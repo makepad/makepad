@@ -317,6 +317,77 @@ script_mod! {
         }
     }
 
+    // THE MASTER LEVEL, in the chrome beside the control that sets it.
+    //
+    // Lying on its side because this bar is 28 points tall: a column here
+    // would have four segments and be a lamp pretending to be a meter. It
+    // wears the deck columns' own colours and the same pale peak mark, so
+    // the three read as one family and a glance between them needs no
+    // translation.
+    //
+    // The lamp at the right end has its own ground, which the bar never
+    // reaches. An overload warning drawn ON the bar would have to be read
+    // against a bar that is loud -- which is exactly the moment it lights.
+    let MasterMeter = SolidView{
+        width: 68
+        height: 11
+        // Also what makes it clickable at all: a plain View emits no finger
+        // actions until it is given a cursor. The click clears the lamp.
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            level: uniform(0.0)
+            hold: uniform(0.0)
+            over: uniform(0.0)
+            color: uniform(#x1d222a)
+            color_lit: uniform(#xff5c39)
+            color_hot: uniform(#xff5a4e)
+            color_mark: uniform(#xffffffcc)
+            color_lamp_off: uniform(#x2a3038)
+            color_lamp: uniform(#xffe14d)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let lamp_w = 7.0
+                let bar_w = w - lamp_w - 3.0
+                sdf.box(0.0, 0.0, bar_w, h, 3.0)
+                sdf.fill(self.color)
+                // Across the bar's own width, not the widget's, so the
+                // reading is not quietly compressed by the lamp's room.
+                let x = self.pos.x * w / bar_w
+                let on = step(x, self.level)
+                let hot = smoothstep(0.72, 0.95, x)
+                let seg = step(0.35, fract(self.pos.x * w / 4.0))
+                let c = self.color_lit.mix(self.color_hot, hot)
+                let lit_w = max(1.0, bar_w * self.level - 3.0)
+                sdf.box(1.5, 1.5, lit_w, h - 3.0, 2.0)
+                sdf.fill(vec4(c.x, c.y, c.z, c.w * on * seg))
+                // The peak mark, on a whole pixel for the reason the deck
+                // columns' is: a two-pixel line at a fraction lands across
+                // two rows at half weight and flickers as the level moves.
+                let mark_w = 2.0
+                let mark_x = floor(clamp(
+                    self.hold * bar_w - mark_w * 0.5,
+                    0.0,
+                    bar_w - mark_w
+                ))
+                sdf.box(mark_x, 1.5, mark_w, h - 3.0, 0.5)
+                sdf.fill(vec4(
+                    self.color_mark.x,
+                    self.color_mark.y,
+                    self.color_mark.z,
+                    self.color_mark.w * step(0.002, self.hold)
+                ))
+                // The lamp. Yellow because everything else here is orange:
+                // a red one would be the bar's own top colour, and the one
+                // thing this must not do is blend in.
+                sdf.box(w - lamp_w, 1.0, lamp_w, h - 2.0, 2.0)
+                sdf.fill(self.color_lamp_off.mix(self.color_lamp, step(0.5, self.over)))
+                return sdf.result
+            }
+        }
+    }
+
     let PillButton = Button{
         draw_bg +: {
             color: #x222831
@@ -911,6 +982,12 @@ script_mod! {
                             }
                             Tip{ text: "Output window"
                                 open_output := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/monitor.svg") } }
+                            }
+                            // The level, immediately before the control
+                            // that sets it: the number and the knob for one
+                            // quantity belong beside each other.
+                            Tip{ text: "Master level — click to clear the overload lamp"
+                                master_vu := MasterMeter{}
                             }
                             // MASTER VOLUME as a DROPDOWN SLIDER: the chip
                             // is a plain click target (no drag in the bar —
@@ -7817,6 +7894,10 @@ pub struct App {
     /// whatever is drawing at whatever rate it draws at.
     #[rust]
     meter_ballistics: [crate::console::MeterBallistics; 3],
+    /// What the chrome lamp was last told, so it is only redrawn when the
+    /// latch actually turns over.
+    #[rust]
+    master_lamp_lit: bool,
     /// When they were last ticked. The poll is a 20 Hz timer that Windows
     /// services late and coalesces, and it stops entirely while another
     /// window is up, so the meters are given the time that actually passed
@@ -15588,9 +15669,32 @@ p2 {}
         // level as measured -- the square-root taper below is for a column
         // of pixels, and would read half again too loud as a number.
         let master = self.meter_ballistics[0].amplitude();
-        self.console_clip.saw(meters[crate::mixer::METER_MASTER]);
+        // What the limiter had to do, not what the peak reached: the
+        // ceiling means the peak can never reach full scale.
+        self.console_clip.saw(self.mixer.limiter_reduction_db());
         let line = crate::console::summary_line(&health, master, self.console_clip.lit());
         self.set_status_label(cx, ids!(console_line), &line);
+        // The chrome meter, which is up on every page -- so unlike the deck
+        // columns it is fed here rather than from the deck surface. Same
+        // deadband, same reason: pushing a uniform marks the pass for
+        // repaint, and a meter that reports every poll would repaint the
+        // window twenty times a second with nothing playing.
+        let lit = self.console_clip.lit();
+        if let Some((level, hold)) = self.meter_ballistics[0].take_push() {
+            let vu = self.ui.view(cx, ids!(master_vu));
+            vu.set_uniform(cx, live_id!(level), &[level]);
+            vu.set_uniform(cx, live_id!(hold), &[hold]);
+            vu.set_uniform(cx, live_id!(over), &[if lit { 1.0 } else { 0.0 }]);
+            vu.redraw(cx);
+            self.master_lamp_lit = lit;
+        } else if lit != self.master_lamp_lit {
+            // The lamp can change while the meter itself is still: it
+            // latches on a moment the level need not have moved through.
+            let vu = self.ui.view(cx, ids!(master_vu));
+            vu.set_uniform(cx, live_id!(over), &[if lit { 1.0 } else { 0.0 }]);
+            vu.redraw(cx);
+            self.master_lamp_lit = lit;
+        }
         // The opened pane is the same numbers with the room to lay them out.
         if self.console.panes().0 {
             let decks = self.mixer.deck_levels();
@@ -18972,6 +19076,12 @@ p2 {}
         }
         if grip.finger_down(actions).is_some() {
             self.splitter_grab = Some(self.lists_extent(cx));
+        }
+        // Clearing the overload lamp is an acknowledgement, so it is an
+        // act. It does not time out: a warning that puts itself out is a
+        // warning nobody ever sees, which is the whole reason it latches.
+        if self.ui.view(cx, ids!(master_vu)).finger_down(actions).is_some() {
+            self.console_clip.clear();
         }
         if let Some(moved) = grip.finger_move(actions) {
             let Some(start) = self.splitter_grab else { return };

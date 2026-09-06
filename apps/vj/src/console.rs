@@ -139,18 +139,30 @@ impl Default for Console {
     }
 }
 
-/// The master clipped, and nobody has cleared it.
+/// The master was driven past what it can pass, and nobody has cleared it.
 ///
-/// A peak meter that shows only the current buffer never shows a clip: it is
-/// one buffer long and the eye is elsewhere. So it latches.
+/// It latches because the event is shorter than a glance: whatever lit it
+/// was over in a fraction of a second and the eye was elsewhere.
+///
+/// What lights it is the limiter having to pull the mix back, NOT a sample
+/// reaching full scale. This master cannot reach full scale -- the ceiling
+/// clamps every sample below it, and that guarantee is the limiter's whole
+/// job -- so a light wired to a clipped sample would have been a light that
+/// could never come on. Being held down is the thing the operator can
+/// actually do something about.
 #[derive(Default)]
 pub struct ClipLatch {
     lit: bool,
 }
 
+/// How far the limiter has to pull the master back before it is worth
+/// saying so. A look-ahead limiter ticks over by fractions of a decibel on
+/// anything loud, which is it working, not a warning.
+pub const OVERLOAD_DB: f32 = 1.0;
+
 impl ClipLatch {
-    pub fn saw(&mut self, peak: f32) {
-        if peak >= 1.0 {
+    pub fn saw(&mut self, reduction_db: f32) {
+        if reduction_db >= OVERLOAD_DB {
             self.lit = true;
         }
     }
@@ -317,7 +329,9 @@ pub fn summary_line(health: &AudioHealth, master: f32, clipped: bool) -> String 
     }
     line.push_str(&format!("   master {:.0}%", master.clamp(0.0, 1.0) * 100.0));
     if clipped {
-        line.push_str("  CLIP");
+        // Not CLIP: nothing clipped, and saying so would send an operator
+        // looking for a fault in a signal path that is behaving.
+        line.push_str("  OVER");
     }
     line
 }
@@ -456,23 +470,26 @@ mod tests {
     }
 
     #[test]
-    fn the_one_line_shows_the_master_level_and_says_when_it_clipped() {
-        let clipped = summary_line(&health(), 0.25, true);
-        assert!(clipped.contains("CLIP"), "the thing you must not miss: {clipped}");
+    fn the_one_line_shows_the_master_level_and_says_when_it_was_held_back() {
+        let over = summary_line(&health(), 0.25, true);
+        assert!(over.contains("OVER"), "the thing you must not miss: {over}");
+        assert!(!over.contains("CLIP"), "and it does not claim a clip: {over}");
         let clean = summary_line(&health(), 0.25, false);
-        assert!(!clean.contains("CLIP"), "{clean}");
+        assert!(!clean.contains("OVER"), "{clean}");
         assert!(clean.contains("25%"), "the level itself: {clean}");
     }
 
     #[test]
-    fn a_clip_stays_lit_once_it_has_happened_until_it_is_cleared() {
+    fn an_overload_stays_lit_once_it_has_happened_until_it_is_cleared() {
         let mut latch = ClipLatch::default();
         assert!(!latch.lit());
-        latch.saw(0.5);
-        assert!(!latch.lit(), "an ordinary level is not a clip");
-        latch.saw(1.0);
-        assert!(latch.lit(), "full scale is");
-        latch.saw(0.1);
+        latch.saw(0.0);
+        assert!(!latch.lit(), "a limiter that never worked is not a warning");
+        latch.saw(0.3);
+        assert!(!latch.lit(), "nor is a limiter merely doing its job");
+        latch.saw(OVERLOAD_DB);
+        assert!(latch.lit(), "a whole decibel of holding back is");
+        latch.saw(0.0);
         assert!(latch.lit(), "and it stays lit, or nobody would ever see it");
         latch.clear();
         assert!(!latch.lit());
