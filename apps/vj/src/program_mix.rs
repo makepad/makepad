@@ -421,6 +421,19 @@ impl ProgramMix {
         master_gain: f32,
         rate: f32,
     ) -> [f32; 2] {
+        self.process_frame_with(sources, master_gain, rate, |summed| summed)
+    }
+
+    /// The same, with something between the master gain and the bus
+    /// dynamics: the mix's own effect chain, which wants to hear the
+    /// whole room and still be caught by the limiter.
+    pub fn process_frame_with(
+        &mut self,
+        sources: [[f32; 2]; STRIP_COUNT],
+        master_gain: f32,
+        rate: f32,
+        insert: impl FnOnce([f32; 2]) -> [f32; 2],
+    ) -> [f32; 2] {
         let mut sum = [0.0f32; 2];
         for (strip, input) in self.strips.iter_mut().zip(sources) {
             let out = strip.process(input, rate);
@@ -428,8 +441,11 @@ impl ProgramMix {
             sum[1] += out[1];
         }
         let master_gain = finite(master_gain, 0.0).clamp(0.0, 1.5);
-        self.master
-            .process([sum[0] * master_gain, sum[1] * master_gain], rate)
+        // `audible` before the insert, so a chain never sees a sample
+        // that is not a number; the dynamics guard again on their own
+        // way in.
+        let summed = insert([audible(sum[0] * master_gain), audible(sum[1] * master_gain)]);
+        self.master.process(summed, rate)
     }
 
     pub fn strip_snapshots(&self) -> [StripSnapshot; STRIP_COUNT] {

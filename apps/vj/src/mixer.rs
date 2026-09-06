@@ -2131,9 +2131,23 @@ struct MixState {
     score_preview: ScorePreviewVoice,
     synth: SynthRack,
     program_mix: ProgramMix,
+    /// The mix's own chain, between the master gain and the bus dynamics:
+    /// after everything has been summed, so an effect here hears the
+    /// whole room, and before the limiter, so whatever it adds is still
+    /// caught.
+    master_chain: DeckChain,
+    /// Which deck's grid the master chain's beat-locked effects follow.
+    /// The mix has no tempo of its own, so it borrows one.
+    master_clock_deck: usize,
 }
 
 impl MixState {
+    /// Whether any master effect is sounding at all.
+    #[cfg(test)]
+    fn master_chain_engaged(&mut self) -> bool {
+        (0..DECK_CHAIN_SLOTS).any(|slot| self.master_chain.slot_engaged(slot))
+    }
+
     fn new() -> MixState {
         MixState {
             video: [VideoBus::new(), VideoBus::new()],
@@ -2151,6 +2165,8 @@ impl MixState {
             score_preview: ScorePreviewVoice::new(48_000),
             synth: SynthRack::new(48_000),
             program_mix: ProgramMix::new(),
+            master_chain: DeckChain::new(48_000.0),
+            master_clock_deck: 0,
         }
     }
 }
@@ -2304,6 +2320,11 @@ pub enum MixCmd {
     /// One knob on one slot of a deck's effect chain. See
     /// [`EffectParam`] for why they share a variant.
     DeckEffect { deck: DeckId, param: EffectParam },
+    MasterEffect { slot: usize, on: bool },
+    MasterMix { slot: usize, mix: f32 },
+    MasterLevelMode { slot: usize, mode: LevelMode },
+    MasterClockDeck(DeckId),
+    MasterCrossovers { low_hz: f32, high_hz: f32 },
     SetGrid { deck: DeckId, grid: Option<TrackGrid> },
     SetSlip { deck: DeckId, on: bool, adopt: bool },
     SetCensor { deck: DeckId, on: bool },
@@ -4148,6 +4169,33 @@ impl Mixer {
         self.run_cmd(MixCmd::SetMasterDynamicsBypass(bypass));
     }
 
+    /// Which deck's grid the master chain's beat-locked effects follow.
+    /// The mix has no tempo of its own, so it borrows one.
+    pub fn set_master_clock_deck(&self, deck: DeckId) {
+        self.run_cmd(MixCmd::MasterClockDeck(deck));
+    }
+
+    /// The master chain's on/off for one effect, by the same slot index
+    /// the deck chains use.
+    pub fn set_master_effect(&self, slot: usize, on: bool) {
+        self.run_cmd(MixCmd::MasterEffect { slot, on });
+    }
+
+    /// One master slot's wet/dry mix.
+    pub fn set_master_mix(&self, slot: usize, mix: f32) {
+        self.run_cmd(MixCmd::MasterMix { slot, mix });
+    }
+
+    /// What one master slot does about the level it returns.
+    pub fn set_master_level_mode(&self, slot: usize, mode: LevelMode) {
+        self.run_cmd(MixCmd::MasterLevelMode { slot, mode });
+    }
+
+    /// And the same crossovers for the mix's own chain.
+    pub fn set_master_crossovers(&self, low_hz: f32, high_hz: f32) {
+        self.run_cmd(MixCmd::MasterCrossovers { low_hz, high_hz });
+    }
+
     pub fn synth_snapshot(&self) -> RackSnapshot {
         self.snapshot().synth
     }
@@ -4213,6 +4261,26 @@ impl MixEngine {
 
     /// Apply one effect parameter to a chain. The bodies are exactly what
     /// the old locked setters ran; only the way they arrive has changed.
+    /// The master chain's on/off for one effect, by the same slot index
+    /// the deck chains use.
+    fn switch_master_effect(chain: &mut DeckChain, slot: usize, on: bool) {
+        let wet = if on { 1.0 } else { 0.0 };
+        match slot {
+            // The echo has no wet of its own: its fraction IS its
+            // switch, off being no fraction at all.
+            2 => chain.echo_mut().set_fraction(on.then_some((1, 2))),
+            3 => chain.flanger_mut().set_wet(wet),
+            5 => chain.tremolo_mut().set_wet(wet),
+            6 => chain.distortion_mut().set_wet(wet),
+            7 => chain.phaser_mut().set_wet(wet),
+            8 => chain.autopan_mut().set_wet(wet),
+            9 => chain.stereo_width_mut().set_wet(wet),
+            10 => chain.plate_reverb_mut().set_wet(wet),
+            11 => chain.moog_ladder_mut().set_wet(wet),
+            _ => {}
+        }
+    }
+
     fn apply_effect(chain: &mut DeckChain, param: EffectParam) {
         match param {
             EffectParam::Echo(fraction) => chain.echo_mut().set_fraction(fraction),
@@ -4641,6 +4709,17 @@ impl MixEngine {
             }
             MixCmd::DeckEffect { deck, param } => {
                 Self::apply_effect(&mut s.decks[deck.index()].chain, param)
+            }
+            MixCmd::MasterEffect { slot, on } => Self::switch_master_effect(&mut s.master_chain, slot, on),
+            MixCmd::MasterMix { slot, mix } => {
+                s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mix(mix)
+            }
+            MixCmd::MasterLevelMode { slot, mode } => {
+                s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mode(mode)
+            }
+            MixCmd::MasterClockDeck(deck) => s.master_clock_deck = deck.index(),
+            MixCmd::MasterCrossovers { low_hz, high_hz } => {
+                s.master_chain.eq_mut().set_crossovers(low_hz, high_hz)
             }
             MixCmd::InstallOver { deck, pcm, keep_playing } => {
                 let d = &mut s.decks[deck.index()];
@@ -5219,6 +5298,14 @@ impl MixEngine {
         let deck_stems: [Option<Arc<TrackStems>>; 2] =
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
         let mut deck_peaks = [0.0f32; 2];
+        // The master's chain gets the same once-a-buffer preparation its
+        // decks do, and borrows a deck's clock: the mix has no tempo of
+        // its own, so a beat-locked effect on it follows whichever deck
+        // is nominated -- deck A until something asks otherwise.
+        {
+            let clock = s.decks[s.master_clock_deck.min(1)].clock;
+            s.master_chain.prepare_block(&clock, rate, frames);
+        }
         for voice in s.decks.iter_mut() {
             // Where the beat will be at the END of this buffer. Read at the
             // end and not the start because that is what the locked LFOs
@@ -5823,7 +5910,7 @@ impl MixEngine {
             let ironfish = s.synth.frame(SynthTrack::Ironfish, frame);
             let drums = s.synth.frame(SynthTrack::Drums, frame);
             let master = s.master.tick(rate);
-            let mixed = s.program_mix.process_frame(
+            let mixed = s.program_mix.process_frame_with(
                 [
                     [video.0, video.1],
                     [deck_out[0].0, deck_out[0].1],
@@ -5835,6 +5922,7 @@ impl MixEngine {
                 ],
                 master,
                 rate,
+                |summed| s.master_chain.process(summed, rate),
             );
             let l = mixed[0].clamp(-CLAMP, CLAMP);
             let r = mixed[1].clamp(-CLAMP, CLAMP);
@@ -6145,6 +6233,13 @@ mod tests {
 
     fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
         Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
+    }
+
+    /// A constant with DIFFERENT left and right, for anything that needs
+    /// a side signal: `const_pcm` leaves both channels equal, which has no
+    /// side at all and makes a width test vacuous.
+    fn const_stereo_pcm(left: i16, right: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[left, right]; frames], sample_rate: rate })
     }
 
     /// First half `a`, second half `b`: a signal a raw splice cannot hide
@@ -6668,6 +6763,58 @@ mod tests {
     /// The deck's playhead in frames, straight from the state.
     fn deck_pos(mixer: &TestMixer, deck: DeckId) -> f64 {
         mixer.state().decks[deck.index()].playhead_frames()
+    }
+
+    /// The master chain sits in the path of every frame of the mix, so
+    /// the one thing that has to be true before any of it is worth having
+    /// is that it costs the signal nothing until an effect is switched on.
+    #[test]
+    fn an_idle_master_chain_leaves_the_mix_alone() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let pcm = tone_pcm(1_000.0, 48_000, 1.0);
+        mixer.install_deck(DeckId::A, pcm.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        assert!(!mixer.state().master_chain_engaged());
+        let start = deck_pos(&mixer, DeckId::A) as usize;
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, 48_000.0, 256 + latency);
+        for index in 0..200 {
+            let want = pcm.frames[start + index][0] as f32 / 32768.0;
+            let got = out.channel(0)[index + latency];
+            assert!(
+                (got - want).abs() < 1e-6,
+                "sample {index}: {got} vs {want} — an idle master chain must be transparent"
+            );
+        }
+    }
+
+    /// And an engaged one reaches the sum. The width sits at 1.5 by
+    /// default, which widens anything that is not already mono, so an
+    /// out-of-phase pair is the cheapest thing to hear it on.
+    #[test]
+    fn an_engaged_master_effect_reaches_the_mix() {
+        let quiet = |on: bool| -> f64 {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            mixer.set_crossfader(0.0);
+            // Genuinely out of phase, so there IS a side signal for
+            // the width to widen. `split_pcm` splits over time and
+            // leaves both channels equal, which has no side at all.
+            mixer.install_deck(DeckId::A, const_stereo_pcm(12_000, -12_000, 96_000, 48_000));
+            mixer.set_deck_playing(DeckId::A, true);
+            if on {
+                mixer.set_master_effect(9, true); // stereo width
+            }
+            render(&mixer, 48_000.0, 8_192);
+            let out = render(&mixer, 48_000.0, 2_048);
+            out.channel(0).iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>()
+        };
+        let off = quiet(false);
+        let on = quiet(true);
+        assert!(on > off * 1.2, "the master width did not reach the mix: {off} then {on}");
     }
 
     #[test]
