@@ -20,12 +20,14 @@
 //!   .52, chevron at α .36, empty state `displayLarge` 28 + `title` 14;
 //! * no animations anywhere.
 //!
-//! Mouse works exactly like the original: hover moves the cursor row
+//! Mouse use works exactly like the original: hover moves the cursor row
 //! (through a pointer-move gate so a list moving under a still pointer does
 //! not reselect), the pointing hand shows on enabled rows, a click
 //! activates, a click outside the card cancels, and the wheel scrolls.
 
 use makepad_widgets::*;
+use makepad_widgets::app_icon::AppIconDraw;
+use crate::desktop::DesktopStyle;
 
 use crate::binds::{combo_text, keymap};
 use crate::theme;
@@ -33,6 +35,9 @@ use crate::theme;
 use super::launcher;
 use super::ui::{contains, rect, DrawShellFill, Ico, ShellDraw};
 use super::{alpha, fade, MenuTokens, ShellTokens};
+
+mod nextstep;
+use nextstep::NextMenus;
 
 // ======================================================================
 // The model
@@ -450,7 +455,36 @@ impl MenuModel {
     /// still the path's business — the search filter does that.
     fn all_items(path: &str) -> Vec<MenuItem> {
         let mut items = omarchy_tree();
+        if path.starts_with("workspace") {
+            for (id, label, kind) in [
+                ("workspace", "Workspace", MenuKind::Menu),
+                ("workspace.files", "New Viewer", MenuKind::App),
+                ("workspace.apps", "Applications", MenuKind::Menu),
+                ("workspace.tools", "Tools", MenuKind::Menu),
+                ("workspace.tools.terminal", "Console", MenuKind::App),
+                ("workspace.tools.task", "Processes", MenuKind::App),
+                ("workspace.desktop", "Appearance", MenuKind::Menu),
+            ] {
+                items.push(MenuItem::new(id, label, kind));
+            }
+        }
+        if path.starts_with("start") {
+            for (id,label,kind,icon) in [
+                ("start.programs","Programs",MenuKind::Menu,Ico::Menu),
+                ("start.documents","Documents",MenuKind::Action,Ico::Photo),
+                ("start.settings","Settings",MenuKind::Menu,Ico::Monitor),
+                ("start.search","Search",MenuKind::Menu,Ico::Search),
+                ("start.run","Run…",MenuKind::Menu,Ico::Keyboard),
+                ("start.power","Shut Down…",MenuKind::Action,Ico::Power),
+            ] {items.push(MenuItem::new(id,label,kind).icon(icon));}
+        }
         items.extend(launcher::apps());
+        items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
+        for style in crate::desktop::DesktopStyle::ALL {
+            items.push(MenuItem::new(&format!("desktop.{}",style.id()),style.label(),MenuKind::Action));
+        }
+        items.push(MenuItem::new("desktop.macos-dark","macOS · Dark",MenuKind::Action));
+        items.push(MenuItem::new("desktop.windows-dark","Windows · Dark",MenuKind::Action));
         if path.starts_with("style.theme") {
             items.extend(theme_items());
         }
@@ -671,11 +705,22 @@ impl MenuModel {
         }
         match row.kind {
             MenuKind::Menu => {
-                self.descend(&row.target);
+                let target=match row.target.as_str() {
+                    "start.programs"|"start.search"|"start.run"|"workspace.apps"=>"apps",
+                    "start.settings"=>"style",
+                    "workspace.desktop"=>"desktop",
+                    other=>other,
+                };
+                self.descend(target);
                 None
             }
             MenuKind::Inert | MenuKind::Link => None,
-            MenuKind::Action | MenuKind::App => Some(row.target),
+            MenuKind::Action | MenuKind::App => Some(match row.target.as_str() {
+                "workspace.files" => "apps.files".into(),
+                "workspace.tools.terminal" => "apps.terminal".into(),
+                "workspace.tools.task" => "apps.task".into(),
+                _ => row.target,
+            }),
         }
     }
 }
@@ -781,6 +826,7 @@ script_mod! {
         height: Fill
         draw_bg +: {}
         d +: {}
+        desktop_d +: {text.text_style: theme.font_regular text_bold.text_style: theme.font_bold}
     }
 }
 
@@ -809,14 +855,18 @@ impl PointerGate {
     /// True when this move is real pointer motion (≥ 1px).
     pub fn moved(&mut self, p: Vec2d) -> bool {
         let moved = !self.armed || (p.x - self.last.x).abs() >= 1.0 || (p.y - self.last.y).abs() >= 1.0;
-        self.last = p;
-        self.armed = true;
+        // Accumulate subpixel motion instead of resetting the reference on
+        // every 120 Hz event. Slow pointer movement must still change rows.
+        if moved { self.last = p; self.armed = true; }
         moved
     }
 }
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellMenu {
+    #[rust] app_icons: AppIconDraw,
+    #[rust] pub desktop_style: DesktopStyle,
+    #[rust] pub dark: bool,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -831,6 +881,8 @@ pub struct ShellMenu {
     #[live]
     d: ShellDraw,
     #[live]
+    desktop_d: ShellDraw,
+    #[live]
     tokens: ShellTokens,
     #[rust]
     pub model: MenuModel,
@@ -840,10 +892,17 @@ pub struct ShellMenu {
     screen: Rect,
     #[rust]
     card: Rect,
+    /// A top-bar selector uses the menu rows as a compact anchored dropdown.
+    #[rust]
+    pub anchor: Option<Rect>,
+    #[rust]
+    touch_press: Option<(u64, Vec2d, Vec2d)>,
     #[rust]
     row_rects: Vec<Rect>,
     #[rust]
     gate: PointerGate,
+    #[rust]
+    next: NextMenus,
     /// Fixture mode: the gallery draws the surface without owning input.
     #[rust]
     pub inert: bool,
@@ -851,24 +910,49 @@ pub struct ShellMenu {
 
 impl ShellMenu {
     fn skin(&self) -> MenuTokens {
-        match self.model.skin {
-            MenuSkin::Menu => self.tokens.menu,
-            MenuSkin::Launcher => self.tokens.launcher,
+        let mut skin=match self.model.skin { MenuSkin::Menu=>self.tokens.menu, MenuSkin::Launcher=>self.tokens.launcher };
+        if self.anchor.is_some() { skin.scrim_alpha = 0.0; return skin; }
+        if self.desktop_style.floating() {
+            let classic=self.desktop_style==DesktopStyle::Windows2000;
+            let next=self.desktop_style==DesktopStyle::NextStep;
+            skin.surface.background=if next {super::rgb(170,170,170)} else {super::rgb(if classic {212}else{245},if classic {208}else{245},if classic {200}else{249})};
+            skin.surface.background_alpha=1.0;
+            skin.surface.text=super::rgb(24,24,28);
+            skin.surface.border=super::rgb(160,160,165);skin.surface.border_end=skin.surface.border;
+            skin.surface.border_width=1.0;
+            skin.selected_background=if next {super::rgb(0,0,0)}else if classic {super::rgb(0,0,128)}else{super::rgb(213,228,249)};
+            skin.selected_background_alpha=1.0;
+            skin.selected_text=if classic || next {super::rgb(255,255,255)}else{super::rgb(24,24,28)};
+            skin.scrim_alpha=0.0;
+            if self.desktop_style.supports_dark() && self.dark {
+                skin.surface.background=super::rgb(40,40,43);
+                skin.surface.text=super::rgb(242,242,245);
+                skin.surface.border=super::rgb(82,82,88);skin.surface.border_end=skin.surface.border;
+                skin.selected_background=super::rgb(36,77,117);
+                skin.selected_text=super::rgb(255,255,255);
+            }
         }
+        skin
     }
 
     pub fn open_at(&mut self, cx: &mut Cx, path: &str, skin: MenuSkin) {
+        self.anchor = None;
+        self.touch_press = None;
         self.model.open_at(path, skin);
+        self.next = nextstep::NextMenus::default();
         self.gate.reset();
         self.redraw(cx);
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
         self.model.close();
+        self.next = nextstep::NextMenus::default();
         self.redraw(cx);
     }
 
     fn row_height(&self) -> f64 {
+        if self.anchor.is_some() { return if self.desktop_style.mobile() {44.0} else {30.0}; }
+        if matches!(self.desktop_style, DesktopStyle::Windows2000 | DesktopStyle::NextStep) {return 30.0;}
         if self.model.rows.iter().any(|r| !r.detail.is_empty()) {
             ROW_HEIGHT_DETAIL
         } else {
@@ -902,10 +986,23 @@ impl ShellMenu {
 
     /// The card rect for a screen, and how many rows fit in it.
     fn layout_card(&self, screen: Rect) -> (Rect, usize) {
+        if let Some(anchor) = self.anchor {
+            let width = 248.0f64.min((screen.size.x - 12.0).max(1.0));
+            let top = (anchor.pos.y + anchor.size.y + 4.0).max(screen.pos.y + 4.0);
+            let available = (screen.pos.y + screen.size.y - top - 6.0).max(1.0);
+            let visible = (((available - 12.0) / (self.row_height() + ROW_SPACING)).floor() as usize)
+                .max(1).min(self.model.rows.len().max(1));
+            let height = (12.0 + self.rows_height(visible)).min(available);
+            let left = anchor.pos.x.clamp(screen.pos.x + 6.0, (screen.pos.x + screen.size.x - width - 6.0).max(screen.pos.x + 6.0));
+            return (rect(left, top, width, height), visible);
+        }
         let tok = &self.tokens;
-        let pad = tok.spacing.panel_padding;
+        let classic=self.desktop_style==DesktopStyle::Windows2000;
+        let next=self.desktop_style==DesktopStyle::NextStep;
+        let pad = if classic || next {3.0}else{tok.spacing.panel_padding};
+        let header_h=if classic && self.model.filter.is_empty() {0.0}else{HEADER_HEIGHT+HEADER_GAP};
         let gaps_out = tok.spacing.gaps_out;
-        let chrome = pad * 2.0 + HEADER_HEIGHT + HEADER_GAP;
+        let chrome = pad * 2.0 + header_h;
         let max_h = (screen.size.y * MAX_HEIGHT_FRACTION).min(screen.size.y - gaps_out * 2.0);
         let avail = (max_h - chrome).max(self.row_height());
         let rh = self.row_height();
@@ -929,20 +1026,40 @@ impl ShellMenu {
                 .max(screen.pos.y + gaps_out)
                 .floor(),
         };
-        (rect(x, y, CARD_WIDTH, height), visible)
+        let (x,y)=match self.desktop_style {
+            crate::desktop::DesktopStyle::Windows2000=>(screen.pos.x+3.0,screen.pos.y+screen.size.y-height-34.0),
+            crate::desktop::DesktopStyle::Windows=>(x,screen.pos.y+screen.size.y-height-66.0),
+            crate::desktop::DesktopStyle::Macos=>(x,screen.pos.y+screen.size.y-height-98.0),
+            DesktopStyle::NextStep=>(screen.pos.x+10.0,screen.pos.y+42.0),
+            _=>(x,y),
+        };
+        (rect(x.max(screen.pos.x),y.max(screen.pos.y+4.0),(if classic || next {244.0}else{CARD_WIDTH}).min(screen.size.x),height),visible)
     }
 
     /// Draw the whole surface into `screen` (scrim included).
-    pub fn draw_surface(&mut self, cx: &mut Cx2d, screen: Rect) {
+    pub fn draw_surface(&mut self,cx:&mut Cx2d,screen:Rect) {
+        let desktop=self.desktop_style.floating() && self.anchor.is_none();
+        if desktop {std::mem::swap(&mut self.d,&mut self.desktop_d);}
+        self.draw_surface_inner(cx,screen);
+        if desktop {std::mem::swap(&mut self.d,&mut self.desktop_d);}
+    }
+    fn draw_surface_inner(&mut self, cx: &mut Cx2d, screen: Rect) {
         self.screen = screen;
         if !self.model.open {
             self.card = Rect::default();
             self.row_rects.clear();
             return;
         }
+        if matches!(self.desktop_style, DesktopStyle::NextStep | DesktopStyle::Windows2000) && self.anchor.is_none() {
+            if self.desktop_style == DesktopStyle::Windows2000 {self.draw_classic_menus(cx, screen);} else {self.draw_next_menus(cx, screen);}
+            return;
+        }
         let tok = self.tokens;
         let skin = self.skin();
-        let pad = tok.spacing.panel_padding;
+        let classic=self.desktop_style==DesktopStyle::Windows2000;
+        let next=self.desktop_style==DesktopStyle::NextStep;
+        let pad = if self.anchor.is_some() {6.0} else if classic || next {3.0}else{tok.spacing.panel_padding};
+        let header_h=if self.anchor.is_some() || (classic && self.model.filter.is_empty()) {0.0}else{HEADER_HEIGHT+HEADER_GAP};
         self.screen = screen;
 
         // Full-screen scrim, then the card.
@@ -952,7 +1069,14 @@ impl ShellMenu {
         let (card, visible) = self.layout_card(screen);
         self.card = card;
         self.d.card(cx, card, &skin.surface);
+        if classic || next {
+            self.d.solid(cx,rect(card.pos.x,card.pos.y,card.size.x,1.0),super::rgb(255,255,255));
+            self.d.solid(cx,rect(card.pos.x,card.pos.y,1.0,card.size.y),super::rgb(255,255,255));
+            self.d.solid(cx,rect(card.pos.x,card.pos.y+card.size.y-1.0,card.size.x,1.0),super::rgb(64,64,64));
+            self.d.solid(cx,rect(card.pos.x+card.size.x-1.0,card.pos.y,1.0,card.size.y),super::rgb(64,64,64));
+        }
 
+        if header_h>0.0 {
         // Header: the filter, or the title with its ellipsis prompt at α .58.
         let (header, placeholder) = self.model.header();
         let header_rect = rect(
@@ -961,7 +1085,12 @@ impl ShellMenu {
             card.size.x - pad * 2.0,
             HEADER_HEIGHT,
         );
-        let header_color = if placeholder {
+        if next {
+            self.d.solid(cx, header_rect, super::rgb(0,0,0));
+        }
+        let header_color = if next {
+            super::rgb(255,255,255)
+        } else if placeholder {
             fade(skin.surface.text, 0.58)
         } else {
             skin.surface.text
@@ -988,11 +1117,12 @@ impl ShellMenu {
             &header,
         );
 
+        }
         let list = rect(
             card.pos.x + pad,
-            card.pos.y + pad + HEADER_HEIGHT + HEADER_GAP,
+            card.pos.y + pad + header_h,
             card.size.x - pad * 2.0,
-            (card.size.y - pad * 2.0 - HEADER_HEIGHT - HEADER_GAP).max(0.0),
+            (card.size.y - pad * 2.0 - header_h).max(0.0),
         );
 
         self.row_rects.clear();
@@ -1072,14 +1202,11 @@ impl ShellMenu {
             // the user wants one label column, so an icon-less row keeps an
             // EMPTY icon slot and every label starts at the same x.
             let label_x = ICON_MARGIN + ICON_COLUMN + ICON_GAP;
-            if let Some(ico) = row.icon {
-                self.d.icon_centered(
-                    cx,
-                    ico,
-                    rect(row_rect.pos.x + ICON_MARGIN, y, ICON_COLUMN, rh),
-                    tok.font.icon_large,
-                    text_color,
-                );
+            if let Some(name) = row.target.strip_prefix("apps.") {
+                let size = if self.desktop_style == DesktopStyle::Windows2000 {16.0}else{24.0};
+                self.app_icons.draw(cx,name,self.desktop_style,rect(row_rect.pos.x+ICON_MARGIN+(ICON_COLUMN-size)*0.5,y+(rh-size)*0.5,size,size),dim as f32,text_color);
+            } else if let Some(ico) = row.icon {
+                self.d.icon_centered(cx,ico,rect(row_rect.pos.x+ICON_MARGIN,y,ICON_COLUMN,rh),tok.font.icon_large,text_color);
             }
             let label_w = row_rect.size.x - label_x - CHEVRON_COLUMN - CHEVRON_MARGIN;
             if row.detail.is_empty() {
@@ -1175,6 +1302,9 @@ impl ShellMenu {
         if !self.model.open {
             return false;
         }
+        if matches!(self.desktop_style, DesktopStyle::NextStep | DesktopStyle::Windows2000) && self.anchor.is_none() {
+            return self.next_key(cx, e);
+        }
         let has_filter = !self.model.filter.is_empty();
         match e.key_code {
             KeyCode::Escape => {
@@ -1268,7 +1398,52 @@ impl ShellMenu {
         if !self.model.open {
             return false;
         }
+        if matches!(self.desktop_style, DesktopStyle::NextStep | DesktopStyle::Windows2000) && self.anchor.is_none() {
+            return self.next_pointer(cx, event);
+        }
         match event {
+            Event::TouchUpdate(update) => {
+                use makepad_platform::event::TouchState;
+                for point in &update.touches {
+                    match point.state {
+                        TouchState::Start if self.touch_press.is_none() => {
+                            if !contains(self.card, point.abs) {
+                                self.model.close();
+                                cx.widget_action(self.uid, ShellMenuAction::Cancel);
+                            } else {
+                                self.touch_press = Some((point.uid, point.abs, point.abs));
+                                if let Some(index) = self.row_at(point.abs) { self.model.sel = index; }
+                            }
+                        }
+                        TouchState::Move => {
+                            if let Some((uid, start, last)) = self.touch_press {
+                                if uid != point.uid { continue; }
+                                let steps = ((last.y - point.abs.y) / (self.row_height() + ROW_SPACING)).trunc() as isize;
+                                if steps != 0 {
+                                    self.model.scroll = self.model.scroll.saturating_add_signed(steps)
+                                        .min(self.model.rows.len().saturating_sub(1));
+                                    self.touch_press = Some((uid, start, point.abs));
+                                }
+                            }
+                        }
+                        TouchState::Stop => {
+                            if let Some((uid, start, _)) = self.touch_press {
+                                if uid != point.uid { continue; }
+                                self.touch_press = None;
+                                if (point.abs - start).length() < 12.0 {
+                                    if let Some(index) = self.row_at(point.abs) {
+                                        self.model.sel = index;
+                                        if !self.model.rows[index].disabled { self.activate_selected(cx); }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.redraw(cx);
+                true
+            }
             Event::MouseMove(e) => {
                 if !self.gate.moved(e.abs) {
                     return true;
@@ -1380,7 +1555,8 @@ mod tests {
     fn browsing_shows_direct_children_in_order() {
         let mut m = MenuModel::default();
         m.open_at("", MenuSkin::Menu);
-        assert_eq!(m.rows.len(), 10);
+        assert_eq!(m.rows.len(), 11);
+        assert!(m.rows.iter().any(|r|r.target=="desktop"));
         assert_eq!(m.rows[0].label, "Apps");
         assert_eq!(m.rows[9].label, "System");
         // Submenu rows carry the chevron.
@@ -1445,6 +1621,9 @@ mod tests {
         // The list moved, not the pointer.
         assert!(!gate.moved(dvec2(10.0, 10.0)));
         assert!(gate.moved(dvec2(10.0, 12.0)));
+        assert!(!gate.moved(dvec2(10.0, 12.4)));
+        assert!(!gate.moved(dvec2(10.0, 12.8)));
+        assert!(gate.moved(dvec2(10.0, 13.2)));
         gate.reset();
         assert!(gate.moved(dvec2(10.0, 12.0)));
     }

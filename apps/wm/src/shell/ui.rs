@@ -729,14 +729,18 @@ impl ShellDraw {
         if s.is_empty() {
             return;
         }
-        let w = self.measure(cx, bold, px, s);
+        let face = self.face(bold);
+        face.text_style.font_size = px_to_pt(px);
+        let run = face.layout(cx, 0.0, 0.0, None, false, Align::default(), s);
+        let w = run.size_in_lpxs.width as f64;
         let x = match align {
             HAlign::Left => r.pos.x,
             HAlign::Center => r.pos.x + (r.size.x - w) * 0.5,
             HAlign::Right => r.pos.x + r.size.x - w,
         };
-        let y = r.pos.y + (r.size.y - px * 1.2) * 0.5;
-        self.text_at(cx, dvec2(x.floor(), y.floor()), bold, px, color, s);
+        let y = r.pos.y + (r.size.y - run.size_in_lpxs.height as f64) * 0.5 + run.ink_center_offset_in_lpxs() as f64;
+        let dpi = cx.current_dpi_factor();
+        self.text_at(cx, dvec2((x*dpi).round()/dpi, (y*dpi).round()/dpi), bold, px, color, s);
     }
 
     /// As `label`, elided to the box first.

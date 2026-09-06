@@ -119,6 +119,8 @@ fn curated() -> Vec<AppDef> {
         AppDef::app("sheets", "Sheets", "makepad-sheets", "apps/sheets", "sheets", OrFocus),
         // The picture wall over a baked library (the SMBC archive by default).
         AppDef::app("photos", "Photos", "makepad-photos", "apps/photos", "photos", OrFocus),
+        AppDef::app("clock", "Clock", "makepad-clock", "apps/clock", "clock", OrFocus),
+        AppDef::app("weather", "Weather", "makepad-weather", "apps/weather", "weather", OrFocus),
         // Sewing patterns from a body measurement: camera, body model, PDF/SVG.
         AppDef::app("fabric", "Fabric", "makepad-fabric", "apps/fabric", "makepad-fabric", OrFocus),
         AppDef::app(
@@ -717,13 +719,13 @@ pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &Ta
     let wait = CancellationToken::new();
     let submitted = pool.submit(Lane::Heavy, move || {
         let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-        if signal::alive(pid) {
+        if signal::alive(-pid) {
             signal::kill_group(pid, signal::SIGKILL);
         }
     });
     match submitted {
         Ok(task) => task.detach(),
-        Err(_) if signal::alive(pid) => signal::kill_group(pid, signal::SIGKILL),
+        Err(_) if signal::alive(-pid) => signal::kill_group(pid, signal::SIGKILL),
         Err(_) => {}
     }
 }
@@ -750,7 +752,7 @@ fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPoo
                 {
                     let wait = CancellationToken::new();
                     let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-                    if signal::alive(pid) {
+                    if signal::alive(-pid) {
                         signal::kill_group(pid, signal::SIGKILL);
                     }
                 }
@@ -851,6 +853,24 @@ fn pump<R: std::io::Read + Send + 'static>(
     }
 }
 
+/// Cargo output that changes the launch panel. Compiler diagnostics stay in
+/// the client log and do not overwrite a useful build stage with source text.
+pub fn cargo_progress(raw: &str) -> Option<(String, bool)> {
+    let raw = raw.trim();
+    if raw.starts_with("Blocking waiting for file lock") {
+        Some(("waiting for another build…".into(), false))
+    } else if raw.starts_with("Running ") || raw.starts_with("Finished ") {
+        Some(("launching…".into(), true))
+    } else if let Some(rest) = raw.strip_prefix("Compiling ") {
+        let package = rest.split(" (").next().unwrap_or(rest).trim();
+        Some((format!("compiling {package}…"), false))
+    } else if raw.starts_with("error:") || raw.starts_with("error[") {
+        Some(("build failed — see the app log".into(), false))
+    } else {
+        None
+    }
+}
+
 /// The command line a launch runs, split out so the release-only law is
 /// testable: children are ALWAYS `--release`, never debug.
 pub fn launch_argv(
@@ -942,7 +962,7 @@ pub fn spawn_client(
         // its window rule alone, 0.985/0.96, reads as opaque).
         // "focused unfocused"; MAKEPAD_WM_TERM_OPACITY overrides.
         let opacity = std::env::var("MAKEPAD_WM_TERM_OPACITY")
-            .unwrap_or_else(|_| "0.88 0.84".to_string());
+            .unwrap_or_else(|_| "0.78 0.70".to_string());
         cmd.env("MAKEPAD_TERMINAL_OPACITY", opacity);
     }
     // Every Makepad app styles itself from the WM's theme.splash.
@@ -996,6 +1016,18 @@ pub fn spawn_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_progress_keeps_the_build_stage_readable() {
+        assert_eq!(cargo_progress("   Compiling makepad-photos v0.1.0 (/a/checkout)"), Some(("compiling makepad-photos v0.1.0…".into(), false)));
+        assert_eq!(cargo_progress("Blocking waiting for file lock on build directory"), Some(("waiting for another build…".into(), false)));
+        assert_eq!(cargo_progress("    Finished `release` profile in 2s"), Some(("launching…".into(), true)));
+        assert_eq!(cargo_progress("     Running `/a/checkout/target/release/photos`"), Some(("launching…".into(), true)));
+        assert!(cargo_progress("warning: unused variable").is_none());
+        assert!(cargo_progress(" --> /a/checkout/src/main.rs:2").is_none());
+        assert!(cargo_progress("app: first frame").is_none());
+        assert_eq!(cargo_progress("error[E0308]: type mismatch"), Some(("build failed — see the app log".into(), false)));
+    }
 
     #[test]
     fn children_are_always_release_never_debug() {
@@ -1078,6 +1110,8 @@ mod tests {
                 "Task Manager",
                 "Sheets",
                 "Photos",
+                "Clock",
+                "Weather",
                 "Fabric",
                 "Score",
                 "Video Player",
@@ -1434,6 +1468,12 @@ mod tests {
         // Past the SIGTERM->SIGKILL escalation: nothing in the group is
         // still standing, wrapper or grandchild.
         let _ = child.wait();
+        // The wrapper can exit before the asynchronous escalation and before
+        // launchd reaps the orphan. Wait only in this test, never on the UI.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { kill(grandchild_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(
             unsafe { kill(grandchild_pid, 0) },
             -1,
