@@ -11,6 +11,7 @@
 //! selection silently moves to whatever file slid into that slot.
 
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -494,6 +495,16 @@ pub struct FileContents {
     /// describes, and Shift+click extends from.
     #[rust]
     anchor: Option<PathBuf>,
+    /// A Storage selection can be below the folder listing. Keep its entry
+    /// with the selection so Preview and Get Info act on the clicked file.
+    #[rust]
+    map_entry: Option<FileEntry>,
+    #[rust]
+    map_entry_pending: Option<PathBuf>,
+    #[rust]
+    map_entry_job: Option<(PathBuf, TaskHandle<Option<FileEntry>>)>,
+    #[rust]
+    map_entry_queue_full: bool,
     #[rust]
     mode: ViewMode,
     /// Tiles per row in the icons view, from the current width.
@@ -754,6 +765,45 @@ impl FileContents {
 
     // ---------------------------------------------------------- selection
 
+    /// Resolve metadata for a deep Storage pick on the pool. Even the demo
+    /// backend can be busy scanning; pointer handling never waits for it.
+    pub fn poll_map_entry(&mut self, cx: &mut Cx) -> bool {
+        let mut changed = false;
+        let result = self.map_entry_job.as_mut().and_then(|(_, job)| job.try_take());
+        if let Some(result) = result {
+            let (path, _) = self.map_entry_job.take().unwrap();
+            if self.anchor.as_ref() == Some(&path) {
+                match result {
+                    Ok(entry) => {self.map_entry = entry; changed = true;}
+                    Err(error) => log!("files: selection metadata failed: {error}"),
+                }
+            }
+        }
+        if self.map_entry_job.is_none() {
+            if let Some(path) = self.map_entry_pending.clone() {
+                if self.anchor.as_ref() != Some(&path) {
+                    self.map_entry_pending = None;
+                } else {
+                    let lookup = path.clone();
+                    match cx.task_pool().submit(Lane::Light, move || crate::model::entry_at(&lookup)) {
+                        Ok(job) => {
+                            self.map_entry_job = Some((path, job));
+                            self.map_entry_pending = None;
+                            self.map_entry_queue_full = false;
+                        }
+                        Err(error) if !self.map_entry_queue_full => {
+                            log!("files: selection metadata queue full, retrying: {error}");
+                            self.map_entry_queue_full = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        if self.map_entry_pending.is_some() || self.map_entry_job.is_some() {let _ = cx.new_next_frame();}
+        changed
+    }
+
     /// The entry the shell acts on: the one the user last landed on.
     pub fn selected_entry(&self) -> Option<FileEntry> {
         let anchor = self.anchor.as_ref()?;
@@ -761,16 +811,19 @@ impl FileContents {
             .iter()
             .find(|r| &r.entry.path == anchor)
             .map(|r| r.entry.clone())
+            .or_else(||self.map_entry.as_ref().filter(|e| &e.path==anchor).cloned())
     }
 
     /// Everything selected, in display order — what copy, trash and batch
     /// rename operate on.
     pub fn selected_entries(&self) -> Vec<FileEntry> {
-        self.rows
-            .iter()
+        let mut entries: Vec<_> = self.rows.iter()
             .filter(|r| self.selected.contains(&r.entry.path))
-            .map(|r| r.entry.clone())
-            .collect()
+            .map(|r| r.entry.clone()).collect();
+        if let Some(entry)=&self.map_entry {
+            if self.selected.contains(&entry.path) && !entries.iter().any(|e|e.path==entry.path) {entries.push(entry.clone());}
+        }
+        entries
     }
 
     pub fn selection_count(&self) -> usize {
@@ -1385,9 +1438,13 @@ impl FileContents {
                     // current listing means "go there" — made a single click
                     // on any rectangle below the top level throw the whole
                     // browser somewhere else, which is the opposite of what a
-                    // map is for. Deeper picks live on the map's own readout;
-                    // only the ones the listing also holds reach the shell.
+                    // map is for. Deeper picks resolve their metadata on the
+                    // worker pool so the same shell actions can use them.
                     TreemapAction::Selected(path) => {
+                        self.map_entry = None;
+                        self.map_entry_job = None;
+                        self.map_entry_pending = (!self.rows.iter().any(|r| r.entry.path == path)).then(|| path.clone());
+                        if self.map_entry_pending.is_some() {let _ = cx.new_next_frame();}
                         self.selected.clear();
                         self.selected.insert(path.clone());
                         self.anchor = Some(path.clone());

@@ -834,7 +834,7 @@ impl Quad {
 }
 
 /// How the map is projected onto the panel.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MapProjection {
     /// The flat map — exactly the 2D treemap.
     Flat,
@@ -1096,7 +1096,7 @@ impl TreemapView {
             None => String::new(),
         };
         format!(
-            "{where_it_is} — {} in {} files · scroll zooms, drag pans, Esc backs out{picked}",
+            "{where_it_is} — {} in {} files{picked}",
             treemap::format_bytes(node.size),
             node.files,
         )
@@ -2761,75 +2761,9 @@ impl TreemapView {
 
         let bright = Palette::vec4(&palette.fg_bright);
         let dim = Palette::vec4(&palette.fg_dim);
-        let accent = Palette::vec4(&palette.accent);
-
-        // The right-hand end first, so the crumbs know where to stop. This is
-        // where the map admits what it is: how old the numbers are, what it
-        // was not allowed to look at, and what it left out on purpose.
         self.rescan_hit = Rect::default();
-        let mut right = strip.pos.x + strip.size.x - 8.0;
-        if !self.scanning {
-            // "Rescan" is not a nicety. A map read back from a file is only
-            // honest if making it true again is one click away.
-            // A word, not a glyph: the UI font has no reload arrow and a
-            // tofu box is worse than no icon at all. Icons in this app are
-            // SVGs, and this control does not need one.
-            let word = "rescan";
-            let width = text_width(&self.draw_bold, cx, word);
-            right -= width;
-            self.draw_bold.color = accent;
-            self.draw_bold.draw_abs(cx, dvec2(right, strip.pos.y + 4.0), word);
-            self.rescan_hit = Rect {
-                pos: dvec2(right - 4.0, strip.pos.y),
-                size: dvec2(width + 8.0, strip.size.y),
-            };
-            right -= 14.0;
-        }
-        // The active filter is never invisible: while one is on, the strip
-        // says what it matched and offers the way out.
         self.filter_hit = Rect::default();
-        if let Some((bytes, _)) = self.filter_matched() {
-            let chip = format!(
-                "matching {} of {} · clear",
-                treemap::format_bytes(bytes),
-                treemap::format_bytes(self.focused().size),
-            );
-            let width = text_width(&self.draw_bold, cx, &chip);
-            right -= width;
-            self.draw_bold.color = accent;
-            self.draw_bold.draw_abs(cx, dvec2(right, strip.pos.y + 4.0), &chip);
-            self.filter_hit = Rect {
-                pos: dvec2(right - 4.0, strip.pos.y),
-                size: dvec2(width + 8.0, strip.size.y),
-            };
-            right -= 14.0;
-        }
-        let note = if self.scanning {
-            format!(
-                "scanning  ·  {} files  ·  {}  ·  {} folders open",
-                self.tree.files,
-                treemap::format_bytes(self.tree.size),
-                self.folders_left,
-            )
-        } else {
-            let mut note = crate::sizecache::age_text(self.scanned_at);
-            if let Some(excluded) = crate::model::scan_exclusions() {
-                note.push_str("  ·  ");
-                note.push_str(&excluded);
-            }
-            if !self.denied.is_empty() {
-                note.push_str("  ·  no access: ");
-                note.push_str(&self.denied.join(", "));
-            }
-            note
-        };
-        let note_w = text_width(&self.draw_text, cx, &note);
-        self.draw_text.color = if self.scanning { accent } else { dim };
-        self.draw_text
-            .draw_abs(cx, dvec2(right - note_w, strip.pos.y + 5.0), &note);
-        let note_w = strip.pos.x + strip.size.x - (right - note_w);
-
-        let limit = strip.pos.x + strip.size.x - note_w - 18.0;
+        let limit = strip.pos.x + strip.size.x - 8.0;
         let mut x = strip.pos.x + 8.0;
         let names: Vec<String> = std::iter::once(crate::model::display_name(&self.root))
             .chain(self.zoom.iter().cloned())
@@ -2900,18 +2834,7 @@ impl TreemapView {
                 pick.path.display().to_string(),
                 Palette::vec4(&palette.fg_bright),
             ),
-            None => (
-                String::new(),
-                if self.projection == MapProjection::Flat {
-                    "Click picks · scroll zooms · drag pans · double-click fills the view · Esc \
-                     backs out · right-click for the file menu"
-                } else {
-                    "Click picks · left-drag orbits · right-drag pans · scroll zooms · \
-                     double-click fills the view · Esc backs out · right-click for the file menu"
-                }
-                .to_string(),
-                Palette::vec4(&palette.fg_dim),
-            ),
+            None => (String::new(), String::new(), Palette::vec4(&palette.fg_dim)),
         };
         let baseline = strip.pos.y + 5.0;
         let mut x = strip.pos.x + 8.0;
@@ -3101,19 +3024,20 @@ impl Widget for TreemapView {
             return DrawStep::done();
         }
 
-        let crumb_strip = Rect {
-            pos: rect.pos,
-            size: dvec2(rect.size.x, CRUMB_H),
-        };
+        // Folder navigation already lives in the toolbar. Only a drill-down
+        // adds breadcrumbs; the normal map starts immediately below that bar.
+        let crumb_h = if self.zoom.is_empty() {0.0} else {CRUMB_H};
+        let foot_h = if self.pick.is_some() {FOOT_H} else {0.0};
+        let crumb_strip = Rect { pos: rect.pos, size: dvec2(rect.size.x, crumb_h) };
         let foot_strip = Rect {
-            pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - FOOT_H),
-            size: dvec2(rect.size.x, FOOT_H),
+            pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - foot_h),
+            size: dvec2(rect.size.x, foot_h),
         };
         let body = Rect {
-            pos: dvec2(rect.pos.x + 1.0, rect.pos.y + CRUMB_H + 1.0),
+            pos: dvec2(rect.pos.x + 1.0, rect.pos.y + crumb_h + 1.0),
             size: dvec2(
                 rect.size.x - 2.0,
-                rect.size.y - CRUMB_H - FOOT_H - 2.0,
+                rect.size.y - crumb_h - foot_h - 2.0,
             ),
         };
         let now = cx.seconds_since_app_start();
@@ -3154,8 +3078,11 @@ impl Widget for TreemapView {
             }
         }
 
-        self.draw_crumbs(cx, crumb_strip, palette);
-        self.draw_footer(cx, foot_strip, palette);
+        self.crumbs.clear();
+        self.rescan_hit = Rect::default();
+        self.filter_hit = Rect::default();
+        if crumb_h > 0.0 { self.draw_crumbs(cx, crumb_strip, palette); }
+        if foot_h > 0.0 { self.draw_footer(cx, foot_strip, palette); }
 
         if self.tree.children.is_empty() {
             self.draw_text.color = Palette::vec4(&palette.fg_dim);
