@@ -511,13 +511,26 @@ impl Widget for TipLayer {
         let inset = if tip.arrow { TIP_ARROW } else { 0.0 };
         let pad = Inset { left: inset, top: inset, right: inset, bottom: inset };
         let bubble;
+        let mut h = h;
         if lines > 1.0 {
             // Text wraps only when the turtle it is drawn into says it may,
             // so the bubble is a wrapping row with its own padding and the
             // text takes the width, finding its own height.
+            //
+            // That height is then MEASURED, not taken from the estimate
+            // above. Words do not split, so a line holds less than the
+            // width says and the guess is always short by some fraction of
+            // a line: a bubble built to the guess clips its own last line
+            // against its bottom edge. The estimate stays where it is
+            // honest, which is deciding whether the text wraps at all.
             self.draw_bg.begin(
                 cx,
-                Walk { margin: pad, ..Walk::fixed(w, h) },
+                Walk {
+                    width: Size::Fixed(w),
+                    height: Size::fit(),
+                    margin: pad,
+                    ..Walk::default()
+                },
                 Layout {
                     flow: Flow::right_wrap(),
                     padding: Inset {
@@ -529,7 +542,6 @@ impl Widget for TipLayer {
                     ..Layout::default()
                 },
             );
-            bubble = cx.turtle().rect();
             self.draw_text.draw_walk(
                 cx,
                 Walk {
@@ -541,6 +553,8 @@ impl Widget for TipLayer {
                 &text,
             );
             self.draw_bg.end(cx);
+            bubble = self.draw_bg.area().rect(cx);
+            h = bubble.size.y;
         } else {
             self.draw_bg.begin(
                 cx,
