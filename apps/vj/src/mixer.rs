@@ -5818,6 +5818,114 @@ impl MixEngine {
     }
 }
 
+/// Fixtures the audio tests share: tracks with a known shape and one
+/// device callback at a time.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
+    }
+
+    /// A constant, but stereo: left and right held at their own separate
+    /// levels for the whole clip. `const_pcm`'s left and right are
+    /// identical, so side (L-R) is exactly zero throughout -- fine for a
+    /// mono-summing effect's click test, but it would make a stereo-width
+    /// click test vacuous: the left channel it measures never moves no
+    /// matter what `width` does, since mid+side*width collapses to the
+    /// same constant when side is already zero.
+    pub(crate) fn const_stereo_pcm(left: i16, right: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[left, right]; frames], sample_rate: rate })
+    }
+
+    /// First half `a`, second half `b`: a signal a raw splice cannot hide
+    /// in, for testing that jumps land as blends.
+    pub(crate) fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        let half = frames / 2;
+        let mut all = vec![[a, a]; frames];
+        for frame in all.iter_mut().skip(half) {
+            *frame = [b, b];
+        }
+        Arc::new(TrackPcm { frames: all, sample_rate: rate })
+    }
+
+    /// Silent, except one full-scale frame at `at_secs`: a mark to time a
+    /// delay against.
+    pub(crate) fn click_pcm(at_secs: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let at = (at_secs * rate as f64).round() as usize;
+        let mut all = vec![[0i16, 0i16]; len];
+        if at < len {
+            all[at] = [i16::MAX, i16::MAX];
+        }
+        Arc::new(TrackPcm { frames: all, sample_rate: rate })
+    }
+
+    /// One device callback. A test thread is not an audio thread: the
+    /// callback arms flush-to-zero on whoever calls it, and a test that
+    /// runs next on this thread must not inherit that (it has its own
+    /// proof, `every_callback_arms_flush_to_zero`).
+    pub(crate) fn render(engine: &mut MixEngine, rate: f64, frames: usize) -> AudioBuffer {
+        let mut buffer = AudioBuffer::new_with_size(frames, 2);
+        engine.render(rate, &mut buffer);
+        crate::music_dsp::set_flush_denormals(false);
+        buffer
+    }
+
+    /// The biggest jump between neighbouring samples in a rendered block.
+    ///
+    /// A click IS a step: the ear hears the discontinuity, not the level. Any
+    /// gain, band or lane move performed on an audible strip has to glide,
+    /// and this is how a test says so in one number. Measure it over a flat
+    /// signal and whatever comes back belongs to the move under test.
+    pub(crate) fn worst_adjacent_step(samples: &[f32]) -> f32 {
+        samples
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// A tone at `frequency`, as a deck would hold it.
+    pub(crate) fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let frames = (0..len)
+            .map(|index| {
+                let value = (2.0 * std::f64::consts::PI * frequency * index as f64
+                    / rate as f64)
+                    .sin();
+                let sample = (value * 12_000.0) as i16;
+                [sample, sample]
+            })
+            .collect();
+        Arc::new(TrackPcm { frames, sample_rate: rate })
+    }
+
+    /// A genuinely stereo tone: independent left and right frequencies,
+    /// so mid and side are both nonzero throughout. `tone_pcm`'s L and R
+    /// are identical, which makes side (L-R) exactly zero and would make
+    /// a stereo-width test vacuous regardless of what the effect does --
+    /// the same "nice value hides the bug" trap the bitcrusher's click
+    /// test found in a mono constant.
+    pub(crate) fn stereo_tone_pcm(
+        freq_l: f64,
+        freq_r: f64,
+        rate: u32,
+        seconds: f64,
+    ) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let frames = (0..len)
+            .map(|index| {
+                let t = index as f64 / rate as f64;
+                let l = (2.0 * std::f64::consts::PI * freq_l * t).sin();
+                let r = (2.0 * std::f64::consts::PI * freq_r * t).sin();
+                [(l * 12_000.0) as i16, (r * 12_000.0) as i16]
+            })
+            .collect();
+        Arc::new(TrackPcm { frames, sample_rate: rate })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6350,7 +6458,7 @@ mod tests {
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
         // Deliberately NOT playing: a hand on the record still moves it.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: 2.0 });
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.0, rate: 2.0 });
         render(&mixer, 48_000.0, 24_000);
         let (scrubbed, _, playing) = mixer.deck_position(DeckId::A);
         assert!(!playing, "scrubbing is not playing");
@@ -6358,7 +6466,7 @@ mod tests {
         assert!(mixer.deck_scratching(DeckId::A));
 
         // Backwards, too.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: -3.0 });
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.0, rate: -3.0 });
         render(&mixer, 48_000.0, 12_000);
         let (back, _, _) = mixer.deck_position(DeckId::A);
         assert!(back < scrubbed, "a backward scrub must rewind: {back:.3}");
@@ -6667,7 +6775,7 @@ mod tests {
         // A deck inside a span never reaches an end to report. The mixer
         // honours any span; LOOP_MIN_SECS is enforced up in `decks`.
         mixer.install_deck(DeckId::B, const_pcm(1000, 100, 48_000));
-        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)));
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_playing(DeckId::B, true);
         render(&mixer, 48_000.0, 1024);
         assert!(mixer.drain_ended_decks().is_empty());
@@ -6681,7 +6789,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000)); // 10 s
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         // Four seconds of audio through a one-second loop.
@@ -6703,7 +6811,7 @@ mod tests {
         mixer.set_crossfader(0.0);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 48_000); // a second of free play first
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         for _ in 0..46 {
             render(&mixer, 48_000.0, 4096);
             let (position, _, _) = mixer.deck_position(DeckId::A);
@@ -6717,7 +6825,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle the master and gain ramps
         let steady = render(&mixer, 48_000.0, 64).channel(0)[32].abs();
@@ -6746,7 +6854,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // The patient rule: a playhead behind IN plays at FULL level until
@@ -6767,13 +6875,13 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         mixer.set_deck_playing(DeckId::A, true);
         // Halve out from under the playhead: 3.5 is 2.5 into the old span,
         // which is 0.5 into the new one modulo its length — the subdivision
         // continues instead of re-triggering the downbeat at IN.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         render(&mixer, 48_000.0, 256);
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
@@ -6794,7 +6902,7 @@ mod tests {
         // A length deliberately NOT commensurate with the 44.1k -> 48k step:
         // a round 0.1 s is exactly 4800 device frames and wraps with zero
         // overshoot, which would hide the discard this test exists to catch.
-        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 0.5);
         mixer.set_deck_playing(DeckId::A, true);
         let step = 44_100.0 / 48_000.0;
@@ -6818,7 +6926,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // Straddle the IN crossing: the run-up must hand over to the seam
@@ -6845,7 +6953,7 @@ mod tests {
         // last frame and the end-of-track check wins over the wrap.
         mixer.install_deck(DeckId::A, const_pcm(16_384, 48_003, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
             render(&mixer, 48_000.0, 4096);
@@ -6867,7 +6975,7 @@ mod tests {
         // the track — so a span whose OUT hugs the end can never see
         // playhead >= end and used to die through the ran-out path.
         mixer.set_deck_rate(DeckId::A, 1.05);
-        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 9.0);
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
@@ -6884,12 +6992,12 @@ mod tests {
         let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         // Paused: the render loop skips this deck entirely, so the catch
         // has to happen when the span is SET or the playhead sits parked
         // outside the loop until play is pressed.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
             (1.49..1.51).contains(&position),
@@ -6930,7 +7038,7 @@ mod tests {
         let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::None);
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         mixer.swap_decks();
@@ -7586,7 +7694,7 @@ mod tests {
         mixer.install_deck_stems(DeckId::A, Arc::new(TrackStems::new(frame_count, 1)));
         mixer.set_deck_splat(DeckId::A, grid.clone());
         mixer.set_deck_splat_enabled(DeckId::A, true);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 3.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 3.0)), crate::decks::LoopSeek::None);
         mixer.set_deck_rate(DeckId::A, 1.05);
         mixer.set_deck_keylock(DeckId::A, true);
         render_count(&mixer, rate, 500, 64);
@@ -7607,7 +7715,7 @@ mod tests {
         mixer.install_deck_stream(DeckId::B, first.clone());
         mixer.set_deck_splat(DeckId::B, grid);
         mixer.set_deck_splat_enabled(DeckId::B, true);
-        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 2.0)), crate::decks::LoopSeek::None);
         render_count(&mixer, rate, 100, 64);
         let grown = Arc::new(first.with_chunk(stream_chunk(7, 4_000), false));
         mixer.grow_deck_stream(DeckId::B, grown);
@@ -8079,7 +8187,7 @@ mod tests {
         handle.install_deck(DeckId::A, const_pcm(4_000, 48_000 * 4, 48_000));
         // Looped, because an unpaced callback runs through four seconds of
         // track in well under the test's wall time.
-        handle.set_deck_loop_span(DeckId::A, Some((0.0, 3.0)));
+        handle.set_deck_loop_span(DeckId::A, Some((0.0, 3.0)), crate::decks::LoopSeek::None);
         handle.set_deck_playing(DeckId::A, true);
         handle.set_master(1.0);
         let stop = Arc::new(AtomicBool::new(false));

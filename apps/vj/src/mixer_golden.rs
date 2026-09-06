@@ -89,14 +89,14 @@ pub(crate) fn summarise(left: &[f32], right: &[f32]) -> Vec<Window> {
 /// Render `frames` in device-sized buffers, calling `at` with the buffer
 /// index before each one so a scenario can act in the middle of a capture,
 /// where a device would see it.
-fn capture(mixer: &Mixer, frames: usize, mut at: impl FnMut(usize)) -> (Vec<f32>, Vec<f32>) {
+fn capture(rig: &Rig, frames: usize, mut at: impl FnMut(usize)) -> (Vec<f32>, Vec<f32>) {
     let mut left = Vec::with_capacity(frames);
     let mut right = Vec::with_capacity(frames);
     let mut index = 0;
     while left.len() < frames {
         at(index);
         let count = WINDOW.min(frames - left.len());
-        let block = render(mixer, RATE, count);
+        let block = rig.render(RATE, count);
         left.extend_from_slice(&block.channel(0)[..count]);
         right.extend_from_slice(&block.channel(1)[..count]);
         index += 1;
@@ -170,17 +170,50 @@ pub(crate) fn assert_golden(name: &str, left: &[f32], right: &[f32]) {
     }
 }
 
+/// A handle and the engine its device callback would own, together.
+///
+/// The scenarios drive both, exactly as the app does across its two
+/// threads: commands go through the handle and are drained by the engine
+/// at the top of the next buffer, and buffers come out of the engine. A
+/// scenario that set a knob and rendered in the same breath would
+/// otherwise be testing an order the app never has.
+///
+/// Derefs to the handle so every `mixer.set_x()` in these tests reads the
+/// way it always did.
+struct Rig {
+    mixer: Mixer,
+    engine: std::cell::RefCell<crate::mixer::MixEngine>,
+}
+
+impl std::ops::Deref for Rig {
+    type Target = Mixer;
+    fn deref(&self) -> &Mixer {
+        &self.mixer
+    }
+}
+
+impl Rig {
+    fn new(mixer: Mixer) -> Rig {
+        let engine = mixer.take_engine().expect("one engine per mixer");
+        Rig { mixer, engine: std::cell::RefCell::new(engine) }
+    }
+
+    fn render(&self, rate: f64, frames: usize) -> makepad_widgets::makepad_platform::audio::AudioBuffer {
+        render(&mut self.engine.borrow_mut(), rate, frames)
+    }
+}
+
 /// A mixer at unity with one track on deck A and the fader on it.
-fn deck_a(pcm: Arc<TrackPcm>) -> Mixer {
+fn deck_a(pcm: Arc<TrackPcm>) -> Rig {
     let mixer = Mixer::new();
     mixer.set_master(1.0);
     mixer.set_crossfader(0.0);
     mixer.install_deck(DeckId::A, pcm);
-    mixer
+    Rig::new(mixer)
 }
 
-fn settle(mixer: &Mixer, frames: usize) {
-    render(mixer, RATE, frames);
+fn settle(rig: &Rig, frames: usize) {
+    rig.render(RATE, frames);
 }
 
 // ---------------------------------------------------------------------------
@@ -549,8 +582,8 @@ fn golden_moog_ladder_lowpass() {
 
 /// The biggest neighbouring-sample step on the left channel while `at`
 /// acts on the mixer part-way through half a second of DC at half scale.
-fn worst_step_across(mixer: &Mixer, at: impl FnMut(usize)) -> f32 {
-    let (left, _) = capture(mixer, CAPTURE, at);
+fn worst_step_across(rig: &Rig, at: impl FnMut(usize)) -> f32 {
+    let (left, _) = capture(rig, CAPTURE, at);
     worst_adjacent_step(&left)
 }
 

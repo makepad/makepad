@@ -7814,6 +7814,7 @@ mod tests {
 
     fn filled_row() -> TrackRowEntry {
         TrackRowEntry {
+            license: String::new(),
             key: TrackKey::Local(PathBuf::from("a.mp3")),
             title: "Title".into(),
             artist: "Artist".into(),

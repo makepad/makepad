@@ -267,6 +267,13 @@ use std::time::Duration;
 // here -- now, elapsed, the duration arithmetic and the ordering.
 use crate::clock::Instant;
 
+/// One `Cx`'s spawner, for tests that need a pool without a running app.
+#[cfg(test)]
+pub(crate) fn test_thread_spawner(
+) -> makepad_widgets::makepad_platform::thread::ThreadSpawner {
+    Cx::new(Box::new(|_, _| {})).thread_spawner()
+}
+
 app_main!(App);
 
 script_mod! {
