@@ -344,6 +344,9 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// Private by default; the broker hands EVERY session's provider the
     /// same one so the fleet is probed once, not once per session.
     picks: std::sync::Arc<FleetPickCache>,
+    /// The worker that accepted this conversation, independent of the
+    /// process-wide discovery cache and other conversations' choices.
+    home: Option<(String, String, bool)>,
     /// Conversation identity for lane stickiness — one per provider
     /// instance, which is one per session. Travels as `chat_session`.
     conversation: String,
@@ -412,6 +415,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             pending: None,
             cancel_signal: None,
             picks,
+            home: None,
             conversation: Self::conversation_id(),
             wire: Vec::new(),
         }
@@ -455,6 +459,14 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// twice. Recently-failed bases are skipped for [`DEAD_TTL`], and the
     /// scan stops at the first usable node (last-good first).
     fn probe(&mut self) -> Result<(String, String, bool), String> {
+        if let Some(home) = &self.home {
+            if self.bases.contains(&home.0) && !self.picks.is_dead(&home.0)
+                && crate::fleet::role_allows(&home.0, "chat")
+                && self.preferred_model.as_deref().is_none_or(|wanted| wanted == home.1)
+            {
+                return Ok(home.clone());
+            }
+        }
         if let Some(pick) = self.picks.fresh() {
             if self.bases.contains(&pick.0)
                 && crate::fleet::role_allows(&pick.0, "chat")
@@ -567,6 +579,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             .and_then(Value::as_arr)
             .map(|caps| caps.iter().any(|c| c.as_str() == Some("chat")))
             .unwrap_or(false);
+        // 0.2 nodes advertise chat/lanes but rebuild the Qwen reasoning
+        // prefix on continuation. A live failover repeatedly ingested 16k
+        // tokens there. Do not route conversations back to that protocol.
+        if legacy_chat_cache(&health) {
+            reasons.push(format!("{base}: AIHub 0.3 or newer is required for conversation cache reuse; update this node"));
+            return None;
+        }
         // Lane contention rides along with the probe we already pay for —
         // never its own request. Absence is meaningful (one lane), so it is
         // recorded as absence.
@@ -709,6 +728,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             .to_string();
         let open_think = resp.get("think_open").and_then(Value::as_bool)
             .unwrap_or(pending.inferred_open_think);
+        self.home = Some((pending.base.clone(), pending.model.clone(),
+            pending.body.get("domain").and_then(Value::as_str) == Some("text")));
         self.active = Some(ActiveJob {
             base: pending.base.clone(), submission: pending, job, delivered: 0, finished: false,
             last_note: String::new(), gen_tokens: 0, think_tokens: None,
@@ -841,6 +862,12 @@ fn preferred_rank(id: &str) -> usize {
         .unwrap_or(PREFERRED.len())
 }
 
+fn legacy_chat_cache(health: &Value) -> bool {
+    let Some(version) = health.get("version").and_then(Value::as_str) else { return false; };
+    let mut parts = version.split('.').filter_map(|part| part.parse::<u32>().ok());
+    matches!((parts.next(), parts.next()), (Some(0), Some(0..=2)))
+}
+
 fn residency_rank(row: &Value) -> u8 {
     match row.get("state").and_then(Value::as_str).unwrap_or("") {
         "loaded" => 0,
@@ -867,6 +894,12 @@ fn better_pick(have: Option<&str>, id: &str, row: &Value) -> bool {
 }
 
 impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
+    fn history_pruned(&mut self, _removed: usize) {
+        // A compacted context no longer extends the exact KV prefix. Rebuild
+        // once on the next request; do not re-elect or reset the provider.
+        self.wire.clear();
+    }
+
     fn kind(&self) -> ProviderKind {
         ProviderKind::FleetQwen
     }
@@ -1238,15 +1271,14 @@ fn job_status_note(status: &Value) -> Option<(String, u16)> {
         "running" if is_active_load(&stage_l, permille) => {
             format!("loading{what} {pct}%", pct = permille / 10)
         }
-        // The wait the user cannot otherwise attribute: the box reading the
-        // conversation back in. Named and percented, or it reads as a hang.
-        // The percentage is the PREFILL'S OWN completion, parsed from the
-        // stage counts ("prefill 32/256 tok") — the job-wide fraction gives
-        // prefill only a ~2-8% sliver of the whole bar, which displayed as
-        // "3%… 5%… done" and read as broken.
-        "running" if stage_l.starts_with("prefill") => {
+        "running" if stage_l.starts_with("prefill") || stage_l.starts_with("kv reuse") => {
             let pct = prefill_own_pct(&stage_l).unwrap_or(permille / 10);
-            format!("preloading the conversation {pct}%")
+            let resumed = stage_l.starts_with("kv reuse") || status.get("serving")
+                .and_then(|s| s.get("prefix_resumed")).and_then(Value::as_bool) == Some(true);
+            let action = if resumed { "reading new input" }
+                else if stage_l.contains("session switch") || stage_l.contains("context full") { "restoring conversation cache" }
+                else { "processing conversation" };
+            format!("{action} {pct}%")
         }
         _ => return None,
     };
@@ -1385,7 +1417,7 @@ mod preload_note_tests {
             ("progress".into(), Value::F64(0.05)),
         ]);
         let (note, _) = job_status_note(&status).expect("prefill notes");
-        assert_eq!(note, "preloading the conversation 50%");
+        assert_eq!(note, "processing conversation 50%");
 
         // No counts in the stage: fall back to the job bar rather than lie.
         let status = Value::Obj(vec![
@@ -1394,7 +1426,7 @@ mod preload_note_tests {
             ("progress".into(), Value::F64(0.04)),
         ]);
         let (note, _) = job_status_note(&status).expect("prefill notes");
-        assert_eq!(note, "preloading the conversation 4%");
+        assert_eq!(note, "processing conversation 4%");
     }
 }
 

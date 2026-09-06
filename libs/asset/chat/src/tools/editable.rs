@@ -236,10 +236,10 @@ pub(super) fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "model.apply", api_name: "model_apply",
-            description: "Apply one atomic typed-operation batch to an expected document head on a worker. Returns accepted plus job ID; query model.jobs for the committed head and operation outputs. Same request_id and arguments replay idempotently. Wait for state applied and use result.head before the next dependent mutation. Use named select/use_selection for whole-object edits, inspecting omitted IDs only when needed. Batch independent operations (up to 256); object_node positions whole objects without enumerating vertices. Discover world.api model.workflow for a practical build sequence.",
+            description: "Apply an atomic worker batch at the expected head. Sandbox waits up to 10s and returns applied/result.head or failed; query model.jobs only for pending jobs. Chat defaults to summary; request selections only for needed IDs. Start with a small visible silhouette batch, then stages of roughly 8–24 operations/4KiB so the construction cage updates often. Keep dependent operations together; hard limit 256. Same request_id+arguments replay. Use result.head for the next stage and named select/use_selection for whole-object edits. Discover model.workflow once.",
             args_doc: r#"{"document":"chair","request_id":"build-seat","expected":{"generation":"0","content":"0000000000000000000000000000000000000000000000000000000000000000"},"operations":[{"op":"cube","object":"seat","size":[1,0.2,1]}]}"#,
             parameters: schema_object(vec![doc(), ("request_id", schema_string_len("stable transaction request id", 1, 96)), expected(),
-                ("result_mode",schema_string_enum("use summary with named selections; selections returns bounded per-operation IDs",&["summary","selections"])),
+                ("result_mode",schema_string_enum("chat default summary; selections returns bounded per-operation IDs",&["summary","selections"])),
                 ("operations", schema_array_bounded("typed engine operations", 1, 256, schema_object(vec![], &[], Some(true))))],
                 &["document", "request_id", "expected", "operations"], Some(false)),
         },

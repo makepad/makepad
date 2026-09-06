@@ -7,10 +7,10 @@
 //! Idle --send--> Streaming
 //!   FleetQwen: Done(text with <<tool>> line) -->
 //!     ToolCall -> execute (ToolProgress*) -> ToolResult
-//!     --textual follow-up turn--> Streaming            (bounded rounds)
+//!     --textual follow-up turn--> Streaming            (until completion or cancellation)
 //!   OpenAI/Grok: FunctionCall -->
 //!     ToolCall -> execute (ToolProgress*) -> ToolResult
-//!     --native continue_function--> Streaming          (bounded rounds)
+//!     --native continue_function--> Streaming          (until completion or cancellation)
 //! Streaming --provider Done(plain text)--> Done event --> Idle
 //! any active --cancel--> Cancelled event --> Idle
 //! ```
@@ -28,7 +28,7 @@ use crate::wire::{
     sanitize_public_error, split_delta_text, AttachmentBinding, ChatEvent, ChatEventBody,
     ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ToolOutcome, MAX_ATTACHMENTS,
     MAX_MESSAGES, MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
-    MAX_TOOL_ROUNDS, MAX_CONFIGURABLE_TOOL_ROUNDS, MAX_TURN_TEXT_BYTES,
+    MAX_TURN_TEXT_BYTES,
 };
 use makepad_asset_client::json::Value;
 use makepad_asset_data::AssetRevisionId;
@@ -128,13 +128,6 @@ pub trait ToolExecutor {
         tools::definitions()
     }
 
-    /// Requested tool calls per user turn. Snapshotted at send, bounded by
-    /// the session's history capacity and MAX_CONFIGURABLE_TOOL_ROUNDS.
-    /// Zero allows a plain answer but refuses tools. Payload bounds remain
-    /// unchanged. Ordinary content chat retains its 16-call default.
-    fn max_tool_rounds(&self) -> u32 {
-        MAX_TOOL_ROUNDS
-    }
     fn take_tool_images(&mut self) -> Vec<makepad_ai_hub::providers::provider::ToolImage> { Vec::new() }
 
     /// True when `call` must be executed by the session's CLIENT — the app
@@ -171,8 +164,6 @@ pub enum SendRefusal {
     Busy,
     TooLarge { what: &'static str },
     TooMany { what: &'static str },
-    /// The bounded history is full; start a new session.
-    HistoryFull,
     InvalidAttachment { what: String },
     /// The provider refused to start the turn.
     ProviderError { message: String },
@@ -206,8 +197,7 @@ pub struct Session {
     events: VecDeque<ChatEvent>,
     seq: u64,
     turn: u64,
-    tool_rounds: u32,
-    tool_round_limit: u32,
+    tool_rounds: u64,
     cancel: CancelFlag,
     sealed: Option<String>,
     tool_executed_this_turn: bool,
@@ -215,10 +205,6 @@ pub struct Session {
     /// Visible assistant text preceding a PARKED client tool call, kept for
     /// the tool round once the client's outcome arrives.
     pending_clean: String,
-    /// The tool-round budget was reached: the model got one FINAL
-    /// completion round ("answer with what you have") and any further tool
-    /// line it emits is not executed — the turn ends with its text.
-    budget_final: bool,
     /// The current round's call rendered in the model's trained template,
     /// recorded into the assistant history entry by `tool_round` (textual
     /// lane only).
@@ -271,8 +257,8 @@ impl Session {
     ) -> Session {
         let mut history: Vec<ChatMessage> =
             history.into_iter().filter(|m| m.validate().is_ok()).collect();
-        // Leave room for the next turn: a resumed conversation that already
-        // filled the history bound would refuse every send.
+        // Start resumed providers with a compact working context. Live sends
+        // roll it forward as needed without refusing subsequent turns.
         let keep = MAX_MESSAGES / 2;
         if history.len() > keep {
             history.drain(..history.len() - keep);
@@ -290,13 +276,11 @@ impl Session {
             seq: 0,
             turn,
             tool_rounds: 0,
-            tool_round_limit: MAX_TOOL_ROUNDS,
             cancel: CancelFlag::default(),
             sealed,
             tool_executed_this_turn: false,
             executed_mutation: false,
             pending_clean: String::new(),
-            budget_final: false,
             last_call_trained: None,
             pending_serving: None,
             end_turn_on_client_outcome: false,
@@ -330,12 +314,6 @@ impl Session {
 
     pub fn is_idle(&self) -> bool {
         matches!(self.phase, Phase::Idle)
-    }
-
-    /// Effective limit captured for the current/latest turn. Older history
-    /// may leave fewer rounds than the executor requested.
-    pub fn tool_round_limit(&self) -> u32 {
-        self.tool_round_limit
     }
 
     /// The cooperative cancel flag this session hands to running tools.
@@ -411,9 +389,6 @@ impl Session {
             a.validate()
                 .map_err(|e| SendRefusal::InvalidAttachment { what: e.to_string() })?;
         }
-        if self.history.len() >= MAX_MESSAGES || self.history.len() + 2 > MAX_MESSAGES {
-            return Err(SendRefusal::HistoryFull);
-        }
         // Honest gate, no fallback: an unavailable provider refuses the
         // send with its live reason. Nothing here constructs another
         // provider — that is a user decision made elsewhere, explicitly.
@@ -459,14 +434,8 @@ impl Session {
         };
         self.turn += 1;
         self.tool_rounds = 0;
-        // The user is already recorded. Reserve the textual final notice
-        // and completion before admitting any potentially mutating call.
-        self.tool_round_limit = tools_exec.max_tool_rounds()
-            .min(MAX_CONFIGURABLE_TOOL_ROUNDS)
-            .min((MAX_MESSAGES.saturating_sub(self.history.len() + 2) / 2) as u32);
         self.tool_executed_this_turn = false;
         self.executed_mutation = false;
-        self.budget_final = false;
         self.cancel.reset();
         if let Err(message) = self.begin_provider_turn() {
             self.history.pop();
@@ -636,22 +605,6 @@ impl Session {
             self.emit(ChatEventBody::Done);
             return;
         }
-        // The post-budget completion round: whatever the model says IS the
-        // answer; a tool line in it is cut off, not executed.
-        if self.budget_final {
-            let visible = match toolcall::extract(&full) {
-                Extract::None => toolcall::split_thinking(&full).visible,
-                Extract::Call { clean, .. } | Extract::Malformed { clean, .. } => clean,
-            };
-            if let Err(body) = self.finish_assistant_text(visible) {
-                self.phase = Phase::Idle;
-                self.emit(body);
-                return;
-            }
-            self.phase = Phase::Idle;
-            self.emit(ChatEventBody::Done);
-            return;
-        }
         match toolcall::extract(&full) {
             Extract::None => {
                 let visible = toolcall::split_thinking(&full).visible;
@@ -680,7 +633,6 @@ impl Session {
                 self.tool_round(clean, None, ToolOutcome::Refused { what }, tools_exec);
             }
             Extract::Call { clean, name, args } => {
-                if !self.admit_tool_round() { return; }
                 let call_id = format!("tc_{}_{}", self.turn, self.tool_rounds + 1);
                 let emit_args = if matches!(args, Value::Obj(_))
                     && args.to_json().len() <= MAX_TOOL_JSON_BYTES
@@ -760,7 +712,6 @@ impl Session {
         arguments: String,
         tools_exec: &mut dyn ToolExecutor,
     ) {
-        if !self.admit_tool_round() { return; }
         if call_id.is_empty() || call_id.len() > MAX_TOOL_CALL_ID {
             self.phase = Phase::Idle;
             self.emit(ChatEventBody::Error {
@@ -866,7 +817,7 @@ impl Session {
     }
 
     /// Record one tool round, feed the result back, and start the follow-up
-    /// provider turn (or end the turn on cancel/budget/overflow).
+    /// provider turn (or end the turn on cancel/invalid output).
     fn tool_round(
         &mut self,
         clean_text: String,
@@ -874,7 +825,6 @@ impl Session {
         outcome: ToolOutcome,
         tools_exec: &mut dyn ToolExecutor,
     ) {
-        if !self.admit_tool_round() { return; }
         let images = tools_exec.take_tool_images();
         let outcome = if images.is_empty() {outcome} else {
             match self.provider.attach_tool_images(images) {
@@ -886,10 +836,7 @@ impl Session {
         if let Some(id) = &call_id {
             self.emit(ChatEventBody::ToolResult { id: id.clone(), outcome: outcome.clone() });
         }
-        if self.history.len() + 2 > MAX_MESSAGES {
-            self.fail_closed_tool_round("history_full", "session history budget exhausted");
-            return;
-        }
+        self.make_history_room(2);
         // The textual lane records the CALL in the assistant turn, in the
         // model's TRAINED spelling. Without it the in-context history shows
         // assistant turns that never call tools (only paired results), and
@@ -949,29 +896,7 @@ impl Session {
             self.emit(ChatEventBody::Done);
             return;
         }
-        self.tool_rounds += 1;
-        if self.tool_rounds >= self.tool_round_limit && !self.budget_final {
-            // Native-tool providers keep the fail-closed shape (their
-            // sessions seal after tools anyway). The textual lane degrades
-            // GRACEFULLY: a turn that spent its budget exploring still
-            // ends in an answer or a build, never a dead session — the
-            // model gets ONE final completion round with a nudge, and any
-            // further tool line it emits is not executed.
-            if self.provider.kind().uses_native_tools() {
-                self.fail_closed_tool_round(
-                    "tool_budget",
-                    &format!("tool round budget ({}) exhausted", self.tool_round_limit),
-                );
-                return;
-            }
-            self.budget_final = true;
-            let nudge = "{\"note\":\"tool budget reached — no more tool calls this \
-                         turn; answer or build with what you already have\"}";
-            if self.push_history(ChatRole::Tool, nudge.to_string()).is_err() {
-                self.fail_closed_tool_round("history_full", "session history budget exhausted");
-                return;
-            }
-        }
+        self.tool_rounds = self.tool_rounds.saturating_add(1);
         if self.provider.kind().uses_native_tools() {
             let Some(id) = call_id else {
                 self.fail_closed_tool_round("provider", "native tool round missing call id");
@@ -1002,25 +927,40 @@ impl Session {
             });
         }
         self.push_history(ChatRole::Assistant, text).map_err(|_| ChatEventBody::Error {
-            code: "history_full".to_string(),
-            message: "session history budget exhausted".to_string(),
+            code: "turn_too_large".to_string(),
+            message: "assistant text is not a valid history message".to_string(),
         })
     }
 
     fn push_history(&mut self, role: ChatRole, text: String) -> Result<(), ()> {
-        if self.history.len() >= MAX_MESSAGES {
-            return Err(());
-        }
         let msg = ChatMessage::new(role, text);
         msg.validate().map_err(|_| ())?;
+        self.make_history_room(1);
         self.history.push(msg);
         Ok(())
     }
 
-    fn admit_tool_round(&mut self) -> bool {
-        if self.tool_rounds < self.tool_round_limit { return true; }
-        self.fail_closed_tool_round("tool_budget", &format!("tool round budget ({}) exhausted", self.tool_round_limit));
-        false
+    /// The transcript is a rolling provider context, not a turn limit.
+    /// Keep recent complete call/result pairs and user instructions. Native
+    /// providers adjust their sent cursor; their conversation chain survives.
+    fn make_history_room(&mut self, incoming: usize) {
+        if self.history.len() + incoming <= MAX_MESSAGES { return; }
+        let mut tail = self.history.len().saturating_sub(MAX_MESSAGES / 2);
+        while tail > 0 && self.history[tail].role == ChatRole::Tool { tail -= 1; }
+        let mut pinned = self.history[..tail].iter().enumerate().rev()
+            .filter(|(_, message)| message.role == ChatRole::User)
+            .take(8).map(|(index, _)| index).collect::<Vec<_>>();
+        if let Some(first) = self.history.iter().position(|message| message.role == ChatRole::User) {
+            pinned.push(first);
+        }
+        let before = self.history.len();
+        let mut index = 0;
+        self.history.retain(|_| {
+            let keep = index >= tail || pinned.contains(&index);
+            index += 1;
+            keep
+        });
+        self.provider.history_pruned(before - self.history.len());
     }
 
     fn fail_closed_tool_round(&mut self, code: &str, message: &str) {

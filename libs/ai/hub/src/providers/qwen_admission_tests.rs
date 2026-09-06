@@ -28,6 +28,7 @@ struct State {
     replies: VecDeque<Result<Value, FleetError>>,
     polls: VecDeque<Result<Value, String>>,
     models: BTreeMap<String, Value>,
+    health: BTreeMap<String, Value>,
     cancel_on_probe: Option<Arc<AtomicBool>>,
     cancels: usize,
 }
@@ -72,7 +73,7 @@ impl Script {
         Self(Rc::new(RefCell::new(State {
             now: Instant::now(), posts: Vec::new(), gets: Vec::new(),
             replies: replies.into_iter().collect(), polls: VecDeque::from([done("answer")]),
-            models: BTreeMap::new(), cancel_on_probe: None, cancels: 0,
+            models: BTreeMap::new(), health: BTreeMap::new(), cancel_on_probe: None, cancels: 0,
         })))
     }
     fn advance(&self) { self.0.borrow_mut().now += Duration::from_secs(9); }
@@ -87,8 +88,9 @@ impl FleetTransport for Script {
     fn get_json(&mut self, url: &str) -> Result<Value, String> {
         let mut s = self.0.borrow_mut();
         s.gets.push(url.into());
-        if url.ends_with("/health") {
+        if let Some(base) = url.strip_suffix("/health") {
             if let Some(signal) = &s.cancel_on_probe { signal.store(true, Ordering::Relaxed); }
+            if let Some(health) = s.health.get(base) { return Ok(health.clone()); }
             return Ok(json::obj(vec![("capabilities", Value::Arr(vec![json::s("chat")]))]));
         }
         if let Some(base) = url.strip_suffix("/models") {
@@ -109,6 +111,55 @@ impl FleetTransport for Script {
         assert!(url.ends_with("/generate"));
         s.posts.push((url.into(), body.clone()));
         s.replies.pop_front().expect("unexpected extra POST")
+    }
+}
+
+#[test]
+fn a_legacy_lane_advertisement_cannot_capture_chat_failover() {
+    let t = Script::new([accepted(), accepted()]);
+    let legacy = "http://legacy:1";
+    t.0.borrow_mut().health.insert(legacy.into(), json::obj(vec![
+        ("version", json::s("0.2.0")),
+        ("capabilities", Value::Arr(vec![json::s("chat")])),
+        ("lanes", json::obj(vec![("lanes_active", Value::Int(0)), ("slots_total", Value::Int(1))])),
+    ]));
+    let mut p = t.provider(&[N1, legacy, N2]);
+    p.begin_turn(&input()).unwrap();
+    t.0.borrow_mut().polls = VecDeque::from([cancelled("local-use: gpu-counter-unavailable"), done("answer")]);
+    assert!(finish(&mut p, &t).iter().any(|event| matches!(event, ProviderEvent::Done { .. })));
+    let state = t.0.borrow();
+    assert_eq!(state.posts.len(), 2);
+    assert_eq!(state.posts[1].0, format!("{N2}/generate"));
+    assert_eq!(state.posts[0].1, state.posts[1].1, "failover preserves the full request");
+}
+
+#[test]
+fn another_conversations_pick_does_not_move_a_warm_conversation() {
+    let t = Script::new([accepted(), accepted()]);
+    let mut p = t.provider(&[N1, N2]);
+    p.begin_turn(&input()).unwrap();
+    finish(&mut p, &t);
+    p.picks.remember(N2.into(), MODEL.into(), false);
+    t.0.borrow_mut().polls.push_back(done("second answer"));
+    let mut next = input();
+    next.messages.extend([ChatMessage::new(ChatRole::Assistant, "answer"), ChatMessage::new(ChatRole::User, "next")]);
+    p.begin_turn(&next).unwrap();
+    finish(&mut p, &t);
+    let state = t.0.borrow();
+    assert_eq!(state.posts[1].0, format!("{N1}/generate"));
+    assert_eq!(state.posts[0].1.get("chat_session"), state.posts[1].1.get("chat_session"));
+}
+
+#[test]
+fn prefill_notes_distinguish_new_input_from_a_cache_restart() {
+    for (stage, serving, expected) in [
+        ("kv reuse 128/256 tok", Value::Null, "reading new input 50%"),
+        ("prefill 128/256 tok", json::obj(vec![("prefix_resumed", Value::Bool(true))]), "reading new input 50%"),
+        ("prefill 128/256 tok (session switch)", Value::Null, "restoring conversation cache 50%"),
+        ("prefill 128/256 tok (context full)", Value::Null, "restoring conversation cache 50%"),
+    ] {
+        let status = json::obj(vec![("state", json::s("running")), ("stage", json::s(stage)), ("serving", serving)]);
+        assert_eq!(job_status_note(&status).unwrap().0, expected);
     }
 }
 fn terminal(events: &[ProviderEvent]) -> usize {

@@ -193,10 +193,9 @@ off rivers, lots on water or roads are left unbuilt, props asked for in
 water go to the shore, and corridors bridge water laid earlier. Each repair
 is an "assist" line — read them and edit the plan rather than fighting them.
 
-ALWAYS BUILD SOMETHING. Primitives (terrain, water, box, mover,
-character, labels) need no store content; missing artwork never blocks a
-level. Into a RUNNING world, add a substitute as ONE world.add_addon
-chunk — never replace the user's level to conjure one thing.
+Primitives need no store art. Add level scaffolding with world.add_addon;
+never replace the level. Preserve requested character identities and image
+references: failed generation does not authorize an unrelated player swap.
 
 MODELS. Only 'mesh' and rigged 'character' assets place with game.model;
 a 'world' alias loads through game.map as a whole level (its own
@@ -213,8 +212,9 @@ wheel bindings through model.open/apply. Use named select/use_selection operatio
 for whole-object edits within a batch; inspect specific IDs only when needed.
 No catalog search is needed to author original geometry. Use model.build
 only for legacy CSG source. Do not replace a requested model with stock art.
-model.apply/publish return accepted jobs: model.jobs({job,wait_ms:10000})
-until terminal. Take the next head from result.head. Publish source+GLB;
+Build a small visible silhouette first, then 8–24 operation stages. Chat apply
+waits up to10s; use model.jobs({job,wait_ms:10000}) only while pending.
+Take the next head from result.head. Publish source+GLB;
 spawn result.alias only after state:"published" AND result.placeable_now:true.
 Use world.spawn({model:<returned alias>,form:"car"}) for a custom driveable car.
 Conflict/failure keeps local edits; a published alias alone is not placement.

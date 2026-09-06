@@ -131,6 +131,10 @@ pub trait ChatProvider {
         Err("native tool continuation is not supported by this provider".to_string())
     }
 
+    /// The host removed already-seen rows from its rolling context. This
+    /// happens between provider requests and preserves the conversation.
+    fn history_pruned(&mut self, _removed: usize) {}
+
     /// Abandon the conversation state deliberately: any in-flight turn is
     /// cancelled AND any pending native function call is dropped, so the
     /// NEXT `begin_turn` starts a fresh provider conversation over whatever
@@ -177,6 +181,7 @@ enum ThreadedCmd {
     ContinueFunction { call_id: String, output: String },
     Cancel,
     Reset,
+    HistoryPruned(usize),
     Probe,
     Shutdown,
 }
@@ -215,6 +220,7 @@ impl ThreadedProvider {
                     }
                     Ok(ThreadedCmd::Cancel) => inner.cancel(),
                     Ok(ThreadedCmd::Reset) => inner.reset_conversation(),
+                    Ok(ThreadedCmd::HistoryPruned(removed)) => inner.history_pruned(removed),
                     Ok(ThreadedCmd::Probe) => {
                         let _ = msg_tx.send(ThreadedMsg::Availability(inner.availability()));
                     }
@@ -317,6 +323,10 @@ impl ChatProvider for ThreadedProvider {
 
     fn reset_conversation(&mut self) {
         let _ = self.cmd_tx.send(ThreadedCmd::Reset);
+    }
+
+    fn history_pruned(&mut self, removed: usize) {
+        let _ = self.cmd_tx.send(ThreadedCmd::HistoryPruned(removed));
     }
 
     fn continue_function(&mut self, call_id: &str, output: &str) -> Result<(), String> {

@@ -172,12 +172,16 @@ impl ChatProvider for CodexCliChatProvider {
         let cwd = turn_dir("codex");
         let mut args = build_args(&self.model, &self.resume, &input.system_with_dynamic(), &cwd.to_string_lossy());
         args.pop(); // Image flags apply to exec or exec resume before stdin '-'.
+        let with_images = !self.images.is_empty();
         for (index,image) in std::mem::take(&mut self.images).into_iter().enumerate(){
             let path=cwd.join(format!("tool-image-{index}.png"));
             if let Err(error)=std::fs::write(&path,&image.png){let _=std::fs::remove_dir_all(&cwd);return Err(format!("tool image staging failed: {error}"));}
             args.push("--image".into());args.push(path.to_string_lossy().into_owned());
             prompt.push_str(&format!("\nAttached reference image {}: {}. Inspect the image before judging the model.\n",index+1,image.label));
         }
+        // --image is variadic; terminate its values so the stdin sentinel
+        // cannot be parsed as another image filename (observed in chat logs).
+        if with_images { args.push("--".into()); }
         args.push("-".into());
         let mut command = cli_command(&cli, &cwd);
         command.args(&args);
