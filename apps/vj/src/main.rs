@@ -261,7 +261,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// The PLATFORM clock, not `std::time`: the web has no monotonic
+// `std::time::Instant`, and this one is a drop-in for the surface used
+// here -- now, elapsed, the duration arithmetic and the ordering.
+use crate::clock::Instant;
 
 app_main!(App);
 

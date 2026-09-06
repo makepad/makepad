@@ -3569,7 +3569,7 @@ impl MixEngine {
                 let deck_rate = d.rate.current();
                 match motion {
                     ScratchMotion::Grab => d.scratch.grab(deck_rate),
-                    ScratchMotion::Move { rate } => d.scratch.drag(rate),
+                    ScratchMotion::Move { secs, rate } => d.scratch.drag(secs, rate),
                     ScratchMotion::Release => d.scratch.release(deck_rate),
                 }
             }
@@ -3623,14 +3623,14 @@ impl MixEngine {
             MixCmd::SwapDecks => s.decks.swap(0, 1),
             MixCmd::SetCrossfader { position, secs } => s.fader.slew(position, secs),
             MixCmd::SetBlendBand { deck, band, gain } => {
-                s.decks[deck.index()].eq.set_blend_band(band, gain);
+                s.decks[deck.index()].chain.eq_mut().set_blend_band(band, gain);
             }
             MixCmd::SetBlendStem { deck, stem, gain } => {
                 s.decks[deck.index()].blend_stem[stem].slew(gain, BLEND_SECS);
             }
             MixCmd::ClearBlend(deck) => {
                 let d = &mut s.decks[deck.index()];
-                d.eq.clear_blend();
+                d.chain.eq_mut().clear_blend();
                 for ramp in &mut d.blend_stem {
                     ramp.slew(1.0, BLEND_SECS);
                 }
@@ -3902,7 +3902,8 @@ impl MixEngine {
             // end and not the start because that is what the locked LFOs
             // compare their own projected phase against; at the start they
             // would chase a beat one buffer stale.
-            let source_rate = voice.pcm.as_ref().map(|pcm| pcm.sample_rate()).unwrap_or(0.0);
+            let source_rate =
+                voice.pcm.as_ref().map(|pcm| pcm.sample_rate().max(1) as f64).unwrap_or(0.0);
             // The platter, not the tempo fader: a hand on the record is the
             // rate the music is actually going round at, and a stopped deck
             // is going round at nothing.
@@ -4007,7 +4008,16 @@ impl MixEngine {
                 let side = if i == 0 { fader.0 } else { fader.1 };
                 let deck_rate = d.rate.tick(rate);
                 let key_ratio = d.key_ratio.tick(rate) as f64;
-                let scratch_rate = d.scratch.tick(rate, deck_rate);
+                // WHERE the record is, not just how fast: the scratch ramp
+                // measures its error against the finger's own place, which
+                // is what stops a dropped or coalesced event becoming drift
+                // the record never recovers.
+                let pos_secs = d
+                    .pcm
+                    .as_ref()
+                    .map(|pcm| d.pos / pcm.sample_rate().max(1) as f64)
+                    .unwrap_or(0.0);
+                let scratch_rate = d.scratch.tick(rate, deck_rate, pos_secs);
                 let scratching = d.scratch.active();
                 let mut stem_gain = [0.0f32; STEM_COUNT];
                 for ((slot, ramp), blend) in stem_gain
@@ -4112,7 +4122,7 @@ impl MixEngine {
                         // Continue from the frame the ear is at, not from
                         // the search's ideal anchor: the two can differ by
                         // a search width, and that difference is a skip.
-                        d.pos = d.stretch.heard_position();
+                        d.pos = d.stretch.position();
                     }
                     d.stretching = want_stretch;
                 }
