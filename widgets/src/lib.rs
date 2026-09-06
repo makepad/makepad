@@ -41,6 +41,7 @@ pub mod badge;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
+pub mod accordion;
 pub mod dialog;
 pub mod toast;
 pub mod browser;
@@ -171,6 +172,7 @@ pub use crate::{
     button_group::*,
     chip::*,
     menu::*,
+    accordion::*,
     dialog::*,
     toast::*,
     placeholder::*,
@@ -622,6 +624,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::fold_button::script_mod(vm);
     crate::fold_header::script_mod(vm);
+    crate::accordion::script_mod(vm);
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
