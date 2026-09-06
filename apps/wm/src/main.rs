@@ -20,6 +20,7 @@ mod desk;
 mod desktop_layout;
 mod desktop;
 mod desktop_app;
+mod snap;
 mod mobile;
 mod mobile_surface;
 mod mobile_app;
@@ -158,6 +159,7 @@ script_mod! {
                         height: Fill
                         flow: Overlay
                         desktop_shelf := DesktopShelf{}
+                        snap_overlay := SnapOverlay{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
                         shell_notes := ShellNotifications{}
@@ -247,6 +249,8 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     state: Option<WmState>,
+    #[rust]
+    snap_hover_timer: Timer,
     /// A keyboard focus that could not land yet (the tile hadn't drawn);
     /// re-asserted when that client's first frame arrives.
     #[rust]
@@ -3188,11 +3192,11 @@ impl App {
             }
             drag.armed = true;
             if !drag.resize {
-                if let Some(w)=self.state.as_mut().and_then(|s|s.layout.desktop.get_mut(drag.client)).filter(|w|w.maximized) {
+                if let Some(w)=self.state.as_mut().and_then(|s|s.layout.desktop.get_mut(drag.client)).filter(|w|w.maximized || w.snap.is_some()) {
                     let anchor=((drag.start.x-drag.start_rect.x)/drag.start_rect.w).clamp(0.0,1.0);
                     w.rect.x=drag.start.x-w.rect.w*anchor;
                     w.rect.y=drag.start.y-16.0;
-                    w.maximized=false;drag.start_rect=w.rect;
+                    w.maximized=false;w.snap=None;drag.start_rect=w.rect;
                 }
             }
         }
@@ -3266,6 +3270,9 @@ impl App {
             None
         };
         self.state_mut().drop_hint = hint;
+        if floating && !resize && self.state_mut().style.target==desktop::DesktopStyle::Windows {
+            self.state_mut().snap.drag(client,abs,area);
+        }
         self.redraw_all(cx);
     }
 
@@ -3281,12 +3288,14 @@ impl App {
         let shift = shift || drag.shift;
         if drag.floating && !drag.resize && drag.armed && self.state_mut().style.target==desktop::DesktopStyle::Windows {
             let area=self.desk_area(cx);
-            if let Some(w)=self.state_mut().layout.desktop.get_mut(drag.client) {
-                if abs.y<=area.y+10.0 {w.maximized=true;}
-                else if abs.x<=area.x+10.0 {w.rect=LRect::new(area.x,area.y,area.w*0.5,area.h);}
-                else if abs.x>=area.x+area.w-10.0 {w.rect=LRect::new(area.x+area.w*0.5,area.y,area.w*0.5,area.h);}
+            self.state_mut().snap.drag(drag.client,abs,area);
+            if let Some(zone)=self.state_mut().snap.preview {
+                // Preserve the free window's size before the edge drag.
+                if let Some(w)=self.state_mut().layout.desktop.get_mut(drag.client) {w.rect=drag.start_rect;}
+                self.apply_snap(cx,drag.client,zone);
             }
         }
+        self.state_mut().snap.clear();
         if !drag.floating && !drag.resize && drag.armed {
             // Tiled move: dropping on another tile swaps the two, which is
             // what Hyprland's `movewindow` drag settles into.
@@ -3752,6 +3761,7 @@ impl MatchEvent for App {
         self.hub = hub;
 
         self.state = Some(WmState {
+            snap: Default::default(),
             phone: Default::default(),
             layout: crate::layout::WmLayout::new(),
             dock_backdrop: None,
@@ -4076,6 +4086,7 @@ impl AppMain for App {
         makepad_aichat::script_mod(vm);
         shell::script_mod(vm);
         desktop::script_mod(vm);
+        snap::script_mod(vm);
         mobile_surface::script_mod(vm);
         desk::phone::script_mod(vm);
         dock_warp::script_mod(vm);
@@ -4156,6 +4167,7 @@ impl AppMain for App {
             return;
         }
         if self.state.is_some() && self.phone_pointer(cx,event) {return;}
+        if self.state.is_some() && self.snap_event(cx,event) {return;}
         if self.state.is_some() && self.desktop_pointer(cx,event) {return;}
         // The AI pane owns the pointer inside its rect while it is open:
         // the event goes to the pane alone, so neither the WM's own drag

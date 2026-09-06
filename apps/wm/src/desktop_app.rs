@@ -18,6 +18,8 @@ impl App {
         }
         self.drag = None;
         self.div_drag = None;
+        self.state_mut().snap.clear();
+        cx.stop_timer(self.snap_hover_timer);
         let area = self.desk_area(cx);
         let dark = self.state_mut().style.dark;
         let sheet = desktop_style::StyleSheet::load_with_appearance(style, dark);
@@ -165,6 +167,65 @@ impl App {
         self.focus_client(cx, client);
         self.redraw_all(cx);
     }
+    pub(super) fn apply_snap(&mut self, cx: &mut Cx, client: ClientId, zone: crate::snap::Zone) {
+        if let Some(w)=self.state_mut().layout.desktop.get_mut(client) {
+            w.maximized=zone==crate::snap::Zone::Maximize;
+            w.snap=(!w.maximized).then_some(zone);
+            w.minimized=false;
+        }
+        self.state_mut().snap.clear();
+        self.focus_client(cx,client);
+        self.redraw_all(cx);
+        log!("wm: snapped client {} to {:?}",client,zone);
+    }
+    pub(super) fn snap_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.state_mut().style.target!=DesktopStyle::Windows || self.drag.is_some() || self.div_drag.is_some() {return false;}
+        if let Some(client)=self.state_mut().snap.picker.as_ref().map(|p|p.client) {
+            let state=self.state_mut();
+            if state.layout.workspace_of(client)!=Some(state.layout.active) || state.layout.desktop.minimized(client) {
+                state.snap.clear();cx.stop_timer(self.snap_hover_timer);self.redraw_all(cx);
+            }
+        }
+        if self.snap_hover_timer.is_event(event).is_some() {
+            if let Some((client,anchor))=self.state_mut().snap.hovered {
+                let area=self.desk_area(cx);
+                self.state_mut().snap.picker=Some(crate::snap::Picker::new(client,area,Some(anchor)));
+                self.state_mut().snap.area=Some(area);
+                self.redraw_all(cx);
+            }
+            return false;
+        }
+        if matches!(event,Event::KeyDown(e) if e.key_code==KeyCode::Escape) && self.state_mut().snap.picker.is_some() {
+            self.state_mut().snap.clear();cx.stop_timer(self.snap_hover_timer);self.redraw_all(cx);return true;
+        }
+        let p=match event {Event::MouseMove(e)=>e.abs,Event::MouseDown(e)=>e.abs,Event::MouseUp(e)=>e.abs,_=>return false};
+        if matches!(event,Event::MouseDown(_)) {cx.stop_timer(self.snap_hover_timer);}
+        let picker=self.state_mut().snap.picker.clone();
+        if let Some(picker)=picker {
+            if picker.bounds.contains(p) {
+                let hit=picker.hit(p);
+                if self.state_mut().snap.preview!=hit {self.state_mut().snap.preview=hit;self.redraw_all(cx);}
+                if matches!(event,Event::MouseDown(e) if e.button.contains(MouseButton::PRIMARY)) {
+                    if let Some(zone)=hit {self.apply_snap(cx,picker.client,zone);}
+                }
+                return true;
+            }
+            let on_anchor=self.state_mut().snap.hovered.is_some_and(|(client,r)|client==picker.client && r.contains(p));
+            if (!picker.near(p) && !on_anchor) || matches!(event,Event::MouseDown(_)) {
+                self.state_mut().snap.clear();self.redraw_all(cx);
+            }
+        }
+        let hovered=self.desk(cx).borrow::<WmDesk>().and_then(|desk| {
+            let (client,hit)=desk.chrome_hit(p)?;
+            (hit==ChromeHit::Maximize).then(|| desk.chrome_button_rect(client,hit).map(|r|(client,r))).flatten()
+        });
+        if self.state_mut().snap.hovered!=hovered {
+            cx.stop_timer(self.snap_hover_timer);
+            self.state_mut().snap.hovered=hovered;
+            if hovered.is_some() && matches!(event,Event::MouseMove(_)) {self.snap_hover_timer=cx.start_timeout(0.45);}
+        }
+        false
+    }
     fn activate_shelf(&mut self, cx: &mut Cx, hit: ShelfHit) {
         match hit {
             ShelfHit::Launcher => self.toggle_launcher(cx),
@@ -245,8 +306,14 @@ impl App {
             return true;
         }
         if style == DesktopStyle::Windows {
-            let area = self.desk_area(cx);
             match e.key_code {
+                KeyCode::KeyZ => {
+                    let area=self.desk_area(cx);
+                    let anchor=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.chrome_button_rect(client,ChromeHit::Maximize));
+                    self.state_mut().snap.picker=Some(crate::snap::Picker::new(client,area,anchor));
+                    self.state_mut().snap.area=Some(area);
+                    self.redraw_all(cx);
+                }
                 KeyCode::ArrowUp => self.maximize_desktop(cx, client),
                 KeyCode::ArrowDown => {
                     if self
@@ -262,16 +329,7 @@ impl App {
                     }
                 }
                 KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                    let x = area.x
-                        + if e.key_code == KeyCode::ArrowRight {
-                            area.w * 0.5
-                        } else {
-                            0.0
-                        };
-                    self.state_mut()
-                        .layout
-                        .set_float_rect(client, LRect::new(x, area.y, area.w * 0.5, area.h));
-                    self.redraw_all(cx);
+                    self.apply_snap(cx,client,if e.key_code==KeyCode::ArrowRight {crate::snap::Zone::Right}else{crate::snap::Zone::Left});
                 }
                 _ => return false,
             }

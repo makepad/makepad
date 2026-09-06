@@ -325,6 +325,7 @@ impl Default for BorderTheme {
 }
 
 pub struct WmState {
+    pub snap: crate::snap::SnapState,
     pub phone: crate::mobile::PhoneState,
     pub style: StyleTween,
     pub dock_backdrop: Option<gauss_view::GaussBlurSnapshot>,
@@ -767,6 +768,7 @@ pub struct WmDesk {
     #[live] phone_ui: PhoneSurface,
     #[live] draw_phone: DrawPhoneApp,
     #[rust] phone_frames: HashMap<ClientId, PhoneFrame>,
+    #[rust] desktop_frames: HashMap<ClientId, WindowFrame>,
     #[rust] pub wallpaper: WidgetRef,
     #[rust] compositor: Option<BackdropCompositor>,
     #[rust] composing: bool,
@@ -1108,12 +1110,15 @@ impl WmDesk {
         let backdrop = if self.composing && (self.terminal_clients.contains(&client) || startup_glass) {
             Some(self.compositor.as_mut().unwrap().backdrop(cx, inner, 3.0))
         } else {None};
+        let rounding = self.style.value([0.0, 14.0, 8.0, 0.0, 0.0]);
+        self.draw_window_shadow(cx, draw_rect, focus, fade);
         let mut capture = self.dock_warps.get_mut(&client)
             .filter(|w| w.frame.is_none() || w.refresh)
             .map(|w| {
                 w.refresh = false;
                 w.frame.take().unwrap_or_else(|| WindowFrame::new(cx))
-            });
+            }).or_else(|| (rounding > 0.01).then(|| self.desktop_frames.remove(&client)
+                .unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_window_surface"))));
         if let Some(frame) = &mut capture { frame.begin(cx, draw_rect); }
         if let Some(snapshot) = backdrop {
             self.terminal_glass.draw_surface_with_backdrop(cx, inner, Some(snapshot), fade as f32);
@@ -1223,6 +1228,10 @@ impl WmDesk {
                 warp.frame=Some(frame);
                 warp.draw(cx, &mut self.draw_warp);
                 if self.composing {self.compositor.as_mut().unwrap().content(warp.bounds());}
+            } else {
+                self.draw_window_surface(cx, &frame, draw_rect, rounding as f32);
+                self.desktop_frames.insert(client, frame);
+                if self.composing { self.compositor.as_mut().unwrap().content(draw_rect); }
             }
             return;
         }
@@ -1386,15 +1395,22 @@ impl WmDesk {
         let top = self.window_at(p)?;
         self.title_hits.iter().rev().find(|(c,r,_)| *c==top && r.contains(p)).map(|(c,_,h)| (*c,*h))
     }
+    pub fn chrome_button_rect(&self, client: ClientId, hit: ChromeHit) -> Option<Rect> {
+        self.title_hits.iter().rev().find(|(c,_,h)|*c==client && *h==hit).map(|(_,r,_)|*r)
+    }
+    fn draw_window_shadow(&mut self, cx: &mut Cx2d, r: Rect, focus: f64, fade: f64) {
+        use crate::shell::ui::rect;
+        let t=&self.style;
+        if t.weights[1] + t.weights[2] > 0.001 {
+            self.draw_shadow.draw_vars.set_uniform(cx, live_id!(opacity), &[((t.weights[1]+t.weights[2])*fade*if focus>0.5 {0.28}else{0.16}) as f32]);
+            self.draw_shadow.draw_abs(cx,rect(r.pos.x-24.0,r.pos.y-24.0,r.size.x+48.0,r.size.y+48.0));
+        }
+    }
     fn draw_window_chrome(&mut self, cx: &mut Cx2d, client: ClientId, r: Rect, h: f64, focus: f64, fade: f64) {
         use crate::desktop::DesktopStyle;
         use crate::shell::{rgb, alpha, ui::{rect,Ico,HAlign}};
         let t=&self.style;
         let opacity = ((1.0-t.weights[0])*fade) as f32;
-        if t.weights[1] + t.weights[2] > 0.001 {
-            self.draw_shadow.draw_vars.set_uniform(cx, live_id!(opacity), &[((t.weights[1]+t.weights[2])*fade*if focus>0.5 {0.28}else{0.16}) as f32]);
-            self.draw_shadow.draw_abs(cx,rect(r.pos.x-24.0,r.pos.y-24.0,r.size.x+48.0,r.size.y+48.0));
-        }
         let classic = t.weights[3] as f32;
         let next = t.weights[4] as f32;
         let retro = classic + next;
@@ -1410,7 +1426,9 @@ impl WmDesk {
         let title=rect(r.pos.x+edge,r.pos.y+edge,r.size.x-edge*2.0,h);
         self.chrome.top_only=1.0;
         self.chrome.title_gradient=classic * focus as f32;
-        self.chrome.radius=t.value([0.0,8.0,6.0,0.0,0.0]) as f32;
+        // The compositor masks the complete window, including its content.
+        // The title fills that surface without an independently inset edge.
+        self.chrome.radius=0.0;
         self.chrome.bevel=0.0;
         self.chrome.color=lerp_color(alpha(if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)},opacity),alpha(if focus>0.5 {rgb(0,0,128)}else{rgb(128,128,128)},opacity),classic as f64);
         self.chrome.color=lerp_color(self.chrome.color,alpha(if focus>0.5 {rgb(0,0,0)}else{rgb(85,85,85)},opacity),next as f64);
@@ -1652,6 +1670,7 @@ impl Widget for WmDesk {
         // when the workspace returns.
         self.anims
             .retain(|client, anim| live.contains(client) || anim.close_t.is_some());
+        self.desktop_frames.retain(|client, _| self.anims.contains_key(client));
 
         // Closing tiles paint under the live ones.
         let closing: Vec<ClientId> = self

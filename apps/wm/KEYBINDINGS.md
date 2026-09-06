@@ -23,6 +23,15 @@ Quitting wm itself is **⌘⇧Q** (the app menu) — plain ⌘Q closes the focus
 window, as in Omarchy. Press **⌘K** at any time for the in-app cheat sheet;
 it prints the exact chords for the OS you are on.
 
+In the Windows style, **SUPER+Z** opens Snap Layouts for the focused window.
+You can also hover its maximize button, or drag its title bar to the top
+center to choose a slot. Drag to a side for half the desktop, or a corner
+for a quarter; the preview shows where the window will land. **SUPER+Left**
+and **SUPER+Right** select a half. Dragging a snapped or maximized title bar
+restores the window's previous floating size under the pointer. Layouts
+follow the available desktop area, excluding the bars; wide layouts offer
+thirds and portrait layouts offer top/bottom halves.
+
 ## Starting things
 
 | Chord              | Does                                                             |
