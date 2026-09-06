@@ -1501,6 +1501,14 @@ struct DeckVoice {
     scratch: ScratchRamp,
     /// True while the time stretcher owns the playhead.
     stretching: bool,
+    /// The stretcher's tail after it hands over to the direct read: frames
+    /// left, and the total, for the blend. The two paths hand the PLAYHEAD
+    /// over exactly and disagree on PHASE, which the ordinary seek blend
+    /// cannot hide -- both sides of THAT blend are the direct read, and
+    /// what differs here is the overlap-add's own phase, which the source
+    /// knows nothing about. So the stretcher keeps sounding, at its own
+    /// place, while the direct read comes up underneath it.
+    stretch_tail: Option<(f64, f64)>,
     stretch: Box<Stretcher>,
     reader: RateReader,
     /// The effect chain. Slot 0 IS the EQ this voice used to hold on its
@@ -1546,6 +1554,7 @@ impl DeckVoice {
             keylock: true,
             scratch: ScratchRamp::default(),
             stretching: false,
+            stretch_tail: None,
             stretch: Box::new(Stretcher::new()),
             reader: RateReader::default(),
             chain: DeckChain::new(48_000.0),
@@ -1580,6 +1589,9 @@ impl DeckVoice {
         }
         self.stretch.reset_to(self.pos);
         self.reader.reset();
+        // A tail belongs to the place it was leaving; after a jump it would
+        // be the old place blended under the new one.
+        self.stretch_tail = None;
         self.ended = false;
     }
 
@@ -5436,14 +5448,30 @@ impl MixEngine {
                         off_unity > STRETCH_ENGAGE_EPSILON
                     };
                 if want_stretch != d.stretching {
+                    // The one jump in the transport that never blended. The
+                    // two paths hand the PLAYHEAD over exactly and disagree
+                    // on PHASE, so the splice is a step on anything but a
+                    // steady tone -- half full scale on a low one.
+                    let from = d.playhead_frames();
                     if want_stretch {
                         d.stretch.reset_to(d.pos);
                         d.reader.reset();
+                        d.stretch_tail = None;
+                        // Going IN, the outgoing stream is the direct read,
+                        // which the ordinary seek blend reproduces exactly.
+                        d.arm_seek_fade(from);
                     } else {
                         // Continue from the frame the ear is at, not from
                         // the search's ideal anchor: the two can differ by
                         // a search width, and that difference is a skip.
                         d.pos = d.stretch.position();
+                        // Coming OUT, it is not: nothing but the stretcher
+                        // can produce the stretcher's tail, so it goes on
+                        // producing it. Its own reader comes with it,
+                        // untouched by the direct path, so the tail is a
+                        // continuation of the very stream being faded.
+                        let total = (SEEK_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
+                        d.stretch_tail = Some((total, total));
                     }
                     d.stretching = want_stretch;
                 }
@@ -5520,6 +5548,28 @@ impl MixEngine {
                         }
                         out
                     }
+                };
+                // The stretcher's tail, mixed under the direct read that
+                // has taken over from it.
+                let frame = match d.stretch_tail {
+                    Some((left, total)) if !d.stretching => {
+                        let old = {
+                            let stretch = &mut d.stretch;
+                            let reader = &mut d.reader;
+                            let mut pull = || stretch.next(&source, false);
+                            reader.read(natural_step * read_rate, &mut pull)
+                        };
+                        d.stretch_tail =
+                            if left > 1.0 { Some((left - 1.0, total)) } else { None };
+                        match old {
+                            Some(old) => {
+                                let t = (1.0 - left / total) as f32;
+                                [old[0] + (frame[0] - old[0]) * t, old[1] + (frame[1] - old[1]) * t]
+                            }
+                            None => frame,
+                        }
+                    }
+                    _ => frame,
                 };
                 if ran_out {
                     // A span must never end the deck. The stretcher's read
