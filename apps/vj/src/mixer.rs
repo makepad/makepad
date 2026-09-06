@@ -5540,9 +5540,18 @@ impl MixEngine {
                     if !pcm.complete() {
                         continue;
                     }
-                    d.playing = false;
-                    d.ended = true;
-                    push_event(shared, MixEvent::DeckEnded(if i == 0 { DeckId::A } else { DeckId::B }));
+                    // Once, not once a frame: the read gate keys on the
+                    // transport, so the deck keeps reading here until its
+                    // ramp lands -- and without this guard the end would be
+                    // announced again on every frame of the fade, which
+                    // fills the event ring and makes the retire path drop
+                    // payloads on this thread.
+                    if !d.ended {
+                        d.playing = false;
+                        d.transport.slew(0.0, SLEW_SECS);
+                        d.ended = true;
+                        push_event(shared, MixEvent::DeckEnded(if i == 0 { DeckId::A } else { DeckId::B }));
+                    }
                     continue;
                 }
                 // The wrap is a crossfade, not a splice and not a duck:
