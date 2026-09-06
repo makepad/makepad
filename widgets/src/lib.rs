@@ -41,6 +41,7 @@ pub mod badge;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
+pub mod dialog;
 pub mod toast;
 pub mod browser;
 pub mod button;
@@ -170,6 +171,7 @@ pub use crate::{
     button_group::*,
     chip::*,
     menu::*,
+    dialog::*,
     toast::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -654,6 +656,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::stack_navigation::script_mod(vm);
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
+    crate::dialog::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
@@ -804,6 +807,33 @@ mod button_group_registration_tests {
         assert!(group.contains("mod.widgets.SegmentedControl = mod.widgets.SegmentedControlFlat{"));
         assert_eq!(group.matches("set_type_default() do mod.widgets.ButtonGroupBase").count(), 1);
         assert_eq!(group.matches("set_type_default() do mod.widgets.SegmentedControlBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod dialog_registration_tests {
+    /// The dialog registers after the modal it is built on and the button
+    /// and label its chrome uses, with one type default and the presets
+    /// hanging off it.
+    #[test]
+    fn test_dialog_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let dialog = include_str!("dialog.rs");
+        assert!(lib.contains("pub mod dialog;"));
+        assert!(lib.contains("dialog::*"));
+        let at = lib.find("crate::dialog::script_mod(vm);").expect("dialog registered");
+        for base in [
+            "crate::modal::script_mod(vm);",
+            "crate::button::script_mod(vm);",
+            "crate::label::script_mod(vm);",
+        ] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before the dialog");
+        }
+        assert!(dialog.contains("mod.widgets.DialogBase = #(Dialog::register_widget(vm))"));
+        assert!(dialog.contains("mod.widgets.Dialog = set_type_default()"));
+        assert!(dialog.contains("mod.widgets.AlertDialog = mod.widgets.Dialog{"));
+        assert!(dialog.contains("mod.widgets.ConfirmDialog = mod.widgets.Dialog{"));
+        assert_eq!(dialog.matches("set_type_default() do mod.widgets.DialogBase").count(), 1);
     }
 }
 
