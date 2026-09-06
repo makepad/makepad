@@ -4,6 +4,17 @@ use crate::desk::ChromeHit;
 use crate::desktop::{DesktopShelf, DesktopStyle, ShelfHit};
 use crate::*;
 
+/// Match the browser's initial page palette, including light Omarchy themes
+/// and classic desktops that have no dark variant.
+pub(super) fn browser_appearance(style: DesktopStyle, dark: bool, omarchy_source: &str) -> bool {
+    if style == DesktopStyle::Omarchy {
+        return scan_theme_color(omarchy_source, "background")
+            .map(|c| 0.2126*c.x + 0.7152*c.y + 0.0722*c.z < 0.5)
+            .unwrap_or(true);
+    }
+    style.supports_dark() && dark
+}
+
 impl App {
     pub(super) fn set_desktop_style(&mut self, cx: &mut Cx, style: DesktopStyle) {
         let previous = self.state_mut().style.target;
@@ -46,6 +57,10 @@ impl App {
         self.stylesheet = Some(sheet);
         // New child processes pick the style before their widget definitions load.
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet_name));
+        let omarchy_source = if style == DesktopStyle::Omarchy {
+            theme::load_theme_source(&self.state_mut().theme_name)
+        } else { String::new() };
+        self.refresh_warm_browser_appearance(cx, browser_appearance(style, dark, &omarchy_source));
         self.style_time = 0.0;
         self.style_frame = cx.new_next_frame();
         if let Some(mut menu) = self
@@ -99,6 +114,14 @@ impl App {
         {
             send_to_app(sender, vec![StudioToApp::Custom(json)]);
         }
+    }
+    pub(super) fn refresh_warm_browser_appearance(&mut self, cx: &mut Cx, dark: bool) {
+        for client in self.warm_pool.set_browser_appearance(dark) {
+            log!("wm: retiring warm browser {} for {} appearance", client, if dark {"dark"} else {"light"});
+            self.request_close(cx, client);
+        }
+        // Normal top-up runs after reaping; no new process overlaps the old
+        // profile lock, and pages the user has opened stay in their process.
     }
     pub(super) fn toggle_desktop_appearance(&mut self, cx: &mut Cx) {
         self.state_mut().style.dark = !self.state_mut().style.dark;
@@ -453,5 +476,22 @@ impl App {
             }
         }
         hit.is_some()
+    }
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+    #[test]
+    fn warm_browser_appearance_matches_classic_and_omarchy_palettes() {
+        for style in [DesktopStyle::Windows2000,DesktopStyle::NextStep] {
+            assert!(!browser_appearance(style,true,""));
+        }
+        for style in [DesktopStyle::Macos,DesktopStyle::Windows,DesktopStyle::Ios,DesktopStyle::Android] {
+            assert!(browser_appearance(style,true,""));
+            assert!(!browser_appearance(style,false,""));
+        }
+        assert!(browser_appearance(DesktopStyle::Omarchy,false,"background: #121212"));
+        assert!(!browser_appearance(DesktopStyle::Omarchy,true,"background: #eeeeee"));
     }
 }

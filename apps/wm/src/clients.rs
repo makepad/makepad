@@ -410,6 +410,9 @@ pub struct WarmStatus {
 #[derive(Debug)]
 pub struct WarmPool {
     enabled: bool,
+    /// Appearance in which browser pages were warmed. A loaded page may
+    /// choose its theme only once, so a media-query update is not sufficient.
+    browser_dark: Option<bool>,
     /// app id -> the warm clients of that app, oldest first.
     ready: HashMap<String, Vec<ClientId>>,
     /// app id -> when (platform seconds) its warm instances died unexpectedly, newest last.
@@ -441,6 +444,7 @@ impl WarmPool {
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
+            browser_dark: None,
             ready: HashMap::new(),
             crashes: HashMap::new(),
         }
@@ -467,6 +471,18 @@ impl WarmPool {
     /// How many instances of this app are currently held.
     pub fn held(&self, app: &str) -> usize {
         self.ready.get(app).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Retire only unused browsers on a light/dark change. Removing them
+    /// from the adoption pool is immediate; the host closes their processes
+    /// and refills after they exit. Deliberate retirement is not a crash.
+    pub fn set_browser_appearance(&mut self, dark: bool) -> Vec<ClientId> {
+        let previous = self.browser_dark.replace(dark);
+        if previous.is_some_and(|previous| previous != dark) {
+            self.ready.remove("browser").unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Every warm client, whatever the app — the shutdown / close-all
@@ -1223,6 +1239,33 @@ mod tests {
             })
             .collect();
         (pool, status)
+    }
+
+    #[test]
+    fn appearance_retires_only_unused_browsers_and_never_counts_as_a_crash() {
+        let (mut pool,status)=pool_with("browser", &[40,41]);
+        pool.note_spawned("files",42);
+        assert!(pool.set_browser_appearance(true).is_empty());
+        assert_eq!(pool.adopt("browser",false,&status),Some(40));
+        assert!(pool.set_browser_appearance(true).is_empty());
+        assert_eq!(pool.set_browser_appearance(false),vec![41]);
+        assert_eq!(pool.adopt("browser",false,&status),None);
+        assert!(pool.holds(42));
+        // Reaping intentional retirements cannot charge the crash budget.
+        assert_eq!(pool.forget(41),None);
+        for dark in [true,false,true,false] {assert!(pool.set_browser_appearance(dark).is_empty());}
+        assert!(pool.wants("browser",0.0));
+        pool.note_spawned("browser",43);
+        assert!(pool.set_browser_appearance(false).is_empty());
+        assert!(pool.holds(43));
+    }
+
+    #[test]
+    fn appearance_changes_do_not_enable_a_disabled_pool() {
+        let mut pool=WarmPool::new(false);
+        pool.set_browser_appearance(true);
+        pool.set_browser_appearance(false);
+        assert!(!pool.wants("browser",0.0));
     }
 
     #[test]

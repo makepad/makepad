@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(target_os = "macos")]
 extern "C" {
     static NSRunLoopCommonModes: ObjcId;
+    static NSAppearanceNameAqua: ObjcId;
+    static NSAppearanceNameDarkAqua: ObjcId;
 }
 
 #[cfg(target_os = "macos")]
@@ -1270,6 +1272,28 @@ static BACKGROUND_COLOR: AtomicU32 = AtomicU32::new(0);
 /// with. Takes effect for browsers created afterwards.
 pub fn set_background_color(argb: u32) {
     BACKGROUND_COLOR.store(argb, Ordering::Release);
+}
+
+/// Set the embedder's native appearance before initializing Chromium. On
+/// macOS, a windowless browser still inherits AppKit's appearance for its
+/// initial renderer and color-scheme client hints. A later media override
+/// alone cannot fix server-rendered pages that already chose a palette.
+/// Must be called on the application's UI thread after platform preparation.
+pub fn set_application_dark_mode(dark: bool) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        static APPEARANCE: AtomicU32 = AtomicU32::new(0);
+        let value = if dark { 2 } else { 1 };
+        if APPEARANCE.swap(value, Ordering::Relaxed) == value {
+            return;
+        }
+        let name = if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua };
+        let appearance: ObjcId = msg_send![class!(NSAppearance), appearanceNamed:name];
+        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app,setAppearance:appearance];
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = dark;
 }
 
 /// The colour `set_background_color` installed (0 = CEF's own default).
