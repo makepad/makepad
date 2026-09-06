@@ -226,6 +226,9 @@ pub struct DrawToast {
     /// 0 while the card is arriving, 1 once it has arrived.
     #[live]
     enter: f32,
+    /// Which edge a card arrives from: 1 below, -1 above.
+    #[live]
+    from_below: f32,
 }
 
 script_mod! {
@@ -243,11 +246,16 @@ script_mod! {
         ..mod.draw.DrawQuad
         countdown: -1.0
         enter: 1.0
+        /** which way a card arrives from: 1 below, -1 above -1..1 step 2 */
+        from_below: 1.0
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             // Arriving cards slide a little and fade: the movement is what
-            // catches the eye, and the fade is what stops it shouting.
-            let lift = (1.0 - self.enter) * 8.0
+            // catches the eye, and the fade is what stops it shouting. It
+            // slides IN FROM ITS OWN EDGE, so a stack at the top drops down
+            // and one at the bottom rises. Always rising made a top-placed
+            // card look as though it were being pulled off the screen.
+            let lift = (1.0 - self.enter) * 8.0 * self.from_below
             sdf.box(0.5, 0.5 + lift, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.radius)
             sdf.fill_keep(vec4(self.color.xyz, self.color.a * self.enter))
             sdf.stroke(vec4(self.border_color.xyz, self.border_color.a * self.enter), 1.0)
@@ -528,6 +536,7 @@ impl Widget for Toaster {
                 _ => -1.0,
             };
             self.draw_bg.enter = card.enter as f32;
+            self.draw_bg.from_below = if self.place.at_top() { -1.0 } else { 1.0 };
             self.draw_bg.draw_abs(cx, rect);
 
             let mut ty = rect.pos.y + CARD_PAD;
