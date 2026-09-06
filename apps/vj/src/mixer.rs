@@ -29,7 +29,8 @@ use crate::loop_splat::{
 };
 use crate::decks::SpinMotion;
 use crate::music_dsp::{
-    knob64, Autopan, Bitcrusher, Compressor, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze,
+    audible, knob, knob64, Autopan, Bitcrusher, Compressor, DeckEcho, DeckEq, Distortion, Flanger,
+    FrameSource, Freeze,
     LevelMode, MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, SlotLevel,
     StereoWidth, Stretcher, Tremolo, STEM_COUNT, STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON,
     STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
@@ -930,7 +931,15 @@ impl Ramp {
 
     /// Move to `target` over `secs` — the whole move takes `secs` no matter
     /// how far it travels. `step` stores the rate in units/second.
+    ///
+    /// A target that is not a number is refused. It would never settle:
+    /// `current != target` stays true for ever, every comparison against
+    /// it is false, and the ramp spends the rest of the set walking
+    /// towards nothing while whatever it feeds is silent.
     fn slew(&mut self, target: f32, secs: f32) {
+        if !target.is_finite() {
+            return;
+        }
         self.target = target;
         let distance = (target - self.current).abs();
         self.step = if secs <= 0.0 { f32::MAX } else { (distance / secs).max(1e-6) };
@@ -2004,7 +2013,11 @@ impl CueRing {
 
     #[inline]
     fn push(&self, pos: u64, left: f32, right: f32) {
-        let packed = (left.to_bits() as u64) | ((right.to_bits() as u64) << 32);
+        // Guarded going IN and not coming out: what is stored here is read
+        // by a second device on a second thread, interpolated between two
+        // neighbours, and one sample that is not a number would spread
+        // over both of them.
+        let packed = (audible(left).to_bits() as u64) | ((audible(right).to_bits() as u64) << 32);
         self.buf[(pos as usize) & (CUE_RING_FRAMES - 1)].store(packed, Ordering::Relaxed);
     }
 
@@ -2880,7 +2893,13 @@ impl Mixer {
     /// purpose: it is enough to fit a visual cycle to a musical phrase while
     /// remaining perceptually safe. Deck and SFX cursors are unrelated.
     pub fn set_slot_playback_rate(&self, slot: SlotId, rate: f64) -> f64 {
-        let rate = rate.clamp(MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE);
+        // Straight into an atomic the callback reads every buffer, so a
+        // refusal has to hand back what the slot is still running at.
+        let Some(rate) = knob64(rate, MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE) else {
+            return f64::from_bits(
+                self.shared.video[slot.index()].playback_rate_bits.load(Ordering::Relaxed),
+            );
+        };
         self.shared.video[slot.index()]
             .playback_rate_bits
             .store(rate.to_bits(), Ordering::Relaxed);
@@ -3022,6 +3041,7 @@ impl Mixer {
     /// The timed A/V crossfade: `to` ramps to 1, `from` ramps to 0. The
     /// program mute is a separate multiplier and is never touched here.
     pub fn fade_slots(&self, from: Option<SlotId>, to: SlotId, secs: f32) {
+        let Some(secs) = knob(secs, SLEW_SECS, 60.0) else { return };
         self.run_cmd(MixCmd::FadeSlots { from, to, secs });
     }
 
@@ -3029,6 +3049,7 @@ impl Mixer {
     /// so a fast hand never zippers. Ignored while a scheduled transition
     /// owns the gains (it lands them itself).
     pub fn set_video_mix(&self, mix: f32) {
+        let Some(mix) = knob(mix, 0.0, 1.0) else { return };
         self.run_cmd(MixCmd::SetVideoMix(mix));
     }
 
@@ -3172,11 +3193,13 @@ impl Mixer {
     /// while it is still decoding — clamped by the callback to what has
     /// arrived, so a jump past the decoded edge waits there.
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
+        let Some(fraction) = knob64(fraction, 0.0, 1.0) else { return };
         self.run_cmd(MixCmd::SeekFraction { deck, fraction });
     }
 
     /// Absolute seek in source seconds.
     pub fn seek_deck_seconds(&self, deck: DeckId, secs: f64) {
+        let Some(secs) = knob64(secs, 0.0, f64::from(u32::MAX)) else { return };
         self.run_cmd(MixCmd::SeekSeconds { deck, secs });
     }
 
@@ -3185,6 +3208,9 @@ impl Mixer {
     /// correction measured against a snapshot — the error survives the
     /// trip, an absolute target does not.
     pub fn nudge_deck_seconds(&self, deck: DeckId, delta_secs: f64) {
+        // A splat's own frame counter ACCUMULATES this one, so a single
+        // bad number would not merely land badly: it would stay.
+        let Some(delta_secs) = knob64(delta_secs, -3_600.0, 3_600.0) else { return };
         self.run_cmd(MixCmd::SeekRelative { deck, delta_secs });
     }
 
@@ -3229,6 +3255,15 @@ impl Mixer {
 
     /// Vinyl-style pointer control over the playhead.
     pub fn scratch_deck(&self, deck: DeckId, motion: ScratchMotion) {
+        // A drag's place and speed are measured from pointer samples, and
+        // a pair of them arriving in the same microsecond is a division by
+        // a zero. The ramp holds both as plain numbers, so a bad one stays
+        // until the hand comes off.
+        if let ScratchMotion::Move { secs, rate } = motion {
+            if !secs.is_finite() || !rate.is_finite() {
+                return;
+            }
+        }
         self.run_cmd(MixCmd::Scratch { deck, motion });
     }
 
@@ -3258,6 +3293,9 @@ impl Mixer {
         span: Option<(f64, f64)>,
         seek: crate::decks::LoopSeek,
     ) {
+        if span.is_some_and(|(start, end)| !start.is_finite() || !end.is_finite()) {
+            return;
+        }
         self.run_cmd(MixCmd::SetLoopSpan { deck, span, seek });
     }
 
@@ -3358,6 +3396,9 @@ impl Mixer {
     }
 
     pub fn pop_deck_roll(&self, deck: DeckId, parent: Option<(f64, f64)>, adopt: bool) {
+        if parent.is_some_and(|(start, end)| !start.is_finite() || !end.is_finite()) {
+            return;
+        }
         self.ui.with(|ui| {
             let depth = &mut ui.deck[deck.index()].roll_depth;
             *depth = if adopt { 0 } else { depth.saturating_sub(1) };
@@ -3871,6 +3912,7 @@ impl Mixer {
     }
 
     pub fn set_deck_gain(&self, deck: DeckId, gain: f32) {
+        let Some(gain) = knob(gain, 0.0, 1.0) else { return };
         self.run_cmd(MixCmd::SetGain { deck, gain });
     }
 
@@ -3882,14 +3924,14 @@ impl Mixer {
     }
 
     pub fn set_crossfader(&self, position: f32) {
-        self.run_cmd(MixCmd::SetCrossfader { position: position.clamp(0.0, 1.0), secs: SLEW_SECS });
+        let Some(position) = knob(position, 0.0, 1.0) else { return };
+        self.run_cmd(MixCmd::SetCrossfader { position, secs: SLEW_SECS });
     }
 
     pub fn fade_crossfader(&self, position: f32, secs: f32) {
-        self.run_cmd(MixCmd::SetCrossfader {
-            position: position.clamp(0.0, 1.0),
-            secs: secs.max(SLEW_SECS),
-        });
+        let Some(position) = knob(position, 0.0, 1.0) else { return };
+        let Some(secs) = knob(secs, SLEW_SECS, 60.0) else { return };
+        self.run_cmd(MixCmd::SetCrossfader { position, secs });
     }
 
     /// Where the crossfader actually is right now, mid-ramp included. The
@@ -3921,7 +3963,8 @@ impl Mixer {
     }
 
     pub fn set_master(&self, gain: f32) {
-        self.run_cmd(MixCmd::SetMaster(gain.clamp(0.0, 1.2)));
+        let Some(gain) = knob(gain, 0.0, 1.2) else { return };
+        self.run_cmd(MixCmd::SetMaster(gain));
     }
 
     /// `(position_secs, duration_secs, playing)` from the device clock.
@@ -3991,6 +4034,9 @@ impl Mixer {
     // ---- sfx voices ---------------------------------------------------------
 
     pub fn start_voice(&self, alloc: VoiceAlloc, pcm: Arc<TrackPcm>) {
+        let mut alloc = alloc;
+        let Some(gain) = knob(alloc.gain, 0.0, 4.0) else { return };
+        alloc.gain = gain;
         self.run_cmd(MixCmd::StartVoice { alloc, pcm });
     }
 
@@ -3999,6 +4045,7 @@ impl Mixer {
     }
 
     pub fn set_pad_voices_gain(&self, pad: PadKey, gain: f32) {
+        let Some(gain) = knob(gain, 0.0, 4.0) else { return };
         self.run_cmd(MixCmd::SetPadVoicesGain { pad, gain });
     }
 
@@ -4032,10 +4079,8 @@ impl Mixer {
     }
 
     pub fn set_phones_volume(&self, volume: f32) {
-        self.shared
-            .cue_ring
-            .volume_bits
-            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        let Some(volume) = knob(volume, 0.0, 1.0) else { return };
+        self.shared.cue_ring.volume_bits.store(volume.to_bits(), Ordering::Relaxed);
     }
 
     /// Route a deck into the phones. Cue follows the deck SLOT (the channel
@@ -4080,6 +4125,7 @@ impl Mixer {
     }
 
     pub fn seek_preview_fraction(&self, fraction: f64) {
+        let Some(fraction) = knob64(fraction, 0.0, 1.0) else { return };
         self.run_cmd(MixCmd::SeekPreviewFraction(fraction));
     }
 
@@ -9914,6 +9960,71 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         let half = std::hint::black_box(0.5f32);
         assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
         crate::music_dsp::set_flush_denormals(false);
+    }
+
+
+    #[test]
+    fn a_deck_handed_a_number_that_is_not_one_keeps_playing() {
+        // One bad number out of a UI division by a zero-width widget, or a
+        // learned controller scale, used to take a deck out for the night.
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4096);
+        let before = render(&mixer, 48_000.0, 256).channel(0)[128];
+        assert!(before.abs() > 0.1, "the deck is sounding to begin with");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            mixer.set_deck_gain(DeckId::A, bad);
+            mixer.set_deck_eq_band(DeckId::A, 1, bad);
+            mixer.set_deck_filter(DeckId::A, bad);
+            mixer.set_master(bad);
+            mixer.set_crossfader(bad);
+            mixer.set_deck_stem_gain(DeckId::A, 0, bad);
+            mixer.set_deck_rate(DeckId::A, bad as f64);
+            mixer.set_deck_key_shift(DeckId::A, bad as f64);
+        }
+        let out = render(&mixer, 48_000.0, 1024);
+        assert!(
+            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
+            "the output stays finite"
+        );
+        assert!(
+            out.channel(0)[512].abs() > 0.1,
+            "and the deck is still sounding, at {}",
+            out.channel(0)[512]
+        );
+    }
+
+
+    #[test]
+    fn the_phones_never_carry_a_sample_that_is_not_a_number() {
+        // The master sum is guarded at the mix point; the cue sum is the
+        // other bus out of this callback, and it reaches an operator's ears
+        // directly. A filter driven past stability on a cued deck must cost
+        // that deck, not the monitor for the rest of the night.
+        let ring = CueRing::new();
+        ring.armed.store(true, Ordering::Relaxed);
+        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
+        let filled = CUE_TARGET_FRAMES as u64 + 2_048;
+        for pos in 0..filled {
+            let bad = pos % 37 == 0;
+            let (l, r) = if bad { (f32::NAN, f32::INFINITY) } else { (0.5, -0.5) };
+            ring.push(pos, l, r);
+        }
+        ring.write_pos.store(filled, Ordering::Release);
+        let mut state = CueReadState::default();
+        let mut out = AudioBuffer::new_with_size(1_024, 2);
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert!(
+            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
+            "every phones sample must be one the device can carry"
+        );
+        assert!(
+            out.channel(0).iter().any(|s| s.abs() > 0.01),
+            "and the good samples still get through"
+        );
     }
 
 }
