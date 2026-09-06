@@ -89,6 +89,52 @@ script_mod! {
             hover_state := Label{text: "showing: 0"}
         }
     }
+
+    mod.stories.AccordionSplit = StoryPage{
+        StoryNote{text: "A list of things to look at, with a pane beside it showing the one being pointed at. The sections open the moment the pointer arrives, because here the sweep IS the browsing and a wait only makes it feel stuck."}
+
+        StoryRow{
+            width: Fill
+            spacing: theme.space_3
+            align: Align{y: 0.0}
+
+            features := AccordionSweep{
+                width: 340.
+                Section{
+                    header +: {heading +: {text: "Stem separation"}}
+                    body +: {P{text: "Four parts out of one recording, live, while it plays."}}
+                }
+                Section{
+                    header +: {heading +: {text: "Beat tracking"}}
+                    body +: {P{text: "The grid follows the record rather than the record following the grid."}}
+                }
+                Section{
+                    header +: {heading +: {text: "Effect chains"}}
+                    body +: {P{text: "Each slot chooses its own mix and its own level policy."}}
+                }
+                Section{
+                    header +: {heading +: {text: "Visuals"}}
+                    body +: {P{text: "What the room sees, driven by what the room hears."}}
+                }
+            }
+
+            preview := RoundedView{
+                width: Fill
+                height: 240.
+                flow: Down
+                padding: theme.mspace_3
+                spacing: theme.space_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container}
+                preview_title := H4{text: "Stem separation"}
+                preview_body := P{text: "Four parts out of one recording, live, while it plays."}
+                Filler{}
+                preview_note := Label{text: "section 0"}
+            }
+        }
+
+        StoryNote{text: "The pane follows the section asked for most recently, not whichever one sits highest, so pointing at a section is a question the pane answers."}
+    }
 }
 
 fn accordion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -132,6 +178,25 @@ fn accordion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     }
 }
 
+const FEATURES: &[(&str, &str)] = &[
+    ("Stem separation", "Four parts out of one recording, live, while it plays."),
+    ("Beat tracking", "The grid follows the record rather than the record following the grid."),
+    ("Effect chains", "Each slot chooses its own mix and its own level policy."),
+    ("Visuals", "What the room sees, driven by what the room hears."),
+];
+
+fn split_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let Some(index) = root.accordion(cx, ids!(features)).changed(actions) else {
+        return;
+    };
+    let Some((title, body)) = FEATURES.get(index) else {
+        return;
+    };
+    root.label(cx, ids!(preview_title)).set_text(cx, title);
+    root.label(cx, ids!(preview_body)).set_text(cx, body);
+    root.label(cx, ids!(preview_note)).set_text(cx, &format!("section {index}"));
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "layout/accordion/overview",
     category: "Layout",
@@ -145,4 +210,25 @@ pub const STORIES: &[Story] = &[Story {
     feature: None,
     controls: &[],
     on_actions: Some(accordion_actions),
+}, Story {
+    key: "layout/accordion/split",
+    category: "Layout",
+    component: "Accordion",
+    name: "Split",
+    dsl: "AccordionSplit",
+    added: "2026-09-05",
+    tags: &["new"],
+    doc: "# Accordion, split
+
+A list of things to look at on one side, a pane on the other showing the one being pointed at. `AccordionSweep` is the panel for it: `hover_secs: 0.0` drops the dwell, so a section opens the moment the pointer arrives.
+
+The dwell exists for a reason and this preset is the one place to be without it. A panel someone is WORKING in must not rearrange itself as the pointer crosses it on the way to a button, so `AccordionHover` waits. Here there is nothing to reach past: the panel is the whole left half, the sweep across it IS the browsing, and a wait only makes the thing feel stuck.
+
+The pane follows `AccordionAction::Changed`, which carries the section asked for most recently that the room can afford. That is the question the person just asked; a pane that showed whichever section sits highest would be answering a different one.
+
+A layout shift under a still pointer cannot ask again, because the panel only reconsiders when the pointer actually moves.",
+    subject: "features",
+    feature: None,
+    controls: &[],
+    on_actions: Some(split_actions),
 }];
