@@ -4310,8 +4310,14 @@ impl MixEngine {
         d.playing = play;
         d.pause_at = None;
         d.ended = false;
-        // A fresh track has nothing to fade out of: cut, not ramp.
-        d.transport = Ramp::at(if play { 1.0 } else { 0.0 });
+        // A fresh track has nothing to fade out of, but it has something
+        // to fade INTO: seated at full level it is a step from silence,
+        // and the old record it replaces has just spent forty milliseconds
+        // leaving so that there would be no step.
+        d.transport = Ramp::at(0.0);
+        if play {
+            d.transport.slew(1.0, LOAD_SWAP_SECS);
+        }
         d.seek_frames(0.0);
         d.chain.eq_mut().reset();
         Self::silence_chain_tails(d);
@@ -5183,6 +5189,19 @@ impl MixEngine {
             }
         }
 
+        // A parked load takes over HERE, before the sources are lifted and
+        // never inside the frame loop: the loop reads one reference per
+        // deck for the whole buffer, so a swap inside it renders the
+        // retired record at the incoming one's gain. The swap lands on the
+        // first buffer boundary after the fade -- a hand-over, not a seam.
+        for d in s.decks.iter_mut() {
+            if d.transport.current <= 0.0 {
+                if let Some(load) = d.pending.take() {
+                    Self::seat_record(shared, d, load.pcm, load.play);
+                }
+            }
+        }
+
         // Deck sources are lifted out of the frame loop: one reference count
         // per buffer instead of one per sample, and the borrow checker can
         // then see that the voice state and its PCM are disjoint.
@@ -5322,11 +5341,6 @@ impl MixEngine {
             for (i, d) in s.decks.iter_mut().enumerate() {
                 let transport = d.transport.tick(rate);
                 if transport <= 0.0 {
-                    // The outgoing record has finished leaving, so the one
-                    // waiting behind it can have the deck.
-                    if let Some(load) = d.pending.take() {
-                        Self::seat_record(shared, d, load.pcm, load.play);
-                    }
                     if let Some(at) = d.pause_at.take() {
                         // The fade is over and nothing is audible: give back
                         // the frames it sounded, so pause leaves the
