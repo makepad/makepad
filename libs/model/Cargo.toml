@@ -1,0 +1,21 @@
+[package]
+name = "makepad-model"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Worker-owned editable model documents and transactional polygon operations"
+
+[dependencies]
+makepad-mesh-edit = { path = "../mesh_edit" }
+makepad-asset-data = { path = "../asset/data" }
+makepad-gltf = { path = "../gltf" }
+makepad-zune-png = { path = "../zune/zune-png" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-csg-math = { path = "../csg/csg_math" }
+makepad-csg-mesh = { path = "../csg/csg_mesh" }
+makepad-csg-boolean = { path = "../csg/csg_boolean", default-features = false }
+makepad-remesh = { path = "../remesh" }
+makepad-game-sim = { path = "../sim" }
+
+[dev-dependencies]
+makepad-render = { path = "../render" }
