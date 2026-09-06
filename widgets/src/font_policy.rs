@@ -110,6 +110,31 @@ fn family_value(
     family.into()
 }
 
+/// A style can choose its primary typeface without losing the platform's
+/// symbol, CJK and emoji fallback policy. Keep lazy members lazy.
+pub(crate) fn append_style_fallbacks(vm: &mut ScriptVm) {
+    let set = vm.cx().font_set();
+    let policy = set.policy();
+    let family_proto = crate::script_eval!(vm, {mod.text.FontFamily});
+    let member_proto = crate::script_eval!(vm, {mod.text.FontMember});
+    let theme = vm.module(id!(theme));
+    for (role, chain) in [(id!(font_regular), policy.regular), (id!(font_label), policy.regular), (id!(font_bold), policy.bold)] {
+        let text_style = vm.bx.heap.value(theme, role.into(), NoTrap);
+        let Some(text_style) = text_style.as_object() else { continue; };
+        let family = vm.bx.heap.value(text_style, id!(font_family).into(), NoTrap);
+        let Some(family) = family.as_object() else { continue; };
+        let fallback = family_value(vm, chain, set, family_proto, member_proto).as_object().unwrap();
+        let existing: Vec<_> = (0..vm.bx.heap.vec_len(family))
+            .map(|i| vm.bx.heap.vec_key_value(family, i, NoTrap).key).collect();
+        for i in 0..vm.bx.heap.vec_len(fallback) {
+            let kv = vm.bx.heap.vec_key_value(fallback, i, NoTrap);
+            if !existing.contains(&kv.key) {
+                vm.bx.heap.vec_push(family, kv.key, kv.value, NoTrap);
+            }
+        }
+    }
+}
+
 /// Install source-compatible `theme.font_*` styles from the selected policy.
 /// Resource handles are constructed while walking that policy, so the
 /// unselected branch is never evaluated.

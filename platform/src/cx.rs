@@ -174,6 +174,8 @@ pub struct Cx {
     /// so prefer `pending_script_reapply` whenever the change can be modeled
     /// as a shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+    /// Re-evaluate Splash definitions while preserving imperative widget state.
+    pub pending_style_reload: bool,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
@@ -897,6 +899,7 @@ impl Cx {
 
             display_context: Default::default(),
             pending_script_reapply: false,
+            pending_style_reload: false,
             pending_live_edit_request: false,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,

@@ -242,6 +242,53 @@ pub struct AnimatorState {
 
 impl ScriptHook for AnimatorState {}
 
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::widget_async::MAIN_SPLASH_VM_ID;
+
+    #[test]
+    fn running_animation_survives_collection_of_replaced_stylesheet() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (group, old_template) = cx.with_vm(|vm| {
+            let off = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(off, id!(opacity).into(), 0.0.into());
+            let on = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(on, id!(opacity).into(), 1.0.into());
+            let template = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(template, id!(off).into(), off.into());
+            vm.bx.heap.set_value_def(template, id!(on).into(), on.into());
+            let mut group = AnimatorGroup { default: id!(off), ..Default::default() };
+            group.states.insert(id!(off), AnimatorState { apply: Some(off), ..Default::default() });
+            group.states.insert(id!(on), AnimatorState { apply: Some(on), ..Default::default() });
+            (group, vm.bx.heap.new_object_ref(template))
+        });
+        let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
+        animator.groups.insert(id!(hover), group);
+        animator.play(&mut cx, &[id!(hover), id!(on)], Some(Play::Forward { duration: 1.0 })).unwrap();
+
+        // A stylesheet reload replaces the groups and releases the old source.
+        // The in-flight track must keep its target alive until it finishes.
+        animator.groups.clear();
+        drop(old_template);
+        cx.with_vm(|vm| vm.gc());
+
+        for (frame, time, expected) in [(0, 0.0, 0.0), (1, 0.5, 0.5), (2, 1.1, 1.0)] {
+            let event = Event::NextFrame(NextFrameEvent {
+                frame,
+                time,
+                set: [animator.next_frame].into_iter().collect(),
+            });
+            let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
+            let value = cx.with_vm(|vm| {
+                vm.bx.heap.value(result.as_object().unwrap(), id!(opacity).into(), NoTrap).as_f64()
+            });
+            assert_eq!(value, Some(expected));
+        }
+        assert!(!animator.is_animating());
+    }
+}
+
 /// Runtime state for a single animation track
 struct AnimatorTrack {
     /// The state group this track belongs to (e.g., "hover")
@@ -254,8 +301,9 @@ struct AnimatorTrack {
     play: Play,
     /// The ease function
     ease: Ease,
-    /// The target apply object (what we're animating to)
-    target_apply: ScriptObject,
+    /// Keep the target alive if a stylesheet reapply replaces its template
+    /// while this animation is still running.
+    target_apply: ScriptObjectRef,
     /// The starting values SNAPSHOT (captured/copied when animation begins)
     /// This is a SEPARATE object from state_object - it must not be mutated during animation
     /// Uses ScriptObjectRef to prevent GC from freeing it
@@ -542,7 +590,7 @@ impl Animator {
         // The snapshot must be a separate object that won't be mutated during animation.
         // We sample from state_object (current animated values) or fall back to static state apply.
         let vm_id = self.vm_id;
-        let from_snapshot = cx.with_script_vm_id(vm_id, |vm| {
+        let (from_snapshot, target_apply) = cx.with_script_vm_id(vm_id, |vm| {
             let snapshot = vm.bx.heap.new_object();
 
             // Get the default state's apply for fallback values
@@ -586,8 +634,11 @@ impl Animator {
                 },
             );
 
-            // Create a ScriptObjectRef to prevent GC from freeing the snapshot
-            vm.bx.heap.new_object_ref(snapshot)
+            // Both inputs must outlive the stylesheet that started the track.
+            (
+                vm.bx.heap.new_object_ref(snapshot),
+                vm.bx.heap.new_object_ref(target_apply),
+            )
         });
 
         // Get the object before moving into track (for return value)
@@ -852,7 +903,7 @@ impl Animator {
                         vm,
                         state_obj,
                         track.from_snapshot.as_object(),
-                        track.target_apply,
+                        track.target_apply.as_object(),
                         mix,
                     );
                 }

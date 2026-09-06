@@ -1846,6 +1846,38 @@ impl SliderRef {
 }
 
 #[cfg(test)]
+mod style_reapply_tests {
+    use super::*;
+    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+
+    #[test]
+    fn style_reapply_preserves_slider_value() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let original = crate::script_eval!(vm, {use mod.widgets.* Slider{min: 0.0 max: 100.0 default: 25.0}});
+            let mut slider = Slider::script_from_value(vm, original);
+            assert!((slider.value() - 25.0).abs() < 1e-9);
+            vm.with_cx_mut(|cx| slider.set_value(cx, 70.0));
+            assert_eq!(slider.text_input.text(), "70.00");
+            for (style, dark) in [(DesktopStyle::Macos, true), (DesktopStyle::Windows2000, false), (DesktopStyle::Omarchy, false)] {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(crate::script_mod);
+                slider.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
+                assert!(
+                    (slider.value() - 70.0).abs() < 1e-9,
+                    "{}: a slider's value must survive a style change, got {}",
+                    style.id(),
+                    slider.value()
+                );
+                assert_eq!(slider.text_input.text(), "70.00", "{}", style.id());
+                assert!((slider.default - 25.0).abs() < 1e-9);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
 mod wheel_tests {
     use super::*;
 

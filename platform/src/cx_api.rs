@@ -594,6 +594,13 @@ impl Cx {
     /// buffers, user-typed text in widgets that don't early-return on
     /// LiveEdit), so prefer `request_script_reapply` when the change can be
     /// modeled as a shared-heap-object mutation instead.
+    /// Re-evaluate application Splash with a new stylesheet, preserving text and
+    /// other imperative state through `Apply::ScriptReapply`.
+    pub fn request_style_reload(&mut self) {
+        self.pending_style_reload = true;
+        self.pending_live_edit_request = true;
+    }
+
     pub fn request_live_edit(&mut self) {
         self.pending_live_edit_request = true;
     }
@@ -831,21 +838,24 @@ impl Cx {
     /// This reads local file-backed resources directly, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
     pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
-        let resource_path = {
-            let resources = self.script_data.resources.resources.borrow();
-            resources
-                .iter()
-                .find(|res| res.has_handle(handle))
-                .map(|res| res.abs_path.clone())
-        };
+        let path = self.get_resource_abs_path(handle)?;
+        self.get_resource_font_bytes_by_path(&path)
+    }
 
-        if let Some(path) = resource_path {
-            if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(&path) {
-                return Some(bytes);
-            }
+    /// Font identity captured in its owning script heap. A local handle alone
+    /// cannot identify a resource once a draw object leaves that heap.
+    pub fn get_resource_font_bytes_by_path(&self, path: &str) -> Option<SharedBytes> {
+        if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(path) {
+            return Some(bytes);
         }
-
-        self.get_resource(handle).map(SharedBytes::from_owned)
+        let resources = self.script_data.resources.resources.borrow();
+        let res = resources.iter().find(|res| res.abs_path == path)?;
+        if let crate::script::res::CxScriptResourceData::Loaded(data) = &res.data {
+            return Some(SharedBytes::from_owned(data.clone()));
+        }
+        res.dependency_path.as_deref()
+            .and_then(|path| self.get_dependency(path).ok())
+            .map(SharedBytes::from_owned)
     }
 
     pub fn null_texture(&self) -> Texture {
@@ -1055,6 +1065,15 @@ impl Cx {
     ) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
+            let rect = area.rect(self);
+            self.publish_hosted_ime(crate::ime::HostedImeState {
+                visible: !config.is_read_only && config.soft_keyboard.input_mode != crate::ime::InputMode::None,
+                input_mode: config.soft_keyboard.input_mode,
+                return_key: config.soft_keyboard.return_key_type,
+                multiline: config.is_multiline,
+                x: rect.pos.x, y: rect.pos.y,
+                width: rect.size.x, height: rect.size.y,
+            });
             self.platform_ops
                 .push_back(CxOsOp::ShowTextIME(area, cursor_rect, config));
         }
@@ -1074,13 +1093,27 @@ impl Cx {
     }
 
     pub fn hide_text_ime(&mut self) {
+        self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.reset_text_ime_dismissed();
         self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
     pub fn text_ime_was_dismissed(&mut self) {
+        self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.set_text_ime_dismissed();
         self.platform_ops.push_back(CxOsOp::HideTextIME);
+    }
+
+    pub fn hosted_ime_state(&self) -> crate::ime::HostedImeState {
+        self.get_global_ref::<crate::ime::HostedImeState>().cloned().unwrap_or_default()
+    }
+
+    fn publish_hosted_ime(&mut self, state: crate::ime::HostedImeState) {
+        if self.get_global_ref::<crate::ime::HostedImeState>() == Some(&state) { return; }
+        if self.in_makepad_studio {
+            Self::send_studio_message(crate::studio::AppToStudio::Custom(state.to_json()));
+        }
+        *self.global::<crate::ime::HostedImeState>() = state;
     }
 
     /// Set or clear a window's `dpi_override` at runtime.
