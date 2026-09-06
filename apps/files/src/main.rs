@@ -485,26 +485,12 @@ script_mod! {
 
                         top_bar := SolidView{
                             width: Fill
-                            height: 48
+                            height: 56
                             flow: Right
-                            spacing: 4
-                            padding: Inset{right: 10}
+                            spacing: 6
+                            padding: Inset{left: 16 right: 16}
                             align: Align{y: 0.5}
                             draw_bg +: {color: theme.color_outset}
-
-                            title_box := View{
-                                width: 196
-                                height: Fill
-                                padding: Inset{left: 18}
-                                align: Align{y: 0.5}
-                                files_title := Label{
-                                    text: "Files"
-                                    draw_text +: {
-                                        color: mod.mpf.fg_bright
-                                        text_style: theme.font_regular{font_size: 11.0}
-                                    }
-                                }
-                            }
 
                             back_button := ToolButton{
                                 Icon{
@@ -527,9 +513,9 @@ script_mod! {
 
                             path_box := RoundedView{
                                 width: Fill
-                                height: 32
+                                height: 34
                                 flow: Right
-                                margin: Inset{left: 6 right: 8}
+                                margin: Inset{left: 8 right: 16}
                                 padding: Inset{left: 5 right: 5}
                                 align: Align{y: 0.5}
                                 draw_bg +: {
@@ -572,45 +558,6 @@ script_mod! {
                                     }
                                 }
                             }
-
-                            icons_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 18 height: 18}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/grid.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            list_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 18 height: 18}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/list.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            compact_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 18 height: 18}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/compact.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            treemap_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 18 height: 18}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/treemap.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-
-                            View{width: 6 height: 1}
 
                             newfolder_button := ToolButton{
                                 Icon{
@@ -816,9 +763,9 @@ script_mod! {
 
                                 folder_header := View{
                                     width: Fill
-                                    height: 44
+                                    height: 64
                                     flow: Right
-                                    padding: Inset{left: 20 right: 20}
+                                    padding: Inset{left: 24 right: 24}
                                     align: Align{y: 0.5}
                                     folder_title := Label{
                                         width: Fill
@@ -836,6 +783,47 @@ script_mod! {
                                             color: mod.mpf.fg_dim
                                             text_style: theme.font_regular{font_size: 9.0}
                                         }
+                                    }
+                                    view_modes := View{
+                                        width: Fit height: Fit flow: Right spacing: 2
+                                        margin: Inset{left: 20}
+                                        icons_button := ToolButton{
+                                            Icon{
+                                                icon_walk: Walk{width: 18 height: 18}
+                                                draw_icon +: {
+                                                    svg: crate_resource("self://resources/icons/grid.svg")
+                                                    color: mod.mpf.fg
+                                                }
+                                            }
+                                        }
+                                        list_button := ToolButton{
+                                            Icon{
+                                                icon_walk: Walk{width: 18 height: 18}
+                                                draw_icon +: {
+                                                    svg: crate_resource("self://resources/icons/list.svg")
+                                                    color: mod.mpf.fg
+                                                }
+                                            }
+                                        }
+                                        compact_button := ToolButton{
+                                            Icon{
+                                                icon_walk: Walk{width: 18 height: 18}
+                                                draw_icon +: {
+                                                    svg: crate_resource("self://resources/icons/compact.svg")
+                                                    color: mod.mpf.fg
+                                                }
+                                            }
+                                        }
+                                        treemap_button := ToolButton{
+                                            Icon{
+                                                icon_walk: Walk{width: 18 height: 18}
+                                                draw_icon +: {
+                                                    svg: crate_resource("self://resources/icons/treemap.svg")
+                                                    color: mod.mpf.fg
+                                                }
+                                            }
+                                        }
+
                                     }
                                 }
                                 empty_label := Label{
@@ -857,10 +845,11 @@ script_mod! {
                                 map_tools := SolidView{
                                     visible: false
                                     width: Fill
-                                    height: 38
+                                    height: 48
                                     flow: Right
-                                    spacing: 4
-                                    padding: Inset{left: 16 right: 16}
+                                    spacing: 6
+                                    margin: Inset{left: 16 right: 16 bottom: 8}
+                                    padding: Inset{left: 8 right: 8}
                                     align: Align{y: 0.5}
                                     draw_bg +: {color: mod.mpf.bg_dark}
                                     // The render-mode switch: one block view,
@@ -893,15 +882,6 @@ script_mod! {
                                         }
                                     }
                                     View{width: 10 height: 1}
-                                    map_rescan := ToolButton{
-                                        map_rescan_icon := Icon{
-                                            icon_walk: Walk{width: 18 height: 18}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/reload.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
                                     View{width: 10 height: 1}
                                     map_trash := ToolButton{
                                         map_trash_icon := Icon{
@@ -943,7 +923,7 @@ script_mod! {
                                         }
                                     }
                                     map_scan_all := CheckBox{
-                                        text: "ignore system"
+                                        text: "Exclude system files"
                                     }
                                 }
                                 map_row := View{
@@ -2196,7 +2176,7 @@ impl App {
 
     fn update_path_ui(&mut self, cx: &mut Cx) {
         let current = self.current_dir();
-        let title = display_name(&current);
+        let title = if self.tabs[self.tab].mode.is_treemap() { "Storage".to_string() } else { display_name(&current) };
         self.ui.label(cx, ids!(folder_title)).set_text(cx, &title);
         let widget = self.ui.widget(cx, ids!(breadcrumbs));
         if let Some(mut breadcrumbs) = widget.borrow_mut::<Breadcrumbs>() {
@@ -2234,8 +2214,8 @@ impl App {
         self.layout_width = width;
         self.phone_layout = narrow;
         let mobile=cx.with_vm(makepad_widgets::desktop_style::current_style).mobile();
-        let bar_height=if mobile {56.0}else{48.0};
-        let field_height=if mobile {44.0}else{32.0};
+        let bar_height=56.0;
+        let field_height=if mobile {44.0}else{34.0};
         let mut bar=self.ui.view(cx,ids!(top_bar));
         script_apply_eval!(cx,bar,{height: #(bar_height)});
         let mut field=self.ui.view(cx,ids!(path_box));
@@ -2246,7 +2226,7 @@ impl App {
         script_apply_eval!(cx,side,{width: 196});
         self.ui.view(cx, ids!(phone_navigation)).set_visible(cx, narrow);
         self.ui.view(cx, ids!(sidebar)).set_visible(cx, !narrow);
-        self.ui.view(cx, ids!(title_box)).set_visible(cx, width >= 1000.0);
+        self.ui.view(cx, ids!(view_modes)).set_visible(cx, !narrow);
         for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button),ids!(newfolder_button),ids!(terminal_button),ids!(props_button),ids!(preview_button),ids!(menu_button)] {
             self.ui.widget(cx,path).set_visible(cx,!narrow);
         }
@@ -2297,6 +2277,8 @@ impl App {
     /// Push a mode into the body and the toolbar without touching history.
     fn apply_mode(&mut self, cx: &mut Cx, mode: ViewMode) {
         let dir = self.current_dir();
+        let heading = if mode.is_treemap() { "Storage".to_string() } else { display_name(&dir) };
+        self.ui.label(cx, ids!(folder_title)).set_text(cx, &heading);
         let projection = self.projection;
         self.with_contents(cx, |contents, cx| {
             contents.set_mode(cx, mode);
@@ -4368,8 +4350,8 @@ impl App {
             return;
         }
         let note = match &picked {
-            Some(path) => format!("Rescan · act on {}", display_name(path)),
-            None => "Rescan · click a rectangle to pick what to delete".to_string(),
+            Some(path) => format!("Selected: {}", display_name(path)),
+            None => "Select an item to inspect its storage".to_string(),
         };
         if note == self.map_tools_note {
             return;
@@ -4657,9 +4639,6 @@ impl App {
             if self.ui.view(cx, id).finger_down(actions).is_some() {
                 return self.set_projection_choice(cx, projection);
             }
-        }
-        if self.ui.view(cx, ids!(map_rescan)).finger_down(actions).is_some() {
-            return self.rescan_map(cx);
         }
         if self.ui.view(cx, ids!(map_filter)).finger_down(actions).is_some() {
             let open = !self.filter_popup_open;
@@ -5044,9 +5023,7 @@ impl MatchEvent for App {
             Bookmarks::load(&crate::model::makepad_home())
         };
         if vfs::is_demo() {
-            // Say so where it cannot be missed: a recording of the demo must
-            // never be mistaken for a recording of somebody's files.
-            self.ui.label(cx, ids!(files_title)).set_text(cx, "Files");
+            // The virtual /Demo breadcrumb identifies demo content.
             #[cfg(feature = "chat")]
             self.ui.widget(cx, ids!(chat_button)).set_visible(cx, false);
         }
