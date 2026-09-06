@@ -2660,6 +2660,15 @@ impl Mixer {
     /// `(overrun callbacks, high-water render nanos)` — a render that
     /// outran its buffer is the one way a buffer is still lost, for the
     /// pump to report.
+    /// Frames between a sample entering the master bus and leaving it:
+    /// the look-ahead of the limiter on it. Anything lining the output up
+    /// against what went into it has to allow for this -- the tests below
+    /// do, and a DAC-referenced playhead would have to as well.
+    pub fn output_latency_frames(&self) -> usize {
+        let rate = f64::from_bits(self.shared.device_rate_bits.load(Ordering::Relaxed));
+        crate::music_dsp::limiter_latency_frames(rate as f32)
+    }
+
     pub fn audio_health(&self) -> AudioHealth {
         AudioHealth {
             // Both zero by construction on this engine; see the struct.
@@ -6146,6 +6155,17 @@ mod tests {
         buffer
     }
 
+    /// Render away the master bus's own latency, so what comes back next
+    /// is the audio for what just happened rather than the tail of what
+    /// happened before it. The limiter looks ahead, and looking ahead is
+    /// a delay.
+    fn flush_bus(mixer: &TestMixer, rate: f64) {
+        let latency = mixer.output_latency_frames();
+        if latency > 0 {
+            render(mixer, rate, latency);
+        }
+    }
+
     #[test]
     fn score_preview_enters_program_before_master_and_stops_at_end() {
         let Some(bank) = local_drum_bank() else { return };
@@ -6405,10 +6425,13 @@ mod tests {
             let state = mixer.state();
             state.decks[0].pos as usize
         };
-        let out = render(&mixer, 48_000.0, 256);
+        // The master bus runs a look-ahead behind the mix, so the sample
+        // that leaves at index N went in that many frames earlier.
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, 48_000.0, 256 + latency);
         for index in 0..200 {
             let want = pcm.frames[start + index][0] as f32 / 32768.0;
-            let got = out.channel(0)[index];
+            let got = out.channel(0)[index + latency];
             assert!(
                 (got - want).abs() < 1e-6,
                 "sample {index}: {got} vs {want} — an untouched deck must be transparent"
@@ -6552,23 +6575,36 @@ mod tests {
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
         // Deliberately NOT playing: a hand on the record still moves it.
+        // The finger says where it is and how fast it is going; the record
+        // follows the place, not the speed.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.0, rate: 2.0 });
-        render(&mixer, 48_000.0, 24_000);
+        for step in 1..=24 {
+            mixer.scratch_deck(
+                DeckId::A,
+                ScratchMotion::Move { secs: step as f64 * 2.0 / 24.0, rate: 2.0 },
+            );
+            render(&mixer, 48_000.0, 1_000);
+        }
         let (scrubbed, _, playing) = mixer.deck_position(DeckId::A);
         assert!(!playing, "scrubbing is not playing");
         assert!(scrubbed > 0.5, "the hand moved the record: {scrubbed:.3} s");
         assert!(mixer.deck_scratching(DeckId::A));
 
         // Backwards, too.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.0, rate: -3.0 });
-        render(&mixer, 48_000.0, 12_000);
+        for step in 1..=12 {
+            mixer.scratch_deck(
+                DeckId::A,
+                ScratchMotion::Move { secs: scrubbed - step as f64 * 3.0 / 12.0, rate: -3.0 },
+            );
+            render(&mixer, 48_000.0, 1_000);
+        }
         let (back, _, _) = mixer.deck_position(DeckId::A);
         assert!(back < scrubbed, "a backward scrub must rewind: {back:.3}");
 
-        // Letting go of a paused deck stops it dead.
+        // Letting go of a paused deck stops it dead. The hand-off grows
+        // with the momentum it was let go at, so give it its longest.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Release);
-        render(&mixer, 48_000.0, 48_000);
+        render(&mixer, 48_000.0, 48_000 * 2);
         assert!(!mixer.deck_scratching(DeckId::A), "the ramp must finish");
         let (settled, _, _) = mixer.deck_position(DeckId::A);
         render(&mixer, 48_000.0, 24_000);
@@ -6654,6 +6690,7 @@ mod tests {
         // The next chunk lands: playback resumes from the edge, no seek.
         let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
         mixer.grow_deck_stream(DeckId::A, table.clone());
+        flush_bus(&mixer, rate as f64);
         let resumed = render(&mixer, rate as f64, 4_096);
         assert!(resumed.channel(0).iter().skip(64).all(|v| v.abs() > 0.1), "resumes on arrival");
         assert!(deck_pos(&mixer, DeckId::A) > STREAM_CHUNK_FRAMES as f64 + 4_000.0);
@@ -6718,6 +6755,9 @@ mod tests {
         mixer.complete_deck(DeckId::A, whole.clone());
         assert!(!mixer.deck_is_streaming(DeckId::A));
         assert_eq!(deck_pos(&mixer, DeckId::A), before, "the swap moves nothing");
+        // The bus is a look-ahead behind: let what was already in it out
+        // first, so what follows is what the whole file holds from `before`.
+        let _ = render(&mixer, rate as f64, mixer.output_latency_frames());
         // What comes out after the swap is what the whole file holds there.
         let out = render(&mixer, rate as f64, 512);
         for (n, sample) in out.channel(0).iter().enumerate() {
@@ -6754,11 +6794,14 @@ mod tests {
         let _ = render(&mixer, rate as f64, 7_777);
         let at = deck_pos(&mixer, DeckId::A) as usize;
         mixer.install_deck_stems(DeckId::A, Arc::new(stems));
-        let out = render(&mixer, rate as f64, 4_096);
+        // The bus hands every frame over one look-ahead late, so the
+        // swap's first frame comes out that many frames in.
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, rate as f64, 4_096 + latency);
         // Frame n after the swap is source frame at+n, read from the lane:
         // the stem sum is the mix, so the blend hides nothing and the lane
         // format's one bit of headroom is the only difference allowed.
-        for (n, sample) in out.channel(0).iter().enumerate() {
+        for (n, sample) in out.channel(0).iter().skip(latency).enumerate() {
             let want = frames[at + n][0] as f32 / 32768.0;
             assert!((sample - want).abs() <= 2.5 / 32768.0, "frame {n}: {sample} vs {want}");
         }
@@ -7165,6 +7208,7 @@ mod tests {
                 pcm.clone(),
             );
         }
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         // Three overlapping voices sum: 3 × 0.25 × master(1.0).
         assert!((out.channel(0)[32] - 0.75).abs() < 0.02, "{}", out.channel(0)[32]);
@@ -7173,6 +7217,7 @@ mod tests {
         let mut ended = mixer.drain_ended_voices();
         ended.sort();
         assert_eq!(ended, vec![1, 2, 3]);
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
@@ -7193,6 +7238,7 @@ mod tests {
         // Closing flushes + refuses further pushes.
         mixer.close_slot(SlotId::A);
         assert!(!mixer.push_slot_audio(SlotId::A, &samples, 2, 48_000));
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
@@ -7304,9 +7350,21 @@ mod tests {
             .schedule_video_transition_at(41, None, SlotId::A, target, 1)
             .unwrap();
 
+        // The transition is scheduled on an exact frame of the MIX; the
+        // bus hands that frame over one look-ahead later, so the sample
+        // it lands on moves with it and the exactness is unchanged.
         let out = render(&mixer, 48_000.0, 12);
-        assert!(out.channel(0)[..5].iter().all(|sample| sample.abs() < 1e-7));
-        assert!((out.channel(0)[5] - 0.5).abs() < 0.02, "transition was not sample exact");
+        let latency = mixer.output_latency_frames();
+        let out = if latency > 0 {
+            let mut all = out.channel(0).to_vec();
+            all.extend_from_slice(render(&mixer, 48_000.0, latency).channel(0));
+            all.drain(..latency);
+            all
+        } else {
+            out.channel(0).to_vec()
+        };
+        assert!(out[..5].iter().all(|sample| sample.abs() < 1e-7));
+        assert!((out[5] - 0.5).abs() < 0.02, "transition was not sample exact");
         let snapshot = mixer.video_transition_snapshot().unwrap();
         assert_eq!(snapshot.id, 41);
         assert_eq!(snapshot.start_frame, Some(target));
@@ -7958,9 +8016,16 @@ mod tests {
         // clock is re-seated on the cell (frame 0), the equal-power fade
         // starts on the first rendered sample (zero incoming gain) and the
         // very next one is live. From here the grid's bars are the cell's.
+        // Read a look-ahead late, because that is where the bus hands
+        // each pair over. The later checks read the splat's own frame
+        // counters, which move with the render and not with the limiter.
+        let latency = mixer.output_latency_frames();
         let first = render_count(&mixer, rate, 1_700, 256);
-        assert!(first[0].abs() < 1e-7 && first[1].abs() > 1e-5, "the click sounds at once");
-        assert!(first[1_000].abs() > 1e-5);
+        assert!(
+            first[latency].abs() < 1e-7 && first[latency + 1].abs() > 1e-5,
+            "the click sounds at once"
+        );
+        assert!(first[1_000 + latency].abs() > 1e-5);
         render_count(&mixer, rate, 2, 64);
 
         render_count(&mixer, rate, 500, 64);

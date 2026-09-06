@@ -78,7 +78,12 @@ impl Default for MasterParams {
             release_secs: 0.18,
             makeup_db: 0.0,
             ceiling_db: -0.5,
-            bypass: false,
+            // Off until asked for. A program compressor at minus ten and
+            // three to one is a sound, not a safety, and the console has
+            // no control on its face to switch one off -- so it starts
+            // transparent, which is also what every reference recorded
+            // against the deck path pins.
+            bypass: true,
         }
     }
 }
@@ -226,11 +231,34 @@ struct MasterFx {
     limiter_reduction_db: f32,
     peak: f32,
     makeup: Smooth,
+    /// The ceiling, and not a clamp. A clamp is a clipper: pushed past
+    /// full scale it flat-tops every sample that got there, which is grit
+    /// rather than loudness. This one looks ahead and ducks the bus before
+    /// the loud sample arrives, at the price of three milliseconds of
+    /// delay the whole output pays. Always on, whatever the compressor's
+    /// bypass says: the delay and the ceiling must not come and go with a
+    /// switch.
+    limiter: Limiter,
+}
+
+/// A non-finite sample is nothing. Before the look-ahead line, because a
+/// NaN in the line would poison the limiter's peak read and duck the bus
+/// for a hold and a release -- a dropout from one bad sample.
+fn audible(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample
+    } else {
+        0.0
+    }
 }
 
 impl MasterFx {
     fn new() -> Self {
         let params = MasterParams::default();
+        // The rate is not known until the first frame; `set_sample_rate`
+        // re-windows the look-ahead once it is, allocation-free.
+        let mut limiter = Limiter::new(0.0);
+        limiter.set_ceiling(db_to_gain(params.ceiling_db));
         Self {
             params,
             envelope: 0.0,
@@ -238,17 +266,20 @@ impl MasterFx {
             limiter_reduction_db: 0.0,
             peak: 0.0,
             makeup: Smooth::new(db_to_gain(params.makeup_db)),
+            limiter,
         }
     }
 
     fn set_params(&mut self, params: MasterParams) {
         self.params = params.sanitise();
         self.makeup.set(db_to_gain(self.params.makeup_db));
+        self.limiter.set_ceiling(db_to_gain(self.params.ceiling_db));
     }
 
     fn set_param(&mut self, param: MasterParam, value: f32) {
         self.params.set_normalised(param, value);
         self.makeup.set(db_to_gain(self.params.makeup_db));
+        self.limiter.set_ceiling(db_to_gain(self.params.ceiling_db));
     }
 
     fn begin_block(&mut self) {
@@ -258,41 +289,41 @@ impl MasterFx {
     }
 
     fn process(&mut self, input: [f32; 2], rate: f32) -> [f32; 2] {
-        if self.params.bypass {
-            self.peak = self.peak.max(input[0].abs()).max(input[1].abs());
-            return input;
-        }
-        let detector = input[0].abs().max(input[1].abs());
-        let attack = coeff(self.params.attack_secs, rate);
-        let release = coeff(self.params.release_secs, rate);
-        let coefficient = if detector > self.envelope { attack } else { release };
-        self.envelope += (detector - self.envelope) * coefficient;
-        let level_db = gain_to_db(self.envelope.max(1e-9));
-        let over = level_db - self.params.threshold_db;
-        let knee = 6.0;
-        let compressed_over = if over <= -knee * 0.5 {
-            0.0
-        } else if over >= knee * 0.5 {
-            over * (1.0 - 1.0 / self.params.ratio)
+        let input = [audible(input[0]), audible(input[1])];
+        self.limiter.set_sample_rate(rate);
+        // The compressor is the only thing the bypass switches. The
+        // ceiling below it is a guarantee, and a guarantee that comes and
+        // goes with a switch is not one.
+        let comp_gain = if self.params.bypass {
+            1.0
         } else {
-            let x = over + knee * 0.5;
-            x * x / (2.0 * knee) * (1.0 - 1.0 / self.params.ratio)
+            let detector = input[0].abs().max(input[1].abs());
+            let attack = coeff(self.params.attack_secs, rate);
+            let release = coeff(self.params.release_secs, rate);
+            let coefficient = if detector > self.envelope { attack } else { release };
+            self.envelope += (detector - self.envelope) * coefficient;
+            let level_db = gain_to_db(self.envelope.max(1e-9));
+            let over = level_db - self.params.threshold_db;
+            let knee = 6.0;
+            let compressed_over = if over <= -knee * 0.5 {
+                0.0
+            } else if over >= knee * 0.5 {
+                over * (1.0 - 1.0 / self.params.ratio)
+            } else {
+                let x = over + knee * 0.5;
+                x * x / (2.0 * knee) * (1.0 - 1.0 / self.params.ratio)
+            };
+            self.compressor_reduction_db = self.compressor_reduction_db.max(compressed_over);
+            db_to_gain(-compressed_over) * self.makeup.next(rate)
         };
-        let comp_gain = db_to_gain(-compressed_over) * self.makeup.next(rate);
-        self.compressor_reduction_db = self.compressor_reduction_db.max(compressed_over);
-        let mut out = [input[0] * comp_gain, input[1] * comp_gain];
-        let ceiling = db_to_gain(self.params.ceiling_db);
-        let peak = out[0].abs().max(out[1].abs());
-        if peak > ceiling {
-            let limiter_gain = ceiling / peak.max(1e-12);
-            out[0] *= limiter_gain;
-            out[1] *= limiter_gain;
-            self.limiter_reduction_db = self
-                .limiter_reduction_db
-                .max(-gain_to_db(limiter_gain).min(0.0));
-        }
+        let pressed = [input[0] * comp_gain, input[1] * comp_gain];
+        let mut out = self.limiter.process(pressed);
+        self.limiter_reduction_db =
+            self.limiter_reduction_db.max(-gain_to_db(self.limiter.gain()).min(0.0));
         // The clamp is the limiter's numerical seat belt, not its transfer
-        // curve. It also contains a non-finite third-party source.
+        // curve: nothing arrives here too loud any more, because the
+        // look-ahead ducked it on the way in.
+        let ceiling = db_to_gain(self.params.ceiling_db);
         for sample in &mut out {
             *sample = if sample.is_finite() { sample.clamp(-ceiling, ceiling) } else { 0.0 };
         }
@@ -316,6 +347,8 @@ fn coeff(seconds: f32, rate: f32) -> f32 {
 fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db / 20.0)
 }
+
+use crate::music_dsp::Limiter;
 
 fn gain_to_db(gain: f32) -> f32 {
     20.0 * gain.max(1e-12).log10()
@@ -448,7 +481,17 @@ mod tests {
         }
         let mut sources = [[0.0; 2]; STRIP_COUNT];
         sources[0] = [f32::NAN, f32::INFINITY];
+        // The bus looks ahead, so the frame that leaves NOW is one from a
+        // look-ahead ago: hot, and held under the ceiling. The poisoned
+        // frame itself comes out that much later, as nothing at all.
         let out = mix.process_frame(sources, 1.0, 48_000.0);
-        assert_eq!(out, [0.0, 0.0]);
+        assert!(out[0].is_finite() && out[1].is_finite());
+        assert!(out[0].abs() <= 1.0 && out[1].abs() <= 1.0);
+        let latency = crate::music_dsp::limiter_latency_frames(48_000.0);
+        let mut last = out;
+        for _ in 0..latency {
+            last = mix.process_frame([[0.0; 2]; STRIP_COUNT], 1.0, 48_000.0);
+        }
+        assert_eq!(last, [0.0, 0.0]);
     }
 }

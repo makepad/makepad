@@ -4366,6 +4366,17 @@ impl Compressor {
 /// enough that the delay it costs the whole output is well under
 /// anything an operator would feel as latency.
 pub const LIMITER_LOOKAHEAD_SECS: f32 = 0.003;
+
+/// The look-ahead in frames at a given rate: the delay a bus running a
+/// [`Limiter`] pays. One function, used by the limiter to size its window
+/// and by anything lining the output up against what went into it, so
+/// the two cannot disagree.
+pub fn limiter_latency_frames(sample_rate: f32) -> usize {
+    if !(sample_rate > 0.0) {
+        return 1;
+    }
+    ((LIMITER_LOOKAHEAD_SECS * sample_rate).round() as usize).clamp(1, LIMITER_MAX_FRAMES - 1)
+}
 /// How long it takes to give the gain back once the loud passage has
 /// gone. Slow enough not to pump on a kick, quick enough that one stab
 /// does not duck the next bar.
@@ -4421,6 +4432,11 @@ pub struct Limiter {
     len: usize,
     /// The rate `len` was worked out for.
     rate: f32,
+    /// Where the output is held, as a multiplier of full scale. Full scale
+    /// itself by default, because the first thing this replaced was a
+    /// clamp at exactly that; a bus that wants margin for inter-sample
+    /// peaks sets it lower.
+    ceiling: f32,
     /// The gain in force, one being none at all.
     gain: f32,
     /// Where the attack ramp is heading, where it set off from, and how
@@ -4457,6 +4473,7 @@ impl Limiter {
             write: 0,
             len: 1,
             rate: 0.0,
+            ceiling: LIMITER_CEILING,
             gain: 1.0,
             target: 1.0,
             from: 1.0,
@@ -4477,8 +4494,26 @@ impl Limiter {
             return;
         }
         self.rate = sample_rate;
-        self.len = ((LIMITER_LOOKAHEAD_SECS * sample_rate).round() as usize)
-            .clamp(1, LIMITER_MAX_FRAMES - 1);
+        self.len = limiter_latency_frames(sample_rate);
+    }
+
+    /// Where to hold the output, as a multiplier of full scale. Refused
+    /// above full scale -- a limiter that lets more than that through is
+    /// not one -- and below a hundredth, where it would be a mute.
+    pub fn set_ceiling(&mut self, ceiling: f32) {
+        if ceiling.is_finite() {
+            self.ceiling = ceiling.clamp(0.01, LIMITER_CEILING);
+        }
+    }
+
+    pub fn ceiling(&self) -> f32 {
+        self.ceiling
+    }
+
+    /// The gain in force right now, for a meter that wants the block's
+    /// worst without clearing it.
+    pub fn gain(&self) -> f32 {
+        self.gain
     }
 
     /// Forget what the line was carrying, so one set's peaks cannot duck
@@ -4518,8 +4553,8 @@ impl Limiter {
         // Both channels take one gain: ducking them apart would walk the
         // stereo image around under a loud passage.
         let peak = frame[0].abs().max(frame[1].abs());
-        if peak > LIMITER_CEILING {
-            let needed = LIMITER_CEILING / peak;
+        if peak > self.ceiling {
+            let needed = self.ceiling / peak;
             if needed < self.target {
                 // Arrive before the sample that asked for it does.
                 self.from = self.gain;
