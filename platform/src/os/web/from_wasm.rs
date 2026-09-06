@@ -381,8 +381,8 @@ pub struct WColorTarget {
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_color: WColor,
-    /// Attachment pixel format: 0 = RGBA8 (default), 1 = R32F
-    /// (`TextureFormat::RenderRf32`, needs EXT_color_buffer_float).
+    /// Attachment format: 0 RGBA8, 1 R32F, 2 RGBA32F, 3 RGBA16F.
+    /// Float color attachments require EXT_color_buffer_float.
     pub format: u32,
 }
 
