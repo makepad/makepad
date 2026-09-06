@@ -36,12 +36,36 @@ script_mod! {
             under_note := Label{text: "pressed 0 times"}
         }
 
+        StoryHeading{text: "Which corner"}
+        StoryNote{text: "Six corners. A card slides in from the edge its stack sits against, so a top stack drops and a bottom stack rises."}
+        StoryRow{
+            corner := SegmentedControl{
+                options: ["Top left" "Top" "Top right" "Bottom left" "Bottom" "Bottom right"]
+                selected: 4
+            }
+        }
+
         toasts := Toaster{}
     }
 }
 
+const CORNERS: [ToastPlace; 6] = [
+    ToastPlace::TopStart,
+    ToastPlace::TopCenter,
+    ToastPlace::TopEnd,
+    ToastPlace::BottomStart,
+    ToastPlace::BottomCenter,
+    ToastPlace::BottomEnd,
+];
+
 fn toast_story_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let toaster = root.toaster(cx, ids!(toasts));
+
+    if let Some(index) = root.segmented_control(cx, ids!(corner)).selected(actions) {
+        if let Some(place) = CORNERS.get(index) {
+            toaster.set_place(cx, *place);
+        }
+    }
 
     if root.button(cx, ids!(say_saved)).clicked(actions) {
         toaster.show(cx, Toast::new(live_id!(saved), "Saved").intent(BadgeIntent::Success));
