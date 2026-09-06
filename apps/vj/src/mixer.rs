@@ -4725,6 +4725,11 @@ impl MixEngine {
                 let frames = secs.max(0.0) * pcm.sample_rate().max(1) as f64;
                 let from = d.playhead_frames();
                 d.seek_frames(frames);
+                // A deliberate move cancels the promise a pause made. A
+                // pause latches where it was pressed and hands the deck
+                // back there when its fade lands; a seek arriving inside
+                // that fade would otherwise be undone the moment it does.
+                d.pause_at = None;
                 d.arm_seek_fade(from);
             }
             MixCmd::SeekRelative { deck, delta_secs } => {
@@ -4883,13 +4888,20 @@ impl MixEngine {
                 } else {
                     let to = d.rate.current();
                     d.scratch.motor(d.scratch.rate(), to, CENSOR_RETURN_SECS, MotorEnd::Retire);
-                    if let Some(ghost) = d.slip.take().filter(|_| d.censor_owns_slip) {
-                        let from = d.playhead_frames();
-                        d.seek_frames(ghost.pos);
-                        d.pause_at = None;
-                        d.arm_seek_fade(from);
-                        d.censor_owns_slip = false;
-                    } else if d.censor_owns_slip {
+                    // Ask WHOSE ghost it is before taking it. `take()`
+                    // empties the slot the moment it runs, and a filter
+                    // after it only decides what to do with what has
+                    // already been removed -- so an operator's own latched
+                    // SLIP was destroyed by a censor that never owned it,
+                    // and neither the landing here nor the later release
+                    // of SLIP had anything left to land on.
+                    if d.censor_owns_slip {
+                        if let Some(ghost) = d.slip.take() {
+                            let from = d.playhead_frames();
+                            d.seek_frames(ghost.pos);
+                            d.pause_at = None;
+                            d.arm_seek_fade(from);
+                        }
                         d.censor_owns_slip = false;
                     }
                 }
@@ -10310,6 +10322,73 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         let clock = mixer.deck_snapshot(DeckId::A).clock;
         assert!((clock.platter_rate - 1.25).abs() < 1e-6, "{}", clock.platter_rate);
         assert!((clock.beat_secs_out - 0.4).abs() < 1e-6, "{}", clock.beat_secs_out);
+    }
+
+
+#[test]
+fn a_censor_under_a_latched_slip_leaves_the_operators_ghost_running() {
+    let mixer = spin_deck_a(16_384, 480_000);
+    mixer.set_deck_playing(DeckId::A, true);
+    spin_render(&mixer, 8);
+    mixer.set_deck_slip(DeckId::A, true, false);
+    let slipped_at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+    mixer.set_deck_censor(DeckId::A, true);
+    spin_render(&mixer, 16);
+    mixer.set_deck_censor(DeckId::A, false);
+    spin_render(&mixer, 1);
+    assert!(
+        mixer.state().decks[DeckId::A.index()].slip.is_some(),
+        "the operator's ghost is still theirs",
+    );
+
+    // And it is still RUNNING: releasing SLIP some buffers later lands
+    // further on again, by exactly the time that passed.
+    let censor_landing = mixer.deck_snapshot(DeckId::A).position_secs;
+    let after = 20;
+    spin_render(&mixer, after);
+    mixer.set_deck_slip(DeckId::A, false, false);
+    spin_render(&mixer, 1);
+    let slip_landing = mixer.deck_snapshot(DeckId::A).position_secs;
+    assert!(
+        slip_landing > censor_landing,
+        "the ghost went on: {censor_landing} -> {slip_landing}",
+    );
+    let want = slipped_at + ((16 + 1 + after + 1) * 512) as f64 / 48_000.0;
+    assert!(
+        (slip_landing - want).abs() < 0.05,
+        "and by the elapsed time: want {want}, got {slip_landing}",
+    );
+}
+
+    #[test]
+    fn a_seek_during_a_pauses_fade_is_not_undone_by_it() {
+        // The pause promises to hand back the frames its fade sounded. A
+        // deliberate move afterwards -- CUE returning to its mark is one --
+        // means that promise no longer applies.
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let pressed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.set_deck_playing(DeckId::A, false);
+        mixer.seek_deck_seconds(DeckId::A, 0.0);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        // Not exactly zero: the fade goes on sounding for its own few
+        // milliseconds from the new place, which is the point of it.
+        assert!(
+            landed < 0.02,
+            "the seek stands, give or take the fade's own length: {landed}"
+        );
+        assert!(
+            pressed_at - landed > 0.05,
+            "and it is nowhere near where pause was pressed ({pressed_at})"
+        );
     }
 
 }
