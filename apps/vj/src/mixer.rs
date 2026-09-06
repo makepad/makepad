@@ -2076,7 +2076,10 @@ impl CueRing {
             let index = state.cursor_fp >> 32;
             if index + 1 >= wp {
                 // Ran dry: the rest of the buffer stays silent and the
-                // next callback re-primes at depth.
+                // next callback re-primes at depth. Counted, because a
+                // monitor that keeps running out is the one number that
+                // says so -- priming a fresh device is not this.
+                self.starved.fetch_add(1, Ordering::Relaxed);
                 state.priming = true;
                 break;
             }
@@ -5425,6 +5428,12 @@ impl MixEngine {
             }
             voice.rolls.advance(frames as f64);
         }
+        // Mixing starts HERE and not at the frame loop: the score preview
+        // and the synth voices render their whole buffer before the loop
+        // that sums them, so timing from the loop alone books real mixing
+        // to the setup and reports a preparation that costs four times
+        // what the mix does.
+        let mix_started = crate::clock::Instant::now();
         s.score_preview.render_block(frames, device_rate);
         s.synth.render_block(buffer_start, frames, device_rate);
         s.program_mix.begin_block();
@@ -6054,11 +6063,21 @@ impl MixEngine {
                 channels
             );
         }
+        let mix_nanos = mix_started.elapsed().as_nanos() as u64;
         shared
             .transition
             .publish_rendered_frame(shared.device_frames.load(Ordering::Acquire));
         Self::publish_snapshot(s, shared, self.serial);
         let render_nanos = render_started.elapsed().as_nanos() as u64;
+        // Three clock reads a buffer and not three per sample: the split
+        // says whether the cost is the mixing or the per-buffer overhead
+        // around it, which is the question a climbing budget raises.
+        let setup_nanos = mix_started.duration_since(render_started).as_nanos() as u64;
+        shared.stage_nanos.publish(StageNanos {
+            setup: setup_nanos,
+            mix: mix_nanos,
+            publish: render_nanos.saturating_sub(setup_nanos).saturating_sub(mix_nanos),
+        });
         shared.render_nanos.store(render_nanos, Ordering::Relaxed);
         shared.buffer_frames.store(frames as u64, Ordering::Relaxed);
         shared.render_max_nanos.fetch_max(render_nanos, Ordering::Relaxed);
@@ -10024,6 +10043,64 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         assert!(
             out.channel(0).iter().any(|s| s.abs() > 0.01),
             "and the good samples still get through"
+        );
+    }
+
+
+    /// The frame loop is timed in three phases so a climbing budget can
+    /// say whether it is the mixing or the per-buffer overhead around it.
+    #[test]
+    fn a_callback_says_where_its_time_went_and_the_phases_add_up() {
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        let health = mixer.audio_health();
+        let stages = health.stages;
+        assert!(stages.mix > 0, "the frame loop is nearly all of it");
+        let summed = stages.setup + stages.mix + stages.publish;
+        assert_eq!(
+            summed, health.render_nanos,
+            "the three phases ARE the callback, with nothing unaccounted for"
+        );
+        assert!(
+            stages.mix > stages.setup,
+            "mixing {} should outweigh the setup {} for a playing deck",
+            stages.mix,
+            stages.setup
+        );
+    }
+
+    #[test]
+    fn the_phones_say_when_they_have_run_dry() {
+        // A programme dropout is counted; a monitor dropout was invisible,
+        // which is the one an operator hears first and can least explain.
+        let mixer = TestMixer::new();
+        let ring = mixer.cue_ring();
+        mixer.set_cue_armed(true);
+        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
+        let mut state = CueReadState::default();
+        let mut out = AudioBuffer::new_with_size(256, 2);
+        // Priming with nothing in the ring is not starvation: it is the
+        // monitor waiting to start.
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert_eq!(mixer.audio_health().phones_starved, 0, "priming is not a dropout");
+        // Now fill it and let the monitor start.
+        let filled = CUE_TARGET_FRAMES + 64;
+        for pos in 0..filled {
+            ring.push(pos, 0.5, 0.5);
+        }
+        ring.write_pos.store(filled, Ordering::Release);
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert_eq!(mixer.audio_health().phones_starved, 0, "a fed monitor is quiet about it");
+        // The programme device stalls: nothing more is pushed, and the
+        // phones device keeps asking until it has drained the ring.
+        for _ in 0..16 {
+            ring.consume(&mut state, 48_000.0, &mut out);
+        }
+        assert!(
+            mixer.audio_health().phones_starved >= 1,
+            "running out mid-buffer is a dropout, and is counted"
         );
     }
 
