@@ -879,33 +879,62 @@ fn push_audio_through(
     Ok(())
 }
 
-/// Copy `src` into the locked `width`x`height` canvas, cropping or letterboxing
-/// when the window was resized mid-recording. The alternative — refusing every
-/// frame after a resize — freezes the recording on a stray window drag.
+/// Center every frame on the recording's fixed canvas. Keep native pixels
+/// when they fit; proportionally shrink larger frames instead of cropping.
+/// Portrait and landscape changes therefore leave opaque black padding, with
+/// no stretch, clipped content, or pixels left from the previous dimensions.
+/// Runs only on the encoder worker.
 fn blit_into(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
+    canvas: &mut [u8], width: u32, height: u32,
+    src: &[u8], src_width: u32, src_height: u32,
 ) {
     if src_width == width && src_height == height && src.len() >= canvas.len() {
         canvas.copy_from_slice(&src[..canvas.len()]);
         return;
     }
-    canvas.fill(0);
-    let copy_w = width.min(src_width) as usize;
-    let copy_h = height.min(src_height) as usize;
+    for pixel in canvas.chunks_exact_mut(4) { pixel.copy_from_slice(&[0, 0, 0, 255]); }
+    if width == 0 || height == 0 || src_width == 0 || src_height == 0
+        || src.len() < src_width as usize * src_height as usize * 4
+        || canvas.len() < width as usize * height as usize * 4 { return; }
+    let scale = (width as f64 / src_width as f64)
+        .min(height as f64 / src_height as f64).min(1.0);
+    let fit_w = ((src_width as f64 * scale).round() as usize).clamp(1, width as usize);
+    let fit_h = ((src_height as f64 * scale).round() as usize).clamp(1, height as usize);
+    let left = (width as usize - fit_w) / 2;
+    let top = (height as usize - fit_h) / 2;
     let dst_stride = width as usize * 4;
     let src_stride = src_width as usize * 4;
-    for y in 0..copy_h {
-        let s = y * src_stride;
-        let d = y * dst_stride;
-        if s + copy_w * 4 > src.len() || d + copy_w * 4 > canvas.len() {
-            break;
+    if fit_w == src_width as usize && fit_h == src_height as usize {
+        // Desktop -> phone normally needs only a centered row copy.
+        for y in 0..fit_h {
+            let d = (top + y) * dst_stride + left * 4;
+            canvas[d..d + fit_w * 4].copy_from_slice(&src[y * src_stride..y * src_stride + fit_w * 4]);
         }
-        canvas[d..d + copy_w * 4].copy_from_slice(&src[s..s + copy_w * 4]);
+        return;
+    }
+    // Bilinear sampling avoids jagged type when a resized window is larger
+    // than the fixed movie. The center-to-center mapping preserves aspect.
+    for y in 0..fit_h {
+        let sy = ((y as f64 + 0.5) * src_height as f64 / fit_h as f64 - 0.5)
+            .clamp(0.0, (src_height - 1) as f64);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(src_height as usize - 1);
+        let fy = sy - y0 as f64;
+        for x in 0..fit_w {
+            let sx = ((x as f64 + 0.5) * src_width as f64 / fit_w as f64 - 0.5)
+                .clamp(0.0, (src_width - 1) as f64);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(src_width as usize - 1);
+            let fx = sx - x0 as f64;
+            let d = (top + y) * dst_stride + (left + x) * 4;
+            for c in 0..4 {
+                let a = src[y0 * src_stride + x0 * 4 + c] as f64;
+                let b = src[y0 * src_stride + x1 * 4 + c] as f64;
+                let c0 = src[y1 * src_stride + x0 * 4 + c] as f64;
+                let d0 = src[y1 * src_stride + x1 * 4 + c] as f64;
+                canvas[d + c] = ((a + (b - a) * fx) * (1.0 - fy) + (c0 + (d0 - c0) * fx) * fy).round() as u8;
+            }
+        }
     }
 }
 
@@ -934,21 +963,35 @@ mod tests {
     }
 
     #[test]
-    fn blit_letterboxes_a_shrunken_window() {
-        let mut canvas = vec![9u8; 4 * 4 * 4];
-        let src = vec![7u8; 2 * 2 * 4];
-        blit_into(&mut canvas, 4, 4, &src, 2, 2);
-        assert_eq!(&canvas[0..8], &[7u8; 8]);
-        // Right half of row 0 is background, not stale canvas.
-        assert_eq!(&canvas[8..16], &[0u8; 8]);
+    fn blit_centers_portrait_then_landscape_without_stale_pixels() {
+        let black = [0, 0, 0, 255];
+        let white = [255, 255, 255, 255];
+        let mut canvas = vec![9; 10 * 6 * 4];
+        blit_into(&mut canvas, 10, 6, &white.repeat(4 * 6), 4, 6);
+        for y in 0..6 { for x in 0..10 {
+            assert_eq!(&canvas[(y * 10 + x) * 4..(y * 10 + x + 1) * 4],
+                if (3..7).contains(&x) { &white } else { &black });
+        }}
+        blit_into(&mut canvas, 10, 6, &white.repeat(6 * 4), 6, 4);
+        for y in 0..6 { for x in 0..10 {
+            assert_eq!(&canvas[(y * 10 + x) * 4..(y * 10 + x + 1) * 4],
+                if (2..8).contains(&x) && (1..5).contains(&y) { &white } else { &black });
+        }}
     }
 
     #[test]
-    fn blit_crops_a_grown_window() {
-        let mut canvas = vec![0u8; 2 * 2 * 4];
-        let src = vec![5u8; 4 * 4 * 4];
-        blit_into(&mut canvas, 2, 2, &src, 4, 4);
-        assert_eq!(canvas, vec![5u8; 2 * 2 * 4]);
+    fn blit_fits_a_larger_window_without_cropping_its_far_edge() {
+        let mut source = vec![0; 8 * 4 * 4];
+        for y in 0..4 { for x in 0..8 {
+            let pixel = if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+            source[(y * 8 + x) * 4..(y * 8 + x + 1) * 4].copy_from_slice(&pixel);
+        }}
+        let mut canvas = vec![9; 4 * 4 * 4];
+        blit_into(&mut canvas, 4, 4, &source, 8, 4);
+        assert_eq!(&canvas[..16], &[0, 0, 0, 255].repeat(4));
+        assert_eq!(&canvas[16..20], &[255, 0, 0, 255]);
+        assert_eq!(&canvas[28..32], &[0, 0, 255, 255]);
+        assert_eq!(&canvas[48..], &[0, 0, 0, 255].repeat(4));
     }
 
     #[test]
