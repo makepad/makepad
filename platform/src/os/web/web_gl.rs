@@ -683,6 +683,8 @@ impl Cx {
             // different texImage2D (and EXT_color_buffer_float).
             let format = match &self.textures[color_texture.texture.texture_id()].format {
                 TextureFormat::RenderRf32 { .. } => 1,
+                TextureFormat::RenderRGBAf32 { .. } => 2,
+                TextureFormat::RenderRGBAf16 { .. } => 3,
                 _ => 0,
             };
             match color_texture.clear_color {

@@ -2568,11 +2568,11 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
     const has_r32f_target = args.color_targets.some(
-      (target) => target && target.format === 1,
+      (target) => target && target.format >= 1 && target.format <= 3,
     );
     if (has_r32f_target && !this.ext_color_buffer_float) {
       this.reject_render_target(
-        "R32F target requires EXT_color_buffer_float",
+        "Float target requires EXT_color_buffer_float",
         args,
       );
       return;
@@ -2593,7 +2593,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     if (has_r32f_target && size.scaled) {
       this.reject_render_target(
-        "R32F data targets cannot be downscaled",
+        "Float data targets cannot be downscaled",
         args,
       );
       return;
@@ -2655,7 +2655,7 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_tex._requested_height = args.height;
         gl_tex._format = tgt.format;
         gl_tex._depth = false;
-        if (tgt.format === 1) {
+        if (tgt.format >= 1 && tgt.format <= 3) {
           // R32F data target (TextureFormat::RenderRf32). Color-renderable
           // only with EXT_color_buffer_float; NEAREST because float
           // filtering is a separate extension and consumers sample_nearest.
@@ -2666,12 +2666,12 @@ export class WasmWebGL extends WasmWebBrowser {
           gl.texImage2D(
             gl.TEXTURE_2D,
             0,
-            gl.R32F,
+            tgt.format === 1 ? gl.R32F : (tgt.format === 2 ? gl.RGBA32F : gl.RGBA16F),
             gl_tex._width,
             gl_tex._height,
             0,
-            gl.RED,
-            gl.FLOAT,
+            tgt.format === 1 ? gl.RED : gl.RGBA,
+            tgt.format === 3 ? gl.HALF_FLOAT : gl.FLOAT,
             null,
           );
         } else {
@@ -3734,6 +3734,8 @@ export class WasmWebGL extends WasmWebBrowser {
 
     this.gpu_info = {
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
+      min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
+      float_color_targets: !!this.ext_color_buffer_float,
       vendor: "unknown",
       renderer: "unknown",
     };

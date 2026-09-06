@@ -193,6 +193,7 @@ impl Cx {
                             .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024)
                     };
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
+                    self.gpu_info.float_color_targets = tw.gpu_info.float_color_targets;
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,

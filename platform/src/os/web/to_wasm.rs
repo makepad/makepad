@@ -19,6 +19,7 @@ use {
 #[derive(ToWasm)]
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
+    pub float_color_targets: bool,
     pub vendor: String,
     pub renderer: String,
 }

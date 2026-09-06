@@ -520,6 +520,13 @@ impl Geometry {
         bytes
     }
 
+    /// Borrow the retained CPU mesh for alternate render layouts. Buffers
+    /// may be empty after explicit CPU-buffer eviction; never reads the GPU.
+    pub fn cpu_buffers<'a>(&self, cx: &'a Cx) -> (&'a IndexData, &'a VertexData) {
+        let geometry = &cx.geometries[self.geometry_id()];
+        (&geometry.indices, &geometry.vertices)
+    }
+
     pub fn cpu_buffer_bytes(&self, cx: &Cx) -> usize {
         let cxgeom = &cx.geometries[self.geometry_id()];
         cxgeom
