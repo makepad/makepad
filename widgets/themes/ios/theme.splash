@@ -136,4 +136,7 @@ use mod.text.*
 mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
 mod.theme.font_label = mod.theme.font_label{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
 mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+// Terminal surfaces follow the app unless this style supplies a console palette.
+mod.theme.color_terminal_bg = mod.theme.color_bg_app
+mod.theme.color_terminal_text = mod.theme.color_text
 true

@@ -1,5 +1,7 @@
 // Current Android Material 3 Expressive semantic theme.
 mod.theme = mod.themes.dark
+mod.theme.color_terminal_bg = #000000
+mod.theme.color_terminal_text = #e8eaed
 mod.theme.textselection_corner_radius = 3.0
 mod.theme.space_factor = 7.0
 mod.theme.space_1 = 3.5

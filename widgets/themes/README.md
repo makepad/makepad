@@ -2,7 +2,7 @@
 
 These Splash files define the shared widget styles used by the window manager:
 `omarchy`, `macos`, `macos-dark`, `windows`, `windows-dark`, `windows-2000`,
-and `nextstep`.
+`nextstep`, `ios`, `ios-dark`, `android`, and `android-dark`.
 
 Each style has two phases:
 
@@ -18,8 +18,8 @@ and choose the same style again from the WM's style picker to hotload it.
 End a generated assignment-only Splash module with `true` so its last
 assignment is evaluated as a statement.
 
-The WM keeps its Omarchy top bar. Click the style name to cycle, or right-click
-it to choose directly. macOS and Windows also have a Light/Dark button. Its Applications
+The WM keeps its Omarchy top bar. Click the current style name to open the
+dropdown. Modern desktop and mobile styles also have a Light/Dark button. Its Applications
 launcher, Windows Start menus, window chrome, and hosted apps use the selected
 appearance.
 
@@ -52,6 +52,13 @@ allows window bodies behind the dock or partly offscreen. Terminals render only
 their background with opacity (`MAKEPAD_WM_TERM_OPACITY`, default `0.78 0.70` for
 focused/unfocused); text and ANSI cell colors remain crisp. Their foreground and
 background follow the active light/dark stylesheet without restarting the PTY.
+`color_terminal_bg` and `color_terminal_text` are separate semantic roles:
+Windows 2000 and Android use opaque black consoles, while NeXTSTEP uses white.
+The palette adapter exports them as `term.background` and `term.foreground`.
+Declare both in each style so a reload resets the previous console palette.
+The terminal opts into `Window.body.keyboard_resize: true`; this KeyboardView
+mode reflows content above the animated keyboard instead of panning the whole
+terminal out of view. Its grid and PTY resize with the available space.
 
 `widgets/src/backdrop.rs` supplies ordered compositor checkpoints. Windows are
 composited from back to front, and a glass surface samples a checkpoint below it.
@@ -63,7 +70,8 @@ unused deeper passes are skipped. Explicit producer/consumer links preserve GPU
 ordering when pass IDs are recycled. `MAKEPAD_WM_TRACE_BLUR=1` logs stack and pass
 counts when they change; normal operation does not log each frame.
 
-In a checkout, launch the WM with `cargo run --release -p makepad-wm -- --remote`.
+In a checkout, build with `cargo build --release -p makepad-wm`, then launch
+`./target/release/wm --remote` from the checkout root.
 Applications launch on demand with `cargo run --release -p <package>`; there is
 no binary collection to prepare. The app's window shows Cargo's compiling or
 build-wait stage before the process connects, then fades into its first frame.

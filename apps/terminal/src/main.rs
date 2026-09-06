@@ -38,6 +38,7 @@ script_mod! {
                 // at the compositor-given opacity into the shared swapchain.
                 pass +: { clear_color: vec4(0.0, 0.0, 0.0, 0.0) }
                 body +: {
+                    keyboard_resize: true
                     term := MpTerm{}
                 }
             }
