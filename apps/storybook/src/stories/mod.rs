@@ -36,6 +36,7 @@ pub mod textinput;
 pub mod radiobutton;
 pub mod view;
 pub mod layout;
+pub mod grid;
 pub mod align_scroll;
 pub mod icon;
 pub mod iconset;
@@ -70,6 +71,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     radiobutton::script_mod(vm);
     view::script_mod(vm);
     layout::script_mod(vm);
+    grid::script_mod(vm);
     align_scroll::script_mod(vm);
     icon::script_mod(vm);
     iconset::script_mod(vm);
@@ -125,6 +127,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         radiobutton::STORIES,
         view::STORIES,
         layout::STORIES,
+        grid::STORIES,
         align_scroll::STORIES,
         icon::STORIES,
         iconset::STORIES,
