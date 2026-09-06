@@ -778,6 +778,10 @@ impl<T: ResponsesTransport> ChatProvider for ResponsesChatProvider<T> {
         self.cancel = CancelToken::new();
     }
 
+    fn history_pruned(&mut self, removed: usize) {
+        self.sent_messages = self.sent_messages.saturating_sub(removed);
+    }
+
     /// Deliberately abandon the conversation: the pending function call
     /// (if any) is dropped and the response chain forgotten, so the next
     /// `begin_turn` replays the session's history from the top as a fresh

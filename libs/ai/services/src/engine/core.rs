@@ -24,8 +24,6 @@ pub const DOCTRINE: &str = include_str!("doctrine.md");
 pub const CALL_DEADLINE_SECS: f64 = 60.0;
 /// Seconds after which even a progressing call is given up.
 pub const CALL_HARD_CAP_SECS: f64 = 600.0;
-/// Tool rounds one user turn may take before the engine stops it.
-pub const MAX_TOOL_ROUNDS: u32 = 16;
 /// The reserved argument the model may use to pick an instance.
 pub const INSTANCE_KEY: &str = "instance";
 /// Live subscriptions one conversation lease may own.
@@ -94,7 +92,6 @@ pub struct EngineCore {
     parked: HashMap<String, Parked>,
     awaiting: Option<AwaitingApp>,
     seen_generation: Option<u64>,
-    tool_rounds: u32,
     next_call: u64,
     doctrine: String,
     turn_active: bool,
@@ -125,7 +122,6 @@ impl EngineCore {
             parked: HashMap::new(),
             awaiting: None,
             seen_generation: None,
-            tool_rounds: 0,
             next_call: 0,
             doctrine: doctrine.unwrap_or(DOCTRINE).to_string(),
             turn_active: false,
@@ -210,7 +206,6 @@ impl EngineCore {
         self.state.thinking.clear();
         self.state.rate = None;
         self.turn_active = true;
-        self.tool_rounds = 0;
         let dynamic = self.registry.dynamic_context();
         self.model.send_user(text, &dynamic);
         self.state.touch();
@@ -449,19 +444,10 @@ impl EngineCore {
                 }
             }
             ModelEvent::ToolCall { call_id, name, args } => {
-                self.tool_rounds += 1;
-                if self.tool_rounds > MAX_TOOL_ROUNDS {
-                    let result = ToolResult::refused(&call_id, format!("tool round limit ({MAX_TOOL_ROUNDS}) reached; answer with what you have"));
-                    self.state.push(Entry::Tool(self.card(&call_id, "", &name, &args)));
-                    self.finish_call(&call_id, result, false);
-                    self.model.cancel();
-                    self.end_turn();
-                } else {
-                    // A row that never got text sits above the card as a gap.
-                    self.drop_empty_assistant();
-                    self.state.status = Status::WaitingForTool;
-                    return self.dispatch(call_id, &name, &args, false, now);
-                }
+                // A row that never got text sits above the card as a gap.
+                self.drop_empty_assistant();
+                self.state.status = Status::WaitingForTool;
+                return self.dispatch(call_id, &name, &args, false, now);
             }
             ModelEvent::Rate(r) => self.state.rate = Some(r),
             ModelEvent::TurnDone { tool_calls } => {
@@ -861,7 +847,6 @@ impl EngineCore {
         self.state.thinking.clear();
         self.state.rate = None;
         self.turn_active = true;
-        self.tool_rounds = 0;
         self.last_wake = Some(now);
         let dynamic = self.registry.dynamic_context();
         self.model.send_user(&input, &dynamic);
@@ -1298,14 +1283,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tool_round_limit_ends_a_runaway_turn() {
+    fn tool_rounds_continue_until_the_user_cancels() {
         let mut script: Vec<Vec<ModelEvent>> = Vec::new();
-        for i in 0..(MAX_TOOL_ROUNDS + 1) {
+        for i in 0..400 {
             script.push(vec![ModelEvent::ToolCall { call_id: format!("m{i}"), name: "files.list_dir".into(), args: r#"{"path":"~"}"#.into() }, ModelEvent::TurnDone { tool_calls: 1 }]);
         }
         let (mut core, model, mut port, _e) = setup(script);
         core.send("loop", 0.0);
-        for t in 0..(MAX_TOOL_ROUNDS + 2) {
+        for t in 0..150 {
             core.pump(t as f64);
             for ev in port.test_drain() {
                 if let PortEvent::Call(c) = ev {
@@ -1315,9 +1300,12 @@ mod tests {
             core.pump(t as f64 + 0.5);
         }
         let m = model.lock().unwrap();
-        assert!(m.tool_results.iter().any(|(_, text, _)| text.contains("round limit")), "{:?}", m.tool_results.last());
-        assert_eq!(m.cancels, 1);
+        assert!(m.tool_results.len() > 128);
+        assert!(!m.tool_results.iter().any(|(_, text, _)| text.contains("round limit")));
+        assert_eq!(m.cancels, 0);
         drop(m);
+        core.cancel(151.0);
+        assert_eq!(model.lock().unwrap().cancels, 1);
         assert_eq!(core.state().status, Status::Idle);
     }
 

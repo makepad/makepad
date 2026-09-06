@@ -9,7 +9,7 @@ use makepad_asset_chat::tools::ContentToolCall;
 use makepad_asset_chat::wire::{
     AttachmentBinding, ChatEventBody, ProviderAvailability, ProviderKind, ServingFacts,
     ToolOutcome, MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_JSON_BYTES,
-    MAX_TOOL_ROUNDS,
+    MAX_MESSAGES,
 };
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_data::AssetRevisionId;
@@ -133,14 +133,12 @@ fn tool_line(name: &str, args: Value) -> String {
     )
 }
 
-struct RoundLimited {
+struct ClientExecutor {
     recorder: Recorder,
-    limit: u32,
     client: bool,
 }
-impl ToolExecutor for RoundLimited {
+impl ToolExecutor for ClientExecutor {
     fn capability_doc(&mut self) -> String { self.recorder.capability_doc() }
-    fn max_tool_rounds(&self) -> u32 { self.limit }
     fn client_executes(&mut self, _: &ContentToolCall) -> bool { self.client }
     fn execute(&mut self, call: &ContentToolCall, ctx: &ExecCtx, progress: &mut dyn FnMut(u16, &str), cancel: &CancelFlag) -> ToolOutcome {
         self.recorder.execute(call, ctx, progress, cancel)
@@ -399,7 +397,7 @@ fn extended_modeling_rounds_reach_parked_publish_and_spawn_on_both_lanes() {
         let mut calls = ["model.workflow", "model.operations", "model.surface", "model.scene", "model.vehicle"]
             .into_iter().map(|topic| ("world.api", json::obj(vec![("query", json::s(topic))]))).collect::<Vec<_>>();
         calls.push(("model.open", document()));
-        for index in 0..6 {
+        for index in 0..150 {
             calls.push(("model.apply", json::obj(vec![("document", json::s("car")), ("request_id", json::s(format!("part_{index}"))),
                 ("expected", head()), ("operations", Value::Arr(vec![json::obj(vec![("op", json::s("cube")), ("object", json::s(format!("part_{index}"))), ("size", Value::Arr(vec![Value::Int(1); 3]))])]))])));
             calls.push(("model.jobs", json::obj(vec![("job", json::s(format!("edit_{index}"))), ("wait_ms", Value::Int(10_000))])));
@@ -408,20 +406,17 @@ fn extended_modeling_rounds_reach_parked_publish_and_spawn_on_both_lanes() {
             ("alias", json::s("gen/models/original-old-car")), ("expected", head()), ("expected_alias", json::s("absent"))])));
         calls.push(("model.jobs", json::obj(vec![("job", json::s("publish_car")), ("wait_ms", Value::Int(10_000))])));
         calls.push(("world.spawn", json::obj(vec![("model", json::s("gen/models/original-old-car")), ("form", json::s("car"))])));
-        assert!(calls.len() > MAX_TOOL_ROUNDS as usize);
+        assert!(calls.len() > 256);
         let mut scripts = calls.iter().enumerate().map(|(i, (name, args))| scripted_call(kind, i, name, args.clone())).collect::<Vec<_>>();
         scripts.push(vec![ProviderEvent::Done { text: "The original car is placed.".into() }]);
         let mut provider = Scripted::new(scripts); provider.kind = kind;
-        let mut exec = RoundLimited { recorder: Recorder::new(ToolOutcome::Ok { value: Value::Null }), limit: 48, client: true };
+        let mut exec = ClientExecutor { recorder: Recorder::new(ToolOutcome::Ok { value: Value::Null }), client: true };
         let mut session = Session::new("modeling", Box::new(provider));
         session.send("model me an old car", &[], &mut exec).unwrap();
-        assert_eq!(session.tool_round_limit(), 48);
-        // Executor changes cannot enlarge/reduce an already admitted turn.
-        exec.limit = 1;
         let mut observed = Vec::new();
         let mut published = false;
         let mut placed = false;
-        for _ in 0..60 {
+        for _ in 0..calls.len() + 5 {
             session.pump(&mut exec);
             for event in session.drain_events() {
                 if let ChatEventBody::ToolCall { id, name, args } = event.body {
@@ -450,34 +445,59 @@ fn extended_modeling_rounds_reach_parked_publish_and_spawn_on_both_lanes() {
 }
 
 #[test]
-fn configurable_round_limit_is_finite_history_bounded_and_fail_closed() {
-    use makepad_asset_chat::wire::{ChatMessage, ChatRole, MAX_MESSAGES, MAX_CONFIGURABLE_TOOL_ROUNDS};
-    for kind in [ProviderKind::CodexCli, ProviderKind::OpenAi] {
-        for (requested, old_rows) in [(48, 0), (u32::MAX, 0), (48, 64), (0, 0)] {
-            let args = json::obj(vec![("document", json::s("car"))]);
-            let scripts = (0..130).map(|i| scripted_call(kind, i, "model.inspect", args.clone())).collect();
-            let mut provider = Scripted::new(scripts); provider.kind = kind;
-            let history = (0..old_rows).map(|_| ChatMessage::new(ChatRole::User, "previous turn")).collect();
-            let mut session = Session::resume(makepad_asset_chat::session::SessionId::generate(), "bounded", Box::new(provider), history, 1, None);
-            let mut exec = RoundLimited { recorder: Recorder::new(ToolOutcome::Ok { value: json::obj(vec![]) }), limit: requested, client: false };
-            session.send("inspect", &[], &mut exec).unwrap();
-            let expected = requested.min(MAX_CONFIGURABLE_TOOL_ROUNDS).min(((MAX_MESSAGES - old_rows - 3) / 2) as u32);
-            assert_eq!(session.tool_round_limit(), expected);
-            let mut last = None;
-            for _ in 0..130 {
-                session.pump(&mut exec);
-                for event in session.drain_events() { last = Some(event.body); }
-                if session.is_idle() { break; }
+fn long_tool_turn_rolls_context_and_accepts_the_next_request() {
+    use makepad_asset_chat::wire::{ChatMessage, ChatRole};
+    for kind in [ProviderKind::FleetQwen, ProviderKind::CodexCli, ProviderKind::OpenAi] {
+        let args = json::obj(vec![("document", json::s("car"))]);
+        let mut scripts = (0..350).map(|i| scripted_call(kind, i, "model.inspect", args.clone())).collect::<Vec<_>>();
+        scripts.push(vec![ProviderEvent::Done { text: "The car is ready.".into() }]);
+        scripts.push(vec![ProviderEvent::Done { text: "Refining the existing body.".into() }]);
+        let mut provider = Scripted::new(scripts); provider.kind = kind;
+        let turns = provider.turns.clone();
+        let history = (0..64).map(|i| ChatMessage::new(ChatRole::User, format!("instruction {i}"))).collect();
+        let mut session = Session::resume(makepad_asset_chat::session::SessionId::generate(), "rolling", Box::new(provider), history, 1, None);
+        let mut exec = Recorder::new(ToolOutcome::Ok { value: json::obj(vec![]) });
+        session.send("build the Herbie car", &[], &mut exec).unwrap();
+        for _ in 0..355 {
+            session.pump(&mut exec);
+            for event in session.drain_events() {
+                assert!(!matches!(event.body, ChatEventBody::Error { .. }), "{:?}", event.body);
             }
-            assert!(session.is_idle());
-            assert_eq!(exec.recorder.calls.borrow().len(), expected as usize);
             assert!(session.history().len() <= MAX_MESSAGES);
-            if kind.uses_native_tools() || expected == 0 {
-                assert!(matches!(last, Some(ChatEventBody::Error { code, .. }) if code == "tool_budget"));
-            } else {
-                assert!(matches!(last, Some(ChatEventBody::Done)));
+            let history = session.history();
+            for (i, message) in history.iter().enumerate() {
+                if message.role == ChatRole::Tool {
+                    assert!(i > 0 && history[i - 1].role == ChatRole::Assistant, "orphan result at {i}");
+                }
             }
+            assert!(history.iter().any(|m| m.text == "instruction 0"));
+            assert!(history.iter().any(|m| m.text.starts_with("build the Herbie car")));
+            if session.is_idle() { break; }
         }
+        assert!(session.is_idle() && !session.is_sealed());
+        assert_eq!(exec.calls.borrow().len(), 350);
+        session.send("continue refining the body", &[], &mut exec).unwrap();
+        session.pump(&mut exec);
+        assert!(session.is_idle());
+        assert_eq!(session.history().last().unwrap().text, "Refining the existing body.");
+        assert!(turns.borrow().iter().all(|turn| turn.messages.len() <= MAX_MESSAGES));
+    }
+}
+
+#[test]
+fn long_conversation_rolls_without_refusing_new_user_messages() {
+    use makepad_asset_chat::wire::ChatRole;
+    let scripts = (0..400).map(|i| vec![ProviderEvent::Done { text: format!("reply {i}") }]).collect();
+    let provider = Scripted::new(scripts);
+    let mut session = Session::new("long_chat", Box::new(provider));
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Null });
+    for i in 0..400 {
+        session.send(&format!("request {i}"), &[], &mut exec).unwrap();
+        session.pump(&mut exec);
+        assert!(session.is_idle() && !session.is_sealed());
+        assert!(session.history().len() <= MAX_MESSAGES);
+        assert!(session.history().iter().any(|m| m.role == ChatRole::User && m.text == "request 0"));
+        assert_eq!(session.history().last().unwrap().text, format!("reply {i}"));
     }
 }
 
@@ -794,45 +814,23 @@ fn cancel_mid_stream_emits_cancelled_and_idles() {
 }
 
 #[test]
-fn tool_round_budget_degrades_gracefully_on_the_textual_lane() {
-    // A provider that answers EVERY turn with another tool call. The
-    // textual lane must NOT hard-kill the turn at the budget: the model
-    // gets one final completion round (with a nudge in history) and any
-    // tool line it emits there is cut off, not executed — the turn ends
-    // in Done, never a dead session.
-    let scripts: Vec<Vec<ProviderEvent>> = (0..MAX_TOOL_ROUNDS + 2)
-        .map(|_| {
-            vec![ProviderEvent::Done {
-                text: tool_line("operation.get", json::obj(vec![("operation", json::s("op_00000000000000000000000000000000"))])),
-            }]
-        })
-        .collect();
+fn textual_tool_turn_continues_until_manual_cancellation() {
+    let scripts = (0..400).map(|i| scripted_call(ProviderKind::FleetQwen, i, "model.inspect", json::obj(vec![("document", json::s("car"))]))).collect();
     let provider = Scripted::new(scripts);
-    let turns = provider.turns.clone();
+    let cancelled = provider.cancelled.clone();
     let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
     let mut session = Session::new("prin_test", Box::new(provider));
-
-    session.send("loop forever", &[], &mut exec).unwrap();
-    for _ in 0..MAX_TOOL_ROUNDS + 4 {
-        session.pump(&mut exec);
-    }
-    let events = session.drain_events();
-    let last = events.last().unwrap();
-    assert!(
-        matches!(&last.body, ChatEventBody::Done),
-        "the budget must end the turn gracefully, got {:?}",
-        last.body
-    );
-    assert!(session.is_idle());
-    assert!(!session.is_sealed(), "a budgeted turn is not a dead session");
-    // Exactly the budget executed; the final round's tool line did not.
-    assert_eq!(exec.calls.borrow().len(), MAX_TOOL_ROUNDS as usize);
-    // The final provider turn saw the nudge in its history.
-    let final_input = turns.borrow().last().cloned().unwrap();
-    assert!(
-        final_input.messages.iter().any(|m| m.text.contains("tool budget reached")),
-        "the final round must carry the budget nudge"
-    );
+    session.send("continue refining", &[], &mut exec).unwrap();
+    for _ in 0..300 { session.pump(&mut exec); session.drain_events(); }
+    assert!(!session.is_idle());
+    assert_eq!(exec.calls.borrow().len(), 300);
+    session.cancel();
+    session.pump(&mut exec);
+    assert!(session.is_idle() && !session.is_sealed());
+    assert_eq!(exec.calls.borrow().len(), 300);
+    assert!(*cancelled.borrow() > 0);
+    assert!(session.drain_events().iter().any(|event| matches!(event.body, ChatEventBody::Cancelled)));
+    session.send("now refine the roof", &[], &mut exec).unwrap();
 }
 
 /// Qwen keeps the textual marker contract; native providers do not.
@@ -1035,35 +1033,23 @@ fn native_malformed_args_are_refused_continuation() {
 }
 
 #[test]
-fn native_tool_round_budget_terminates() {
-    let scripts: Vec<Vec<ProviderEvent>> = (0..MAX_TOOL_ROUNDS + 2)
-        .map(|i| {
-            vec![ProviderEvent::FunctionCall {
-                call_id: format!("call_{i}"),
-                name: "operation_get".into(),
-                arguments: r#"{"operation":"op_00000000000000000000000000000000"}"#.into(),
-            }]
-        })
-        .collect();
+fn native_tool_turn_continues_until_manual_cancellation() {
+    let scripts = (0..400).map(|i| scripted_call(ProviderKind::OpenAi, i, "model.inspect", json::obj(vec![("document", json::s("car"))]))).collect();
     let mut provider = Scripted::new(scripts);
     provider.kind = ProviderKind::OpenAi;
     let conts = provider.continuations.clone();
     let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
     let mut session = Session::new("prin_native", Box::new(provider));
-    session.send("loop forever", &[], &mut exec).unwrap();
-    for _ in 0..MAX_TOOL_ROUNDS + 2 {
-        session.pump(&mut exec);
-    }
-    let events = session.drain_events();
-    let last = events.last().unwrap();
-    assert!(
-        matches!(&last.body, ChatEventBody::Error { code, .. } if code == "tool_budget"),
-        "expected tool_budget, got {:?}",
-        last.body
-    );
+    session.send("continue refining", &[], &mut exec).unwrap();
+    for _ in 0..300 { session.pump(&mut exec); session.drain_events(); }
+    assert!(!session.is_idle());
+    assert_eq!(exec.calls.borrow().len(), 300);
+    assert_eq!(conts.borrow().len(), 300);
+    session.cancel();
+    session.pump(&mut exec);
     assert!(session.is_idle());
-    assert_eq!(exec.calls.borrow().len(), MAX_TOOL_ROUNDS as usize);
-    assert_eq!(conts.borrow().len(), (MAX_TOOL_ROUNDS - 1) as usize);
+    assert_eq!(exec.calls.borrow().len(), 300);
+    assert!(session.drain_events().iter().any(|event| matches!(event.body, ChatEventBody::Cancelled)));
 }
 
 #[test]

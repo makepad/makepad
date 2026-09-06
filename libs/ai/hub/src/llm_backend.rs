@@ -796,16 +796,16 @@ fn llm_generate_streamed(
             }
             user.push_str("Intent: ");
             user.push_str(params.prompt.trim());
-            // Qwen3.8 chat-shaped open think is the path that actually
-            // decodes. The older expander ChatML + empty/seed </think>
-            // prefill made 3.8 emit EOS on the first token.
+            // Expansion needs its answer within the small generation budget.
+            // Use the seeded, closed thought; an open chat thought can spend
+            // every token reasoning and then fail the identity-anchor check.
             crate::protocol::assemble_chat_prompt_with_think(
                 &system,
                 &[crate::protocol::ChatMessageJson {
                     role: "user".to_string(),
                     text: user,
                 }],
-                crate::protocol::think_prefill_for_model(model_id),
+                crate::protocol::think_prefill_for_expand(model_id),
             )
         };
 
@@ -2930,6 +2930,7 @@ mod tests {
         let mut backend = LlmBackend::with_stub(
             "qwen3.8-27b",
             Box::new(move |job: &ExpandJob| {
+                assert!(job.prompt_text.ends_with(crate::protocol::CHAT_THINK_PREFILL_EXPAND_38));
                 *seen_job.lock().unwrap() = job.max_tokens;
                 Ok("<think>\nplan\n</think>\n\na red fox in morning light".into())
             }),

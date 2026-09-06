@@ -283,6 +283,8 @@ pub fn definitions() -> Vec<ToolDef> {
             description: "Generate and publish a character through expanded prompt → image → \
                           matte → mesh → rig → motion. Waits for owned jobs and returns \
                           intermediate aliases/revisions and measured skin/clip/playable metadata. \
+                          Text-driven: attached chat images are not passed to this generator. \
+                          For editable modeling from a visual reference use model.open/apply. \
                           Unavailable stages are reported honestly; creation does not place it.",
             args_doc: r#"{"prompt": "armored fox ranger, standing idle"}"#,
             parameters: schema_object(
@@ -542,7 +544,7 @@ pub fn definitions() -> Vec<ToolDef> {
 /// row/step/deadline budgets bound what that SQL may then cost.
 pub const MAX_QUERY_SQL_BYTES: usize = 4096;
 /// Most placements one `world.place` call may carry (a fence is one call,
-/// not one call per segment — tool rounds are budgeted).
+/// not one call per segment — batching saves tokens and latency).
 pub const MAX_WORLD_PLACEMENTS: usize = 64;
 
 /// The GAME session's tool vocabulary: catalog lookups, one deliberately

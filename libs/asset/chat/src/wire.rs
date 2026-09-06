@@ -28,17 +28,6 @@ pub const MAX_ATTACHMENTS: usize = 8;
 pub const MAX_TRANSFORM_INPUTS: usize = 4;
 /// Tool progress note (mirrors the Asset Server heartbeat bound).
 pub const MAX_NOTE_BYTES: usize = 200;
-/// Tool rounds within one user turn.
-/// Tool rounds per user turn. A level-building turn legitimately spends
-/// schema + a few narrowing queries + get_source + set_source + a
-/// correction pass — 8 was hit by real (non-looping) exploration the day
-/// the catalog grew to ~3k models. Fail-closed as before; the session's
-/// history/token budgets remain the real backstop.
-pub const MAX_TOOL_ROUNDS: u32 = 16;
-/// Absolute configurable ceiling: each tool retains two messages, with
-/// room for the user, a final-budget notice and an assistant completion.
-/// A session also clamps this to its actual remaining history capacity.
-pub const MAX_CONFIGURABLE_TOOL_ROUNDS: u32 = ((MAX_MESSAGES - 3) / 2) as u32;
 /// Progress callbacks retained from one tool execution.
 pub const MAX_PROGRESS_EVENTS: usize = 32;
 
