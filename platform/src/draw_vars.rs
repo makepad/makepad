@@ -23,7 +23,10 @@ use crate::makepad_script::{
 };
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
-pub const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
+// Combined bindings, not the fragment-stage limit. Full rigid PBR uses
+// 16 fragment textures plus one vertex-only morph texture with GI enabled.
+// WebGL2 guarantees 16 per stage and at least 32 combined units.
+pub const DRAW_CALL_TEXTURE_SLOTS: usize = 17;
 pub const DRAW_CALL_UNIFORM_BUFFER_SLOTS: usize = 2;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
