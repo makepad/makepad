@@ -53,6 +53,9 @@ workspace.members = [
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
+    # Editable polygon topology and worker-owned model documents.
+    "libs/mesh_edit",
+    "libs/model",
     # === examples ===
     "examples/teamtalk",
     "examples/automate",
