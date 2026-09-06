@@ -190,28 +190,37 @@ script_mod! {
         draw_arrow +: {
             color: #x10141bf2
             border_color: #xffffff2e
-            /** which edge the pointer sits on: 0 up, 1 down, 2 right, 3 left 0..3 step 1 */
+            /** which way the pointer AIMS: 0 up, 1 down, 2 right, 3 left 0..3 step 1 */
             side: 0.0
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                // A square turned by a quarter turn, centred on the middle
-                // of the pointer's base: the half inside this quad is the
-                // triangle, and the half past the quad's edge is never
-                // painted. The path fill the shape language offers does not
-                // fill here, which is why the popover draws its arrow the
-                // same way.
+                // A square turned by a quarter turn, centred on the BASE
+                // edge — the one against the bubble. The half inside this
+                // quad is the triangle, narrowing to a point at the far
+                // edge, so the point is the end that aims at the control.
+                // Centring it on the near edge instead makes the pointer
+                // aim away from the thing it belongs to. The path fill the
+                // shape language offers does not fill here, which is why
+                // the popover draws its arrow the same way.
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let mut c = vec2(w * 0.5, 1.0)
+                // The centre sits ON the base edge, not a pixel inside it:
+                // half the square is then clipped away and what is left is
+                // a full triangle, base the width of the quad and apex
+                // exactly on the far edge. A pixel of inset blunts the apex
+                // and shortens the base, which is what made the pointer
+                // read as a smear. The quad already overlaps the bubble by
+                // a pixel, so nothing is lost by putting the base flush.
+                let mut c = vec2(w * 0.5, h)
                 let mut r = w * 0.5
                 if self.side > 2.5 {
-                    c = vec2(1.0, h * 0.5)
+                    c = vec2(w, h * 0.5)
                     r = h * 0.5
                 } else if self.side > 1.5 {
-                    c = vec2(w - 1.0, h * 0.5)
+                    c = vec2(0.0, h * 0.5)
                     r = h * 0.5
                 } else if self.side > 0.5 {
-                    c = vec2(w * 0.5, h - 1.0)
+                    c = vec2(w * 0.5, 0.0)
                 }
                 sdf.rotate(PI * 0.25, c.x, c.y)
                 let s = r * 1.41421356
@@ -235,7 +244,7 @@ pub struct DrawTipBg {
     color: Vec4f,
     #[live]
     border_color: Vec4f,
-    /// Which edge a pointer sits on: 0 up, 1 down, 2 right, 3 left. The
+    /// Which way a pointer AIMS: 0 up, 1 down, 2 right, 3 left. The
     /// bubble ignores it.
     #[live]
     side: f32,
@@ -494,6 +503,13 @@ impl Widget for TipLayer {
         // Where the bubble landed in the pass. Everything drawn beside it
         // is placed against this, because the pass is shifted into position
         // only at the end.
+        // A pointer on the bubble's TOP or LEFT edge is drawn before the
+        // bubble's own origin, and the overlay pass is sized to what was
+        // drawn from that origin onward, so it was simply clipped away.
+        // Inset the bubble by the pointer's length and give the shift the
+        // same amount back: there is then room on every side of it.
+        let inset = if tip.arrow { TIP_ARROW } else { 0.0 };
+        let pad = Inset { left: inset, top: inset, right: inset, bottom: inset };
         let bubble;
         if lines > 1.0 {
             // Text wraps only when the turtle it is drawn into says it may,
@@ -501,7 +517,7 @@ impl Widget for TipLayer {
             // text takes the width, finding its own height.
             self.draw_bg.begin(
                 cx,
-                Walk::fixed(w, h),
+                Walk { margin: pad, ..Walk::fixed(w, h) },
                 Layout {
                     flow: Flow::right_wrap(),
                     padding: Inset {
@@ -526,7 +542,11 @@ impl Widget for TipLayer {
             );
             self.draw_bg.end(cx);
         } else {
-            self.draw_bg.begin(cx, Walk::fixed(w, h), Layout::default());
+            self.draw_bg.begin(
+                cx,
+                Walk { margin: pad, ..Walk::fixed(w, h) },
+                Layout::default(),
+            );
             bubble = cx.turtle().rect();
             self.draw_text.draw_abs(
                 cx,
@@ -594,7 +614,7 @@ impl Widget for TipLayer {
         }
         self.draw_bg.color = rest_bg;
         self.draw_text.color = rest_ink;
-        cx.end_pass_sized_turtle_with_shift(self.area, placed.rect.pos - origin);
+        cx.end_pass_sized_turtle_with_shift(self.area, placed.rect.pos - origin - dvec2(inset, inset));
         draw_list.end(cx);
         DrawStep::done()
     }
