@@ -11975,6 +11975,13 @@ p2 {}
         Self::save_ui_surface(self.apc.surface);
         self.ui.page_flip(cx, ids!(pages)).set_active_page(cx, page.into());
         self.console_page = page.into();
+        // Coming back to the decks: the pump stops re-arming itself for a
+        // playing deck while the lane is off screen, so the first frame
+        // has to be asked for here or the surface would sit at whatever
+        // it was showing when the operator left it.
+        if self.console_page == live_id!(music_page) {
+            self.music_pump = cx.new_next_frame();
+        }
         self.sync_mesh_liveness(cx);
         self.paint_tabs(cx, page);
         self.ui.redraw(cx);
@@ -28306,21 +28313,39 @@ p2 {}
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
+        // The beat reference is released from here whichever page is up,
+        // for the reason `refresh_music_surface` spells out: a deck left
+        // holding one would go on asking for frames for ever.
         self.push_deck_beats(cx);
-        self.push_wave_positions(cx);
+        // These two only feed the deck surface, and the deck surface is
+        // not on screen.
+        if self.console_page == live_id!(music_page) {
+            self.push_wave_positions(cx);
+            self.refresh_loop_score_preview(cx);
+        }
+        // These two are not surface work whatever page is up: a pre-listen
+        // player has to fold itself away when its tape runs out, and a
+        // timed transition has to go on landing -- an operator who starts
+        // one and walks to another page must come back to it finished, not
+        // to a fader stopped half way.
         self.push_phones_playhead(cx);
         self.track_crossfade(cx);
-        self.refresh_loop_score_preview(cx);
         self.schedule_music_frame(cx);
     }
 
     /// Ask for another frame while anything on the surface is moving.
     fn schedule_music_frame(&mut self, cx: &mut Cx) {
         let moving = self.xfade_target.is_some()
-            || [DeckId::A, DeckId::B].iter().any(|deck| {
-                let snapshot = self.mixer.deck_snapshot(*deck);
-                snapshot.playing || snapshot.scratching
-            })
+            // A playing deck asks for display-rate frames only while its
+            // own lane is on screen. Off the music page nobody is watching
+            // a playhead, and asking anyway held the whole app at the
+            // display's rate for the length of a set. The surface is
+            // brought back up to date the moment the page returns.
+            || (self.console_page == live_id!(music_page)
+                && [DeckId::A, DeckId::B].iter().any(|deck| {
+                    let snapshot = self.mixer.deck_snapshot(*deck);
+                    snapshot.playing || snapshot.scratching
+                }))
             // The pre-listen playhead moves at display cadence too.
             || self
                 .mixer
