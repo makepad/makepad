@@ -7793,6 +7793,12 @@ pub struct App {
     /// How many seconds of AUDIBLE time the wave lanes show. The widget
     /// owns the live value; this is what is written down, so a zoom the
     /// operator picked is still there next launch.
+    ///
+    /// Seeded with the lane's OWN default rather than left at zero: it is
+    /// pushed into the widget on first sight, and a zero clamps to the
+    /// tightest zoom there is -- which opened every session an inch from
+    /// the playhead.
+    #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
     wave_zoom_secs: f64,
     /// Pushed into the widget once, when the surface first has one. Not
     /// every frame: the wheel moves the widget first and reports after,
