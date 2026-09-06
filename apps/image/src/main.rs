@@ -87,7 +87,7 @@ impl MatchEvent for App {
         // theme.color_bg_app from it, if MAKEPAD_WM_THEME_SPLASH is set); patch the
         // pass clear color explicitly too so the dark letterbox is right even
         // if the stock theme default ever drifts.
-        if let Some(bg_hex) = makepad_wm_theme::current().map(|p| p.hex("background", "#1a1b26")) {
+        if let Some(bg_hex) = cx.with_vm(makepad_wm_theme::current_for_vm).map(|p| p.hex("background", "#1a1b26")) {
             if let Some(color) = parse_hex_color(&bg_hex) {
                 let mut window = self.ui.window(cx, ids!(main_window));
                 script_apply_eval!(cx, window, {

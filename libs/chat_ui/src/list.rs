@@ -25,7 +25,7 @@ script_mod! {
         width: 44
         height: 16
         draw_dots +: {
-            color: uniform(#x9fb4d0)
+            color: uniform(mod.theme.color_text_disabled)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let r = min(self.rect_size.y * 0.22, 3.5)
@@ -71,14 +71,14 @@ script_mod! {
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
                 show_bg: true
                 draw_bg +: {
-                    color: #x2a3a5a
+                    color: mod.theme.color_bg_highlight
                     radius: 8.0
                 }
                 body := Label {
                     width: Fill
                     height: Fit
                     text: ""
-                    draw_text.color: #xe8eef8
+                    draw_text.color: mod.theme.color_text
                     draw_text.text_style: theme.font_regular{font_size: 13}
                 }
             }
@@ -91,14 +91,14 @@ script_mod! {
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
                 show_bg: true
                 draw_bg +: {
-                    color: #x232330
+                    color: mod.theme.color_bg_container
                     radius: 8.0
                 }
                 body := Label {
                     width: Fill
                     height: Fit
                     text: ""
-                    draw_text.color: #xd8dee8
+                    draw_text.color: mod.theme.color_text
                     draw_text.text_style: theme.font_regular{font_size: 13}
                 }
                 // How fast this reply came out, pinned once it landed.
@@ -110,7 +110,7 @@ script_mod! {
                     visible: false
                     margin: Inset{top: 2}
                     text: ""
-                    draw_text.color: #x6f7c90
+                    draw_text.color: mod.theme.color_text_disabled
                     draw_text.text_style: theme.font_regular{font_size: 10}
                 }
             }
@@ -146,7 +146,7 @@ script_mod! {
                 padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
                 show_bg: true
                 draw_bg +: {
-                    color: #x232330
+                    color: mod.theme.color_bg_container
                     radius: 8.0
                 }
                 View {
@@ -162,7 +162,7 @@ script_mod! {
                         width: Fit
                         height: Fit
                         text: ""
-                        draw_text.color: #x6f7c90
+                        draw_text.color: mod.theme.color_text_disabled
                         draw_text.text_style: theme.font_regular{font_size: 10}
                     }
                 }
@@ -175,7 +175,7 @@ script_mod! {
                     height: 46
                     text: ""
                     max_lines: 3
-                    draw_text.color: #x525d70
+                    draw_text.color: mod.theme.color_text_disabled
                     draw_text.text_style: theme.font_regular{font_size: 9}
                 }
             }
@@ -190,7 +190,7 @@ script_mod! {
                 padding: Inset{left: 6 top: 2 right: 6 bottom: 2}
                 show_bg: true
                 draw_bg +: {
-                    color: #x1a2430
+                    color: mod.theme.color_inset
                     radius: 6.0
                 }
                 chip := ButtonFlatter {
@@ -199,7 +199,7 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: ""
                     draw_text +: {
-                        color: #x9fc4e8
+                        color: mod.theme.color_text
                         text_style: theme.font_regular{font_size: 11}
                     }
                 }
@@ -209,7 +209,7 @@ script_mod! {
                     visible: false
                     margin: Inset{left: 8 bottom: 6}
                     text: ""
-                    draw_text.color: #x8fa2b8
+                    draw_text.color: mod.theme.color_text_disabled
                     draw_text.text_style: theme.font_regular{font_size: 10}
                 }
             }

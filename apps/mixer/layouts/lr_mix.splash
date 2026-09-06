@@ -498,7 +498,7 @@ View{
         draw_text.color: mp.fg_dim
         draw_text.text_style: theme.font_code{font_size: 8.0}
     }
-    strip_row := View{
+    strip_row := ScrollXView{
         width: Fill
         height: Fill
         flow: Right

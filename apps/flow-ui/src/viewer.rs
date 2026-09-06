@@ -43,7 +43,7 @@ script_mod! {
             color_hover: theme.flow_surface_hover
             color_down: theme.flow_surface_raised
             border_color: theme.flow_edge
-            border_radius: 12.0
+            border_radius: mod.theme.container_corner_radius
         }
         draw_text +: {
             color: theme.flow_text
@@ -168,7 +168,7 @@ script_mod! {
                         color: #x17191eef
                         border_color: #xffffff18
                         border_size: 1.0
-                        border_radius: 10.0
+                        border_radius: mod.theme.container_corner_radius
                         shadow_color: #x00000088
                         shadow_radius: 14.0
                     }
@@ -249,7 +249,7 @@ script_mod! {
                     border_color_hover: theme.flow_edge_soft
                     border_color_down: theme.flow_edge_soft
                     border_color_focus: theme.flow_edge_soft
-                    border_radius: 14.0
+                    border_radius: mod.theme.container_corner_radius
                 }
                 draw_icon +: {
                     color: theme.flow_text

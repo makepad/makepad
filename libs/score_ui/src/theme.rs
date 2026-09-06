@@ -7,40 +7,40 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.score_theme = {
-        color_surround: #x20211f
-        color_surround_soft: #x292a27
+        color_surround: theme.color_bg_app
+        color_surround_soft: theme.color_bg_container
         color_paper: #xf7f4ec
         color_paper_shadow: #x00000036
         color_ink: #x171713
         color_ink_soft: #x4a4943
 
-        color_chrome: #x1c1d1b
-        color_chrome_raised: #x292a27
-        color_panel: #x242522
-        color_panel_alt: #x20211f
-        color_input: #x171815
-        color_border: #x0f100e
-        color_border_light: #x41423d
-        color_row_hover: #x343630
-        color_row_active: #x314c62
-        color_button: #x343630
-        color_button_hover: #x464941
-        color_button_down: #x252621
-        color_accent: #xc86b4a
-        color_accent_hover: #xda7d5a
-        color_accent_dim: #x704331
+        color_chrome: theme.color_fg_app
+        color_chrome_raised: theme.color_outset
+        color_panel: theme.color_bg_container
+        color_panel_alt: theme.color_bg_odd
+        color_input: theme.color_inset
+        color_border: theme.color_bevel_inset_2
+        color_border_light: theme.color_bevel_outset_1
+        color_row_hover: theme.color_outset_hover
+        color_row_active: theme.color_bg_highlight
+        color_button: theme.color_outset
+        color_button_hover: theme.color_outset_hover
+        color_button_down: theme.color_outset_down
+        color_accent: theme.color_focus
+        color_accent_hover: theme.color_focus
+        color_accent_dim: theme.color_bg_highlight
         color_selection: #xff8000
         color_annotation: #xd4913b
         color_ok: #x6da77b
         color_warning: #xd2a445
         color_error: #xd66a62
 
-        color_text: #xe8e5dc
-        color_text_dim: #xaaa79e
-        color_text_muted: #x74736d
-        color_text_on_accent: #xffffff
-        color_float: #x181916e8
-        color_float_border: #x5a5b54a0
+        color_text: theme.color_text
+        color_text_dim: theme.color_text_disabled
+        color_text_muted: theme.color_text_disabled
+        color_text_on_accent: theme.color_text_on_accent
+        color_float: theme.color_bg_container
+        color_float_border: theme.color_bevel_outset_2
 
         menu_height: 27.0
         toolbar_height: 38.0
@@ -53,8 +53,8 @@ script_mod! {
         pad_2: 7.0
         pad_3: 11.0
         pad_4: 16.0
-        radius: 3.0
-        radius_large: 6.0
+        radius: theme.corner_radius
+        radius_large: theme.container_corner_radius
         font_ui: 8.5
         font_small: 7.5
         font_header: 9.2

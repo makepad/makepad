@@ -239,7 +239,7 @@ script_mod! {
         show_bg: true
         draw_bg +: {
             color: theme.flow_surface_translucent
-            border_radius: 12.0
+            border_radius: mod.theme.container_corner_radius
             border_size: 1.0
             border_color: theme.flow_surface_hover
             shadow_color: theme.flow_shadow
@@ -259,7 +259,7 @@ script_mod! {
             color_drag: theme.flow_accent
             splitter_pad: 2.0
             bar_size: 72.0
-            border_radius: 2.0
+            border_radius: mod.theme.corner_radius
         }
     }
 
@@ -282,7 +282,7 @@ script_mod! {
         show_bg: true
         draw_bg +: {
             color: theme.flow_surface
-            border_radius: 14.0
+            border_radius: mod.theme.container_corner_radius
             border_size: 1.0
             border_color: theme.flow_edge_soft
         }
@@ -380,7 +380,7 @@ script_mod! {
                                 show_bg: true
                                 draw_bg +: {
                                     color: theme.flow_surface_translucent
-                                    border_radius: 12.0
+                                    border_radius: mod.theme.container_corner_radius
                                     border_size: 1.0
                                     border_color: theme.flow_surface_hover
                                     shadow_color: theme.flow_shadow
@@ -391,7 +391,7 @@ script_mod! {
                                     width: 8
                                     height: 8
                                     draw_bg +: {
-                                        border_radius: 4.0
+                                        border_radius: mod.theme.corner_radius
                                         color: theme.flow_text_muted
                                     }
                                 }
@@ -633,7 +633,7 @@ script_mod! {
                                     color: theme.flow_surface
                                     border_color: theme.flow_edge_soft
                                     border_size: 1.0
-                                    border_radius: 14.0
+                                    border_radius: mod.theme.container_corner_radius
                                     shadow_color: theme.flow_shadow
                                     shadow_radius: 18.0
                                 }
@@ -6432,4 +6432,9 @@ fn input_value_json(ty: PortType, text: String) -> makepad_strict_json::Value {
         ("type".to_string(), Json::Str(ty.as_str().to_string())),
         payload,
     ])
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

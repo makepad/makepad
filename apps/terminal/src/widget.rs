@@ -311,14 +311,33 @@ pub struct MpTerm {
     #[rust]
     last_mouse_cell: Option<(u32, u32, u8)>,
     /// Background alpha (focused, unfocused): Omarchy's window opacity rule
-    /// "0.985 0.96", handed down by makepad-wm via MAKEPAD_TERMINAL_OPACITY. Standalone
+    /// "0.78 0.70", handed down by makepad-wm via MAKEPAD_TERMINAL_OPACITY. Standalone
     /// runs are opaque. The shared swapchain is BGRA and the compositor
     /// blends premultiplied, so the wallpaper shows through for free.
     #[rust((1.0, 1.0))]
     bg_opacity: (f32, f32),
+    #[rust] opaque_style: bool,
+    #[rust]
+    style_colors: Option<(Rgb, Rgb)>,
+    #[rust]
+    original_colors: Option<([Rgb; 16], Rgb, Rgb)>,
 }
 
-impl ScriptHook for MpTerm {}
+impl ScriptHook for MpTerm {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        self.opaque_style = matches!(desktop_style::current_style(vm), desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
+        self.style_colors = if desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
+            makepad_wm_theme::current_for_vm(vm).and_then(|p| {
+                Some((parse_hex_rgb(p.get("foreground")?)?, parse_hex_rgb(p.get("background")?)?))
+            })
+        } else { None };
+        if let (Some(session), Some((mut palette, fg, bg))) = (&mut self.session, self.original_colors) {
+            let (fg, bg) = self.style_colors.unwrap_or((fg, bg));
+            palette[0] = bg; palette[7] = fg;
+            session.terminal.set_theme(&palette, fg, bg);
+        }
+    }
+}
 
 impl MpTerm {
     /// Rows currently painted in the widget, or the last `lines` rows of
@@ -427,6 +446,10 @@ impl MpTerm {
                             session.terminal.cursor_color = Some(rgb);
                         }
                     }
+                }
+                self.original_colors = Some((base16, fg, bg));
+                if let Some((style_fg, style_bg)) = self.style_colors {
+                    fg = style_fg; bg = style_bg; base16[0] = bg; base16[7] = fg;
                 }
                 session.terminal.set_theme(&base16, fg, bg);
                 self.session = Some(session);
@@ -929,7 +952,7 @@ impl MpTerm {
         } else {
             default_bg
         };
-        let alpha = if has_focus {
+        let alpha = if self.opaque_style {1.0} else if has_focus {
             self.bg_opacity.0
         } else {
             self.bg_opacity.1

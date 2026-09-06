@@ -217,9 +217,9 @@ script_mod! {
                 // The prompt is a hint, not text: a dark grey in every state,
                 // never the typed colour (the composer is always focused).
                 draw_text +: {
-                    color_empty: #666666
-                    color_empty_hover: #777777
-                    color_empty_focus: #666666
+                    color_empty: mod.theme.color_text_disabled
+                    color_empty_hover: mod.theme.color_text_disabled
+                    color_empty_focus: mod.theme.color_text_disabled
                 }
             }
             send_button := Button{ text: "Send" }

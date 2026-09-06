@@ -40,7 +40,7 @@ script_mod! {
         spacing: 8
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: 10.0
+            border_radius: theme.container_corner_radius
             border_size: 1.0
             border_color: mod.finance.line_soft
         }
@@ -93,7 +93,7 @@ script_mod! {
             color_hover: mod.finance.raised
             color_down: mod.finance.accent_soft
             color_focus: #x00000000
-            border_radius: 6.0
+            border_radius: theme.corner_radius
             border_size: 0.0
         }
         draw_text +: {
@@ -113,7 +113,7 @@ script_mod! {
             color_hover: mod.finance.line
             color_down: mod.finance.accent_soft
             color_focus: mod.finance.raised
-            border_radius: 13.0
+            border_radius: theme.container_corner_radius
             border_size: 0.0
         }
         draw_text +: {
@@ -130,17 +130,17 @@ script_mod! {
         padding: Inset{left: 16, right: 16, top: 6, bottom: 6}
         draw_bg +: {
             color: mod.finance.accent
-            color_hover: #x5d99ff
-            color_down: #x3b7ae6
+            color_hover: mod.theme.color_focus
+            color_down: mod.theme.color_focus
             color_focus: mod.finance.accent
-            border_radius: 6.0
+            border_radius: theme.corner_radius
             border_size: 0.0
         }
         draw_text +: {
-            color: #xffffff
-            color_hover: #xffffff
-            color_down: #xffffff
-            color_focus: #xffffff
+            color: mod.theme.color_text_on_accent
+            color_hover: mod.theme.color_text_on_accent
+            color_down: mod.theme.color_text_on_accent
+            color_focus: mod.theme.color_text_on_accent
             text_style: theme.font_bold{font_size: 9.5}
         }
     }
@@ -177,7 +177,7 @@ script_mod! {
                 color_hover: mod.finance.raised
                 color_down: mod.finance.accent_soft
                 color_focus: #x00000000
-                border_radius: 6.0
+                border_radius: theme.corner_radius
                 border_size: 0.0
             }
         }
@@ -225,16 +225,16 @@ script_mod! {
         // invisible on a dark surface.
         scroll_bar_h: mod.widgets.ScrollBar{
             draw_bg +: {
-                color: uniform(#xffffff26)
-                color_hover: uniform(#xffffff42)
-                color_drag: uniform(#xffffff66)
+                color: uniform(mod.theme.color_bevel_inset_2)
+                color_hover: uniform(mod.theme.color_text_disabled)
+                color_drag: uniform(mod.theme.color_text)
             }
         }
         scroll_bar_v: mod.widgets.ScrollBar{
             draw_bg +: {
-                color: uniform(#xffffff26)
-                color_hover: uniform(#xffffff42)
-                color_drag: uniform(#xffffff66)
+                color: uniform(mod.theme.color_bevel_inset_2)
+                color_hover: uniform(mod.theme.color_text_disabled)
+                color_drag: uniform(mod.theme.color_text)
             }
         }
         draw_cell +: {
@@ -282,7 +282,7 @@ script_mod! {
         spacing: 6
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: 10.0
+            border_radius: theme.container_corner_radius
             border_size: 1.0
             border_color: mod.finance.line_soft
         }

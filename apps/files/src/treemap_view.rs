@@ -3093,7 +3093,7 @@ impl TreemapView {
 impl Widget for TreemapView {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle(walk);
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         self.draw_bg.color = Palette::vec4(&palette.bg);
         self.draw_bg.draw_abs(cx, rect);
         if rect.size.x < 40.0 || rect.size.y < CRUMB_H + FOOT_H + 20.0 {
