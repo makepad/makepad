@@ -1,0 +1,18 @@
+# clock — a small Makepad app with two resident faces: the full clock with a
+# stopwatch and a countdown, and a compact home-widget tile. The WM picks the
+# face on the same window/swapchain via `HostedView`; one process, one model.
+
+[package]
+name = "makepad-clock"
+version = "0.1.0"
+edition = "2021"
+default-run = "clock"
+
+[[bin]]
+name = "clock"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
