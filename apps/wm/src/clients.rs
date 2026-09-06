@@ -29,7 +29,7 @@ use crate::host;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool};
+use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 use makepad_widgets::Cx;
 
 use crate::hub::ClientId;
@@ -823,13 +823,19 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// Read a child stream line by line into the log file and the UI channel.
 fn pump<R: std::io::Read + Send + 'static>(
-    pool: &TaskPool,
+    spawner: &ThreadSpawner,
     client: ClientId,
     stream: R,
     mut log: Option<std::fs::File>,
     lines: Sender<ClientLine>,
 ) {
-    let submitted = pool.submit(Lane::Heavy, move || {
+    // Each pipe lives for the child's entire lifetime. A blocking reader
+    // must not occupy a finite pool worker: enough open apps would starve
+    // new compile logs and even process cleanup.
+    let submitted = spawner.spawn_worker(ThreadOptions {
+        name: Some(format!("wm-client-{client}-output").into()),
+        ..Default::default()
+    }, move || {
         use std::io::{BufRead, BufReader, Write};
         let reader = BufReader::new(stream);
         for line in reader.lines() {
@@ -908,6 +914,7 @@ pub fn launch_argv(
 /// Spawn an app as a hub client.
 pub fn spawn_client(
     pool: &TaskPool,
+    spawner: &ThreadSpawner,
     app: &AppDef,
     id: ClientId,
     hub_port: u16,
@@ -981,10 +988,10 @@ pub fn spawn_client(
     let log_path = host::homeless_root().join(format!("wm-client-{}.log", id));
     let log = std::fs::File::create(&log_path).ok();
     if let Some(out) = child.stdout.take() {
-        pump(pool, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
+        pump(spawner, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
     }
     if let Some(err) = child.stderr.take() {
-        pump(pool, id, err, log, lines);
+        pump(spawner, id, err, log, lines);
     }
     Ok(ClientSlot {
         id,

@@ -185,6 +185,7 @@ pub fn app_for_request(req: &OpenRequest) -> Option<(AppDef, Vec<String>)> {
 /// Spawn the app for a request. Returns the new client slot.
 pub fn spawn_for_request(
     pool: &makepad_widgets::makepad_platform::thread::TaskPool,
+    spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner,
     req: &OpenRequest,
     id: ClientId,
     hub_port: u16,
@@ -195,7 +196,7 @@ pub fn spawn_for_request(
     // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
     // (`PreviewCache`), which keeps a viewer alive between panels rather
     // than standing one by before the first.
-    spawn_client(pool, &app, id, hub_port, None, None, &extra, false, lines)
+    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, lines)
 }
 
 #[cfg(test)]
