@@ -443,11 +443,13 @@ impl TipLayer {
 
 impl Widget for TipLayer {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        // The layer's own turtle claims the window rect (for clamping);
-        // the tip itself draws on the OVERLAY draw list so it floats over
-        // every sibling panel.
+        // The layer's own turtle gives the origin its overlay pass is
+        // shifted FROM. It is not the room a tip has to fit in: a layer
+        // declared as the last child of a page gets whatever space is left
+        // at the bottom of it, and clamping tips to that strip drags every
+        // one of them down there. The room is the pass, below.
         cx.begin_turtle(walk, Layout::default());
-        let window = cx.turtle().rect();
+        let origin = cx.turtle().rect().pos;
         cx.end_turtle_with_area(&mut self.area);
         let Some(tip) = self.showing.clone() else {
             return DrawStep::done();
@@ -535,13 +537,15 @@ impl Widget for TipLayer {
         }
         // One placement helper, the same one every anchored popup uses:
         // the wanted side, flipped when there is no room, shifted to stay
-        // inside the window.
+        // inside the window. The room is the WHOLE PASS, which is what a
+        // tooltip may cover, and it is the space the anchor rects are
+        // measured in.
         let placed = place(&PlaceRequest {
             anchor,
             size: dvec2(w, h),
             bounds: Rect {
-                pos: dvec2(window.pos.x + 2.0, window.pos.y + 2.0),
-                size: dvec2(window.size.x - 4.0, window.size.y - 4.0),
+                pos: dvec2(2.0, 2.0),
+                size: dvec2(pass.x - 4.0, pass.y - 4.0),
             },
             gap: TIP_GAP,
             placement: tip.place.placement(),
@@ -590,7 +594,7 @@ impl Widget for TipLayer {
         }
         self.draw_bg.color = rest_bg;
         self.draw_text.color = rest_ink;
-        cx.end_pass_sized_turtle_with_shift(self.area, placed.rect.pos - window.pos);
+        cx.end_pass_sized_turtle_with_shift(self.area, placed.rect.pos - origin);
         draw_list.end(cx);
         DrawStep::done()
     }
