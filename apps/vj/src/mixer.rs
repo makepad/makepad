@@ -1981,6 +1981,86 @@ const MAX_SFX_VOICES: usize = 64;
 /// Every change the UI can ask of the audio state. Payloads are moved in
 /// whole; the audio thread never allocates for one and never frees one —
 /// what a command replaces comes back to the UI as a [`Retired`] payload.
+/// One effect parameter, on its way to the audio thread.
+///
+/// ONE command variant carries all of these rather than seventy of their
+/// own. They are all the same shape -- a deck, a slot, a number -- and
+/// seventy variants would be seventy places to forget when a slot gains a
+/// knob. Small and `Copy`, so the ring moves it by value.
+#[derive(Clone, Copy, Debug)]
+pub enum EffectParam {
+    Resonance(f32),
+    EchoFeedback(f32),
+    EchoPingpong(bool),
+    Flanger(bool),
+    FlangerRate(f32),
+    FlangerDepth(f32),
+    FlangerFeedback(f32),
+    FlangerSyncUnits(u32),
+    FlangerBeatOffset(f32),
+    Bitcrusher(bool),
+    BitcrusherRate(f32),
+    BitcrusherBits(f32),
+    Tremolo(bool),
+    TremoloRate(f32),
+    TremoloDepth(f32),
+    TremoloSyncUnits(u32),
+    TremoloBeatOffset(f32),
+    Distortion(bool),
+    DistortionDrive(f32),
+    Phaser(bool),
+    PhaserRate(f32),
+    PhaserFeedback(f32),
+    PhaserSyncUnits(u32),
+    PhaserBeatOffset(f32),
+    Autopan(bool),
+    Compressor(bool),
+    CompressorThreshold(f32),
+    CompressorRatio(f32),
+    AutopanRate(f32),
+    EchoMix(f32),
+    EchoLevelMode(LevelMode),
+    EchoCeiling(f32),
+    FlangerMix(f32),
+    FlangerLevelMode(LevelMode),
+    FlangerCeiling(f32),
+    BitcrusherMix(f32),
+    BitcrusherLevelMode(LevelMode),
+    BitcrusherCeiling(f32),
+    TremoloMix(f32),
+    TremoloLevelMode(LevelMode),
+    TremoloCeiling(f32),
+    DistortionMix(f32),
+    DistortionLevelMode(LevelMode),
+    DistortionCeiling(f32),
+    PhaserMix(f32),
+    PhaserLevelMode(LevelMode),
+    PhaserCeiling(f32),
+    AutopanMix(f32),
+    AutopanLevelMode(LevelMode),
+    AutopanCeiling(f32),
+    StereoWidthMix(f32),
+    StereoWidthLevelMode(LevelMode),
+    StereoWidthCeiling(f32),
+    PlateReverbMix(f32),
+    PlateReverbLevelMode(LevelMode),
+    PlateReverbCeiling(f32),
+    MoogLadderMix(f32),
+    MoogLadderLevelMode(LevelMode),
+    MoogLadderCeiling(f32),
+    LevelDefault(LevelMode),
+    AutopanSyncUnits(u32),
+    AutopanBeatOffset(f32),
+    StereoWidth(bool),
+    StereoWidthAmount(f32),
+    PlateReverb(bool),
+    PlateReverbSize(f32),
+    MoogLadder(bool),
+    MoogLadderCutoff(f32),
+    MoogLadderResonance(f32),
+    Crossovers(f32, f32),
+}
+
 pub enum MixCmd {
     OpenSlot(SlotId),
     CloseSlot(SlotId),
@@ -2017,6 +2097,9 @@ pub enum MixCmd {
     SetLoopSpan { deck: DeckId, span: Option<(f64, f64)> },
     SetMute { deck: DeckId, muted: bool },
     SetGain { deck: DeckId, gain: f32 },
+    /// One knob on one slot of a deck's effect chain. See
+    /// [`EffectParam`] for why they share a variant.
+    DeckEffect { deck: DeckId, param: EffectParam },
     SwapDecks,
     SetCrossfader { position: f32, secs: f32 },
     SetBlendBand { deck: DeckId, band: usize, gain: f32 },
@@ -2909,6 +2992,496 @@ impl Mixer {
         self.run_cmd(MixCmd::SetMute { deck, muted });
     }
 
+    pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Resonance(lift),
+        });
+    }
+
+    pub fn set_deck_echo_feedback(&self, deck: DeckId, feedback: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::EchoFeedback(feedback),
+        });
+    }
+
+    pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::EchoPingpong(on),
+        });
+    }
+
+    pub fn set_deck_flanger(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Flanger(on),
+        });
+    }
+
+    pub fn set_deck_flanger_rate(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerRate(hz),
+        });
+    }
+
+    pub fn set_deck_flanger_depth(&self, deck: DeckId, depth: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerDepth(depth),
+        });
+    }
+
+    pub fn set_deck_flanger_feedback(&self, deck: DeckId, feedback: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerFeedback(feedback),
+        });
+    }
+
+    pub fn set_deck_flanger_sync_units(&self, deck: DeckId, units: u32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerSyncUnits(units),
+        });
+    }
+
+    pub fn set_deck_flanger_beat_offset(&self, deck: DeckId, offset: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerBeatOffset(offset),
+        });
+    }
+
+    pub fn set_deck_bitcrusher(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Bitcrusher(on),
+        });
+    }
+
+    pub fn set_deck_bitcrusher_rate(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::BitcrusherRate(hz),
+        });
+    }
+
+    pub fn set_deck_bitcrusher_bits(&self, deck: DeckId, bits: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::BitcrusherBits(bits),
+        });
+    }
+
+    pub fn set_deck_tremolo(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Tremolo(on),
+        });
+    }
+
+    pub fn set_deck_tremolo_rate(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloRate(hz),
+        });
+    }
+
+    pub fn set_deck_tremolo_depth(&self, deck: DeckId, depth: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloDepth(depth),
+        });
+    }
+
+    pub fn set_deck_tremolo_sync_units(&self, deck: DeckId, units: u32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloSyncUnits(units),
+        });
+    }
+
+    pub fn set_deck_tremolo_beat_offset(&self, deck: DeckId, offset: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloBeatOffset(offset),
+        });
+    }
+
+    pub fn set_deck_distortion(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Distortion(on),
+        });
+    }
+
+    pub fn set_deck_distortion_drive(&self, deck: DeckId, drive: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::DistortionDrive(drive),
+        });
+    }
+
+    pub fn set_deck_phaser(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Phaser(on),
+        });
+    }
+
+    pub fn set_deck_phaser_rate(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserRate(hz),
+        });
+    }
+
+    pub fn set_deck_phaser_feedback(&self, deck: DeckId, feedback: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserFeedback(feedback),
+        });
+    }
+
+    pub fn set_deck_phaser_sync_units(&self, deck: DeckId, units: u32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserSyncUnits(units),
+        });
+    }
+
+    pub fn set_deck_phaser_beat_offset(&self, deck: DeckId, offset: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserBeatOffset(offset),
+        });
+    }
+
+    pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Autopan(on),
+        });
+    }
+
+    pub fn set_deck_compressor(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Compressor(on),
+        });
+    }
+
+    pub fn set_deck_compressor_threshold(&self, deck: DeckId, db: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::CompressorThreshold(db),
+        });
+    }
+
+    pub fn set_deck_compressor_ratio(&self, deck: DeckId, ratio: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::CompressorRatio(ratio),
+        });
+    }
+
+    pub fn set_deck_autopan_rate(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanRate(hz),
+        });
+    }
+
+    pub fn set_deck_echo_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::EchoMix(mix),
+        });
+    }
+
+    pub fn set_deck_echo_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::EchoLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_echo_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::EchoCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_flanger_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerMix(mix),
+        });
+    }
+
+    pub fn set_deck_flanger_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_flanger_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::FlangerCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_bitcrusher_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::BitcrusherMix(mix),
+        });
+    }
+
+    pub fn set_deck_bitcrusher_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::BitcrusherLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_bitcrusher_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::BitcrusherCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_tremolo_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloMix(mix),
+        });
+    }
+
+    pub fn set_deck_tremolo_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_tremolo_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::TremoloCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_distortion_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::DistortionMix(mix),
+        });
+    }
+
+    pub fn set_deck_distortion_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::DistortionLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_distortion_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::DistortionCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_phaser_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserMix(mix),
+        });
+    }
+
+    pub fn set_deck_phaser_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_phaser_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PhaserCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_autopan_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanMix(mix),
+        });
+    }
+
+    pub fn set_deck_autopan_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_autopan_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_stereo_width_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::StereoWidthMix(mix),
+        });
+    }
+
+    pub fn set_deck_stereo_width_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::StereoWidthLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_stereo_width_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::StereoWidthCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_plate_reverb_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PlateReverbMix(mix),
+        });
+    }
+
+    pub fn set_deck_plate_reverb_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PlateReverbLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_plate_reverb_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PlateReverbCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_moog_ladder_mix(&self, deck: DeckId, mix: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadderMix(mix),
+        });
+    }
+
+    pub fn set_deck_moog_ladder_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadderLevelMode(mode),
+        });
+    }
+
+    pub fn set_deck_moog_ladder_ceiling(&self, deck: DeckId, ceiling: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadderCeiling(ceiling),
+        });
+    }
+
+    pub fn set_deck_level_default(&self, deck: DeckId, mode: LevelMode) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::LevelDefault(mode),
+        });
+    }
+
+    pub fn set_deck_autopan_sync_units(&self, deck: DeckId, units: u32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanSyncUnits(units),
+        });
+    }
+
+    pub fn set_deck_autopan_beat_offset(&self, deck: DeckId, offset: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::AutopanBeatOffset(offset),
+        });
+    }
+
+    pub fn set_deck_stereo_width(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::StereoWidth(on),
+        });
+    }
+
+    pub fn set_deck_stereo_width_amount(&self, deck: DeckId, width: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::StereoWidthAmount(width),
+        });
+    }
+
+    pub fn set_deck_plate_reverb(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PlateReverb(on),
+        });
+    }
+
+    pub fn set_deck_plate_reverb_size(&self, deck: DeckId, size: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::PlateReverbSize(size),
+        });
+    }
+
+    pub fn set_deck_moog_ladder(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadder(on),
+        });
+    }
+
+    pub fn set_deck_moog_ladder_cutoff(&self, deck: DeckId, hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadderCutoff(hz),
+        });
+    }
+
+    pub fn set_deck_moog_ladder_resonance(&self, deck: DeckId, resonance: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::MoogLadderResonance(resonance),
+        });
+    }
+
+    pub fn set_deck_crossovers(&self, deck: DeckId, low_hz: f32, high_hz: f32) {
+        self.run_cmd(MixCmd::DeckEffect {
+            deck,
+            param: EffectParam::Crossovers(low_hz, high_hz),
+        });
+    }
+
     pub fn set_deck_gain(&self, deck: DeckId, gain: f32) {
         self.run_cmd(MixCmd::SetGain { deck, gain });
     }
@@ -3269,6 +3842,83 @@ impl MixEngine {
         &mut self.state
     }
 
+    /// Apply one effect parameter to a chain. The bodies are exactly what
+    /// the old locked setters ran; only the way they arrive has changed.
+    fn apply_effect(chain: &mut DeckChain, param: EffectParam) {
+        match param {
+            EffectParam::Resonance(lift) => chain.eq_mut().set_resonance(lift),
+            EffectParam::EchoFeedback(feedback) => chain.echo_mut().set_feedback(feedback),
+            EffectParam::EchoPingpong(on) => chain.echo_mut().set_pingpong(on),
+            EffectParam::Flanger(on) => chain.flanger_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::FlangerRate(hz) => chain.flanger_mut().set_rate(hz),
+            EffectParam::FlangerDepth(depth) => chain.flanger_mut().set_depth(depth),
+            EffectParam::FlangerFeedback(feedback) => chain.flanger_mut().set_feedback(feedback),
+            EffectParam::FlangerSyncUnits(units) => chain.flanger_mut().set_sync_units(units),
+            EffectParam::FlangerBeatOffset(offset) => chain.flanger_mut().set_beat_offset(offset),
+            EffectParam::Bitcrusher(on) => chain.bitcrusher_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::BitcrusherRate(hz) => chain.bitcrusher_mut().set_rate(hz),
+            EffectParam::BitcrusherBits(bits) => chain.bitcrusher_mut().set_bits(bits),
+            EffectParam::Tremolo(on) => chain.tremolo_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::TremoloRate(hz) => chain.tremolo_mut().set_rate(hz),
+            EffectParam::TremoloDepth(depth) => chain.tremolo_mut().set_depth(depth),
+            EffectParam::TremoloSyncUnits(units) => chain.tremolo_mut().set_sync_units(units),
+            EffectParam::TremoloBeatOffset(offset) => chain.tremolo_mut().set_beat_offset(offset),
+            EffectParam::Distortion(on) => chain.distortion_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::DistortionDrive(drive) => chain.distortion_mut().set_drive(drive),
+            EffectParam::Phaser(on) => chain.phaser_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::PhaserRate(hz) => chain.phaser_mut().set_rate(hz),
+            EffectParam::PhaserFeedback(feedback) => chain.phaser_mut().set_feedback(feedback),
+            EffectParam::PhaserSyncUnits(units) => chain.phaser_mut().set_sync_units(units),
+            EffectParam::PhaserBeatOffset(offset) => chain.phaser_mut().set_beat_offset(offset),
+            EffectParam::Autopan(on) => chain.autopan_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::Compressor(on) => chain.compressor_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::CompressorThreshold(db) => chain.compressor_mut().set_threshold_db(db),
+            EffectParam::CompressorRatio(ratio) => chain.compressor_mut().set_ratio(ratio),
+            EffectParam::AutopanRate(hz) => chain.autopan_mut().set_rate(hz),
+            EffectParam::EchoMix(mix) => chain.level_mut(2).set_mix(mix),
+            EffectParam::EchoLevelMode(mode) => chain.level_mut(2).set_mode(mode),
+            EffectParam::EchoCeiling(ceiling) => chain.level_mut(2).set_ceiling(ceiling),
+            EffectParam::FlangerMix(mix) => chain.level_mut(3).set_mix(mix),
+            EffectParam::FlangerLevelMode(mode) => chain.level_mut(3).set_mode(mode),
+            EffectParam::FlangerCeiling(ceiling) => chain.level_mut(3).set_ceiling(ceiling),
+            EffectParam::BitcrusherMix(mix) => chain.level_mut(4).set_mix(mix),
+            EffectParam::BitcrusherLevelMode(mode) => chain.level_mut(4).set_mode(mode),
+            EffectParam::BitcrusherCeiling(ceiling) => chain.level_mut(4).set_ceiling(ceiling),
+            EffectParam::TremoloMix(mix) => chain.level_mut(5).set_mix(mix),
+            EffectParam::TremoloLevelMode(mode) => chain.level_mut(5).set_mode(mode),
+            EffectParam::TremoloCeiling(ceiling) => chain.level_mut(5).set_ceiling(ceiling),
+            EffectParam::DistortionMix(mix) => chain.level_mut(6).set_mix(mix),
+            EffectParam::DistortionLevelMode(mode) => chain.level_mut(6).set_mode(mode),
+            EffectParam::DistortionCeiling(ceiling) => chain.level_mut(6).set_ceiling(ceiling),
+            EffectParam::PhaserMix(mix) => chain.level_mut(7).set_mix(mix),
+            EffectParam::PhaserLevelMode(mode) => chain.level_mut(7).set_mode(mode),
+            EffectParam::PhaserCeiling(ceiling) => chain.level_mut(7).set_ceiling(ceiling),
+            EffectParam::AutopanMix(mix) => chain.level_mut(8).set_mix(mix),
+            EffectParam::AutopanLevelMode(mode) => chain.level_mut(8).set_mode(mode),
+            EffectParam::AutopanCeiling(ceiling) => chain.level_mut(8).set_ceiling(ceiling),
+            EffectParam::StereoWidthMix(mix) => chain.level_mut(9).set_mix(mix),
+            EffectParam::StereoWidthLevelMode(mode) => chain.level_mut(9).set_mode(mode),
+            EffectParam::StereoWidthCeiling(ceiling) => chain.level_mut(9).set_ceiling(ceiling),
+            EffectParam::PlateReverbMix(mix) => chain.level_mut(10).set_mix(mix),
+            EffectParam::PlateReverbLevelMode(mode) => chain.level_mut(10).set_mode(mode),
+            EffectParam::PlateReverbCeiling(ceiling) => chain.level_mut(10).set_ceiling(ceiling),
+            EffectParam::MoogLadderMix(mix) => chain.level_mut(11).set_mix(mix),
+            EffectParam::MoogLadderLevelMode(mode) => chain.level_mut(11).set_mode(mode),
+            EffectParam::MoogLadderCeiling(ceiling) => chain.level_mut(11).set_ceiling(ceiling),
+            EffectParam::LevelDefault(mode) => chain.set_level_default(mode),
+            EffectParam::AutopanSyncUnits(units) => chain.autopan_mut().set_sync_units(units),
+            EffectParam::AutopanBeatOffset(offset) => chain.autopan_mut().set_beat_offset(offset),
+            EffectParam::StereoWidth(on) => chain.stereo_width_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::StereoWidthAmount(width) => chain.stereo_width_mut().set_width(width),
+            EffectParam::PlateReverb(on) => chain.plate_reverb_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::PlateReverbSize(size) => chain.plate_reverb_mut().set_size(size),
+            EffectParam::MoogLadder(on) => chain.moog_ladder_mut().set_wet(if on { 1.0 } else { 0.0 }),
+            EffectParam::MoogLadderCutoff(hz) => chain.moog_ladder_mut().set_cutoff(hz),
+            EffectParam::MoogLadderResonance(resonance) => chain.moog_ladder_mut().set_resonance(resonance),
+            EffectParam::Crossovers(low_hz, high_hz) => chain.eq_mut().set_crossovers(low_hz, high_hz),
+        }
+    }
+
     fn apply(&mut self, cmd: MixCmd) {
         let shared = &*self.shared;
         let s = &mut self.state;
@@ -3572,6 +4222,9 @@ impl MixEngine {
                     ScratchMotion::Move { secs, rate } => d.scratch.drag(secs, rate),
                     ScratchMotion::Release => d.scratch.release(deck_rate),
                 }
+            }
+            MixCmd::DeckEffect { deck, param } => {
+                Self::apply_effect(&mut s.decks[deck.index()].chain, param)
             }
             MixCmd::SetEqBand { deck, band, gain } => {
                 s.decks[deck.index()].chain.eq_mut().set_band(band, gain)
