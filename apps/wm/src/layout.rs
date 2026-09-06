@@ -268,6 +268,7 @@ pub struct Workspace {
 }
 
 pub struct WmLayout {
+    pub desktop: crate::desktop_layout::DesktopWindows,
     nodes: Vec<Option<Node>>,
     free: Vec<usize>,
     /// `WORKSPACES` numbered workspaces plus the scratchpad at `SCRATCHPAD`.
@@ -308,6 +309,7 @@ impl Default for WmLayout {
 impl WmLayout {
     pub fn new() -> Self {
         Self {
+            desktop: Default::default(),
             nodes: Vec::new(),
             free: Vec::new(),
             workspaces: (0..WORKSPACES + 1).map(|_| Workspace::default()).collect(),
@@ -364,7 +366,7 @@ impl WmLayout {
         let ws = self.focus_ws();
         // The fallback skips a Quick-Look panel: it is never what the
         // keyboard should land on, even when it is the only thing here.
-        self.workspaces[ws].focus.or_else(|| {
+        self.workspaces[ws].focus.filter(|c|self.takes_key_focus(*c)).or_else(|| {
             self.clients_on(ws)
                 .into_iter()
                 .find(|c| self.takes_key_focus(*c))
@@ -505,7 +507,8 @@ impl WmLayout {
     }
 
     pub fn insert_on(&mut self, ws: usize, client: ClientId, area: LRect, gap: f64) {
-        self.insert_at(ws, client, area, gap, true);
+        self.desktop.ensure(client, area);
+        self.insert_at(ws, client, area, gap, !self.desktop.enabled);
     }
 
     /// `auto_group = false` forces a real split even when the target slot
@@ -651,6 +654,7 @@ impl WmLayout {
     }
 
     pub fn remove(&mut self, client: ClientId) {
+        self.desktop.windows.retain(|w| w.client != client);
         self.focus_history.retain(|c| *c != client);
         self.tile_origin.retain(|(c, _)| *c != client);
         self.floats.retain(|f| f.client != client);
@@ -710,6 +714,19 @@ impl WmLayout {
     }
 
     pub fn rects_of(&self, ws: usize, area: LRect, gap: f64) -> Vec<(ClientId, LRect)> {
+        if self.desktop.enabled && ws < WORKSPACES {
+            let clients = self.clients_on(ws);
+            let mut out = self.desktop.rects(&clients, area);
+            // Native preview floats keep their explicit geometry and focus policy.
+            for f in &self.floats {
+                if (f.ws == ws || f.pinned) && !self.desktop.minimized(f.client) && (f.pinned || self.desktop.get(f.client).is_none()) {
+                    out.retain(|(c, _)| *c != f.client);
+                    out.push((f.client, f.rect));
+                }
+            }
+            if self.scratchpad_open && ws == self.active { self.scratchpad_rects(area, gap, &mut out); }
+            return out;
+        }
         let mut out = Vec::new();
         let workspace = &self.workspaces[ws];
         match (workspace.fullscreen, workspace.fullscreen_mode) {
@@ -1095,6 +1112,7 @@ impl WmLayout {
     /// The deepest divider band containing a point on the active
     /// workspace, or None.
     pub fn divider_at(&self, x: f64, y: f64, area: LRect, gap: f64) -> Option<DividerHit> {
+        if self.desktop.enabled { return None; }
         self.divider_at_on(self.active, x, y, area, gap)
     }
 
@@ -1181,6 +1199,7 @@ impl WmLayout {
     // ------------------------------------------------------------------
 
     pub fn is_float(&self, client: ClientId) -> bool {
+        if self.desktop.enabled && self.desktop.get(client).is_some() { return true; }
         self.floats.iter().any(|f| f.client == client)
     }
 
@@ -1189,6 +1208,7 @@ impl WmLayout {
     }
 
     pub fn float_rect(&self, client: ClientId) -> Option<LRect> {
+        if self.desktop.enabled { if let Some(w) = self.desktop.get(client) { return Some(w.rect); } }
         self.floats
             .iter()
             .find(|f| f.client == client)
@@ -1196,6 +1216,7 @@ impl WmLayout {
     }
 
     pub fn set_float_rect(&mut self, client: ClientId, rect: LRect) {
+        if self.desktop.enabled { if let Some(w) = self.desktop.get_mut(client) { w.rect = rect; w.maximized = false; return; } }
         if let Some(f) = self.floats.iter_mut().find(|f| f.client == client) {
             f.rect = rect;
         }
@@ -1207,6 +1228,7 @@ impl WmLayout {
 
     /// Raise a float to the top of the stack (`alterzorder top`).
     pub fn raise_float(&mut self, client: ClientId) {
+        if self.desktop.enabled { self.desktop.raise(client); }
         if let Some(i) = self.floats.iter().position(|f| f.client == client) {
             let entry = self.floats.remove(i);
             self.floats.push(entry);
@@ -1254,6 +1276,7 @@ impl WmLayout {
 
     /// False only for a Quick-Look panel (`add_preview_float`).
     pub fn takes_key_focus(&self, client: ClientId) -> bool {
+        if self.desktop.minimized(client) { return false; }
         !self
             .floats
             .iter()
@@ -1432,6 +1455,12 @@ impl WmLayout {
     /// SUPER+F / SUPER+ALT+F. Toggling the same mode clears it; a different
     /// mode replaces it.
     pub fn toggle_fullscreen_mode(&mut self, mode: FullscreenMode) {
+        if self.desktop.enabled {
+            if let Some(client) = self.focused_client() {
+                if let Some(w) = self.desktop.get_mut(client) { w.maximized = !w.maximized; }
+            }
+            return;
+        }
         let ws = self.focus_ws();
         let Some(focus) = self.focused_client() else {
             return;

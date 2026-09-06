@@ -50,6 +50,7 @@ pub struct ModuleHost {
     instances: HashMap<ClientId, AppInstance>,
     next_scope: u64,
     per_app: HashMap<String, u64>,
+    style: Option<desktop_style::StyleSheet>,
 }
 
 impl ModuleHost {
@@ -82,6 +83,10 @@ impl ModuleHost {
         let parts = cx.with_script_vm_id_trusted(vm_id, |vm| {
             // The isolate came up with the stock theme; the WM's palette
             // retints it exactly as it retints a child process's.
+            if let Some(sheet)=&self.style {
+                desktop_style::install(vm,sheet.clone());
+                vm.with_reload(|vm| { makepad_widgets::widgets_mod(vm); desktop_style::apply_widgets(vm); });
+            }
             makepad_wm_theme::apply(vm);
             module.register(vm);
             module.create(vm, open, handles)
@@ -109,6 +114,24 @@ impl ModuleHost {
             },
         );
         Ok(())
+    }
+
+    pub fn apply_style(&mut self,cx:&mut Cx,sheet:&desktop_style::StyleSheet) {
+        self.style=Some(sheet.clone());
+        for instance in self.instances.values_mut() {
+            cx.with_script_vm_id_trusted(instance.vm_id,|vm| {
+                desktop_style::install(vm,sheet.clone());
+                vm.with_reload(|vm| {
+                    makepad_widgets::widgets_mod(vm);
+                    desktop_style::apply_widgets(vm);
+                    makepad_wm_theme::apply(vm);
+                    instance.module.register(vm);
+                });
+                let source=instance.root.widget_type_id().and_then(|ty|vm.bx.heap.type_default_for_id(ty)).unwrap_or_else(||instance.root.script_source());
+                instance.root.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
+            });
+            instance.root.redraw(cx);
+        }
     }
 
     pub fn is_module(&self, client: ClientId) -> bool {
@@ -191,5 +214,31 @@ impl ModuleHost {
         cx.free_splash_vm(vm_id);
         log!("wm: module instance {label} torn down; isolate {vm_id:?} freed");
         true
+    }
+}
+
+#[cfg(all(test, feature="app-sheets"))]
+mod style_tests {
+    use super::*;
+    #[test]
+    fn module_restyle_updates_custom_roles_and_keeps_instance() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let mut host=ModuleHost::default();
+        let module=&makepad_sheets::module::SHEETS_MODULE;
+        let open=module.open_schema().validate("{}", &[]).unwrap();
+        host.create(&mut cx,1,module,open,dvec2(900.0,700.0)).unwrap();
+        let uid=host.get(1).unwrap().root.widget_uid();
+        host.apply_style(&mut cx,&desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
+        let instance=host.get(1).unwrap();
+        assert_eq!(instance.root.widget_uid(),uid);
+        cx.with_script_vm_id_trusted(instance.vm_id,|vm| {
+            let palette=makepad_wm_theme::current_for_vm(vm).unwrap();
+            assert_eq!(palette.get("background"),Some("#ececec"));
+            let sheets=vm.module(id!(sheets));
+            assert_eq!(vm.bx.heap.value(sheets,id!(bg).into(),NoTrap).as_color(),Some(0xecececff));
+            assert!(vm.take_errors().is_empty());
+        });
+        host.teardown(&mut cx,1);
     }
 }

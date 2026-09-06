@@ -83,32 +83,9 @@ script_mod! {
                 return fb * self.fade
             }
         }
-        no_fb_view: RectView {
+        no_fb_view: Splash {
             width: Fill
             height: Fill
-            draw_bg +: {
-                color: #0000
-            }
-            View {
-                width: Fill
-                height: Fill
-                flow: Down
-                spacing: 6
-                align: Align {x: 0.5 y: 0.5}
-                placeholder := Label {
-                    text: "starting…"
-                    draw_text.color: #x565f89
-                    draw_text.text_style.font_size: 11.0
-                }
-                // The child's newest stdout/stderr line — cargo's
-                // "Compiling …" while it builds. One line, a step dimmer.
-                status_line := Label {
-                    text: ""
-                    draw_text.color: #x3b4261
-                    draw_text.text_style: theme.font_code
-                    draw_text.text_style.font_size: 9.0
-                }
-            }
         }
     }
 }
@@ -193,6 +170,12 @@ pub struct MpRunView {
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
+    #[rust]
+    startup_initialized: bool,
+    #[rust] startup_glass: bool,
+    #[rust] startup_glass_applied: Option<bool>,
+    #[rust]
+    startup_app: String,
     /// While closing: this quad's place inside the ORIGINAL tile rect
     /// (normalized origin + span), so the frozen frame stays screen-fixed
     /// and the shrinking quad merely crops it.
@@ -531,7 +514,9 @@ impl MpRunView {
             })
             .unwrap_or(true);
 
-        let rect_changed = self.last_rect != rect || self.last_dpi_factor != dpi_factor;
+        // Child coordinates stay local. A desktop translation does not resize
+        // the app or replace its shared framebuffer.
+        let rect_changed = self.last_rect.size != rect.size || self.last_dpi_factor != dpi_factor;
         if needs_new_swapchain {
             if self.last_swapchain_with_completed_draws.is_none() {
                 self.last_swapchain_with_completed_draws = self.swapchain.take();
@@ -735,6 +720,21 @@ impl MpRunView {
         self.redraw(cx);
     }
 
+    pub fn set_startup_style(&mut self, cx: &mut Cx, sheet: &desktop_style::StyleSheet) {
+        self.startup_glass = sheet.name.starts_with("macos");
+        self.startup_glass_applied = None;
+        if let Some(mut splash) = self.no_fb_view.borrow_mut::<Splash>() {
+            splash.set_stylesheet(cx, sheet.clone());
+        }
+    }
+
+    pub fn set_startup_app(&mut self, app: &str) {
+        if self.startup_app != app {
+            self.startup_app.clear();
+            self.startup_app.push_str(app);
+        }
+    }
+
     /// Keep the tail — that is where the crate name is.
     fn trimmed_status(&self, width: f64) -> String {
         // The code font at 9pt is about 7 logical px per character.
@@ -774,7 +774,7 @@ impl MpRunView {
 impl Widget for MpRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
-        let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
+        let rect = cx.walk_turtle(walk).dpi_snap(1.0 / dpi_factor);
         // Only the "starting…" state gets a backdrop; a presented frame is
         // composited straight over the wallpaper so translucent children
         // (Omarchy's 0.985/0.96 window opacity) show it through.
@@ -796,7 +796,9 @@ impl Widget for MpRunView {
             }
         }
 
-        let waiting_for_framebuffer = target.is_some() && self.present_ok_count == 0;
+        // A cargo build has no protocol target yet. Its launch panel must
+        // still be visible before the application connects.
+        let waiting_for_framebuffer = self.present_ok_count == 0;
         if waiting_for_framebuffer {
             self.redraw(cx);
         } else if self.redraw_countdown > 0 {
@@ -843,21 +845,52 @@ impl Widget for MpRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(fade), &[self.fade * first_fade]);
-        self.draw_app.draw_abs(cx, rect);
-
-        if waiting_for_framebuffer {
+        if waiting_for_framebuffer || first_fade < 1.0 {
+            if !self.startup_initialized {
+                self.startup_initialized = true;
+                self.no_fb_view.set_text(cx, include_str!("../resources/startup.splash"));
+            }
+            let headline = if self.status_line.starts_with("compiling ") {
+                "Compiling…"
+            } else if self.status_line.starts_with("waiting for another build") {
+                "Waiting to compile…"
+            } else if self.status_line.starts_with("build failed") {
+                "Could not build application"
+            } else { "Starting…" };
+            self.no_fb_view.label(cx, ids!(placeholder)).set_text(cx, headline);
             let status = self.trimmed_status(rect.size.x);
             self.no_fb_view
                 .label(cx, ids!(status_line))
                 .set_text(cx, &status);
+            if let Some(mut icon) = self.no_fb_view.widget(cx, ids!(startup_icon)).borrow_mut::<app_icon::AppIcon>() {
+                icon.set_name(cx, if self.startup_app.is_empty() {"app"} else {&self.startup_app});
+            }
             self.no_fb_view.draw_walk_all(cx, scope, Walk::abs_rect(rect));
+            if self.startup_glass_applied != Some(self.startup_glass) {
+                let surface = self.no_fb_view.widget(cx, ids!(startup_surface));
+                if let Some(mut surface) = surface.borrow_mut::<View>() {
+                    let opacity = if self.startup_glass {0.20f32} else {1.0};
+                    // This view belongs to the Splash isolate. Change its draw
+                    // instance directly; never apply main-heap script values.
+                    surface.draw_bg.draw_vars.set_dyn_instance(cx, id!(opacity), &[opacity]);
+                    surface.redraw(cx);
+                    drop(surface);
+                    self.startup_glass_applied = Some(self.startup_glass);
+                    self.redraw(cx);
+                };
+            }
         }
+        self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
         if target.is_some() && cx.has_key_focus(self.area) {
             let ime = self
                 .ime_pos
                 .unwrap_or_else(|| dvec2(rect.size.x * 0.5, rect.size.y * 0.5));
-            cx.show_text_ime(self.area, ime);
+            // This anchors the native candidate window for a remote process.
+            // It is not a text-input request from the WM or a module client.
+            cx.push_unique_platform_op(CxOsOp::ShowTextIME(
+                self.area, Rect{pos:ime,size:Vec2d::default()}, TextInputConfig::default(),
+            ));
         }
         DrawStep::done()
     }

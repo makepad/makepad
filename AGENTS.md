@@ -18,14 +18,21 @@ use current source for API signatures and working examples.
 
 ## Builds and runtime verification
 
+- Use printf-style debugging (`log!`, `eprintln!`, or equivalent tracing).
+  Do not launch or attach a debugger such as LLDB or GDB; debugger access
+  triggers system permission popups.
+
 - Use release builds for runtime validation, profiling, benchmarks, and
   timing checks unless the user explicitly requests debug.
 - Build with `cargo build --release -p <package>` from the package's owning
   workspace, then launch the resulting standalone executable from this
   checkout. Check the target directory and resource working directory;
   some apps have their own workspace.
-- Do not use `cargo run`, `cargo makepad`, or the Studio remote bridge
-  (`ObserveMount`, `RunItem`, websocket clients) for UI inspection.
+- Use the WM’s Cargo launch path for its hosted apps: `cargo run --release`
+  builds each app on demand, and the WM shows compilation while it starts.
+  Do not collect prebuilt app binaries for a WM session.
+- Outside that WM workflow, do not use `cargo run`, `cargo makepad`, or the
+  Studio remote bridge (`ObserveMount`, `RunItem`, websocket clients) for UI inspection.
 - After UI/runtime changes, rebuild and relaunch before drawing conclusions.
   A successful build/check alone does not verify UI behavior.
 - Exercise the relevant interaction and inspect logs; capture a frame when

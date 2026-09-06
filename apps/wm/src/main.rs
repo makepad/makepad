@@ -17,6 +17,15 @@ mod binds;
 mod clients;
 mod demo_home;
 mod desk;
+mod desktop_layout;
+mod desktop;
+mod desktop_app;
+mod mobile;
+mod mobile_surface;
+mod mobile_app;
+mod mobile_tiles;
+mod scene;
+mod dock_warp;
 mod host;
 mod hub;
 mod layout;
@@ -94,9 +103,24 @@ script_mod! {
                 // its buttons) so the window still drags.
                 show_caption_bar: false
                 body +: {
-                    flow: Overlay
+                    flow: Down
                     // The wallpaper layer: the theme's image (crop-to-fill)
                     // over the theme's deep background.
+                        bar := SolidView{
+                            width: Fill
+                            height: 26
+                            flow: Overlay
+                            draw_bg +: {
+                                color: mod.wm_theme.background
+                            }
+                            desktop_controls := View{
+                                width: Fill height: Fill
+                                shell_bar := ShellBar{width: Fill height: Fill}
+                            }
+                            phone_controls := PhoneSurface{visible: false}
+                        }
+                    scene := WmScene{
+                    wallpaper := CachedView{width: Fill height: Fill flow: Overlay
                     bg_fill := RectView{
                         width: Fill
                         height: Fill
@@ -114,41 +138,7 @@ script_mod! {
                         fit: ImageFit.CropToFill
                         visible: false
                     }
-                    main_column := View{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        // THE OMARCHY BAR, inside the caption strip and
-                        // OPAQUE over the wallpaper like omarchy's shell
-                        // (background-alpha = 1.0). Left: workspaces (room
-                        // for the mac traffic lights first); center: the
-                        // date; right: the tray.
-                        // THE OMARCHY BAR — shell/bar.rs draws every
-                        // module of `config/omarchy/shell.json` itself
-                        // (menu, workspaces, active window, clock,
-                        // keyboard layout, indicators, bluetooth, network,
-                        // audio, monitor, power) with the tooltips, the
-                        // open-panel pill and the press/wheel gestures.
-                        // The wrapper keeps `ids!(bar)` for the caption
-                        // strip: its height tracks the OS window buttons
-                        // and the drag query answers Caption over it.
-                        bar := SolidView{
-                            width: Fill
-                            height: 26
-                            flow: Overlay
-                            draw_bg +: {
-                                color: mod.wm_theme.background
-                            }
-                            shell_bar := ShellBar{
-                                width: Fill
-                                height: Fill
-                            }
-                        }
-                        // THE DESK ROW: the AI pane on the LEFT reserves a
-                        // strip (its own width, animated by the slide) and
-                        // the desk fills what is left, so the tiles reflow
-                        // beside the pane instead of vanishing under it
-                        // (decision 17; shell/ai_pane.rs).
+                    }
                         desk_row := View{
                             width: Fill
                             height: Fill
@@ -160,7 +150,6 @@ script_mod! {
                                 ModuleTile := MpModuleView{}
                             }
                         }
-                    }
                     // The shell's floating surfaces, over the desk: the
                     // menu/launcher, the bar flyouts, the OSD and the
                     // notification stack. Each draws only when it is up.
@@ -168,10 +157,12 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Overlay
+                        desktop_shelf := DesktopShelf{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
                         shell_notes := ShellNotifications{}
                         shell_osd := ShellOsd{}
+                    }
                     }
                     // `wm --gallery`: every ported omarchy surface with
                     // fixture data, over the desktop (see shell/gallery.rs).
@@ -362,6 +353,12 @@ pub struct App {
     /// module hosting (apps.rs).
     #[rust]
     apps: AppRegistry,
+    #[rust] style_frame: NextFrame,
+    #[rust] style_time: f64,
+    #[rust] title_press: Option<(ClientId, f64, Vec2d)>,
+    #[rust] stylesheet: Option<desktop_style::StyleSheet>,
+    #[rust] phone_frame: NextFrame,
+    #[rust] phone_time: f64,
 }
 
 /// A warm instance's own swapchain: the host end of the frames a DORMANT
@@ -409,6 +406,8 @@ pub struct DragState {
     client: ClientId,
     /// Right button: resize instead of move.
     resize: bool,
+    resize_x: bool,
+    resize_y: bool,
     /// The window was floating when the drag began.
     floating: bool,
     start: Vec2d,
@@ -497,7 +496,7 @@ impl App {
             rect.pos.x + gap,
             rect.pos.y + gap,
             (w - gap * 2.0).max(1.0),
-            (h - gap * 2.0).max(1.0),
+            (h - gap * 2.0 - self.state.as_ref().map(|s| s.style.reserved_height()).unwrap_or(0.0)).max(1.0),
         )
     }
 
@@ -529,6 +528,8 @@ impl App {
                     // never open at all. Nor is the AI pane's child.
                     !slot.warm
                         && !slot.pane
+                        && !slot.is_preview
+                        && slot.closing.is_none()
                         && (clients::word_match(&slot.app, pattern)
                             || clients::word_match(&slot.title, pattern))
                 })
@@ -538,7 +539,7 @@ impl App {
             existing.sort_unstable();
             let existing = existing.first().copied();
             if let Some(client) = existing {
-                self.focus_client(cx, client);
+                self.activate_client(cx, client);
                 return;
             }
         }
@@ -596,7 +597,7 @@ impl App {
                 self.desk(cx)
                     .borrow_mut::<WmDesk>()
                     .map(|mut d| d.with_run_view(cx, id, |cx, v| v.set_run_target(cx, id, 0, hub_port)));
-                self.focus_client(cx, id);
+                self.activate_client(cx, id);
                 self.redraw_all(cx);
             }
             Err(err) => {
@@ -712,7 +713,7 @@ impl App {
                 v.app_ready(cx, client, window_id);
             })
         });
-        self.focus_client(cx, client);
+        self.activate_client(cx, client);
         // Wake it: samplers, refresh timers, everything a dormant instance
         // was told to hold back (`makepad_wm_api::warm_start`).
         self.send_wm_event(client, WmEvent::Adopted);
@@ -938,40 +939,17 @@ impl App {
     /// Put every child's newest output line on its tile — cargo's
     /// "Compiling …" while the app is still being built.
     fn drain_client_lines(&mut self, cx: &mut Cx) {
-        let mut latest: Vec<(ClientId, String)> = Vec::new();
+        let mut latest: Vec<(ClientId, String, bool)> = Vec::new();
         if let Some(lines) = self.client_lines.as_ref() {
             while let Ok(line) = lines.rx.try_recv() {
-                match latest.iter_mut().find(|(c, _)| *c == line.client) {
-                    Some(slot) => slot.1 = line.text,
-                    None => latest.push((line.client, line.text)),
+                let Some((text, linked)) = clients::cargo_progress(&line.text) else { continue };
+                match latest.iter_mut().find(|(c, _, _)| *c == line.client) {
+                    Some(slot) => { slot.1 = text; slot.2 |= linked; }
+                    None => latest.push((line.client, text, linked)),
                 }
             }
         }
-        for (client, raw) in latest {
-            // Cargo's real state, in the user's words — but NEVER raw
-            // pathnames on screen (they leak the machine's layout into
-            // recordings). Known states get a clean phrase; anything
-            // path-shaped is summarized.
-            let text = if raw.starts_with("Blocking waiting for file lock") {
-                "waiting for another build\u{2026}".to_string()
-            } else if raw.starts_with("Running ") || raw.starts_with("Finished ") {
-                "launching\u{2026}".to_string()
-            } else if let Some(rest) = raw.strip_prefix("   Compiling ") {
-                // "Compiling foo v0.1.0 (/path/…)" → keep crate + version.
-                let head = rest.split(" (").next().unwrap_or(rest).trim();
-                format!("compiling {}\u{2026}", head)
-            } else if let Some(rest) = raw.trim_start().strip_prefix("Compiling ") {
-                let head = rest.split(" (").next().unwrap_or(rest).trim();
-                format!("compiling {}\u{2026}", head)
-            } else if raw.contains('/') {
-                // The app's own chatter with a path in it: not on the desk.
-                String::new()
-            } else {
-                raw.clone()
-            };
-            if text.is_empty() {
-                continue;
-            }
+        for (client, text, linked) in latest {
             let mut warm = false;
             let mut pane = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -983,8 +961,8 @@ impl App {
                 // can hold main() for tens of seconds — see the tick.
                 // Only cargo's handover means the binary is fresh on disk
                 // and about to be exec'd for the first time.
-                slot.linked = raw.starts_with("Running ") || raw.starts_with("Finished ");
-                if slot.linked {
+                slot.linked |= linked;
+                if linked {
                     slot.linked_at = Some(host::now());
                 }
             }
@@ -1432,6 +1410,11 @@ impl App {
         }
         self.warm_frames.remove(&client);
         self.warm_last_tick.remove(&client);
+        // A home tile's client is gone: the tile shows the launcher again
+        // (within its relaunch budget) on the next phone frame.
+        if let Some(app) = self.state_mut().phone.tiles.forget_client(client) {
+            log!("wm: home tile {} lost client {}", app, client);
+        }
         self.state_mut().layout.remove(client);
         self.state_mut().clients.remove(&client);
         // A dying warm viewer (or its requester) clears the cache's
@@ -1443,6 +1426,22 @@ impl App {
         }
         self.focus_after_layout(cx);
         self.redraw_all(cx);
+    }
+
+    fn activate_client(&mut self, cx: &mut Cx, client: ClientId) {
+        // A client the home page launched for its tile becomes a real
+        // window on its first open — the same client, seated in the layout.
+        self.promote_tile_client(cx, client);
+        if self.state_mut().style.target.mobile() {
+            self.state_mut().phone.activate(client);
+            // In front now: its full face and full viewport go out at once,
+            // so the zoom-in never plays over a compact frame.
+            self.sync_home_tiles(cx);
+            self.animate_phone(cx);
+        } else {
+            self.replay_tile_face(cx, client);
+        }
+        self.focus_client(cx, client);
     }
 
     fn focus_client(&mut self, cx: &mut Cx, client: ClientId) {
@@ -1481,6 +1480,7 @@ impl App {
             }
             state.layout.workspaces[ws].focus = Some(client);
             state.layout.note_focus(client);
+            if state.layout.desktop.enabled {state.layout.raise_float(client);}
         }
         // The tile widget only exists once the desk has drawn it, and its
         // Area only after its first draw — a focus at launch time lands on
@@ -1895,7 +1895,7 @@ impl App {
             self.send_to_pane(frame);
         }
         log!("wm: launched {} as client {} (in-process)", module.id(), id);
-        self.focus_client(cx, id);
+        self.activate_client(cx, id);
         self.update_bar(cx);
         self.redraw_all(cx);
     }
@@ -2182,6 +2182,7 @@ impl App {
                             );
                         }
                     }
+                    self.send_desktop_style(client);
                     // The pane just connected (or reconnected): it learns
                     // every current registration, the WM's own first.
                     if self.ai_bus.is_pane(client) {
@@ -2250,6 +2251,10 @@ impl App {
                             d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
                         });
                     }
+                    self.send_desktop_style(client);
+                    // A home tile's client hears which face to show before
+                    // its first frame (mobile_app.rs).
+                    self.replay_tile_face(cx, client);
                 }
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
@@ -2284,7 +2289,12 @@ impl App {
                     self.note_first_frame(client);
                     return;
                 }
+                // Which of the phone's captures this frame may refresh: a
+                // tile client's frames are sorted by size, so a card never
+                // shows a stretched tile and a tile never a squeezed window.
+                let face = self.note_client_frame_face(client, pd.width, pd.height);
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                    d.note_client_frame(client, face);
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
                 self.note_first_frame(client);
@@ -2307,6 +2317,18 @@ impl App {
                 cx.copy_to_clipboard(&text);
             }
             AppToStudio::Custom(json) => {
+                if let Some(back) = makepad_platform::ime::HostedBack::parse(&json) {
+                    if back.handled == Some(false) && self.state_mut().phone.client == Some(client) {
+                        self.state_mut().phone.navigate(mobile::PhoneScreen::Home);
+                        self.animate_phone(cx);
+                    }
+                    return;
+                }
+                if let Some(ime) = makepad_platform::ime::HostedImeState::parse(&json) {
+                    self.state_mut().phone.ime.insert(client,ime);
+                    self.sync_phone_keyboard(cx);
+                    return;
+                }
                 // The typed app<->WM vocabulary (libs/wm_api) first; what
                 // is not the WM's own envelope is the AI bus's (or noise).
                 if let Some(req) = WmRequest::parse(&json) {
@@ -2427,6 +2449,9 @@ impl App {
     }
 
     fn open_shell_menu(&mut self, cx: &mut Cx, path: &str, skin: MenuSkin) {
+        let path = if path.is_empty() && self.state_mut().style.target == desktop::DesktopStyle::NextStep {
+            "workspace"
+        } else { path };
         let menu = self.ui.widget(cx, ids!(shell_menu));
         {
             let mut borrowed = menu.borrow_mut::<ShellMenu>();
@@ -2523,6 +2548,15 @@ impl App {
     /// What a menu row does. The ids are the jsonc's dotted paths, with
     /// `apps.<id>` and `style.theme[.import].<name>` from the providers.
     fn shell_menu_activate(&mut self, cx: &mut Cx, target: &str) {
+        if target=="start.documents" {self.launch_app(cx,"files");return;}
+        if target=="start.power" {self.toggle_shell_panel(cx,BarModule::Power);return;}
+        if let Some(name) = target.strip_prefix("desktop.") {
+            if let Some(style) = desktop::DesktopStyle::parse(name) {
+                if style.supports_dark() { self.state_mut().style.dark = name.ends_with("-dark"); }
+                self.set_desktop_style(cx, style);
+                return;
+            }
+        }
         if let Some(app) = target.strip_prefix("apps.") {
             let app = app.to_string();
             self.close_shell_menu(cx);
@@ -2565,6 +2599,9 @@ impl App {
     /// those points answer Client to the drag query so the press reaches
     /// the widget instead of moving the OS window.
     fn shell_bar_claims(&self, cx: &mut Cx, p: Vec2d) -> bool {
+        if self.state.as_ref().is_some_and(|state| state.style.target.mobile()) {
+            return false;
+        }
         let bar = self.ui.widget(cx, ids!(shell_bar));
         let borrowed = bar.borrow::<shell::bar::ShellBar>();
         borrowed
@@ -2641,6 +2678,9 @@ impl App {
     /// (`shell/bar.rs` does the sampling — cheap things every second, the
     /// expensive ones every fifth).
     fn update_bar(&mut self, cx: &mut Cx) {
+        if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
+            self.state_mut().phone.clock=clock;
+        }
         let mut shown: Vec<usize> = Vec::new();
         let workspaces = {
             let state = self.state_mut();
@@ -2674,6 +2714,8 @@ impl App {
         };
         let mut data = self.bar_sample.clone();
         data.workspaces = workspaces;
+        data.style = self.state_mut().style.target;
+        data.dark = self.state_mut().style.dark;
         data.active_window = (!title.is_empty()).then_some(title);
         data.open_panel = self.shell_panel_open;
         // The middle window control reads "restore" while maximized.
@@ -2733,6 +2775,9 @@ impl App {
             if let Some(b) = borrowed.as_mut() {
                 b.pad_left = pad_left;
             }
+        }
+        if let Some(mut controls) = self.ui.widget(cx, ids!(phone_controls)).borrow_mut::<mobile_surface::PhoneSurface>() {
+            controls.pad_left = pad_left;
         }
         self.redraw_all(cx);
     }
@@ -3106,6 +3151,8 @@ impl App {
         self.drag = Some(DragState {
             client,
             resize,
+            resize_x: true,
+            resize_y: true,
             floating,
             start: abs,
             last: abs,
@@ -3138,6 +3185,14 @@ impl App {
                 return;
             }
             drag.armed = true;
+            if !drag.resize {
+                if let Some(w)=self.state.as_mut().and_then(|s|s.layout.desktop.get_mut(drag.client)).filter(|w|w.maximized) {
+                    let anchor=((drag.start.x-drag.start_rect.x)/drag.start_rect.w).clamp(0.0,1.0);
+                    w.rect.x=drag.start.x-w.rect.w*anchor;
+                    w.rect.y=drag.start.y-16.0;
+                    w.maximized=false;drag.start_rect=w.rect;
+                }
+            }
         }
         let (client, resize, floating, start, last, start_rect, grab_left, grab_top) = (
             drag.client,
@@ -3149,6 +3204,7 @@ impl App {
             drag.grab_left,
             drag.grab_top,
         );
+        let (resize_x,resize_y)=(drag.resize_x,drag.resize_y);
         drag.last = abs;
         let area = self.desk_area(cx);
         let gap = self.state_mut().gap;
@@ -3157,13 +3213,13 @@ impl App {
             let rect = if resize {
                 // The grabbed corner moves with the pointer; the opposite
                 // one is fixed (DragController.cpp:413-423).
-                let (x, w) = if grab_left {
+                let (x, w) = if !resize_x {(start_rect.x,start_rect.w)}else if grab_left {
                     let w = (start_rect.w - d.x).max(80.0);
                     (start_rect.x + start_rect.w - w, w)
                 } else {
                     (start_rect.x, (start_rect.w + d.x).max(80.0))
                 };
-                let (y, h) = if grab_top {
+                let (y, h) = if !resize_y {(start_rect.y,start_rect.h)}else if grab_top {
                     let h = (start_rect.h - d.y).max(60.0);
                     (start_rect.y + start_rect.h - h, h)
                 } else {
@@ -3221,6 +3277,14 @@ impl App {
         // together with the mouse often enough); the drag's own last known
         // state stands in for it.
         let shift = shift || drag.shift;
+        if drag.floating && !drag.resize && drag.armed && self.state_mut().style.target==desktop::DesktopStyle::Windows {
+            let area=self.desk_area(cx);
+            if let Some(w)=self.state_mut().layout.desktop.get_mut(drag.client) {
+                if abs.y<=area.y+10.0 {w.maximized=true;}
+                else if abs.x<=area.x+10.0 {w.rect=LRect::new(area.x,area.y,area.w*0.5,area.h);}
+                else if abs.x>=area.x+area.w-10.0 {w.rect=LRect::new(area.x+area.w*0.5,area.y,area.w*0.5,area.h);}
+            }
+        }
         if !drag.floating && !drag.resize && drag.armed {
             // Tiled move: dropping on another tile swaps the two, which is
             // what Hyprland's `movewindow` drag settles into.
@@ -3654,6 +3718,12 @@ impl MatchEvent for App {
         // Children inherit the theme file path so every Makepad app styles
         // itself from the same theme.splash.
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(&theme_name).as_os_str());
+        let wallpaper = self.ui.widget(cx, ids!(wallpaper));
+        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.wallpaper = wallpaper; }
+        let sheet = desktop_style::StyleSheet::load(desktop::DesktopStyle::Omarchy);
+        host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet.name));
+        self.module_host.apply_style(cx, &sheet);
+        self.stylesheet = Some(sheet);
         let source = theme::load_theme_source(&theme_name);
         let term_env = theme::scan_term_palette(&source)
             .map(|p| p.env_value())
@@ -3680,7 +3750,9 @@ impl MatchEvent for App {
         self.hub = hub;
 
         self.state = Some(WmState {
+            phone: Default::default(),
             layout: crate::layout::WmLayout::new(),
+            dock_backdrop: None,
             clients: std::collections::HashMap::new(),
             hub_port,
             theme_name: theme_name.clone(),
@@ -3694,6 +3766,7 @@ impl MatchEvent for App {
             dragging: Vec::new(),
             drop_hint: None,
             pane_sliding: false,
+            style: Default::default(),
         });
         self.next_id = 1;
         // The hosting registry: the linked modules, the person's overrides
@@ -3801,7 +3874,9 @@ impl MatchEvent for App {
             // activations, the flyouts' controls.
             match wa.cast::<ShellBarAction>() {
                 ShellBarAction::Press(module) => match module {
-                    BarModule::Menu => self.do_action(cx, WmAction::Menu),
+                    BarModule::Appearance => self.toggle_desktop_appearance(cx),
+                    BarModule::Style => self.open_style_menu(cx),
+                    BarModule::Menu => self.toggle_launcher(cx),
                     BarModule::Workspace(i) => {
                         let ws = self.bar_workspaces.get(i).copied().unwrap_or(i);
                         self.do_action(cx, WmAction::Workspace(ws));
@@ -3823,6 +3898,8 @@ impl MatchEvent for App {
                 },
                 ShellBarAction::RightPress(module) => match module {
                     // The Omarchy button's right click opens a terminal.
+                    BarModule::Appearance => self.toggle_desktop_appearance(cx),
+                    BarModule::Style => self.open_style_menu(cx),
                     BarModule::Menu => self.do_action(cx, WmAction::LaunchTerminal),
                     BarModule::ActiveWindow => {
                         if let Some(focus) = self.state_mut().layout.focused_client() {
@@ -3926,6 +4003,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        desktop_style::install(vm,desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Omarchy));
         crate::makepad_widgets::script_mod(vm);
 
         // The theme: evaluated before any module that reads
@@ -3990,17 +4068,46 @@ impl AppMain for App {
 
         run_view::script_mod(vm);
         module_view::script_mod(vm);
-        desk::script_mod(vm);
         // The assistant as a module: its panel and overlay root, so the
         // pane can seat `mod.widgets.AiChatOverlay{}` by name.
         #[cfg(feature = "app-aichat")]
         makepad_aichat::script_mod(vm);
         shell::script_mod(vm);
+        desktop::script_mod(vm);
+        mobile_surface::script_mod(vm);
+        desk::phone::script_mod(vm);
+        dock_warp::script_mod(vm);
+        desk::script_mod(vm);
+        scene::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Recording belongs to the WM, including on Home and in an OS menu.
+        // Forwarding this chord also starts a recorder in the focused child.
+        if let Event::KeyDown(e) | Event::KeyUp(e) = event {
+            if e.key_code == KeyCode::F10 && e.modifiers.control && !e.modifiers.shift {
+                if matches!(event, Event::KeyDown(_)) && !e.is_repeat {
+                    if let Some(mut window) = self.ui.window(cx, ids!(main_window)).borrow_mut() {
+                        window.toggle_recording(cx);
+                    }
+                }
+                return;
+            }
+        }
+        self.phone_animation_event(cx,event);
+        if let Some(ne) = self.style_frame.is_event(event) {
+            if self.state.is_some() {
+                let dt=if self.style_time==0.0 {0.0}else{(ne.time-self.style_time).min(0.05)};
+                self.style_time=ne.time;
+                if self.state_mut().style.step(dt) {self.style_frame=cx.new_next_frame();}
+                self.redraw_all(cx);
+            }
+        }
         if let Event::WindowGeomChange(ev) = event {
+            if ev.old_geom.inner_size != ev.new_geom.inner_size {
+                if let Some(mut scene) = self.ui.widget(cx, ids!(scene)).borrow_mut::<scene::WmScene>() {scene.cut(cx);}
+            }
             // The bar is the caption: keep it around the OS buttons.
             self.update_bar_chrome(cx, &ev.new_geom);
             // A warm instance is configured with the desktop's own dpi, so
@@ -4014,12 +4121,22 @@ impl AppMain for App {
             // The shell bar's own modules are BUTTONS, not a drag handle:
             // where it claims a point, the press reaches the widget.
             let bar = self.ui.view(cx, ids!(bar)).area();
-            if self.shell_bar_claims(cx, dq.abs) {
+            if self.phone_toolbar_hit(cx,dq.abs).is_some() || self.shell_bar_claims(cx, dq.abs) {
                 dq.response.set(WindowDragQueryResponse::Client);
             } else if bar.is_valid(cx) && bar.rect(cx).contains(dq.abs) {
                 dq.response.set(WindowDragQueryResponse::Caption);
             } else {
                 dq.response.set(WindowDragQueryResponse::Client);
+            }
+        }
+        if self.state.is_some() && !self.state_mut().style.target.mobile() {
+            if let Event::MouseDown(e)=event {
+                let module=self.ui.widget(cx,ids!(shell_bar)).borrow::<shell::bar::ShellBar>().and_then(|b|b.module_at(e.abs));
+                if module==Some(BarModule::Appearance) {self.toggle_desktop_appearance(cx);return;}
+                if module==Some(BarModule::Style) {
+                    self.open_style_menu(cx);
+                    return;
+                }
             }
         }
         // The shell menu (and, for move/down/up, an open bar flyout) is
@@ -4030,12 +4147,14 @@ impl AppMain for App {
         if self.state.is_some()
             && matches!(
                 event,
-                Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
+                Event::TouchUpdate(_) | Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
             )
             && (self.shell_menu_pointer(cx, event) || self.shell_panel_pointer(cx, event))
         {
             return;
         }
+        if self.state.is_some() && self.phone_pointer(cx,event) {return;}
+        if self.state.is_some() && self.desktop_pointer(cx,event) {return;}
         // The AI pane owns the pointer inside its rect while it is open:
         // the event goes to the pane alone, so neither the WM's own drag
         // gestures nor the tile underneath ever see it.
@@ -4051,7 +4170,7 @@ impl AppMain for App {
         }
         // SUPER + mouse:272 / mouse:273 — move and resize (tiling.lua).
         // Taken before the tiles see it, so the drag never reaches a child.
-        if self.state.is_some() {
+        if self.state.is_some() && !self.state_mut().style.target.mobile() {
             match event {
                 Event::MouseDown(e) if super_chord(&e.modifiers) => {
                     let resize = e.button.contains(MouseButton::SECONDARY);
@@ -4107,6 +4226,7 @@ impl AppMain for App {
                     self.alt_armed = false;
                     return;
                 }
+                if self.phone_key(cx,e) {return;}
                 // F10 is the assistant, everywhere (aicontrol decision 8):
                 // under the WM the bare key opens the pane for whatever is
                 // focused, before the keymap and before any tile.
@@ -4115,6 +4235,7 @@ impl AppMain for App {
                     self.do_action(cx, WmAction::ToggleAi);
                     return;
                 }
+                if self.desktop_key(cx,e) {return;}
                 let armed = self.alt_armed;
                 if let Some(action) = match_bind_armed(e.key_code, &e.modifiers, armed) {
                     // Any key but the prefix itself disarms it.
@@ -4186,6 +4307,7 @@ impl AppMain for App {
         } else {
             self.ui.handle_event(cx, event, &mut Scope::empty());
         }
+        self.sync_phone_keyboard(cx);
         // The gap cursor, LAST: a tile hover-out inside `ui.handle_event`
         // resets the cursor to Default, and the frame's final `set_cursor`
         // is the one the platform applies.
