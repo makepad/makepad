@@ -18818,9 +18818,9 @@ p2 {}
         if let Some(view) = column_ref.as_mut() {
             if beside {
                 view.walk.width = Size::Fixed(extent);
-                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
             } else {
-                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.width = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.walk.height = Size::Fixed(extent);
             }
         }
@@ -18833,10 +18833,10 @@ p2 {}
         if let Some(view) = grip_ref.as_mut() {
             if beside {
                 view.walk.width = Size::Fixed(7.0);
-                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.cursor = Some(MouseCursor::ColResize);
             } else {
-                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.width = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.walk.height = Size::Fixed(7.0);
                 view.cursor = Some(MouseCursor::RowResize);
             }
@@ -18988,7 +18988,7 @@ p2 {}
             label.walk.width = if wrapped {
                 Size::Fit { min: None, max: None }
             } else {
-                Size::Fill { weight: 100.0, min: None, max: None }
+                Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None }
             };
         }
         drop(label_ref);
@@ -19301,7 +19301,8 @@ p2 {}
                 Fold::Singles => console_scale::ConsoleFold::Singles,
             }));
             if let Size::Fill { weight, max, .. } = view.walk.height {
-                view.walk.height = Size::Fill { weight, min, max };
+                view.walk.height =
+                    Size::Fill { weight, basis: FitBound::Abs(0.0), shrink: 0.0, min, max };
             }
         }
         drop(region_ref);

@@ -7356,6 +7356,10 @@ pub fn column_size(column: Column, narrow: bool) -> Size {
         // title beside nothing.
         ColumnWidth::Fill { min, max } => Size::Fill {
             weight: if matches!(column, Column::Title) { 400.0 } else { 100.0 },
+            // A column neither grows from a basis nor gives ground: the
+            // weights above are the whole of how the row shares its width.
+            basis: FitBound::Abs(0.0),
+            shrink: 0.0,
             min: min.filter(|_| !narrow),
             max,
         },

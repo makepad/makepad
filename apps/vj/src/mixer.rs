@@ -1020,6 +1020,61 @@ impl EffectKind {
     }
 }
 
+/// Where one rendered buffer's time went. Three phases and not five: the
+/// render is ONE frame loop with no sequential per-source block to time,
+/// and timing sources would mean a clock read per source per SAMPLE,
+/// which costs more than the work it measures.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StageNanos {
+    /// Ramps, filter coefficients, lifting the deck sources out of the loop.
+    pub setup: u64,
+    /// The frame loop, which is nearly all of it.
+    pub mix: u64,
+    /// Meters, the cue publish, the per-deck snapshots, reaping.
+    pub publish: u64,
+}
+
+/// What the audio thread is managing, for the console strip.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioHealth {
+    /// Whole buffers silenced by lock contention.
+    ///
+    /// Always zero now, and kept only so the console's line does not have
+    /// to change shape: this engine has no lock for the UI to hold, so
+    /// there is nothing left to contend for. It counted a hazard that has
+    /// been designed out rather than reduced.
+    pub contended: u64,
+    /// Callbacks that found the lock poisoned and took it over. Zero for
+    /// the same reason.
+    pub poisoned: u64,
+    /// Buffers the monitor could not fill from the cue ring, since the app
+    /// started. Priming a fresh or re-opened phones device does not count.
+    pub phones_starved: u64,
+    /// What the last rendered buffer cost.
+    pub render_nanos: u64,
+    /// The worst any buffer has cost since the app started.
+    pub render_max_nanos: u64,
+    /// Frames in the last rendered buffer, and the rate it plays at: the
+    /// denominator of the budget.
+    pub buffer_frames: u64,
+    pub device_rate: f64,
+    /// Where the last buffer's time went.
+    pub stages: StageNanos,
+}
+
+impl AudioHealth {
+    /// The share of the last buffer's own playing time that rendering it
+    /// took. Above one the render cannot keep up. `None` before the first
+    /// buffer, or from a device that reports no rate.
+    pub fn budget_used(&self) -> Option<f64> {
+        if self.buffer_frames == 0 || !(self.device_rate > 0.0) {
+            return None;
+        }
+        let available_nanos = self.buffer_frames as f64 / self.device_rate * 1e9;
+        (available_nanos > 0.0).then(|| self.render_nanos as f64 / available_nanos)
+    }
+}
+
 /// How many loop rolls can be stacked before the oldest is dropped. A
 /// hand can hold a few at once; past that the stack is a leak.
 pub const ROLL_STACK_CAP: usize = 4;
@@ -1735,11 +1790,16 @@ pub struct CueRing {
     armed: AtomicBool,
     /// Headphone volume, f32 bits. The UI writes, the consumer smooths.
     volume_bits: AtomicU32,
+    /// Buffers the monitor could not fill. Counted HERE because the ring is
+    /// the only thing that knows it ran dry; priming a fresh or re-opened
+    /// device is not a miss and does not count.
+    starved: AtomicU64,
 }
 
 impl CueRing {
     fn new() -> CueRing {
         CueRing {
+            starved: AtomicU64::new(0),
             buf: (0..CUE_RING_FRAMES).map(|_| AtomicU64::new(0)).collect(),
             write_pos: AtomicU64::new(0),
             main_rate_bits: AtomicU64::new(0),
@@ -2144,6 +2204,13 @@ struct Shared {
     overrun_callbacks: AtomicU64,
     /// High-water render time, nanoseconds.
     render_max_nanos: AtomicU64,
+    /// What the LAST buffer cost and how long it was. The high-water
+    /// figure above is a lifetime worst and cannot answer the question the
+    /// console actually asks, which is whether the render is coping NOW.
+    render_nanos: AtomicU64,
+    buffer_frames: AtomicU64,
+    /// Where that buffer's time went.
+    stage_nanos: crate::published::Published<StageNanos>,
     /// The headphone cue bus, written by `render`, drained by the phones
     /// device callback (slot 1).
     cue_ring: Arc<CueRing>,
@@ -2243,6 +2310,9 @@ impl Mixer {
             first_non_silent: AtomicBool::new(false),
             overrun_callbacks: AtomicU64::new(0),
             render_max_nanos: AtomicU64::new(0),
+            render_nanos: AtomicU64::new(0),
+            buffer_frames: AtomicU64::new(0),
+            stage_nanos: crate::published::Published::new(StageNanos::default()),
             cue_ring: Arc::new(CueRing::new()),
             video: [SlotShared::new(), SlotShared::new()],
         });
@@ -2281,11 +2351,24 @@ impl Mixer {
     /// `(overrun callbacks, high-water render nanos)` — a render that
     /// outran its buffer is the one way a buffer is still lost, for the
     /// pump to report.
-    pub fn audio_health(&self) -> (u64, u64) {
-        (
-            self.shared.overrun_callbacks.load(Ordering::Relaxed),
-            self.shared.render_max_nanos.load(Ordering::Relaxed),
-        )
+    pub fn audio_health(&self) -> AudioHealth {
+        AudioHealth {
+            // Both zero by construction on this engine; see the struct.
+            contended: 0,
+            poisoned: 0,
+            phones_starved: self.shared.cue_ring.starved.load(Ordering::Relaxed),
+            render_nanos: self.shared.render_nanos.load(Ordering::Relaxed),
+            render_max_nanos: self.shared.render_max_nanos.load(Ordering::Relaxed),
+            buffer_frames: self.shared.buffer_frames.load(Ordering::Relaxed),
+            device_rate: f64::from_bits(self.shared.device_rate_bits.load(Ordering::Relaxed)),
+            stages: self.shared.stage_nanos.read(),
+        }
+    }
+
+    /// Callbacks whose render outran its own buffer period. On this engine
+    /// nothing else can silence a buffer, so this is THE dropout counter.
+    pub fn audio_overruns(&self) -> u64 {
+        self.shared.overrun_callbacks.load(Ordering::Relaxed)
     }
 
     /// Queue a command for the callback. Never waits: a full ring parks
@@ -4394,6 +4477,8 @@ impl MixEngine {
             .publish_rendered_frame(shared.device_frames.load(Ordering::Acquire));
         Self::publish_snapshot(s, shared, self.serial);
         let render_nanos = render_started.elapsed().as_nanos() as u64;
+        shared.render_nanos.store(render_nanos, Ordering::Relaxed);
+        shared.buffer_frames.store(frames as u64, Ordering::Relaxed);
         shared.render_max_nanos.fetch_max(render_nanos, Ordering::Relaxed);
         let budget_nanos = (frames as f64 / device_rate * 1e9) as u64;
         if render_nanos > budget_nanos {
