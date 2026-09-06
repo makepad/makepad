@@ -219,8 +219,26 @@ pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
 const SCRATCH_IDLE_SECS: f64 = 0.045;
 
 script_mod! {
+    let vj = mod.vj_theme
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
+
+    // Deck identity is not the OS accent: A is orange and B is blue in
+    // every appearance, chosen to read on both light and dark surfaces.
+    let deck_a_ink = #xf2612e
+    let deck_b_ink = #x4f8ff5
+    // Control sizes follow the theme: 26pt on a desktop, 44pt under a
+    // finger. The derived sizes keep the desktop numbers this page was
+    // drawn with (22, 14 and 13) and grow them for touch (31, 23 and 22).
+    let ctl = vj.control_height
+    let ctl_mid = (vj.control_height * 0.5 + 9.0)
+    let ctl_min = (vj.control_height * 0.5 + 1.0)
+    let ctl_half = (vj.control_height * 0.5)
+    // Transport keys: 38 on a desktop, 48 for touch.
+    let transport = (vj.control_height * 0.55 + 23.7)
+    let transport_icon = (vj.control_height * 0.55 + 25.7)
+    let label_font = (vj.label_size - 2.0)
+    let button_font = (vj.label_size - 1.0)
 
     set_type_default() do #(DrawSplatCell::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -457,7 +475,7 @@ script_mod! {
         width: Fill
         height: Fill
         draw_text +: {
-            color: #xf4f7fa
+            color: vj.text
             text_style: theme.font_bold{font_size: 10}
         }
         draw_small +: {
@@ -472,11 +490,11 @@ script_mod! {
         tiles: texture_2d(float)
         stem_tiles: texture_2d(float)
 
-        color_bg: uniform(#x0a0d12)
+        color_bg: uniform(vj.waveform_background)
         // Before separation a wave is grey peaks and nothing else: colour
         // in this view always means a real separated stem.
         color_grey: uniform(#x8b98a6)
-        color_grid: uniform(#xffffff1e)
+        color_grid: uniform(vj.waveform_grid)
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
         // waveform stays readable through, not a fill that replaces it.
@@ -491,7 +509,7 @@ script_mod! {
         // Drawn dimmer beside the ghost so the operator sees both where
         // the loop IS and where release will put it.
         preview_span: uniform(#x00000000)
-        color_head: uniform(#xf4f7fa)
+        color_head: uniform(vj.text)
         // The stem palette, pushed from STEM_COLORS every draw so the
         // waveform and the knobs cannot disagree. Uniforms, not instances:
         // they are per-draw constants, and as instances they blew the
@@ -713,7 +731,7 @@ script_mod! {
         width: Fill
         height: Fill
         draw_text +: {
-            color: #x8e9aa7
+            color: vj.text_secondary
             text_style: theme.font_bold{font_size: 8}
         }
         draw_head +: {
@@ -776,7 +794,7 @@ script_mod! {
             }
         }
         draw_marker_cue_hot +: {
-            color: uniform(#xf2f6fa)
+            color: uniform(vj.text)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let w = self.rect_size.x
@@ -861,7 +879,7 @@ script_mod! {
     let TrackText = Label{
         flow: Flow.Right{wrap: false}
         max_lines: 1
-        draw_text.color: #xd6dee6
+        draw_text.color: vj.text
         draw_text.text_style.font_size: 9
     }
 
@@ -875,7 +893,7 @@ script_mod! {
     // the inline-player one — hoisted so the two can never drift apart.
     let TrackRowBody = View{
         width: Fill
-        height: 22
+        height: ctl_mid
         flow: Right
         spacing: 6
         padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
@@ -884,25 +902,25 @@ script_mod! {
         row_badge := Label{
             width: 26
             text: ""
-            draw_text.color: #xff5c39
+            draw_text.color: vj.accent
             draw_text.text_style: theme.font_bold{font_size: 8}
         }
         row_title := TrackText{width: Fill{weight: 400. min: 180.}}
-        row_artist := TrackText{width: Fill{max: 150.} draw_text.color: #x9fabb7}
+        row_artist := TrackText{width: Fill{max: 150.} draw_text.color: vj.text_secondary}
         row_bpm := TrackText{
             width: 54
-            draw_text.color: #xff5c39
+            draw_text.color: vj.accent
             draw_text.text_style: theme.font_bold{font_size: 9}
         }
         row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
-        row_time := TrackText{width: 52 draw_text.color: #x9fabb7}
+        row_time := TrackText{width: 52 draw_text.color: vj.text_secondary}
         // The processed marks: a green tick under STEM when the
         // store holds this track's four stems, under KRK when it
         // holds the word-aligned transcript.
         row_stem := TrackText{width: 36 draw_text.color: #x35c05f}
         row_krk := TrackText{width: 30 draw_text.color: #x35c05f}
-        row_license := TrackText{width: 128 draw_text.color: #x6f7b87}
-        row_tags := TrackText{width: Fill{max: 190.} draw_text.color: #x6f7b87}
+        row_license := TrackText{width: 128 draw_text.color: vj.text_muted}
+        row_tags := TrackText{width: Fill{max: 190.} draw_text.color: vj.text_muted}
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
         // ButtonIcon, not Button: an icon-only button carries no label and
@@ -914,16 +932,16 @@ script_mod! {
             align: Align{x: 0.5, y: 0.5}
             icon_walk: Walk{width: 10 height: Fit}
             draw_bg +: {
-                color: #x272e38
-                color_hover: #x2b3440
-                color_down: #x1e232b
-                border_color: #xffffff26
+                color: vj.control
+                color_hover: vj.control_hover
+                color_down: vj.control_down
+                border_color: vj.border
                 border_radius: 4.0
                 border_size: 1.0
             }
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/headphones.svg")
-                color: #x9fabb7
+                color: vj.text_secondary
             }
         }
         row_queue := Button{
@@ -935,15 +953,15 @@ script_mod! {
             padding: 0
             align: Align{x: 0.5, y: 0.5}
             draw_bg +: {
-                color: #x272e38
-                color_hover: #x2b3440
-                color_down: #x1e232b
-                border_color: #xffffff26
+                color: vj.control
+                color_hover: vj.control_hover
+                color_down: vj.control_down
+                border_color: vj.border
                 border_radius: 4.0
                 border_size: 1.0
             }
             draw_text +: {
-                color: #xd6dee6
+                color: vj.text
                 text_style: theme.font_bold{font_size: 9}
             }
         }
@@ -968,7 +986,7 @@ script_mod! {
             color: #xe8a33d
         }
         draw_head +: {
-            color: #xf2f6fa
+            color: vj.text
         }
     }
 
@@ -981,7 +999,7 @@ script_mod! {
         spacing: 4
         padding: Inset{left: 8.0 right: 8.0 top: 6.0 bottom: 8.0}
         draw_bg +: {
-            color: #x16161b
+            color: vj.background
             border_color: #x35c05f55
             border_size: 1.0
             border_radius: 6.0
@@ -994,41 +1012,41 @@ script_mod! {
             align: Align{x: 0.0, y: 0.5}
             hp_play := ButtonIcon{
                 visible: false
-                width: 24
-                height: 20
+                width: (ctl_mid + 2.0)
+                height: (ctl_mid - 2.0)
                 padding: 0
                 align: Align{x: 0.5, y: 0.5}
                 icon_walk: Walk{width: 9 height: Fit}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
                 draw_icon +: {
                     svg: crate_resource("self:resources/icons/play.svg")
-                    color: #xd6dee6
+                    color: vj.text
                 }
             }
             hp_pause := ButtonIcon{
-                width: 24
-                height: 20
+                width: (ctl_mid + 2.0)
+                height: (ctl_mid - 2.0)
                 padding: 0
                 align: Align{x: 0.5, y: 0.5}
                 icon_walk: Walk{width: 9 height: Fit}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
                 draw_icon +: {
                     svg: crate_resource("self:resources/icons/pause.svg")
-                    color: #xd6dee6
+                    color: vj.text
                 }
             }
             // The title clips here and scrolls as a ticker when it does
@@ -1041,14 +1059,14 @@ script_mod! {
                 hp_title := Label{
                     width: Fit
                     text: ""
-                    draw_text.color: #xe8eef4
+                    draw_text.color: vj.text
                     draw_text.text_style: theme.font_bold{font_size: 9}
                 }
             }
             hp_time := Label{
                 width: Fit
                 text: ""
-                draw_text.color: #x9fabb7
+                draw_text.color: vj.text_secondary
                 draw_text.text_style.font_size: 9
             }
             // What the pre-listen is FOR: the verdict. A and B send the
@@ -1063,15 +1081,15 @@ script_mod! {
                 text: "A"
                 align: Align{x: 0.5, y: 0.5}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
                 draw_text +: {
-                    color: #xff5c39
+                    color: vj.accent
                     text_style: theme.font_bold{font_size: 9}
                 }
             }
@@ -1082,10 +1100,10 @@ script_mod! {
                 text: "B"
                 align: Align{x: 0.5, y: 0.5}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
@@ -1101,15 +1119,15 @@ script_mod! {
                 text: "+"
                 align: Align{x: 0.5, y: 0.5}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
                 draw_text +: {
-                    color: #xd6dee6
+                    color: vj.text
                     text_style: theme.font_bold{font_size: 10}
                 }
             }
@@ -1120,15 +1138,15 @@ script_mod! {
                 text: "×"
                 align: Align{x: 0.5, y: 0.5}
                 draw_bg +: {
-                    color: #x272e38
-                    color_hover: #x2b3440
-                    color_down: #x1e232b
-                    border_color: #xffffff26
+                    color: vj.control
+                    color_hover: vj.control_hover
+                    color_down: vj.control_down
+                    border_color: vj.border
                     border_radius: 4.0
                     border_size: 1.0
                 }
                 draw_text +: {
-                    color: #xd6dee6
+                    color: vj.text
                     text_style: theme.font_bold{font_size: 10}
                 }
             }
@@ -1149,16 +1167,16 @@ script_mod! {
             drag_scrolling: false
             TrackRow := RoundedView{
                 width: Fill
-                height: 22
+                height: ctl_mid
                 padding: 0
                 draw_bg +: {
-                    color: #x1c2129
+                    color: vj.surface
                     color_alt: #x11161c
                     color_live: #x1d2a2a
                     // A picked row, for the hand that is about to drag it.
                     color_sel: #x2c3a4e
                     // The row that IS in the hand: the ghost's own accent.
-                    color_carry: #xff5c39
+                    color_carry: vj.accent
                     live: instance(0.0)
                     odd: instance(0.0)
                     sel: instance(0.0)
@@ -1230,7 +1248,7 @@ script_mod! {
                 align: Align{x: 0.5, y: 0.5}
                 empty_label := Label{
                     text: "no tracks"
-                    draw_text.color: #x8e9aa7
+                    draw_text.color: vj.text_secondary
                 }
             }
         }
@@ -1241,8 +1259,8 @@ script_mod! {
     // -----------------------------------------------------------------
 
     let MusicLabel = Label{
-        draw_text.color: #xa6b1bd
-        draw_text.text_style: theme.font_bold{font_size: 8}
+        draw_text.color: vj.text_secondary
+        draw_text.text_style: theme.font_bold{font_size: label_font}
     }
 
 
@@ -1264,54 +1282,55 @@ script_mod! {
             border_radius: 0.0
         }
         draw_text +: {
-            color: #xa6b1bd
-            color_focus: #xa6b1bd
-            color_hover: #xd6dee6
-            color_down: #x8e9aa7
-            text_style: theme.font_bold{font_size: 8}
+            color: vj.text_secondary
+            color_focus: vj.text_secondary
+            color_hover: vj.text
+            color_down: vj.text_secondary
+            text_style: theme.font_bold{font_size: label_font}
         }
     }
 
     let MusicValue = Label{
         flow: Flow.Right{wrap: false}
         max_lines: 1
-        draw_text.color: #xe8eef4
+        draw_text.color: vj.text
         draw_text.text_style.font_size: 11
     }
 
     let MusicButton = Button{
+        height: ctl
         draw_bg +: {
-            color: #x272e38
-            color_focus: #x272e38
-            color_hover: #x2b3440
-            color_down: #x1e232b
-            border_color: #xffffff2e
+            color: vj.control
+            color_focus: vj.control
+            color_hover: vj.control_hover
+            color_down: vj.control_down
+            border_color: vj.border
             border_radius: 6.0
             border_size: 1.0
         }
         draw_text +: {
-            color: #xd6dee6
-            color_focus: #xd6dee6
-            color_hover: #xfffaf4
-            text_style: theme.font_bold{font_size: 9}
+            color: vj.text
+            color_focus: vj.text
+            color_hover: vj.text_hover
+            text_style: theme.font_bold{font_size: button_font}
         }
     }
 
     let MusicIconButton = ButtonIcon{
-        width: 30
-        height: 24
+        width: (vj.control_height + 4.0)
+        height: ctl
         icon_walk: Walk{width: 12 height: Fit}
         draw_bg +: {
-            color: #x272e38
-            color_focus: #x272e38
-            color_hover: #x2b3440
-            color_down: #x1e232b
-            border_color: #xffffff26
+            color: vj.control
+            color_focus: vj.control
+            color_hover: vj.control_hover
+            color_down: vj.control_down
+            border_color: vj.border
             border_radius: 5.0
             border_size: 1.0
         }
         draw_icon +: {
-            color: #xd6dee6
+            color: vj.text
         }
     }
 
@@ -1319,7 +1338,7 @@ script_mod! {
     // the same chrome as the compact utility controls, but at a size that is
     // comfortable to hit; two rows keep that size inside each 316pt deck.
     let MusicTransportButton = MusicButton{
-        height: 38
+        height: transport
         padding: Inset{left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
         align: Align{x: 0.5, y: 0.5}
         draw_bg +: {border_radius: 7.0}
@@ -1327,8 +1346,8 @@ script_mod! {
     }
 
     let MusicTransportIconButton = MusicIconButton{
-        width: 40
-        height: 38
+        width: transport_icon
+        height: transport
         icon_walk: Walk{width: 16 height: Fit}
         draw_bg +: {border_radius: 7.0}
     }
@@ -1336,8 +1355,8 @@ script_mod! {
     // An accordion chevron: bare, quiet, and the height of the heading it
     // sits beside. It says which way the block will go, and nothing else.
     let ChevronIcon = ButtonIcon{
-        width: 16
-        height: 13
+        width: (ctl_min + 2.0)
+        height: ctl_min
         icon_walk: Walk{width: 10 height: Fit}
         draw_bg +: {
             color: #x00000000
@@ -1348,7 +1367,7 @@ script_mod! {
             border_size: 0.0
             border_radius: 3.0
         }
-        draw_icon +: { color: #x8e9aa7 }
+        draw_icon +: { color: vj.text_secondary }
     }
 
     // A bare mode icon: no chrome at rest, so a row of them reads as marks
@@ -1357,8 +1376,8 @@ script_mod! {
     // because an SVG has one colour and no states of its own. Only hover
     // puts anything behind it, which is what keeps them findable.
     let ModeIcon = ButtonIcon{
-        width: 26
-        height: 22
+        width: ctl
+        height: ctl
         icon_walk: Walk{width: 14 height: Fit}
         draw_bg +: {
             color: #x00000000
@@ -1379,27 +1398,27 @@ script_mod! {
     // round icon key.
     let MusicChipButton = Button{
         width: Fit
-        height: 22
+        height: ctl
         padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
         spacing: 5.0
         icon_walk: Walk{width: 10 height: Fit}
         draw_bg +: {
-            color: #x272e38
-            color_focus: #x272e38
-            color_hover: #x2b3440
-            color_down: #x1e232b
-            border_color: #xffffff2e
+            color: vj.control
+            color_focus: vj.control
+            color_hover: vj.control_hover
+            color_down: vj.control_down
+            border_color: vj.border
             border_radius: 11.0
             border_size: 1.0
         }
         draw_text +: {
-            color: #xd6dee6
-            color_focus: #xd6dee6
-            color_hover: #xfffaf4
-            text_style: theme.font_bold{font_size: 9}
+            color: vj.text
+            color_focus: vj.text
+            color_hover: vj.text_hover
+            text_style: theme.font_bold{font_size: button_font}
         }
         draw_icon +: {
-            color: #xd6dee6
+            color: vj.text
         }
     }
 
@@ -1408,7 +1427,7 @@ script_mod! {
     // EQ bands alike; the host paints them hot through paint_lit.
     let MSButton = MusicButton{
         width: Fill
-        height: 13
+        height: ctl_half
         padding: 0
         align: Align{x: 0.5, y: 0.5}
         draw_text +: {
@@ -1436,12 +1455,12 @@ script_mod! {
         flow: Down
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1c222b)
-            body_color_hover: uniform(#x2a323d)
-            rim_color: uniform(#xffffff40)
-            ring_color: uniform(#x2f3842)
-            val_color: uniform(#xff5c39)
-            pointer_color: uniform(#xf2f6fa)
+            body_color: uniform(vj.surface)
+            body_color_hover: uniform(vj.surface_raised)
+            rim_color: uniform(vj.border_strong)
+            ring_color: uniform(vj.control_hover)
+            val_color: uniform(vj.accent)
+            pointer_color: uniform(vj.text)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let c = self.rect_size * 0.5
@@ -1485,10 +1504,10 @@ script_mod! {
             border_radius: 0.0
         }
         draw_text +: {
-            color: #xa6b1bd
-            color_focus: #xa6b1bd
-            color_hover: #xd6dee6
-            color_down: #x8e9aa7
+            color: vj.text_secondary
+            color_focus: vj.text_secondary
+            color_hover: vj.text
+            color_down: vj.text_secondary
             text_style: theme.font_bold{font_size: 7}
         }
     }
@@ -1543,9 +1562,9 @@ script_mod! {
             border_size: 0.0
         }
         draw_text +: {
-            color: #x6f7b87
-            color_focus: #x6f7b87
-            color_hover: #x9fabb7
+            color: vj.text_muted
+            color_focus: vj.text_muted
+            color_hover: vj.text_secondary
             color_down: #x5f6a76
             text_style: theme.font_bold{font_size: 7}
         }
@@ -1572,11 +1591,11 @@ script_mod! {
         flow: Down
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
-            cap_shadow: uniform(#x8d98a7)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
+            cap_shadow: uniform(vj.text_secondary)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(3., 2., self.rect_size.x - 6., self.rect_size.y - 4., 6.)
@@ -1611,11 +1630,11 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
-            cap_shadow: uniform(#x8d98a7)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
+            cap_shadow: uniform(vj.text_secondary)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(2., 6., self.rect_size.x - 4., self.rect_size.y - 12., 8.)
@@ -1646,8 +1665,8 @@ script_mod! {
         height: Fill
         draw_bg +: {
             level: uniform(0.0)
-            color: uniform(#x1d222a)
-            color_lit: uniform(#xff5c39)
+            color: uniform(vj.surface)
+            color_lit: uniform(vj.accent)
             color_hot: uniform(#xff5a4e)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -1672,7 +1691,7 @@ script_mod! {
         padding: 1
         draw_bg +: {
             color: #x000000
-            border_color: #xffffff26
+            border_color: vj.border
             border_size: 1.0
             border_radius: 8.0
         }
@@ -1692,7 +1711,7 @@ script_mod! {
         // re-drew the whole console — the panels below, the track lists, and
         // (through the status bar) the offscreen 3D passes. A panel now
         // redraws only when its own contents change.
-        View{
+        deck_heads := View{
             width: Fill
             height: Fit
             flow: Right
@@ -1718,7 +1737,7 @@ script_mod! {
                 }
                 Label{
                     text: "A"
-                    draw_text.color: #xff5c39
+                    draw_text.color: deck_a_ink
                     draw_text.text_style: theme.font_bold{font_size: 13}
                 }
                 deck_a_art := Image{width: 44 height: 44}
@@ -1736,7 +1755,7 @@ script_mod! {
                         deck_a_credit_artist := AttributionLink{text: ""}
                         Label{
                             text: "·"
-                            draw_text.color: #x6f7b87
+                            draw_text.color: vj.text_muted
                             draw_text.text_style: theme.font_bold{font_size: 7}
                         }
                         deck_a_credit_license := AttributionLink{text: ""}
@@ -1750,7 +1769,7 @@ script_mod! {
                     align: Align{x: 1.0, y: 0.5}
                     deck_a_bpm := Label{
                         text: "---.-"
-                        draw_text.color: #xff5c39
+                        draw_text.color: deck_a_ink
                         draw_text.text_style: theme.font_bold{font_size: 17}
                     }
                     deck_a_pitch_text := MusicLabel{text: "+0.0%"}
@@ -1763,7 +1782,7 @@ script_mod! {
             // placement rounding, which this deliberately is not. It sits
             // at the console's center line, between the two decks it
             // gates equally.
-            View{
+            quant_cluster := View{
                 width: Fit
                 height: Fit
                 flow: Right
@@ -1797,7 +1816,7 @@ script_mod! {
                     align: Align{x: 0.0, y: 0.5}
                     deck_b_bpm := Label{
                         text: "---.-"
-                        draw_text.color: #x6aa8ff
+                        draw_text.color: deck_b_ink
                         draw_text.text_style: theme.font_bold{font_size: 17}
                     }
                     deck_b_pitch_text := MusicLabel{text: "+0.0%"}
@@ -1816,7 +1835,7 @@ script_mod! {
                         deck_b_credit_artist := AttributionLink{text: ""}
                         Label{
                             text: "·"
-                            draw_text.color: #x6f7b87
+                            draw_text.color: vj.text_muted
                             draw_text.text_style: theme.font_bold{font_size: 7}
                         }
                         deck_b_credit_license := AttributionLink{text: ""}
@@ -1826,14 +1845,14 @@ script_mod! {
                 deck_b_art := Image{width: 44 height: 44}
                 Label{
                     text: "B"
-                    draw_text.color: #x6aa8ff
+                    draw_text.color: deck_b_ink
                     draw_text.text_style: theme.font_bold{font_size: 13}
                 }
             }
         }
 
         // ---- whole-track overview strips ----
-        View{
+        deck_overviews := View{
             width: Fill
             height: 46
             flow: Right
@@ -1843,14 +1862,14 @@ script_mod! {
                 width: Fill
                 deck_a_overview := mod.widgets.VjWaveOverview{
                     height: Fill
-                    draw_load +: {color: #xff5c39}
+                    draw_load +: {color: deck_a_ink}
                 }
             }
             deck_b_well := DeckWell{
                 width: Fill
                 deck_b_overview := mod.widgets.VjWaveOverview{
                     height: Fill
-                    draw_load +: {color: #x6aa8ff}
+                    draw_load +: {color: deck_b_ink}
                 }
             }
         }
@@ -1860,7 +1879,7 @@ script_mod! {
         // The page body remains the responsive in-flow surface; the card is
         // its later sibling, so it neither takes deck/list space nor yields
         // pointer hits to the waveform underneath.
-        View{
+        page_overlay := View{
             width: Fill
             height: Fill
             flow: Overlay
@@ -1913,10 +1932,10 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
-                        deck_a_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
-                        deck_a_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        deck_a_tab_0 := MusicButton{width: 62 height: ctl text: "deck A"}
+                        deck_a_tab_1 := MusicButton{width: 62 height: ctl text: "deck B"}
                         // Only once the mixer is a tab as well.
-                        deck_a_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        deck_a_tab_2 := MusicButton{visible: false width: 56 height: ctl text: "mixer"}
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -1943,26 +1962,26 @@ script_mod! {
                             }
                         }
                     }
-                    View{
+                    deck_a_tools := View{
                         width: Fill
                         height: Fit
                         flow: Right
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
-                        deck_a_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        deck_a_sync := MusicButton{width: Fill height: ctl text: "SYNC"}
                         // The analyser's grid can sit on the off pulse: same tempo,
                         // sync exactly half a beat out. This flips it.
-                        deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
-                        deck_a_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
+                        deck_a_phase_flip := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        deck_a_keylock := MusicButton{width: 44 height: ctl text: "KEY"}
                         // The key steps in whole semitones, so it steps: a fader
                         // with twelve detents a side would be a worse way to ask
                         // for the same number. The readout is up in the header,
                         // beside the BPM the key belongs to.
-                        deck_a_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
-                        deck_a_key_up := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
-                        deck_a_range := MusicButton{width: 46 height: 22 text: "±8%"}
+                        deck_a_key_down := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
+                        deck_a_key_up := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
+                        deck_a_range := MusicButton{width: 46 height: ctl text: "±8%"}
                     }
-                    View{
+                    deck_a_body := View{
                         width: Fill
                         height: Fill
                         flow: Right
@@ -1986,7 +2005,7 @@ script_mod! {
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
                                 deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
-                                deck_a_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
+                                deck_a_pitch_reset := MusicButton{width: Fill height: ctl_min padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                             View{
                                 width: 44
@@ -1996,7 +2015,7 @@ script_mod! {
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "VOL"}
                                 deck_a_gain := MusicFader{min: 0.0 max: 1.5 default: 1.0}
-                                deck_a_mute := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
+                                deck_a_mute := MusicButton{width: Fill height: ctl_min padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
                             }
                             View{
                                 width: 10
@@ -2008,7 +2027,7 @@ script_mod! {
                                 deck_a_vu := DeckMeter{}
                             }
                         }
-                        View{
+                        deck_a_knobs := View{
                             width: Fill
                             height: Fill
                             flow: Down
@@ -2203,19 +2222,19 @@ script_mod! {
                     // The deck's own transport, at the foot of its column. Two
                     // explicit wrapping rows keep every primary control large
                     // without letting either line escape the fixed deck panel.
-                    View{
+                    deck_a_transport := View{
                         width: Fill
                         height: Fit
                         flow: Down
                         spacing: 5
-                        View{
+                        deck_a_transport_main := View{
                             width: Fill
                             height: Fit
                             flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
                             spacing: 5
                             wrap_spacing: 5
                             align: Align{x: 0.0, y: 0.5}
-                            deck_a_to_start := MusicTransportIconButton{
+                            deck_a_to_start :=MusicTransportIconButton{
                                 draw_icon +: { svg: crate_resource("self:resources/icons/skip_start.svg") }
                             }
                             deck_a_play := MusicTransportIconButton{
@@ -2236,19 +2255,19 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
                             }
                         }
-                        View{
+                        deck_a_transport_loop := View{
                             width: Fill
                             height: Fit
                             flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
                             spacing: 5
                             wrap_spacing: 5
                             align: Align{x: 0.0, y: 0.5}
-                            deck_a_loop := MusicTransportIconButton{
+                            deck_a_loop :=MusicTransportIconButton{
                                 draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                             }
                             deck_a_loop_halve := MusicTransportButton{width: 36 text: "<"}
                             deck_a_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
+                                width: (transport + 4.0) height: transport loop_rows: true
                                 draw_bg +: {arrow: 0.0}
                                 draw_text +: {text_style: theme.font_bold{font_size: 11}}
                             }
@@ -2289,10 +2308,10 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
-                        mixer_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
-                        mixer_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        mixer_tab_0 := MusicButton{width: 62 height: ctl text: "deck A"}
+                        mixer_tab_1 := MusicButton{width: 62 height: ctl text: "deck B"}
                         // Only once the mixer is a tab as well.
-                        mixer_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        mixer_tab_2 := MusicButton{visible: false width: 56 height: ctl text: "mixer"}
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -2364,14 +2383,14 @@ script_mod! {
                             // FADE walks the console to the other side over that
                             // duration; CUT jumps there. Both land on the
                             // other deck, whichever side that currently is.
-                            xfade_now := MusicButton{width: 46 height: 22 text: "FADE"}
-                            xfade_switch := MusicButton{width: 40 height: 22 text: "CUT"}
+                            xfade_now := MusicButton{width: 46 height: ctl text: "FADE"}
+                            xfade_switch := MusicButton{width: 40 height: ctl text: "CUT"}
                             // Eight gain laws, each row wearing a plot of itself.
                             xcurve := mod.widgets.VjCurveDrop{}
                             // Tone follows the fader too when this is lit: the deck
                             // on its way out loses its bass, so two kicks never
                             // stack in the middle of a blend.
-                            music_eqfade := MusicButton{width: 34 height: 22 text: "EQ"}
+                            music_eqfade := MusicButton{width: 34 height: ctl text: "EQ"}
                         }
                         // The sweep and its two cue keys are three children, not
                         // one: the strip flanks the sweep with them while there
@@ -2383,7 +2402,7 @@ script_mod! {
                             flow: Right
                             spacing: 6
                             align: Align{x: 0.0, y: 0.5}
-                            fade_to_a := MusicButton{width: 46 height: 22 text: "◀ A"}
+                            fade_to_a := MusicButton{width: 46 height: ctl text: "◀ A"}
                             xfade_label_a := MusicLabel{width: 12 text: "A"}
                         }
                         // Fit here is only a fallback: the strip always draws this
@@ -2406,7 +2425,7 @@ script_mod! {
                             spacing: 6
                             align: Align{x: 0.0, y: 0.5}
                             xfade_label_b := MusicLabel{width: 12 text: "B"}
-                            fade_to_b := MusicButton{width: 46 height: 22 text: "B ▶"}
+                            fade_to_b := MusicButton{width: 46 height: ctl text: "B ▶"}
                         }
                         strip_automation := View{
                             width: Fit
@@ -2421,19 +2440,19 @@ script_mod! {
                             // plus their gaps have to stay inside the strip's
                             // 290pt budget or the row wraps and reads as two
                             // unrelated groups.
-                            decks_swap := MusicButton{width: 46 height: 22 text: "SWAP"}
+                            decks_swap := MusicButton{width: 46 height: ctl text: "SWAP"}
                             // Level-matching: a quiet master comes up, a hot one
                             // comes down, and the faders still read what the hand
                             // set. The ECG waveform says levelling without a word.
                             Tip{
                                 text: "NORMALIZER"
                                 music_normalise := MusicIconButton{
-                                    width: 34
-                                    height: 22
+                                    width: (ctl + 8.0)
+                                    height: ctl
                                     draw_icon +: { svg: crate_resource("self:resources/icons/waveform.svg") }
                                 }
                             }
-                            auto_sync := MusicButton{width: 80 height: 22 text: "AUTO SYNC"}
+                            auto_sync := MusicButton{width: 80 height: ctl text: "AUTO SYNC"}
                             // The AUTO DJ latch wears its own status line, the way
                             // the SYNC button wears its mode — one control, one
                             // home — and the gear that configures it never leaves
@@ -2444,9 +2463,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 6
                                 align: Align{x: 0.0, y: 0.5}
-                                auto_dj := MusicButton{width: 74 height: 22 text: "AUTO DJ"}
+                                auto_dj := MusicButton{width: 74 height: ctl text: "AUTO DJ"}
                                 auto_cfg := MusicIconButton{
-                                    width: 26 height: 22
+                                    width: ctl height: ctl
                                     draw_icon +: { svg: crate_resource("self:resources/icons/gear.svg") }
                                 }
                             }
@@ -2473,10 +2492,10 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
-                        deck_b_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
-                        deck_b_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        deck_b_tab_0 := MusicButton{width: 62 height: ctl text: "deck A"}
+                        deck_b_tab_1 := MusicButton{width: 62 height: ctl text: "deck B"}
                         // Only once the mixer is a tab as well.
-                        deck_b_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        deck_b_tab_2 := MusicButton{visible: false width: 56 height: ctl text: "mixer"}
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -2503,27 +2522,27 @@ script_mod! {
                             }
                         }
                     }
-                    View{
+                    deck_b_tools := View{
                         width: Fill
                         height: Fit
                         flow: Right
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
-                        deck_b_range := MusicButton{width: 46 height: 22 text: "±8%"}
+                        deck_b_range :=MusicButton{width: 46 height: ctl text: "±8%"}
                         // Mirrored against deck A: + then −, reading outward from
                         // the console's centre line.
-                        deck_b_key_up := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
-                        deck_b_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
-                        deck_b_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
-                        deck_b_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
-                        deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        deck_b_key_up := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
+                        deck_b_key_down := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
+                        deck_b_keylock := MusicButton{width: 44 height: ctl text: "KEY"}
+                        deck_b_phase_flip := MusicButton{width: ctl height: ctl padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        deck_b_sync := MusicButton{width: Fill height: ctl text: "SYNC"}
                     }
-                    View{
+                    deck_b_body := View{
                         width: Fill
                         height: Fill
                         flow: Right
                         spacing: 8
-                        View{
+                        deck_b_knobs := View{
                             width: Fill
                             height: Fill
                             flow: Down
@@ -2730,7 +2749,7 @@ script_mod! {
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "VOL"}
                                 deck_b_gain := MusicFader{min: 0.0 max: 1.5 default: 1.0}
-                                deck_b_mute := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
+                                deck_b_mute := MusicButton{width: Fill height: ctl_min padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
                             }
                             View{
                                 width: 44
@@ -2740,24 +2759,24 @@ script_mod! {
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
                                 deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
-                                deck_b_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
+                                deck_b_pitch_reset := MusicButton{width: Fill height: ctl_min padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                         }
                     }
                     // Deck B mirrors both transport rows across the waveforms.
-                    View{
+                    deck_b_transport := View{
                         width: Fill
                         height: Fit
                         flow: Down
                         spacing: 5
-                        View{
+                        deck_b_transport_main := View{
                             width: Fill
                             height: Fit
                             flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
                             spacing: 5
                             wrap_spacing: 5
                             align: Align{x: 1.0, y: 0.5}
-                            deck_b_jump_back := MusicTransportIconButton{
+                            deck_b_jump_back :=MusicTransportIconButton{
                                 draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
                             }
                             deck_b_jump_fwd := MusicTransportIconButton{
@@ -2774,7 +2793,7 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                             }
                         }
-                        View{
+                        deck_b_transport_loop := View{
                             width: Fill
                             height: Fit
                             flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
@@ -2790,7 +2809,7 @@ script_mod! {
                             deck_b_loop_out := MusicTransportButton{width: 36 text: "]"}
                             deck_b_loop_halve := MusicTransportButton{width: 36 text: "<"}
                             deck_b_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
+                                width: (transport + 4.0) height: transport loop_rows: true
                                 draw_bg +: {arrow: 0.0}
                                 draw_text +: {text_style: theme.font_bold{font_size: 11}}
                             }
@@ -2832,11 +2851,11 @@ script_mod! {
                     flow: Right
                     spacing: 6
                     align: Align{x: 0.0, y: 0.5}
-                    lists_tab_0 := MusicButton{width: 74 height: 22 text: "explorer"}
-                    lists_tab_1 := MusicButton{width: 62 height: 22 text: "queue"}
-                    lists_tab_2 := MusicButton{width: 62 height: 22 text: "loops"}
+                    lists_tab_0 := MusicButton{width: 74 height: ctl text: "explorer"}
+                    lists_tab_1 := MusicButton{width: 62 height: ctl text: "queue"}
+                    lists_tab_2 := MusicButton{width: 62 height: ctl text: "loops"}
                 }
-                View{
+                lists_body := View{
                     width: Fill
                     height: Fill
                     flow: Right
@@ -2855,7 +2874,7 @@ script_mod! {
                             border_size: 1.0
                             border_radius: 8.0
                         }
-                        View{
+                        music_library_tools := View{
                             width: Fill
                             height: Fit
                             flow: Right
@@ -2943,14 +2962,14 @@ script_mod! {
                             visible: false
                             width: Fill
                             text: ""
-                            draw_text.color: #xff5c39
+                            draw_text.color: vj.accent
                         }
                         // The column heads. Every one of them sorts: a click takes
                         // the order, a second click reverses it, and the arrow in the
                         // label says which column is holding it. STEM and KRK are
                         // heads like the rest — same widget, same box — so they sit
                         // on the line their neighbours sit on.
-                        View{
+                        music_track_heads := View{
                             width: Fill
                             height: Fit
                             flow: Right
@@ -2958,7 +2977,7 @@ script_mod! {
                             padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 26 text: ""}
-                            th_title := MusicColHead{width: Fill{weight: 400. min: 180.} text: "TITLE"}
+                            th_title :=MusicColHead{width: Fill{weight: 400. min: 180.} text: "TITLE"}
                             th_artist := MusicColHead{width: Fill{max: 150.} text: "ARTIST"}
                             th_bpm := MusicColHead{width: 54 text: "BPM"}
                             th_key := MusicColHead{width: 40 text: "KEY"}
@@ -3006,7 +3025,7 @@ script_mod! {
                             align: Align{x: 0.0, y: 0.5}
                             Label{
                                 text: "QUEUE"
-                                draw_text.color: #xff5c39
+                                draw_text.color: vj.accent
                                 draw_text.text_style: theme.font_bold{font_size: 10}
                             }
                             queue_count := MusicLabel{width: Fill text: ""}
@@ -3014,17 +3033,14 @@ script_mod! {
                             // recycling and the pick order. The transition style
                             // moved into the AUTO DJ gear modal.
                             queue_repeat := MusicChipButton{
-                                height: 20
                                 text: "REPEAT"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") }
                             }
                             queue_shuffle := MusicChipButton{
-                                height: 20
                                 text: "SHUFFLE"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/shuffle.svg") }
                             }
                             queue_clear := MusicChipButton{
-                                height: 20
                                 text: "Clear"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/square_x.svg") }
                             }
@@ -3062,11 +3078,11 @@ script_mod! {
                             flow: Right
                             spacing: 6
                             align: Align{x: 0.0, y: 0.5}
-                            splat_deck_a := MusicButton{width: 26 height: 22 text: "A"}
-                            splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
-                            splat_on := MusicButton{width: 36 height: 22 text: "ON"}
+                            splat_deck_a := MusicButton{width: (ctl + 6.0) height: ctl text: "A"}
+                            splat_deck_b := MusicButton{width: (ctl + 6.0) height: ctl text: "B"}
+                            splat_on := MusicButton{width: 36 height: ctl text: "ON"}
                             View{width: Fill height: Fit}
-                            splat_score := MusicButton{width: 52 height: 22 text: "score"}
+                            splat_score := MusicButton{width: 52 height: ctl text: "score"}
                         }
                         loop_splat := mod.widgets.VjLoopSplat{}
                     }
@@ -3076,7 +3092,7 @@ script_mod! {
 
             loop_score_panel := RoundedView{
                 visible: false
-                width: 700
+                width: Fill{max: 700.}
                 height: 240
                 flow: Down
                 padding: Inset{left: 6.0 right: 6.0 bottom: 6.0}
@@ -3098,28 +3114,28 @@ script_mod! {
                         width: Fill
                         height: 18
                         text: "select a loop cell"
-                        draw_text.color: #xf4f7fa
+                        draw_text.color: vj.text
                         draw_text.text_style: theme.font_bold{font_size: 10}
                     }
                     loop_score_play := MusicButton{
-                        width: 28
-                        height: 22
+                        width: (ctl + 2.0)
+                        height: ctl
                         padding: 0
                         text: "▶"
                     }
                     loop_score_stop := MusicButton{
-                        width: 28
-                        height: 22
+                        width: (ctl + 2.0)
+                        height: ctl
                         padding: 0
                         text: "■"
                     }
                     loop_score_loop := MusicChipButton{
-                        height: 22
+                        height: ctl
                         text: "LOOP"
                     }
                     loop_score_close := MusicButton{
-                        width: 24
-                        height: 22
+                        width: ctl
+                        height: ctl
                         text: "×"
                     }
                 }
@@ -3150,7 +3166,7 @@ script_mod! {
             spacing: 8
             align: Align{x: 0.0, y: 0.5}
             models_state := MusicLabel{width: Fill text: ""}
-            models_install := MusicButton{width: 130 height: 20 text: "INSTALL MODELS"}
+            models_install := MusicButton{width: 130 height: ctl text: "INSTALL MODELS"}
         }
 
         // The AUTO DJ settings dialog: mix tier, transition style, and the
@@ -3169,14 +3185,14 @@ script_mod! {
                     spacing: 12
                     flow: Down
                     draw_bg +: {
-                        color: #x16161b
-                        border_color: #xffffff18
+                        color: vj.background
+                        border_color: vj.border
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     Label{
                         text: "AUTO DJ"
-                        draw_text.color: #xff5c39
+                        draw_text.color: vj.accent
                         draw_text.text_style: theme.font_bold{font_size: 11}
                     }
                     View{
@@ -3217,15 +3233,15 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
-                        auto_vocal := MusicButton{width: 110 height: 22 text: "VOCAL GUARD"}
-                        auto_phrase := MusicButton{width: 110 height: 22 text: "PHRASE SNAP"}
+                        auto_vocal := MusicButton{width: 110 height: ctl text: "VOCAL GUARD"}
+                        auto_phrase := MusicButton{width: 110 height: ctl text: "PHRASE SNAP"}
                     }
                     View{
                         width: Fill
                         height: Fit
                         flow: Right
                         align: Align{x: 1.0, y: 0.5}
-                        auto_cfg_close := MusicButton{width: 60 height: 22 text: "Close"}
+                        auto_cfg_close := MusicButton{width: 60 height: ctl text: "Close"}
                     }
                 }
             }
@@ -3251,14 +3267,14 @@ script_mod! {
                     spacing: 12
                     flow: Down
                     draw_bg +: {
-                        color: #x16161b
-                        border_color: #xffffff18
+                        color: vj.background
+                        border_color: vj.border
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     Label{
                         text: "FIND LOOPS"
-                        draw_text.color: #xff5c39
+                        draw_text.color: vj.accent
                         draw_text.text_style: theme.font_bold{font_size: 11}
                     }
                     View{
@@ -3282,9 +3298,9 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MIN SECS"}
-                            scan_min_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            scan_min_secs_dec := MusicButton{width: ctl height: ctl text: "-"}
                             scan_min_secs := TextInput{width: 60 text: "4"}
-                            scan_min_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            scan_min_secs_inc := MusicButton{width: ctl height: ctl text: "+"}
                         }
                         View{
                             width: Fill
@@ -3293,9 +3309,9 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MAX SECS"}
-                            scan_max_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            scan_max_secs_dec := MusicButton{width: ctl height: ctl text: "-"}
                             scan_max_secs := TextInput{width: 60 text: "10"}
-                            scan_max_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            scan_max_secs_inc := MusicButton{width: ctl height: ctl text: "+"}
                         }
                     }
                     scan_beats_rows := View{
@@ -3330,9 +3346,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "LOOPS"}
-                        scan_count_dec := MusicButton{width: 22 height: 22 text: "-"}
+                        scan_count_dec := MusicButton{width: ctl height: ctl text: "-"}
                         scan_count := TextInput{width: 60 text: "10"}
-                        scan_count_inc := MusicButton{width: 22 height: 22 text: "+"}
+                        scan_count_inc := MusicButton{width: ctl height: ctl text: "+"}
                     }
                     // Lit = on, the switch idiom the AUTO DJ dialog next
                     // door already uses for its two brains.
@@ -3343,7 +3359,7 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "AUTOMATIC"}
-                        scan_auto := MusicButton{width: 110 height: 22 text: "AUTO FIND"}
+                        scan_auto := MusicButton{width: 110 height: ctl text: "AUTO FIND"}
                     }
                     View{
                         width: Fill
@@ -3351,8 +3367,8 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
-                        scan_remove_user := MusicButton{width: 146 height: 22 text: "REMOVE USER LOOPS"}
-                        scan_remove_ai := MusicButton{width: 146 height: 22 text: "REMOVE AI LOOPS"}
+                        scan_remove_user := MusicButton{width: 146 height: ctl text: "REMOVE USER LOOPS"}
+                        scan_remove_ai := MusicButton{width: 146 height: ctl text: "REMOVE AI LOOPS"}
                     }
                     // SCAN NOW sits alone on the left: it is the one button
                     // here that DOES something and leaves the dialog open,
@@ -3364,10 +3380,10 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
-                        scan_find := MusicButton{width: 84 height: 22 text: "FIND NOW"}
+                        scan_find := MusicButton{width: 84 height: ctl text: "FIND NOW"}
                         View{width: Fill height: 1}
-                        scan_cancel := MusicButton{width: 70 height: 22 text: "CANCEL"}
-                        scan_ok := MusicButton{width: 50 height: 22 text: "OK"}
+                        scan_cancel := MusicButton{width: 70 height: ctl text: "CANCEL"}
+                        scan_ok := MusicButton{width: 50 height: ctl text: "OK"}
                     }
                 }
             }
@@ -3385,14 +3401,14 @@ script_mod! {
                     spacing: 10
                     flow: Down
                     draw_bg +: {
-                        color: #x16161b
-                        border_color: #xffffff18
+                        color: vj.background
+                        border_color: vj.border
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     Label{
                         text: "About to download the deck models"
-                        draw_text.color: #xe8eef4
+                        draw_text.color: vj.text
                         draw_text.text_style: theme.font_bold{font_size: 12}
                     }
                     View{
@@ -3416,13 +3432,13 @@ script_mod! {
                     Label{
                         width: Fill
                         text: "Both weight sets are MIT-licensed. They download once into local/ inside the checkout — resumable, with size and sha256 pinned — and nothing is uploaded anywhere."
-                        draw_text.color: #x8e9aa7
+                        draw_text.color: vj.text_secondary
                         draw_text.text_style.font_size: 9
                     }
                     Label{
                         width: Fill
                         text: "MORE MODELS"
-                        draw_text.color: #xff5c39
+                        draw_text.color: vj.accent
                         draw_text.text_style: theme.font_bold{font_size: 10}
                     }
                     hub_model_install_panel := mod.widgets.ModelInstallPanel{
@@ -3435,7 +3451,7 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0, y: 0.5}
-                        models_download := MusicButton{width: 100 height: 22 text: "Download"}
+                        models_download := MusicButton{width: 100 height: ctl text: "Download"}
                     }
                 }
             }
@@ -4325,7 +4341,7 @@ impl Widget for VjWaveScroll {
             if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
                 continue;
             }
-            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+            self.draw_text.color = crate::theme::color(cx, id!(text));
             self.draw_text.text_style.font_size = 9.0;
             self.draw_text.draw_abs(
                 cx,
@@ -4335,7 +4351,7 @@ impl Widget for VjWaveScroll {
         }
 
         // Bar numbers, ruled off whichever deck is leading the view.
-        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
+        self.draw_text.color = crate::theme::color(cx, id!(waveform_text));
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         if let Some((beat_cols, phase)) = lane.grid_columns() {
@@ -4382,9 +4398,9 @@ impl Widget for VjWaveScroll {
             let lane_rect = self.lane_rects[index];
             self.draw_text.text_style.font_size = 9.0;
             let hint = if index == 0 {
-                "deck A — load a track from the list below"
+                "Deck A · choose a track in Library"
             } else {
-                "deck B — load a track from the list below"
+                "Deck B · choose a track in Library"
             };
             self.draw_text.draw_abs(
                 cx,
@@ -5000,7 +5016,7 @@ impl Widget for VjWaveOverview {
                     size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
                 }
             };
-            self.draw_load.color = Vec4f::from_u32(0x2a323cff);
+            self.draw_load.color = crate::theme::color(cx, id!(border_strong));
             self.draw_load.draw_abs(cx, track);
             self.draw_load.color = match load.phase as u32 {
                 2 => Vec4f::from_u32(0xf5c542ff),
@@ -6001,10 +6017,18 @@ impl Widget for VjTrackList {
                     // one being pre-listened. Templated rows are painted
                     // from data here, never through the host's latch cache.
                     let previewing = self.active_preview.as_ref() == Some(&entry.key);
-                    let hp_ink: u32 = if previewing { 0x35c05fff } else { 0x9fabb7ff };
-                    let hp_edge: u32 = if previewing { 0x35c05f80 } else { 0xffffff26 };
-                    let hp_ink = Vec4f::from_u32(hp_ink);
-                    let hp_edge = Vec4f::from_u32(hp_edge);
+                    // Green is the console's "live" ink and stays; the resting
+                    // mark takes the theme's own secondary text and border.
+                    let hp_ink = if previewing {
+                        Vec4f::from_u32(0x35c05fff)
+                    } else {
+                        crate::theme::color(cx, id!(text_secondary))
+                    };
+                    let hp_edge = if previewing {
+                        Vec4f::from_u32(0x35c05f80)
+                    } else {
+                        crate::theme::color(cx, id!(border))
+                    };
                     let mut hp = item.button(cx, ids!(row_hp));
                     script_apply_eval!(cx, hp, {
                         draw_icon +: { color: #(hp_ink) }

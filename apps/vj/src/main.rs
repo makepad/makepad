@@ -43,6 +43,12 @@ mod catalog;
 mod chat;
 mod clock;
 mod console_scale;
+mod console_layout;
+mod music_responsive;
+mod presentation;
+use presentation::Presentation;
+mod theme;
+mod popup_layout;
 mod cue;
 mod deck_sections;
 mod deck_tabs;
@@ -248,6 +254,7 @@ use std::time::Duration;
 app_main!(App);
 
 script_mod! {
+    let vj = mod.vj_theme
     use mod.prelude.widgets.*
     use mod.widgets.*
 
@@ -260,47 +267,53 @@ script_mod! {
     }
 
     let PanelLabel = Label{
-        draw_text.color: #xa6b1bd
+        draw_text.color: vj.text_secondary
         draw_text.text_style.font_size: 10
     }
 
     let ValueLabel = Label{
-        draw_text.color: #xe8eef4
+        draw_text.color: vj.text
         draw_text.text_style.font_size: 11
     }
 
     let ChromeButton = Button{
+        min_height: vj.control_height
+        margin: 0
+        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
         draw_bg +: {
-            color: #x272e38
-            color_focus: #x272e38
-            color_hover: #x2b3440
-            color_down: #x1e232b
-            border_color: #xffffff2e
+            color: vj.control
+            color_focus: vj.control
+            color_hover: vj.control_hover
+            color_down: vj.control_down
+            border_color: vj.border
             // ONE RADIUS: match the dropdown chrome (theme 2.5).
-            border_radius: 2.5
+            border_radius: vj.radius
             border_size: 1.0
         }
         draw_text +: {
-            color: #xd6dee6
-            color_focus: #xd6dee6
-            color_hover: #xfffaf4
+            color: vj.text
+            color_focus: vj.text
+            color_hover: vj.text_hover
             text_style: theme.font_regular{font_size: 10}
         }
     }
 
     let PillButton = Button{
+        min_height: vj.control_height
+        margin: 0
+        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
         draw_bg +: {
-            color: #x222831
-            color_hover: #x2f3842
-            color_down: #x1c2129
-            border_color: #xffffff26
+            color: vj.surface_raised
+            color_hover: vj.control_hover
+            color_down: vj.surface
+            border_color: vj.border
             // ONE RADIUS: match the dropdown chrome (theme 2.5).
-            border_radius: 2.5
+            border_radius: vj.radius
             border_size: 1.0
         }
         draw_text +: {
-            color: #xb4bfca
-            color_hover: #xff5c39
+            color: vj.text_secondary
+            color_hover: vj.accent
             text_style: theme.font_bold{font_size: 10}
         }
     }
@@ -309,16 +322,16 @@ script_mod! {
     // theme's thin grey slider).
     let ApcHSlider = Slider{
         width: Fill
-        height: 22
+        height: vj.control_height
         min: 0.0
         max: 1.0
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
             inert: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -346,17 +359,17 @@ script_mod! {
     // mapping and persistence remain stable.
     let ApcBipolarSlider = Slider{
         width: Fill
-        height: 22
+        height: vj.control_height
         min: 0.0
         max: 1.0
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
-            centre_color: uniform(#xffffff36)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
+            centre_color: uniform(vj.border_strong)
             inert: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -396,12 +409,12 @@ script_mod! {
             height: 0
         }
         draw_bg +: {
-            body_color: uniform(#x1c222b)
-            body_color_hover: uniform(#x2a323d)
-            rim_color: uniform(#xffffff40)
-            ring_color: uniform(#x2f3842)
-            val_color: uniform(#xff5c39)
-            pointer_color: uniform(#xf2f6fa)
+            body_color: uniform(vj.surface)
+            body_color_hover: uniform(vj.surface_raised)
+            rim_color: uniform(vj.border_strong)
+            ring_color: uniform(vj.control_hover)
+            val_color: uniform(vj.accent)
+            pointer_color: uniform(vj.text)
             // Slot dials the loaded effect does not declare dim to inert
             // (fixed dial count keeps MIDI maps stable; the dimming keeps
             // the strip honest about which ones do anything).
@@ -436,45 +449,45 @@ script_mod! {
     // 22px icon button for the cue strips / console. The host paints `lit`
     // state (playing, loop on, spin on) through draw_bg.color like FxButton.
     let IconButton = ButtonIcon{
-        width: 24
-        height: 22
+        width: vj.control_height
+        height: vj.control_height
         padding: 0
         // ONE BUTTON FAMILY app-wide (the pager's well + glyph ratio):
         // 24x22 wells, 9-wide glyphs, comfortable padding everywhere.
         icon_walk: Walk{width: 9 height: Fit}
         draw_bg +: {
-            color: #x272e38
-            color_focus: #x272e38
-            color_hover: #x2b3440
-            color_down: #x1e232b
-            border_color: #xffffff26
+            color: vj.control
+            color_focus: vj.control
+            color_hover: vj.control_hover
+            color_down: vj.control_down
+            border_color: vj.border
             // ONE RADIUS: match the dropdown chrome (theme 2.5).
-            border_radius: 2.5
+            border_radius: vj.radius
             border_size: 1.0
         }
         draw_icon +: {
-            color: #xd6dee6
+            color: vj.text
         }
     }
 
     // House-dark dropdown for dialog rows (the deck strips carry their own
     // inline copies of the same popup theme).
     let PhonesDrop = DropDown{
-        height: 22
+        height: vj.control_height
         popup_menu: PopupMenu{
             draw_bg +: {
-                color: #x16161b
-                border_color: #xffffff2e
+                color: vj.background
+                border_color: vj.border
             }
             menu_item: PopupMenuItem{
                 draw_bg +: {
-                    color_hover: #x2b3440
-                    color_active: #xff5c39
+                    color_hover: vj.control_hover
+                    color_active: vj.accent
                 }
                 draw_text +: {
-                    color: #xd6dee6
-                    color_hover: #xfffaf4
-                    color_active: #x1c0b06
+                    color: vj.text
+                    color_hover: vj.text_hover
+                    color_active: vj.on_accent
                 }
             }
         }
@@ -502,11 +515,11 @@ script_mod! {
             height: 0
         }
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
-            cap_shadow: uniform(#x8d98a7)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
+            cap_shadow: uniform(vj.text_secondary)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(3., 2., self.rect_size.x - 6., self.rect_size.y - 4., 6.)
@@ -534,7 +547,7 @@ script_mod! {
 
     let ApcPad = ChromeButton{
         width: Fill
-        height: 22
+        height: vj.control_height
         draw_text +: {
             text_style: theme.font_bold{font_size: 8}
         }
@@ -542,7 +555,7 @@ script_mod! {
 
     let Tick = Label{
         width: Fill
-        draw_text.color: #xa6b1bd
+        draw_text.color: vj.text_secondary
         draw_text.text_style: theme.font_bold{font_size: 8}
     }
 
@@ -556,8 +569,8 @@ script_mod! {
         spacing: 3
         padding: 7
         draw_bg +: {
-            color: #x181e25
-            border_color: #xffffff20
+            color: vj.surface
+            border_color: vj.border
             border_size: 1.0
             border_radius: 3.0
         }
@@ -565,7 +578,7 @@ script_mod! {
 
     let SynthParamRow = View{
         width: Fill
-        height: 22
+        height: vj.control_height
         flow: Right
         spacing: 5
         align: Align{x: 0.0 y: 0.5}
@@ -587,11 +600,11 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x1d222a)
-            track_color: uniform(#x2b343f)
-            fill_color: uniform(#xff5c39)
-            cap_color: uniform(#xe8eef4)
-            cap_shadow: uniform(#x8d98a7)
+            body_color: uniform(vj.surface)
+            track_color: uniform(vj.control)
+            fill_color: uniform(vj.accent)
+            cap_color: uniform(vj.text)
+            cap_shadow: uniform(vj.text_secondary)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(2., 6., self.rect_size.x - 4., self.rect_size.y - 12., 8.)
@@ -662,14 +675,14 @@ script_mod! {
                         flow: Down
                         spacing: 4
                         padding: Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 8.0}
-                        draw_bg.color: #x14171c
+                        draw_bg.color: vj.background
 
                         // ---- status / navigation bar (top). Left padding leaves
                         // room for the macOS traffic lights; the window drags by
                         // the dot gripper only, never by a control.
-                        status_bar := View{
+                        status_bar := ScrollXView{
                             width: Fill
-                            height: 28
+                            height: 48
                             // One line at every width that can hold one.
                             // `App::sync_status_bar_wrap` turns the wrap on
                             // and takes it off again — it cannot be declared,
@@ -700,10 +713,10 @@ script_mod! {
                             // It IS the window's drag handle: the
                             // WindowDragQuery answers Caption over this
                             // rect, and icons consume no clicks.
-                            Tip{ text: "Drag to move the window"
+                            brand_grip := Tip{ text: "Drag to move the window"
                                 win_grip := View{
                                     width: Fit
-                                    height: 22
+                                    height: vj.control_height
                                     flow: Right
                                     spacing: 7
                                     align: Align{x: 0.0, y: 0.5}
@@ -711,7 +724,7 @@ script_mod! {
                                         icon_walk: Walk{width: 24 height: Fit}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/logo_mark.svg")
-                                            color: #xff5c39
+                                            color: vj.accent
                                         }
                                     }
                                     Icon{
@@ -730,6 +743,7 @@ script_mod! {
                             mode_dj := PillButton{text: "DJ"}
                             mode_synth := PillButton{text: "SYNTH"}
                             mode_mix := PillButton{text: "MIX"}
+                            appearance_toggle := ChromeButton{text: "System theme"}
                             // OFFSCREEN RENDER HOSTS — every 4x4 heartbeat
                             // widget stacked in ONE overlay slot with a
                             // bar-colored cover on top: the sample draws
@@ -817,7 +831,7 @@ script_mod! {
                             SolidView{
                                 width: 4
                                 height: 4
-                                draw_bg.color: #x14171c
+                                draw_bg.color: vj.background
                             }
                             }
                             apc_map_label := PanelLabel{width: 0 text: ""}
@@ -826,7 +840,7 @@ script_mod! {
                                 flow: Flow.Right{wrap: false}
                                 max_lines: 1
                                 text: "starting…"
-                                draw_text.color: #xa9b4bf
+                                draw_text.color: vj.text_secondary
                                 draw_text.text_style.font_size: 10
                             }
                             // ONE beat block: a live wave of the captured
@@ -844,8 +858,8 @@ script_mod! {
                                 spacing: 6
                                 align: Align{x: 0.0, y: 0.5}
                                 new_batch: true
-                                beat_wave := VjBeatWave{width: 120 height: 22}
-                                beat_led := VjBeatLed{width: 18 height: 22}
+                                beat_wave := VjBeatWave{width: 120 height: vj.control_height}
+                                beat_led := VjBeatLed{width: 18 height: vj.control_height}
                             }
                             // BPM as a Blender-style value field: drag to
                             // bend (±0.1/px), click to type, hover chevrons
@@ -877,7 +891,7 @@ script_mod! {
                                 max_lines: 1
                                 width: 0
                                 text: "CONF:   0%"
-                                draw_text.color: #xa9b4bf
+                                draw_text.color: vj.text_secondary
                                 draw_text.text_style.font_size: 9
                             }
                             external_phase := Label{
@@ -886,7 +900,7 @@ script_mod! {
                                 max_lines: 1
                                 width: 0
                                 text: "BEAT -/4 [........] PHASE   0%"
-                                draw_text.color: #xff8f70
+                                draw_text.color: vj.accent_hover
                                 draw_text.text_style: theme.font_bold{font_size: 9}
                             }
                             external_capture := Label{
@@ -1000,23 +1014,23 @@ script_mod! {
                                     draw_bg.button_type: DesktopButtonType.WindowsMin
                                     width: 40 height: 26
                                     draw_bg +: {
-                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
-                                        bg_color_hover: #x2b3440, bg_color_down: #x1e232b
+                                        color: vj.text, color_hover: #xffffff, color_down: #xffffff
+                                        bg_color_hover: vj.control_hover, bg_color_down: vj.control_down
                                     }
                                 }
                                 win_max := DesktopButton{
                                     draw_bg.button_type: DesktopButtonType.WindowsMax
                                     width: 40 height: 26
                                     draw_bg +: {
-                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
-                                        bg_color_hover: #x2b3440, bg_color_down: #x1e232b
+                                        color: vj.text, color_hover: #xffffff, color_down: #xffffff
+                                        bg_color_hover: vj.control_hover, bg_color_down: vj.control_down
                                     }
                                 }
                                 win_close := DesktopButton{
                                     draw_bg.button_type: DesktopButtonType.WindowsClose
                                     width: 40 height: 26
                                     draw_bg +: {
-                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
+                                        color: vj.text, color_hover: #xffffff, color_down: #xffffff
                                         bg_color_hover: #xe81123, bg_color_down: #xf1707a
                                     }
                                 }
@@ -1033,10 +1047,10 @@ script_mod! {
                             draw_bg +: {
                                 // App-dark ground, near-invisible bar at
                                 // rest, accent only under the pointer.
-                                color_bg: #x14171c
-                                color: #x222830
-                                color_hover: #x46312b
-                                color_drag: #xff5c39
+                                color_bg: vj.background
+                                color: vj.surface_raised
+                                color_hover: vj.selection
+                                color_drag: vj.accent
                                 splitter_pad: 2.0
                                 bar_size: 72.0
                             }
@@ -1074,10 +1088,10 @@ script_mod! {
                                     // the 4px gutter law yields.
                                     size: 6.0
                                     draw_bg +: {
-                                        color_bg: #x14171c
-                                        color: #x222830
-                                        color_hover: #x46312b
-                                        color_drag: #xff5c39
+                                        color_bg: vj.background
+                                        color: vj.surface_raised
+                                        color_hover: vj.selection
+                                        color_drag: vj.accent
                                         splitter_pad: 2.0
                                         bar_size: 72.0
                                     }
@@ -1137,7 +1151,7 @@ script_mod! {
                                                     // (see DrawCornerCap).
                                                     VjCornerCaps{
                                                         radius: 10.0
-                                                        draw_cap +: { cap_color: #x14171c }
+                                                        draw_cap +: { cap_color: vj.background }
                                                     }
                                                 }
                                             }
@@ -1161,7 +1175,7 @@ script_mod! {
                                                     preview := VideoProgram{}
                                                     VjCornerCaps{
                                                         radius: 10.0
-                                                        draw_cap +: { cap_color: #x14171c }
+                                                        draw_cap +: { cap_color: vj.background }
                                                     }
                                                 }
                                             }
@@ -1197,7 +1211,7 @@ script_mod! {
                                                     }
                                                     VjCornerCaps{
                                                         radius: 10.0
-                                                        draw_cap +: { cap_color: #x14171c }
+                                                        draw_cap +: { cap_color: vj.background }
                                                     }
                                                 }
                                             }
@@ -1216,7 +1230,7 @@ script_mod! {
                                         // belongs to a control (fader, knob, scratch,
                                         // tile). Wheel/trackpad and the scrollbar
                                         // itself keep working.
-                                        scroll_bars.scroll_bar_y.drag_scrolling: false
+                                        scroll_bars.scroll_bar_y.drag_scrolling: true
                                         // ---- console: mix controls + EFFECT SLOTS on ONE row.
                                         // The old hardwired FX bank (13 buttons + its knob strip)
                                         // is GONE — effects and transitions are catalog content
@@ -1248,7 +1262,7 @@ script_mod! {
                                         // harmony by shared centering, not
                                         // edge-locking, with uniform gaps
                                         // inside the band.
-                                        View{
+                                        vj_controls_row := View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
@@ -1276,8 +1290,8 @@ script_mod! {
                                                 width: Fit height: 270 flow: Down spacing: 4
                                                 padding: 10
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
@@ -1315,12 +1329,12 @@ script_mod! {
                                                                 text: "Make VFR"
                                                                 draw_bg +: {
                                                                     size: 16.0
-                                                                    mark_color_active: #xff5c39
+                                                                    mark_color_active: vj.accent
                                                                     mark_color_active_hover: #xff7a5c
                                                                     border_color: #xffffff33
-                                                                    border_color_hover: #xff5c39
-                                                                    border_color_active: #xff5c39
-                                                                    border_color_focus: #xff5c39
+                                                                    border_color_hover: vj.accent
+                                                                    border_color_active: vj.accent
+                                                                    border_color_focus: vj.accent
                                                                 }
                                                                 draw_text +: {
                                                                     color: #xc7d0da
@@ -1348,7 +1362,7 @@ script_mod! {
                                                                     sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 1.5)
                                                                     sdf.fill(#x232833)
                                                                     sdf.box(0.0, 0.0, max(self.rect_size.x * self.progress, 4.0), self.rect_size.y, 1.5)
-                                                                    sdf.fill(#xff5c39)
+                                                                    sdf.fill(vj.accent)
                                                                     return sdf.result
                                                                 }
                                                             }
@@ -1374,7 +1388,7 @@ script_mod! {
                                             // COMPOSITE (video × effect).
                                             // Card: one tidy module per
                                             // cluster (the app's well idiom).
-                                            RoundedView{
+                                            vj_source_a := RoundedView{
                                                 // THE BAND LAW: every card in
                                                 // the center strip is a FIXED
                                                 // height — nothing in this
@@ -1382,8 +1396,8 @@ script_mod! {
                                                 width: Fit height: 270 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
@@ -1397,7 +1411,7 @@ script_mod! {
                                                 // their own corners in-shader;
                                                 // a card behind a square video
                                                 // quad just gets covered.
-                                                View{
+                                                vj_source_a_preview := View{
                                                     width: 420 height: 228 flow: Overlay
                                                     deck_a_source := VideoView{
                                                         width: Fill
@@ -1427,7 +1441,7 @@ script_mod! {
                                                         width: Fill height: 208
                                                         VjCornerCaps{
                                                             radius: 10.0
-                                                            draw_cap +: { cap_color: #x181c23 }
+                                                            draw_cap +: { cap_color: vj.surface }
                                                         }
                                                     }
                                                     // CUE ACK, UI-layer only:
@@ -1444,7 +1458,7 @@ script_mod! {
                                                             width: 44
                                                             height: 44
                                                             draw_bg +: {
-                                                                color: #xff5c39
+                                                                color: vj.accent
                                                                 stroke_width: 3.0
                                                             }
                                                         }
@@ -1491,7 +1505,7 @@ script_mod! {
                                                         Tip{ text: "Play mode"
                                                             deck_a_mode := DropDown{
                                                                 width: 92
-                                                                height: 22
+                                                                height: vj.control_height
                                                                 labels: ["→ Forward" "← Reverse" "↔ Bounce" "→| Single"]
                                                                 // House-dark popup:
                                                                 // the stock theme
@@ -1500,18 +1514,18 @@ script_mod! {
                                                                 // console.
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
-                                                                        color: #x16161b
-                                                                        border_color: #xffffff2e
+                                                                        color: vj.background
+                                                                        border_color: vj.border
                                                                     }
                                                                     menu_item: PopupMenuItem{
                                                                         draw_bg +: {
-                                                                            color_hover: #x2b3440
-                                                                            color_active: #xff5c39
+                                                                            color_hover: vj.control_hover
+                                                                            color_active: vj.accent
                                                                         }
                                                                         draw_text +: {
-                                                                            color: #xd6dee6
-                                                                            color_hover: #xfffaf4
-                                                                            color_active: #x1c0b06
+                                                                            color: vj.text
+                                                                            color_hover: vj.text_hover
+                                                                            color_active: vj.on_accent
                                                                         }
                                                                     }
                                                                 }
@@ -1529,32 +1543,32 @@ script_mod! {
                                                         Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
                                                             deck_a_tween := DropDown{
                                                                 width: 40
-                                                                height: 22
+                                                                height: vj.control_height
                                                                 labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
                                                                 // XF: the fresh-deck default. A stored
                                                                 // per-clip choice still wins over it.
                                                                 selected_item: 1
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
-                                                                        color: #x16161b
-                                                                        border_color: #xffffff2e
+                                                                        color: vj.background
+                                                                        border_color: vj.border
                                                                     }
                                                                     menu_item: PopupMenuItem{
                                                                         draw_bg +: {
-                                                                            color_hover: #x2b3440
-                                                                            color_active: #xff5c39
+                                                                            color_hover: vj.control_hover
+                                                                            color_active: vj.accent
                                                                         }
                                                                         draw_text +: {
-                                                                            color: #xd6dee6
-                                                                            color_hover: #xfffaf4
-                                                                            color_active: #x1c0b06
+                                                                            color: vj.text
+                                                                            color_hover: vj.text_hover
+                                                                            color_active: vj.on_accent
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                         deck_a_ai3_status := Label{
-                                                            width: 42 height: 22 text: ""
+                                                            width: 42 height: vj.control_height text: ""
                                                             draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
                                                         vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
@@ -1609,12 +1623,12 @@ script_mod! {
                                             // crossfader — one nested block,
                                             // the fader row tucked to the fx
                                             // row's width.
-                                            View{
-                                                width: Fit height: Fit
+                                            vj_mix_column := View{
+                                                width: Fill{basis: 478.0 min: 260.0 max: 620.0} height: Fit
                                                 flow: Down spacing: 8
                                                 align: Align{x: 0.5, y: 0.0}
-                                                View{
-                                                    width: Fit height: Fit
+                                                vj_effect_slots := ScrollXView{
+                                                    width: Fill height: 230
                                                     flow: Right
                                                     spacing: 8
                                                     align: Align{x: 0.0, y: 0.0}
@@ -1630,8 +1644,8 @@ script_mod! {
                                                 width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
@@ -1705,8 +1719,8 @@ script_mod! {
                                                 width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
@@ -1774,8 +1788,8 @@ script_mod! {
                                                 width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
@@ -1842,7 +1856,7 @@ script_mod! {
                                                 // The slider takes whatever
                                                 // length the flanking
                                                 // controls leave.
-                                                RoundedView{
+                                                vj_crossfade_panel := RoundedView{
                                                     // FIXED height, by
                                                     // construction equal to
                                                     // the deck cards: 270
@@ -1851,13 +1865,13 @@ script_mod! {
                                                     // Fit that resisted
                                                     // every nudge is gone;
                                                     // content centers.
-                                                    width: 478 height: 62
+                                                    width: Fill height: Fit min_height: 62
                                                     flow: Right spacing: 8
                                                     padding: Inset{left: 12.0, right: 12.0}
                                                     align: Align{x: 0.5, y: 0.5}
                                                     draw_bg +: {
-                                                        color: #x181c23
-                                                        border_color: #xffffff12
+                                                        color: vj.surface
+                                                        border_color: vj.separator
                                                         border_size: 1.0
                                                         border_radius: 5.0
                                                     }
@@ -1896,7 +1910,7 @@ script_mod! {
                                                 }
                                             }
                                             // DECK B SOURCE, mirroring A.
-                                            RoundedView{
+                                            vj_source_b := RoundedView{
                                                 // THE BAND LAW: every card in
                                                 // the center strip is the SAME
                                                 // fixed height — nothing in
@@ -1904,15 +1918,15 @@ script_mod! {
                                                 width: Fit height: 270 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
+                                                    color: vj.surface
+                                                    border_color: vj.separator
                                                     border_size: 1.0
                                                     border_radius: 5.0
                                                 }
                                                 // THE WORKING DECK, mirroring
                                                 // A: rounded-in-shader lane +
                                                 // picture, UI-only spinner.
-                                                View{
+                                                vj_source_b_preview := View{
                                                     width: 420 height: 228 flow: Overlay
                                                     deck_b_source := VideoView{
                                                         width: Fill
@@ -1935,7 +1949,7 @@ script_mod! {
                                                         width: Fill height: 208
                                                         VjCornerCaps{
                                                             radius: 10.0
-                                                            draw_cap +: { cap_color: #x181c23 }
+                                                            draw_cap +: { cap_color: vj.surface }
                                                         }
                                                     }
                                                     deck_b_busy := View{
@@ -1947,7 +1961,7 @@ script_mod! {
                                                             width: 44
                                                             height: 44
                                                             draw_bg +: {
-                                                                color: #xff5c39
+                                                                color: vj.accent
                                                                 stroke_width: 3.0
                                                             }
                                                         }
@@ -1981,7 +1995,7 @@ script_mod! {
                                                         Tip{ text: "Play mode"
                                                             deck_b_mode := DropDown{
                                                                 width: 92
-                                                                height: 22
+                                                                height: vj.control_height
                                                                 labels: ["→ Forward" "← Reverse" "↔ Bounce" "→| Single"]
                                                                 // House-dark popup:
                                                                 // the stock theme
@@ -1990,18 +2004,18 @@ script_mod! {
                                                                 // console.
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
-                                                                        color: #x16161b
-                                                                        border_color: #xffffff2e
+                                                                        color: vj.background
+                                                                        border_color: vj.border
                                                                     }
                                                                     menu_item: PopupMenuItem{
                                                                         draw_bg +: {
-                                                                            color_hover: #x2b3440
-                                                                            color_active: #xff5c39
+                                                                            color_hover: vj.control_hover
+                                                                            color_active: vj.accent
                                                                         }
                                                                         draw_text +: {
-                                                                            color: #xd6dee6
-                                                                            color_hover: #xfffaf4
-                                                                            color_active: #x1c0b06
+                                                                            color: vj.text
+                                                                            color_hover: vj.text_hover
+                                                                            color_active: vj.on_accent
                                                                         }
                                                                     }
                                                                 }
@@ -2019,32 +2033,32 @@ script_mod! {
                                                         Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
                                                             deck_b_tween := DropDown{
                                                                 width: 40
-                                                                height: 22
+                                                                height: vj.control_height
                                                                 labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
                                                                 // XF: the fresh-deck default. A stored
                                                                 // per-clip choice still wins over it.
                                                                 selected_item: 1
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
-                                                                        color: #x16161b
-                                                                        border_color: #xffffff2e
+                                                                        color: vj.background
+                                                                        border_color: vj.border
                                                                     }
                                                                     menu_item: PopupMenuItem{
                                                                         draw_bg +: {
-                                                                            color_hover: #x2b3440
-                                                                            color_active: #xff5c39
+                                                                            color_hover: vj.control_hover
+                                                                            color_active: vj.accent
                                                                         }
                                                                         draw_text +: {
-                                                                            color: #xd6dee6
-                                                                            color_hover: #xfffaf4
-                                                                            color_active: #x1c0b06
+                                                                            color: vj.text
+                                                                            color_hover: vj.text_hover
+                                                                            color_active: vj.on_accent
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                         deck_b_ai3_status := Label{
-                                                            width: 42 height: 22 text: ""
+                                                            width: 42 height: vj.control_height text: ""
                                                             draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
                                                         vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
@@ -2086,12 +2100,13 @@ script_mod! {
                                         // page tabs at the rail's foot — so
                                         // the way back is never on the page
                                         // being flipped away.
-                                        View{
+                                        vj_library := View{
                                             width: Fill
                                             height: Fill
+                                            min_height: 260
                                             flow: Right
                                             spacing: 14
-                                            View{
+                                            vj_library_rail := ScrollXYView{
                                                 width: 104
                                                 height: Fill
                                                 flow: Down
@@ -2177,20 +2192,20 @@ script_mod! {
                                                     spacing: 10
                                                     flow: Down
                                                     draw_bg +: {
-                                                        color: #x16161b
-                                                        border_color: #xffffff18
+                                                        color: vj.background
+                                                        border_color: vj.border
                                                         border_size: 1.0
                                                         border_radius: 5.0
                                                     }
                                                     remove_title := Label{
                                                         text: ""
-                                                        draw_text.color: #xe8eef4
+                                                        draw_text.color: vj.text
                                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                                     }
                                                     Label{
                                                         width: Fill
                                                         text: "Remove from grid, does not delete original."
-                                                        draw_text.color: #x8e9aa7
+                                                        draw_text.color: vj.text_secondary
                                                         draw_text.text_style.font_size: 9
                                                     }
                                                     View{
@@ -2212,7 +2227,7 @@ script_mod! {
                                                     height: Fill
                                                     flow: Down
                                                     spacing: 4
-                                                    scroll_bars.scroll_bar_y.drag_scrolling: false
+                                                    scroll_bars.scroll_bar_y.drag_scrolling: true
                                         // ---- lighting desk (APC40 knobs / faders / scenes) ----
                                         View{
                                             width: Fill
@@ -2224,13 +2239,13 @@ script_mod! {
                                             show_status_label := Label{
                                                 width: Fill
                                                 text: "show control starting…"
-                                                draw_text.color: #x8e9aa7
+                                                draw_text.color: vj.text_secondary
                                                 draw_text.text_style.font_size: 9
                                             }
                                             light_desk_status := Label{
                                                 width: Fit
                                                 text: ""
-                                                draw_text.color: #x8e9aa7
+                                                draw_text.color: vj.text_secondary
                                                 draw_text.text_style.font_size: 8
                                             }
                                             light_power := Toggle{text: "pwr"}
@@ -2349,7 +2364,7 @@ script_mod! {
                                                             flow: Flow.Right{wrap: false}
                                                             max_lines: 1
                                                             text: "search the internet archive"
-                                                            draw_text.color: #x8e9aa7
+                                                            draw_text.color: vj.text_secondary
                                                             draw_text.text_style.font_size: 9
                                                         }
                                                         archive_prev := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_prev.svg") }}
@@ -2371,8 +2386,8 @@ script_mod! {
                                                             spacing: 4
                                                             padding: 8
                                                             draw_bg +: {
-                                                                color: #x181c23
-                                                                border_color: #xffffff12
+                                                                color: vj.surface
+                                                                border_color: vj.separator
                                                                 border_size: 1.0
                                                                 border_radius: 5.0
                                                             }
@@ -2409,7 +2424,7 @@ script_mod! {
                                                                 flow: Flow.Right{wrap: false}
                                                                 max_lines: 1
                                                                 text: "click a tile to audition it"
-                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.color: vj.text_secondary
                                                                 draw_text.text_style.font_size: 8
                                                             }
                                                             archive_title := Label{
@@ -2418,7 +2433,7 @@ script_mod! {
                                                                 flow: Flow.Right{wrap: false}
                                                                 max_lines: 1
                                                                 text: ""
-                                                                draw_text.color: #xe8eef4
+                                                                draw_text.color: vj.text
                                                                 draw_text.text_style: theme.font_bold{font_size: 10}
                                                             }
                                                             archive_meta := Label{
@@ -2427,7 +2442,7 @@ script_mod! {
                                                                 flow: Flow.Right{wrap: false}
                                                                 max_lines: 1
                                                                 text: ""
-                                                                draw_text.color: #xa6b1bd
+                                                                draw_text.color: vj.text_secondary
                                                                 draw_text.text_style.font_size: 8
                                                             }
                                                             archive_license := Label{
@@ -2436,7 +2451,7 @@ script_mod! {
                                                                 flow: Flow.Right{wrap: false}
                                                                 max_lines: 1
                                                                 text: ""
-                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.color: vj.text_secondary
                                                                 draw_text.text_style.font_size: 8
                                                             }
                                                             archive_import_lab := Label{
@@ -2445,7 +2460,7 @@ script_mod! {
                                                                 flow: Flow.Right{wrap: false}
                                                                 max_lines: 1
                                                                 text: ""
-                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.color: vj.text_secondary
                                                                 draw_text.text_style.font_size: 8
                                                             }
                                                         }
@@ -2475,7 +2490,7 @@ script_mod! {
                                 // they affect, so this line stays honest as the
                                 // rack grows.
                                 View{
-                                    width: Fill height: 28 flow: Right spacing: 8
+                                    width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 8
                                     align: Align{x: 0.0 y: 0.5}
                                     synth_play := ChromeButton{width: 62 text: "PLAY"}
                                     synth_status := Label{
@@ -2485,44 +2500,45 @@ script_mod! {
                                     }
                                     synth_clock_status := Label{
                                         width: Fit text: "120.0 · FREE"
-                                        draw_text.color: #x8e9aa7
+                                        draw_text.color: vj.text_secondary
                                         draw_text.text_style.font_size: 9
                                     }
                                     synth_drop_status := Label{
                                         width: Fit text: ""
-                                        draw_text.color: #xff5c39
+                                        draw_text.color: vj.accent
                                         draw_text.text_style: theme.font_bold{font_size: 8}
                                     }
                                     View{width: Fill height: 1}
                                     Tick{width: Fit text: "ONE CLOCK · ALL INSTRUMENTS"}
                                 }
-                                View{
+                                synth_workspace := View{
                                     width: Fill height: Fill flow: Right spacing: 10
                                     // Sequencer plus rack overview. This side
                                     // expands to the full page for Piano and
                                     // Drums, whose engines have no editable
                                     // parameter surface.
-                                    View{
+                                    synth_sequence_column := View{
                                         width: Fill height: Fill flow: Down spacing: 7
                                         synth_editors := PageFlip{
                                             width: Fill
-                                            height: 575
+                                            height: Fill{weight: 3.0 min: 180.0}
                                             active_page: @synth_piano_editor
                                             synth_piano_editor := View{
                                                 width: Fill height: Fill flow: Down spacing: 5
                                                 View{
-                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 6
                                                     align: Align{x: 0.0 y: 0.5}
                                                     Tick{width: Fit text: "PIANO · C3–B3 · 12 NOTE LANES"}
                                                     View{width: Fill height: 1}
                                                     Label{
                                                         width: Fit text: "consecutive notes tie"
-                                                        draw_text.color: #x657383
+                                                        draw_text.color: vj.text_muted
                                                         draw_text.text_style.font_size: 8
                                                     }
                                                     piano_clear := ChromeButton{width: 54 text: "CLEAR"}
                                                 }
-                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                ScrollXYView{width: Fill height: Fill
+View{width: Fill height: Fill min_width: vj.grid_cell_min * 16 + 90 min_height: vj.grid_cell_min * 12 flow: Right spacing: 8
                                                     View{width: 74 height: Fill flow: Down
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "B3"}}
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "A#3"}}
@@ -2539,11 +2555,12 @@ script_mod! {
                                                     }
                                                     piano_grid := VjStepGrid{width: Fill height: Fill rows: 12}
                                                 }
+}
                                             }
                                             synth_ironfish_editor := View{
                                                 width: Fill height: Fill flow: Down spacing: 5
                                                 View{
-                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 6
                                                     align: Align{x: 0.0 y: 0.5}
                                                     Tick{width: Fit text: "IRONFISH · 12 SCALE-DEGREE LANES"}
                                                     View{width: Fill height: 1}
@@ -2553,7 +2570,8 @@ script_mod! {
                                                     ironfish_scale := DropDown{width: 116 labels: ["MINOR" "MAJOR" "DORIAN" "PENTATONIC"]}
                                                     ironfish_clear := ChromeButton{width: 54 text: "CLEAR"}
                                                 }
-                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                ScrollXYView{width: Fill height: Fill
+View{width: Fill height: Fill min_width: vj.grid_cell_min * 16 + 90 min_height: vj.grid_cell_min * 12 flow: Right spacing: 8
                                                     View{width: 74 height: Fill flow: Down
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_11 := Tick{text: ""}}
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_10 := Tick{text: ""}}
@@ -2570,18 +2588,19 @@ script_mod! {
                                                     }
                                                     ironfish_grid := VjStepGrid{width: Fill height: Fill rows: 12}
                                                 }
+}
                                             }
                                             synth_drums_editor := View{
                                                 width: Fill height: Fill flow: Down spacing: 5
                                                 View{
-                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 6
                                                     align: Align{x: 0.0 y: 0.5}
                                                     Tick{width: Fit text: "DRUM COMPUTER · 8 LANES"}
                                                     View{width: Fill height: 1}
                                                     drums_clear := ChromeButton{width: 54 text: "CLEAR"}
                                                 }
-                                                View{
-                                                    width: Fill height: Fill flow: Right spacing: 8
+                                                ScrollXYView{width: Fill height: Fill
+View{width: Fill height: Fill min_width: vj.grid_cell_min * 16 + 90 min_height: vj.grid_cell_min * 8 flow: Right spacing: 8
                                                     View{
                                                         width: 82 height: Fill flow: Down
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "CRASH"}}
@@ -2595,34 +2614,37 @@ script_mod! {
                                                     }
                                                     drums_grid := VjStepGrid{width: Fill height: Fill rows: 8}
                                                 }
+}
                                             }
                                         }
                                         // The rack is the scalable instrument
                                         // chooser. Selection is orange; runtime
                                         // activity and the MIX mute state remain
                                         // visible without duplicating faders.
-                                        SynthPanel{
+                                        synth_rack := ScrollYView{
+                                            width: Fill height: Fit flow: Down spacing: 8 padding: 8 show_bg: true
+                                            draw_bg +: {color: vj.surface}
                                             width: Fill height: Fit
                                             View{width: Fill height: 18 flow: Right
                                                 Tick{width: Fill text: "RACK · SELECT AN INSTRUMENT TO EDIT"}
                                                 Tick{width: Fit text: "MUTE IS SHARED WITH MIX"}
                                             }
-                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                            View{width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 7 align: Align{x: 0.0 y: 0.5}
                                                 synth_piano_btn := PillButton{width: 82 text: "PIANO"}
-                                                rack_piano_state := Label{width: 150 text: "IDLE · 12 NOTE LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
-                                                piano_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_piano_state := Label{width: Fill{basis: 150.0 min: 80.0} text: "IDLE · 12 NOTE LANES" draw_text.color: vj.text_muted draw_text.text_style.font_size: 9}
+                                                piano_rack_grid := VjStepGrid{width: Fill height: vj.control_height rows: 1 read_only: true}
                                                 rack_piano_mute := ChromeButton{width: 34 text: "M"}
                                             }
-                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                            View{width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 7 align: Align{x: 0.0 y: 0.5}
                                                 synth_ironfish_btn := PillButton{width: 82 text: "IRONFISH"}
-                                                rack_ironfish_state := Label{width: 150 text: "IDLE · DUAL OSC SYNTH" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
-                                                ironfish_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_ironfish_state := Label{width: Fill{basis: 150.0 min: 80.0} text: "IDLE · DUAL OSC SYNTH" draw_text.color: vj.text_muted draw_text.text_style.font_size: 9}
+                                                ironfish_rack_grid := VjStepGrid{width: Fill height: vj.control_height rows: 1 read_only: true}
                                                 rack_ironfish_mute := ChromeButton{width: 34 text: "M"}
                                             }
-                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                            View{width: Fill height: Fit min_height: vj.control_height flow: Right{wrap: true} spacing: 7 align: Align{x: 0.0 y: 0.5}
                                                 synth_drums_btn := PillButton{width: 82 text: "DRUMS"}
-                                                rack_drums_state := Label{width: 150 text: "IDLE · 8 DRUM LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
-                                                drums_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_drums_state := Label{width: Fill{basis: 150.0 min: 80.0} text: "IDLE · 8 DRUM LANES" draw_text.color: vj.text_muted draw_text.text_style.font_size: 9}
+                                                drums_rack_grid := VjStepGrid{width: Fill height: vj.control_height rows: 1 read_only: true}
                                                 rack_drums_mute := ChromeButton{width: 34 text: "M"}
                                             }
                                             Tick{width: Fill text: "+ FUTURE SYNTHS APPEAR HERE · THE TRANSPORT AND MIX BUS STAY SHARED"}
@@ -2634,22 +2656,22 @@ script_mod! {
                                     // the ScrollYView is only a short-window
                                     // fallback, not the primary navigation.
                                     synth_engine_column := SynthPanel{
-                                        width: 600 height: Fill spacing: 5
+                                        width: Fill{basis: 520.0 min: 280.0 max: 700.0} height: Fill spacing: 5
                                         View{width: Fill height: 20 flow: Right align: Align{x: 0.0 y: 0.5}
                                             Tick{width: Fill text: "IRONFISH"}
                                             ironfish_voice_status := Label{width: Fit text: "0 / 16 VOICES" draw_text.color: #xffe0a3 draw_text.text_style.font_size: 9}
                                         }
-                                        View{width: Fill height: 22 flow: Right spacing: 4
-                                            ironfish_preset_0 := ChromeButton{width: Fill text: "INIT"}
-                                            ironfish_preset_1 := ChromeButton{width: Fill text: "GLASS"}
-                                            ironfish_preset_2 := ChromeButton{width: Fill text: "ACID"}
-                                            ironfish_preset_3 := ChromeButton{width: Fill text: "SUB"}
-                                            ironfish_preset_4 := ChromeButton{width: Fill text: "FORMANT"}
-                                            ironfish_preset_5 := ChromeButton{width: Fill text: "CRUSH"}
-                                            ironfish_preset_6 := ChromeButton{width: Fill text: "WIDE"}
-                                            ironfish_preset_7 := ChromeButton{width: Fill text: "PAD"}
+                                        View{width: Fill height: Fit flow: Right{wrap: true} spacing: 4
+                                            ironfish_preset_0 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "INIT"}
+                                            ironfish_preset_1 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "GLASS"}
+                                            ironfish_preset_2 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "ACID"}
+                                            ironfish_preset_3 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "SUB"}
+                                            ironfish_preset_4 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "FORMANT"}
+                                            ironfish_preset_5 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "CRUSH"}
+                                            ironfish_preset_6 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "WIDE"}
+                                            ironfish_preset_7 := ChromeButton{width: Fill{basis: 76.0 min: 64.0} text: "PAD"}
                                         }
-                                        View{width: Fill height: 22 flow: Right spacing: 4
+                                        View{width: Fill height: Fit flow: Right{wrap: true} spacing: 4
                                             ironfish_voice_tab := PillButton{width: 76 text: "VOICE"}
                                             ironfish_fx_tab := PillButton{width: 62 text: "FX"}
                                             View{width: Fill height: 1}
@@ -2660,8 +2682,9 @@ script_mod! {
                                             ironfish_voice_page := ScrollYView{
                                                 width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
                                                 scroll_bars.scroll_bar_y.drag_scrolling: false
-                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "OSCILLATOR 1"}
                                                         ironfish_osc1_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
                                                         SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc1_transpose := ApcBipolarSlider{}}
@@ -2673,6 +2696,7 @@ script_mod! {
                                                         SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc1_harmonic_lfo := ApcBipolarSlider{}}
                                                     }
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "OSCILLATOR 2"}
                                                         ironfish_osc2_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
                                                         SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc2_transpose := ApcBipolarSlider{}}
@@ -2685,18 +2709,20 @@ script_mod! {
                                                     }
                                                 }
                                                 SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                     Tick{width: Fill text: "VOICE MIX"}
-                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                    View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                         SynthParamRow{Tick{width: 62 text: "BALANCE"} ironfish_osc_balance := ApcHSlider{}}
                                                         SynthParamRow{Tick{width: 40 text: "SUB"} ironfish_sub := ApcHSlider{}}
                                                     }
-                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                    View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                         SynthParamRow{Tick{width: 62 text: "NOISE"} ironfish_noise := ApcHSlider{}}
                                                         SynthParamRow{Tick{width: 40 text: "PORTA"} ironfish_portamento := ApcHSlider{}}
                                                     }
                                                 }
-                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "AMP ENVELOPE"}
                                                         SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_amp_predelay := ApcHSlider{}}
                                                         SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_amp_attack := ApcHSlider{}}
@@ -2706,6 +2732,7 @@ script_mod! {
                                                         SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_amp_release := ApcHSlider{}}
                                                     }
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "MOD ENVELOPE"}
                                                         SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_mod_predelay := ApcHSlider{}}
                                                         SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_mod_attack := ApcHSlider{}}
@@ -2715,8 +2742,9 @@ script_mod! {
                                                         SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_mod_release := ApcHSlider{}}
                                                     }
                                                 }
-                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "FILTER"}
                                                         ironfish_filter_type := DropDown{width: Fill labels: ["LOW PASS" "HIGH PASS" "BAND PASS" "BAND REJECT"]}
                                                         SynthParamRow{Tick{width: 62 text: "CUTOFF"} ironfish_filter_cutoff := ApcHSlider{}}
@@ -2726,11 +2754,12 @@ script_mod! {
                                                         SynthParamRow{Tick{width: 62 text: "TOUCH AMT"} ironfish_filter_touch := ApcBipolarSlider{}}
                                                     }
                                                     SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                         Tick{width: Fill text: "LFO + PERFORMANCE"}
                                                         ironfish_lfo_wave := DropDown{width: Fill labels: ["SAW" "SINE" "PULSE" "TRIANGLE"]}
                                                         SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_lfo_rate := ApcHSlider{}}
                                                         SynthParamRow{Tick{width: 62 text: "TOUCH"} ironfish_touch := ApcHSlider{}}
-                                                        View{width: Fill height: 22 flow: Right spacing: 5
+                                                        View{width: Fill height: vj.control_height flow: Right spacing: 5
                                                             ironfish_lfo_key_sync := Toggle{width: 92 text: "KEY SYNC"}
                                                             ironfish_arp_enable := Toggle{width: 70 text: "ARP"}
                                                         }
@@ -2741,16 +2770,18 @@ script_mod! {
                                             ironfish_fx_page := ScrollYView{
                                                 width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
                                                 scroll_bars.scroll_bar_y.drag_scrolling: false
-                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                View{width: Fill height: Fit flow: Right{wrap: true} spacing: 6
                                                     View{width: Fill height: Fit flow: Down spacing: 6
                                                         SynthPanel{
-                                                            View{width: Fill height: 22 flow: Right
+                                                        width: Fill{basis: 260.0 min: 220.0}
+                                                            View{width: Fill height: vj.control_height flow: Right
                                                                 Tick{width: Fill text: "BITCRUSH"}
                                                                 ironfish_bitcrush_enable := Toggle{width: 48 text: "ON"}
                                                             }
                                                             SynthParamRow{Tick{width: 62 text: "AMOUNT"} ironfish_bitcrush := ApcHSlider{}}
                                                         }
                                                         SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                             Tick{width: Fill text: "CROSS STEREO DELAY"}
                                                             SynthParamRow{Tick{width: 62 text: "SEND"} ironfish_delay_send := ApcHSlider{}}
                                                             SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_delay_feedback := ApcHSlider{}}
@@ -2759,12 +2790,14 @@ script_mod! {
                                                             SynthParamRow{Tick{width: 62 text: "LENGTH"} ironfish_delay_length := ApcHSlider{}}
                                                         }
                                                         SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                             Tick{width: Fill text: "OUTPUT"}
                                                             SynthParamRow{Tick{width: 62 text: "LEVEL"} ironfish_output := ApcHSlider{}}
                                                         }
                                                     }
                                                     View{width: Fill height: Fit flow: Down spacing: 6
                                                         SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                             Tick{width: Fill text: "SIX-LINE WAVEGUIDE CHORUS"}
                                                             SynthParamRow{Tick{width: 62 text: "MIN DELAY"} ironfish_chorus_min_delay := ApcHSlider{}}
                                                             SynthParamRow{Tick{width: 62 text: "DEPTH"} ironfish_chorus_mod_depth := ApcHSlider{}}
@@ -2774,6 +2807,7 @@ script_mod! {
                                                             SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_chorus_feedback := ApcHSlider{}}
                                                         }
                                                         SynthPanel{
+                                                        width: Fill{basis: 260.0 min: 220.0}
                                                             Tick{width: Fill text: "GRIESINGER REVERB"}
                                                             SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_reverb_mix := ApcHSlider{}}
                                                             SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_reverb_feedback := ApcHSlider{}}
@@ -2783,7 +2817,7 @@ script_mod! {
                                                 View{width: Fill height: Fill}
                                                 Label{
                                                     width: Fill text: "Historical order: bitcrush → chorus → cross delay → reverb. Final dynamics live in MIX."
-                                                    draw_text.color: #x657383
+                                                    draw_text.color: vj.text_muted
                                                     draw_text.text_style.font_size: 9
                                                 }
                                             }
@@ -2798,17 +2832,20 @@ script_mod! {
                                     Tick{width: Fit text: "PROGRAM MIX"}
                                     mix_solo_status := Label{
                                         width: Fill text: "all channels listening"
-                                        draw_text.color: #x8e9aa7
+                                        draw_text.color: vj.text_secondary
                                         draw_text.text_style.font_size: 9
                                     }
                                     mix_master_meter := Label{
                                         width: Fit text: "PEAK — · GR —"
-                                        draw_text.color: #xe8eef4
+                                        draw_text.color: vj.text
                                         draw_text.text_style.font_size: 9
                                     }
                                 }
-                                View{
+                                mix_workspace := View{
                                     width: Fill height: Fill flow: Right spacing: 10
+                                    mix_channels := ScrollXView{
+                                        width: Fill{basis: 460.0 min: 200.0 max: 560.0}
+                                        height: Fill flow: Right spacing: 10
                                     FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
@@ -2816,21 +2853,22 @@ script_mod! {
                                     FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    View{width: 8 height: Fill}
-                                    RoundedView{
-                                        width: Fill height: Fill flow: Down spacing: 3 padding: 8
-                                        draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
+                                    }
+                                    mix_master_panel := ScrollYView{
+                                        width: Fill height: Fill flow: Down spacing: 12 padding: 12
+                                        show_bg: true
+                                        draw_bg +: {color: vj.surface border_color: vj.border border_size: 1.0 border_radius: 3.0}
                                         View{width: Fill height: Fit flow: Right
                                             Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
                                             mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
                                         }
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
-                                        View{width: Fill height: Fill}
+                                        View{width: Fill height: Fit flow: Right{wrap: true} spacing: 8 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}}}
+                                        View{width: Fill height: Fit flow: Right{wrap: true} spacing: 8 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}}}
+                                        View{width: Fill height: Fit flow: Right{wrap: true} spacing: 8 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{width: Fill{basis: 140.0 min: 110.0}}}
+                                        View{width: Fill height: 12}
                                         Label{
                                             width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
-                                            draw_text.color: #x657383
+                                            draw_text.color: vj.text_muted
                                             draw_text.text_style.font_size: 9
                                         }
                                     }
@@ -2907,15 +2945,16 @@ script_mod! {
                             }
                             }
                             }
-                            a: RoundedView{
+                            a: ScrollYView{
+                                show_bg: true
                                 width: Fill
                                 height: Fill
                                 flow: Down
                                 spacing: 8
                                 padding: 8
                                 draw_bg +: {
-                                    color: #x1c2129
-                                    border_color: #xffffff26
+                                    color: vj.surface
+                                    border_color: vj.border
                                     border_size: 1.0
                                     border_radius: 10.0
                                 }
@@ -2927,7 +2966,7 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     Label{
                                         text: "GEN"
-                                        draw_text.color: #xff5c39
+                                        draw_text.color: vj.accent
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                     View{width: Fill height: 1}
@@ -2978,7 +3017,7 @@ script_mod! {
                                     gen_loop := CheckBox{text: "CONT"}
                                 }
                                 gen_status := PanelLabel{text: ""}
-                                gen_jobs := VjJobList{}
+                                gen_jobs := VjJobList{height: Fill{min: 150.0}}
                                 // Say it in words instead: the same broker
                                 // chat the asset UI runs (session on the
                                 // server, tool chips, rate meter), opened
@@ -2992,7 +3031,7 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     Label{
                                         text: "CHAT"
-                                        draw_text.color: #xff5c39
+                                        draw_text.color: vj.accent
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                     View{width: Fill height: 1}
@@ -3003,7 +3042,7 @@ script_mod! {
                                     width: Fill
                                     text: "Waiting for the asset server…"
                                 }
-                                chat_list := AssetChatList{}
+                                chat_list := AssetChatList{height: Fill{min: 200.0}}
                                 View{
                                     width: Fill
                                     height: Fit
@@ -3018,6 +3057,16 @@ script_mod! {
                                 }
                             }
                         }
+                        compact_nav := Grid{
+                            visible: false width: Fill height: 52
+                            columns: ["repeat(auto-fit, minmax(80px, 1fr))"]
+                            implicit_row_size: 48 column_gap: 6 row_gap: 4
+                            compact_tab_0 := ChromeButton{width: Fill text: "Perform"}
+                            compact_tab_1 := ChromeButton{width: Fill text: "Library"}
+                            compact_tab_2 := ChromeButton{width: Fill text: "Controls"}
+                            compact_tab_3 := ChromeButton{width: Fill text: "Create"}
+                        }
+
                         // IMPORT CONTENT. Folded away until asked for, because
                         // importing is a thing you do between sets, not during
                         // one — but the handle is always on screen so it is
@@ -3034,8 +3083,8 @@ script_mod! {
                             spacing: 4
                             padding: Inset{left: 10.0 right: 10.0 top: 4.0 bottom: 4.0}
                             draw_bg +: {
-                                color: #x1c2129
-                                border_color: #xffffff22
+                                color: vj.surface
+                                border_color: vj.border
                                 border_size: 1.0
                                 border_radius: 8.0
                             }
@@ -3047,7 +3096,7 @@ script_mod! {
                                 align: Align{x: 0.0 y: 0.5}
                                 Label{
                                     text: "LIGHT"
-                                    draw_text.color: #xff5c39
+                                    draw_text.color: vj.accent
                                     draw_text.text_style: theme.font_bold{font_size: 10}
                                 }
                                 PanelLabel{text: "auto spatial"}
@@ -3193,8 +3242,8 @@ script_mod! {
                                 spacing: 12
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: vj.background
+                                    border_color: vj.border
                                     border_size: 1.0
                                     border_radius: 6.0
                                 }
@@ -3214,7 +3263,7 @@ script_mod! {
                                     }
                                     Label{
                                         text: "HEADPHONES"
-                                        draw_text.color: #xff5c39
+                                        draw_text.color: vj.accent
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                 }
@@ -3260,7 +3309,7 @@ script_mod! {
                                 phones_status := Label{
                                     width: Fill
                                     text: ""
-                                    draw_text.color: #x8e9aa7
+                                    draw_text.color: vj.text_secondary
                                     draw_text.text_style.font_size: 9
                                 }
                                 View{
@@ -3285,7 +3334,7 @@ script_mod! {
                         align: Align{x: 0.5, y: 0.5}
                         draw_bg +: {
                             color: #x2b3440f0
-                            border_color: #xff5c39
+                            border_color: vj.accent
                             border_size: 1.5
                             border_radius: 10.0
                         }
@@ -4921,6 +4970,24 @@ pub struct LatchPaint {
 }
 
 impl LatchPaint {
+    /// Resolve runtime latch paint through the same roles as the Splash UI.
+    fn themed(self, cx: &mut Cx) -> Self {
+        if crate::theme::is_custom(cx) { return self; }
+        // Cue monitoring retains its distinct green identity.
+        if self == Self::cue(true) { return self; }
+        let lit = self == Self::icon(true);
+        let ghost = self == Self::ghost();
+        let bg = crate::theme::rgba(cx, if lit { id!(accent) } else { id!(control) });
+        let fg = crate::theme::rgba(cx, if lit { id!(on_accent) } else if ghost { id!(text_muted) } else { id!(text) });
+        Self {
+            bg,
+            bg_hover: crate::theme::rgba(cx, if lit { id!(accent_hover) } else { id!(control_hover) }),
+            bg_down: if lit { bg } else { crate::theme::rgba(cx, id!(control_down)) },
+            fg,
+            fg_hover: if lit || ghost { fg } else { crate::theme::rgba(cx, id!(text_hover)) },
+            border: crate::theme::rgba(cx, id!(border)),
+        }
+    }
     /// Icon buttons and the FX bank: dark chrome at rest, accent when lit.
     pub fn icon(lit: bool) -> LatchPaint {
         if lit {
@@ -8131,6 +8198,8 @@ pub struct App {
     /// no surface is showing.
     #[rust(live_id!(video_page))]
     console_page: LiveId,
+    #[rust]
+    presentation: Presentation,
     #[rust(live_id!(video_out_page))]
     out_page: LiveId,
 
@@ -8892,7 +8961,7 @@ impl App {
             .set_active_page(cx, editor.into());
         self.ui
             .view(cx, ids!(synth_engine_column))
-            .set_visible(cx, self.synth_mix.selected == SynthTrack::Ironfish);
+            .set_visible(cx, self.synth_mix.selected == SynthTrack::Ironfish && (!self.presentation.compact || self.presentation.page == 1));
         self.ui
             .page_flip(cx, ids!(ironfish_engine_pages))
             .set_active_page(
@@ -11164,7 +11233,7 @@ p2 {}
     /// operator. `label` re-labels the chip (the check is prepended here).
     fn paint_chip(&mut self, cx: &mut Cx, chip: &[LiveId], on: bool, label: Option<&str>) {
         let mut button = self.ui.button(cx, chip);
-        let p = LatchPaint::chip(on);
+        let p = LatchPaint::chip(on).themed(cx);
         let (bg, bg_hover, bg_down, fg, fg_hover) =
             (p.bg(), p.bg_hover(), p.bg_down(), p.fg(), p.fg_hover());
         script_apply_eval!(cx, button, {
@@ -11173,6 +11242,10 @@ p2 {}
                 color_focus: #(bg)
                 color_hover: #(bg_hover)
                 color_down: #(bg_down)
+                color_2: #(bg)
+                color_2_focus: #(bg)
+                color_2_hover: #(bg_hover)
+                color_2_down: #(bg_down)
             }
             draw_text +: {
                 color: #(fg)
@@ -12133,6 +12206,7 @@ p2 {}
     }
 
     fn paint_icon_face(&mut self, cx: &mut Cx, id: &[LiveId], p: LatchPaint) {
+        let p = p.themed(cx);
         let (bg, bg_hover, bg_down, fg) = (p.bg(), p.bg_hover(), p.bg_down(), p.fg());
         let mut button = self.ui.widget(cx, id);
         script_apply_eval!(cx, button, {
@@ -12141,6 +12215,10 @@ p2 {}
                 color_focus: #(bg)
                 color_hover: #(bg_hover)
                 color_down: #(bg_down)
+                color_2: #(bg)
+                color_2_focus: #(bg)
+                color_2_hover: #(bg_hover)
+                color_2_down: #(bg_down)
             }
             draw_icon +: { color: #(fg) }
         });
@@ -12149,6 +12227,7 @@ p2 {}
     /// Same face law for TEXT buttons (the rate chip, ×) — and it drops
     /// the paint_lit cache entry so the next real latch paint lands.
     fn paint_text_face(&mut self, cx: &mut Cx, id: &[LiveId], p: LatchPaint) {
+        let p = p.themed(cx);
         let key = id.iter().fold(0u64, |acc, live| acc ^ live.0.rotate_left(7));
         self.lit_state.remove(&key);
         let (bg, bg_hover, bg_down, fg, fg_hover) =
@@ -12160,6 +12239,10 @@ p2 {}
                 color_focus: #(bg)
                 color_hover: #(bg_hover)
                 color_down: #(bg_down)
+                color_2: #(bg)
+                color_2_focus: #(bg)
+                color_2_hover: #(bg_hover)
+                color_2_down: #(bg_down)
             }
             draw_text +: {
                 color: #(fg)
@@ -19548,9 +19631,7 @@ p2 {}
             return;
         }
         let native = cx.windows[main_id].native_dpi_factor();
-        let physical_width = ev.new_geom.inner_size.x * ev.new_geom.dpi_factor;
-        let physical_height = ev.new_geom.inner_size.y * ev.new_geom.dpi_factor;
-        let wanted = console_scale::console_dpi(physical_width, physical_height, native);
+        let wanted = native;
         if (cx.windows[main_id].effective_dpi_factor() - wanted).abs() < 1e-9 {
             return;
         }
@@ -19564,6 +19645,7 @@ p2 {}
     /// is a column of [decks, lists] and turning it row-wise puts the lists
     /// to the right of deck B instead of under it.
     fn sync_page_body_flow(&mut self, cx: &mut Cx, event: &Event) {
+        if self.presentation.compact { return; }
         let Event::WindowGeomChange(ev) = event else { return };
         let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
             return;
@@ -19736,6 +19818,7 @@ p2 {}
     /// the blocks have, so asking whether the blocks need folding of the
     /// CURRENT layout would answer its own question differently every frame.
     fn sync_deck_accordion(&mut self, cx: &mut Cx, event: &Event) {
+        if self.presentation.compact { return; }
         let Event::WindowGeomChange(ev) = event else { return };
         let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
             return;
@@ -19891,6 +19974,7 @@ p2 {}
     /// asked whether the middle NEEDED folding would undo its own answer
     /// every other frame.
     fn sync_deck_tabs(&mut self, cx: &mut Cx, event: &Event) {
+        if self.presentation.compact { return; }
         let Event::WindowGeomChange(ev) = event else { return };
         let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
             return;
@@ -19929,6 +20013,10 @@ p2 {}
     /// Show the deck the tabs point at, light the tab and the mode that is
     /// in force, and — on a wide console — put both panels back.
     fn paint_deck_tabs(&mut self, cx: &mut Cx) {
+        if self.presentation.compact {
+            crate::music_responsive::paint_deck_tabs(self, cx);
+            return;
+        }
         let stage = self.tab_stage;
         let tabbed = stage != TabStage::None;
         let shown = self.deck_tabs.shown();
@@ -24815,7 +24903,7 @@ p2 {}
         // ALL FOUR states, per the latch law at `LatchPaint`: painting only
         // rest+focus leaves hover/down at the theme's UNLIT colours — which
         // is exactly the "hover off goes black on a lit button" bug.
-        let p = LatchPaint::icon(lit);
+        let p = LatchPaint::icon(lit).themed(cx);
         let (bg, bg_hover, bg_down, fg, fg_hover) =
             (p.bg(), p.bg_hover(), p.bg_down(), p.fg(), p.fg_hover());
         script_apply_eval!(cx, button, {
@@ -24824,6 +24912,10 @@ p2 {}
                 color_focus: #(bg)
                 color_hover: #(bg_hover)
                 color_down: #(bg_down)
+                color_2: #(bg)
+                color_2_focus: #(bg)
+                color_2_hover: #(bg_hover)
+                color_2_down: #(bg_down)
             }
             draw_text +: {
                 color: #(fg)
@@ -27674,6 +27766,7 @@ p2 {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        self.presentation_startup_size(cx);
         #[cfg(target_arch = "wasm32")]
         let startup_started = Cx::monotonic_now();
         #[cfg(target_arch = "wasm32")]
@@ -28039,6 +28132,7 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.presentation_actions(cx, actions) { return; }
         // Full-console navigation. VJ/DJ also retarget the APC; SYNTH/MIX
         // deliberately leave its current performance surface alone.
         for (button, mode) in MODE_BUTTONS {
@@ -29295,6 +29389,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        crate::theme::script_mod(vm);
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
         makepad_asset_widgets::script_mod(vm);
@@ -29316,6 +29411,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.presentation_before_event(cx, event);
         self.drain_ai_port(cx, event);
         #[cfg(target_arch = "wasm32")]
         let first_draw_started = if !self.first_draw_timed && matches!(event, Event::Draw(_)) {
@@ -29348,7 +29444,7 @@ impl AppMain for App {
         self.sync_deck_tabs(cx, event);
         self.sync_deck_accordion(cx, event);
         self.sync_lists_tabs(cx, event);
-        self.sync_status_bar_wrap(cx, event);
+
         self.sync_page_body_flow(cx, event);
         self.handle_output_window_event(cx, event);
         if let Event::KeyDown(ke) = event {
@@ -29708,6 +29804,7 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.presentation_after_event(cx, event);
         #[cfg(target_arch = "wasm32")]
         if let Some(started) = first_draw_started {
             log!(
@@ -30919,4 +31016,9 @@ mod prefetch_tests {
             assert_eq!(state.source, None);
         }
     }
+}
+
+#[cfg(test)]
+mod application_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

@@ -4,6 +4,7 @@ use crate::synth::{StepPattern, STEPS};
 use makepad_widgets::*;
 
 script_mod! {
+    let vj = mod.vj_theme
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
@@ -22,11 +23,11 @@ script_mod! {
             playhead: 0.0
             beat: 0.0
             dim: 0.0
-            color_off: #x202731
-            color_on: #xff5c39
+            color_off: vj.surface_raised
+            color_on: vj.accent
             color_play: #xffe0a3
-            color_beat: #x2b3541
-            color_rim: #xffffff22
+            color_beat: vj.surface_raised
+            color_rim: vj.border
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let base = self.color_off.mix(self.color_beat, self.beat)
@@ -145,7 +146,8 @@ impl VjStepGrid {
 impl Widget for VjStepGrid {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event.hits(cx, self.area) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(_) => {}
+            Hit::FingerUp(fe) if fe.is_over && fe.was_tap() => {
                 if !self.read_only {
                     if let Some((column, row)) = self.cell_at(cx, fe.abs) {
                         self.pattern[column] ^= 1u16 << row;

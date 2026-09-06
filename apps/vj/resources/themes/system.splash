@@ -1,0 +1,26 @@
+// Semantic roles follow the actual Splash style, including light/dark changes.
+mod.vj_theme = {
+    background: mod.theme.color_bg_app
+    surface: mod.theme.color_bg_container
+    surface_raised: mod.theme.color_outset
+    inset: mod.theme.color_inset
+    waveform_background: mod.theme.color_inset
+    waveform_text: mod.theme.color_text_disabled
+    waveform_grid: mod.theme.color_bevel_outset_2
+    control: mod.theme.color_outset
+    control_hover: mod.theme.color_outset_hover
+    control_down: mod.theme.color_outset_down
+    text: mod.theme.color_text
+    text_secondary: mod.theme.color_label_outer
+    text_muted: mod.theme.color_text_disabled
+    text_hover: mod.theme.color_text_hover
+    border: mod.theme.color_bevel_outset_1
+    border_strong: mod.theme.color_bevel_inset_1
+    separator: mod.theme.color_bevel_outset_2
+    accent: mod.theme.color_ctrl_active
+    accent_hover: mod.theme.color_ctrl_active
+    on_accent: #ffffff
+    selection: mod.theme.color_bg_highlight
+    radius: mod.theme.corner_radius
+    panel_radius: mod.theme.container_corner_radius
+}
