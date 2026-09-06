@@ -261,6 +261,10 @@ const TIP_PAD_X: f64 = 8.0;
 const TIP_PAD_Y: f64 = 5.0;
 /// Half the width of the pointer on a tip that asks for one.
 const TIP_ARROW: f64 = 5.0;
+/// The bubble's visual corner radius. `sdf.box` draws twice the radius it
+/// is given, and the bubble asks for 4, so its corners eat 8 points off
+/// each end of every edge. A pointer has to stay clear of them.
+const TIP_BUBBLE_R: f64 = 8.0;
 
 /// Transparent tooltip DECLARATION wrapper: walks its child unchanged,
 /// reports hover to the window's [`TipLayer`].
@@ -599,25 +603,41 @@ impl Widget for TipLayer {
                 bubble.pos.x + (at.x - placed.rect.pos.x),
                 bubble.pos.y + (at.y - placed.rect.pos.y),
             );
+            // Keep the whole pointer on the FLAT part of the edge. The
+            // placement helper only clamps the anchor point to the bubble's
+            // extent, so on a control wider than its own tip the point lands
+            // on a rounded corner and one flank of the triangle is drawn over
+            // bare background, with a notch where the corner curves away.
+            let along = |v: f64, start: f64, extent: f64| -> f64 {
+                let lo = start + TIP_BUBBLE_R + a;
+                let hi = start + extent - TIP_BUBBLE_R - a;
+                if hi <= lo {
+                    start + extent * 0.5
+                } else {
+                    v.max(lo).min(hi)
+                }
+            };
+            let ax = along(local.x, bubble.pos.x, bubble.size.x);
+            let ay = along(local.y, bubble.pos.y, bubble.size.y);
             let (rect, side) = match placed.side {
                 Side::Bottom => (
-                    Rect { pos: dvec2(local.x - a, bubble.pos.y - a + 1.0), size: dvec2(a * 2.0, a) },
+                    Rect { pos: dvec2(ax - a, bubble.pos.y - a + 1.0), size: dvec2(a * 2.0, a) },
                     0.0,
                 ),
                 Side::Top => (
                     Rect {
-                        pos: dvec2(local.x - a, bubble.pos.y + bubble.size.y - 1.0),
+                        pos: dvec2(ax - a, bubble.pos.y + bubble.size.y - 1.0),
                         size: dvec2(a * 2.0, a),
                     },
                     1.0,
                 ),
                 Side::Right => (
-                    Rect { pos: dvec2(bubble.pos.x - a + 1.0, local.y - a), size: dvec2(a, a * 2.0) },
+                    Rect { pos: dvec2(bubble.pos.x - a + 1.0, ay - a), size: dvec2(a, a * 2.0) },
                     3.0,
                 ),
                 Side::Left => (
                     Rect {
-                        pos: dvec2(bubble.pos.x + bubble.size.x - 1.0, local.y - a),
+                        pos: dvec2(bubble.pos.x + bubble.size.x - 1.0, ay - a),
                         size: dvec2(a, a * 2.0),
                     },
                     2.0,
