@@ -13,7 +13,7 @@ use crate::providers::claude::build_prompt_only;
 use crate::providers::cli::{
     categorize_cli_error, cli_command, find_cli, toml_basic_string, turn_dir, CliTurn,
 };
-use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
+use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput, ToolImage, validate_tool_images};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
 
@@ -29,11 +29,12 @@ pub struct CodexCliChatProvider {
     model: Option<String>,
     resume: Option<String>,
     turn: Option<(CliTurn, ParseState)>,
+    images: Vec<ToolImage>,
 }
 
 impl CodexCliChatProvider {
     pub fn new(model: Option<String>) -> CodexCliChatProvider {
-        CodexCliChatProvider { cli: find_codex(), model, resume: None, turn: None }
+        CodexCliChatProvider { cli: find_codex(), model, resume: None, turn: None, images: Vec::new() }
     }
 }
 
@@ -139,6 +140,11 @@ pub fn parse_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEvent>, boo
 }
 
 impl ChatProvider for CodexCliChatProvider {
+    fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
+        validate_tool_images(&images)?;
+        if self.turn.is_some(){return Err("image continuation requested while provider is active".into());}
+        self.images=images;Ok(())
+    }
     fn kind(&self) -> ProviderKind {
         ProviderKind::CodexCli
     }
@@ -162,9 +168,17 @@ impl ChatProvider for CodexCliChatProvider {
         let Some(cli) = self.cli.clone() else {
             return Err("codex CLI not found".to_string());
         };
-        let prompt = build_prompt_only(input, self.resume.is_some());
+        let mut prompt = build_prompt_only(input, self.resume.is_some());
         let cwd = turn_dir("codex");
-        let args = build_args(&self.model, &self.resume, &input.system_with_dynamic(), &cwd.to_string_lossy());
+        let mut args = build_args(&self.model, &self.resume, &input.system_with_dynamic(), &cwd.to_string_lossy());
+        args.pop(); // Image flags apply to exec or exec resume before stdin '-'.
+        for (index,image) in std::mem::take(&mut self.images).into_iter().enumerate(){
+            let path=cwd.join(format!("tool-image-{index}.png"));
+            if let Err(error)=std::fs::write(&path,&image.png){let _=std::fs::remove_dir_all(&cwd);return Err(format!("tool image staging failed: {error}"));}
+            args.push("--image".into());args.push(path.to_string_lossy().into_owned());
+            prompt.push_str(&format!("\nAttached reference image {}: {}. Inspect the image before judging the model.\n",index+1,image.label));
+        }
+        args.push("-".into());
         let mut command = cli_command(&cli, &cwd);
         command.args(&args);
         let turn = CliTurn::spawn(command, Some(prompt), "codex", Some(cwd))?;
@@ -214,6 +228,7 @@ impl ChatProvider for CodexCliChatProvider {
     }
 
     fn cancel(&mut self) {
+        self.images.clear();
         if let Some((cli, _)) = self.turn.take() {
             cli.kill_group();
         }

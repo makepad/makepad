@@ -28,7 +28,7 @@ use crate::wire::{
     sanitize_public_error, split_delta_text, AttachmentBinding, ChatEvent, ChatEventBody,
     ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ToolOutcome, MAX_ATTACHMENTS,
     MAX_MESSAGES, MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
-    MAX_TOOL_ROUNDS, MAX_TURN_TEXT_BYTES,
+    MAX_TOOL_ROUNDS, MAX_CONFIGURABLE_TOOL_ROUNDS, MAX_TURN_TEXT_BYTES,
 };
 use makepad_asset_client::json::Value;
 use makepad_asset_data::AssetRevisionId;
@@ -128,6 +128,15 @@ pub trait ToolExecutor {
         tools::definitions()
     }
 
+    /// Requested tool calls per user turn. Snapshotted at send, bounded by
+    /// the session's history capacity and MAX_CONFIGURABLE_TOOL_ROUNDS.
+    /// Zero allows a plain answer but refuses tools. Payload bounds remain
+    /// unchanged. Ordinary content chat retains its 16-call default.
+    fn max_tool_rounds(&self) -> u32 {
+        MAX_TOOL_ROUNDS
+    }
+    fn take_tool_images(&mut self) -> Vec<makepad_ai_hub::providers::provider::ToolImage> { Vec::new() }
+
     /// True when `call` must be executed by the session's CLIENT — the app
     /// that owns the state the tool touches (the sandbox owns the game
     /// world). The session then emits the ToolCall event as usual but PARKS
@@ -198,6 +207,7 @@ pub struct Session {
     seq: u64,
     turn: u64,
     tool_rounds: u32,
+    tool_round_limit: u32,
     cancel: CancelFlag,
     sealed: Option<String>,
     tool_executed_this_turn: bool,
@@ -280,6 +290,7 @@ impl Session {
             seq: 0,
             turn,
             tool_rounds: 0,
+            tool_round_limit: MAX_TOOL_ROUNDS,
             cancel: CancelFlag::default(),
             sealed,
             tool_executed_this_turn: false,
@@ -308,6 +319,7 @@ impl Session {
         &self.origin
     }
 
+    pub fn attach_images(&mut self,images:Vec<makepad_ai_hub::providers::provider::ToolImage>)->Result<(),String>{self.provider.attach_tool_images(images)}
     pub fn provider_kind(&self) -> ProviderKind {
         self.provider.kind()
     }
@@ -318,6 +330,12 @@ impl Session {
 
     pub fn is_idle(&self) -> bool {
         matches!(self.phase, Phase::Idle)
+    }
+
+    /// Effective limit captured for the current/latest turn. Older history
+    /// may leave fewer rounds than the executor requested.
+    pub fn tool_round_limit(&self) -> u32 {
+        self.tool_round_limit
     }
 
     /// The cooperative cancel flag this session hands to running tools.
@@ -441,6 +459,11 @@ impl Session {
         };
         self.turn += 1;
         self.tool_rounds = 0;
+        // The user is already recorded. Reserve the textual final notice
+        // and completion before admitting any potentially mutating call.
+        self.tool_round_limit = tools_exec.max_tool_rounds()
+            .min(MAX_CONFIGURABLE_TOOL_ROUNDS)
+            .min((MAX_MESSAGES.saturating_sub(self.history.len() + 2) / 2) as u32);
         self.tool_executed_this_turn = false;
         self.executed_mutation = false;
         self.budget_final = false;
@@ -657,6 +680,7 @@ impl Session {
                 self.tool_round(clean, None, ToolOutcome::Refused { what }, tools_exec);
             }
             Extract::Call { clean, name, args } => {
+                if !self.admit_tool_round() { return; }
                 let call_id = format!("tc_{}_{}", self.turn, self.tool_rounds + 1);
                 let emit_args = if matches!(args, Value::Obj(_))
                     && args.to_json().len() <= MAX_TOOL_JSON_BYTES
@@ -736,6 +760,7 @@ impl Session {
         arguments: String,
         tools_exec: &mut dyn ToolExecutor,
     ) {
+        if !self.admit_tool_round() { return; }
         if call_id.is_empty() || call_id.len() > MAX_TOOL_CALL_ID {
             self.phase = Phase::Idle;
             self.emit(ChatEventBody::Error {
@@ -847,8 +872,16 @@ impl Session {
         clean_text: String,
         call_id: Option<String>,
         outcome: ToolOutcome,
-        _tools_exec: &mut dyn ToolExecutor,
+        tools_exec: &mut dyn ToolExecutor,
     ) {
+        if !self.admit_tool_round() { return; }
+        let images = tools_exec.take_tool_images();
+        let outcome = if images.is_empty() {outcome} else {
+            match self.provider.attach_tool_images(images) {
+                Ok(())=>outcome,
+                Err(message)=>outcome.image_delivery_failed(&message),
+            }
+        };
         let outcome = bounded_outcome(outcome);
         if let Some(id) = &call_id {
             self.emit(ChatEventBody::ToolResult { id: id.clone(), outcome: outcome.clone() });
@@ -917,7 +950,7 @@ impl Session {
             return;
         }
         self.tool_rounds += 1;
-        if self.tool_rounds >= MAX_TOOL_ROUNDS && !self.budget_final {
+        if self.tool_rounds >= self.tool_round_limit && !self.budget_final {
             // Native-tool providers keep the fail-closed shape (their
             // sessions seal after tools anyway). The textual lane degrades
             // GRACEFULLY: a turn that spent its budget exploring still
@@ -927,7 +960,7 @@ impl Session {
             if self.provider.kind().uses_native_tools() {
                 self.fail_closed_tool_round(
                     "tool_budget",
-                    &format!("tool round budget ({MAX_TOOL_ROUNDS}) exhausted"),
+                    &format!("tool round budget ({}) exhausted", self.tool_round_limit),
                 );
                 return;
             }
@@ -982,6 +1015,12 @@ impl Session {
         msg.validate().map_err(|_| ())?;
         self.history.push(msg);
         Ok(())
+    }
+
+    fn admit_tool_round(&mut self) -> bool {
+        if self.tool_rounds < self.tool_round_limit { return true; }
+        self.fail_closed_tool_round("tool_budget", &format!("tool round budget ({}) exhausted", self.tool_round_limit));
+        false
     }
 
     fn fail_closed_tool_round(&mut self, code: &str, message: &str) {

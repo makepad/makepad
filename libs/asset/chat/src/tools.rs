@@ -17,6 +17,9 @@ use makepad_asset_client::OperationId;
 use makepad_asset_data::{AssetAlias, AssetId, AssetRevisionId, ScalePreset};
 use std::str::FromStr;
 
+mod editable;
+pub use editable::ModelDocumentTool;
+
 /// Prompt-facing description of one tool (rendered into the provider's
 /// system text by `toolcall::render_system` / [`render_native_system`]).
 #[derive(Clone, Debug)]
@@ -730,8 +733,9 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           class — a later game.chaser/sentry/follower call retunes \
                           them), everything else is a grounded prop at a sane scale. Use \
                           form: \"follower\" for a character body that follows the player; \
-                          rigged and unrigged loadable models both work as bodies. Query the catalog for the \
-                          canon_alias first. If no suitable creature asset exists and a \
+                          rigged and unrigged loadable models both work as bodies. Use the returned publication alias directly after model.jobs reports \
+                          result.placeable_now:true; pass form: \"car\" for a custom modeled vehicle. \
+                          For reused art, query the catalog for canon_alias first. If no suitable creature asset exists and a \
                           primitive part-built creature is wanted, use world.add_addon \
                           with the worked game-context example instead. Use \
                           world.set_source only for NEW levels or \
@@ -995,6 +999,7 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             ),
         },
     ];
+    defs.extend(editable::definitions());
     for def in &mut defs {
         if def.name.starts_with("world.") && def.name != "world.new_level" {
             add_optional_sub(&mut def.parameters);
@@ -1158,6 +1163,17 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_add_addon" => Some("world.add_addon"),
         "model_build" => Some("model.build"),
         "model_fetch" => Some("model.fetch"),
+        "model_open" => Some("model.open"),
+        "model_apply" => Some("model.apply"),
+        "model_texture" => Some("model.texture"),
+        "model_render" => Some("model.render"),
+        "model_concepts" => Some("model.concepts"),
+        "model_inspect" => Some("model.inspect"),
+        "model_history" => Some("model.history"),
+        "model_close" => Some("model.close"),
+        "model_publish" => Some("model.publish"),
+        "model_jobs" => Some("model.jobs"),
+        "model_cancel" => Some("model.cancel"),
         _ => None,
     }
 }
@@ -1538,6 +1554,8 @@ pub enum ContentToolCall {
     ModelBuild { title: String, source: String },
     /// Fetch the authoritative CSG source for an existing generated alias.
     ModelFetch { alias: AssetAlias },
+    /// Bounded editable-document command, executed by the game-owned worker.
+    ModelDocument { tool: ModelDocumentTool, args: Value },
     /// Place models into the running game world (sandbox sessions only).
     WorldPlace { items: Vec<WorldPlaceItem> },
     /// Remove placements by id or by tag (exactly one of the two).
@@ -1740,6 +1758,7 @@ impl ContentToolCall {
             ContentToolCall::AssetsSchema => "assets.schema",
             ContentToolCall::ModelBuild { .. } => "model.build",
             ContentToolCall::ModelFetch { .. } => "model.fetch",
+            ContentToolCall::ModelDocument { tool, .. } => tool.name(),
             ContentToolCall::WorldPlace { .. } => "world.place",
             ContentToolCall::WorldRemove { .. } => "world.remove",
             ContentToolCall::WorldMove { .. } => "world.move",
@@ -1768,6 +1787,10 @@ impl ContentToolCall {
         }
         if args.to_json().len() > MAX_TOOL_JSON_BYTES {
             return Err("tool arguments too large".to_string());
+        }
+        if let Some(tool) = ModelDocumentTool::from_name(name) {
+            editable::validate(tool, args)?;
+            return Ok(ContentToolCall::ModelDocument { tool, args: args.clone() });
         }
         if name.starts_with("world.")
             && name != "world.generate"
@@ -3179,6 +3202,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         ContentToolCall::ModelFetch { alias } => {
             json::obj(vec![("alias", json::s(alias.to_string()))])
         }
+        ContentToolCall::ModelDocument { args, .. } => args.clone(),
         ContentToolCall::WorldPlace { items } => json::obj(vec![(
             "items",
             Value::Arr(

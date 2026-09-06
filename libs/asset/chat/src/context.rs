@@ -113,6 +113,7 @@ impl ClientProfile {
                     | C::WorldAddAddon { .. }
                     | C::ModelBuild { .. }
                     | C::ModelFetch { .. }
+                    | C::ModelDocument { .. }
             ),
             ClientProfile::Gen => matches!(
                 call,

@@ -244,6 +244,7 @@ impl ToolExecutor for AssetServerTools {
             // calls one anyway gets the honest answer, not an execution.
             ContentToolCall::ModelBuild { .. }
             | ContentToolCall::ModelFetch { .. }
+            | ContentToolCall::ModelDocument { .. }
             | ContentToolCall::WorldPlace { .. }
             | ContentToolCall::WorldRemove { .. }
             | ContentToolCall::WorldMove { .. }

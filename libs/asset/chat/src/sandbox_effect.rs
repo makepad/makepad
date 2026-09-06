@@ -14,11 +14,12 @@ pub fn sandbox_effect(name: &str) -> Option<SandboxEffect> {
     use SandboxEffect::*;
     match canonicalize_tool_name(name).as_str() {
         "assets.query" | "assets.schema" | "world.list" | "world.get_source"
-        | "world.get_plan" | "world.api" | "model.fetch" => Some(Read),
+        | "world.get_plan" | "world.api" | "model.fetch" | "model.inspect" | "model.jobs" | "model.render" => Some(Read),
         "world.place" | "world.remove" | "world.move" | "world.spawn"
         | "world.add_addon" | "world.tune" | "world.set_source" | "world.set_plan"
         | "world.new_level" | "world.set_player_model" => Some(WorldMutation),
-        "content.generate" | "model.build" => Some(ContentMutation),
+        "content.generate" | "model.build" | "model.open" | "model.apply" | "model.concepts" | "model.texture"
+        | "model.history" | "model.close" | "model.publish" | "model.cancel" => Some(ContentMutation),
         _ => None,
     }
 }
@@ -39,7 +40,7 @@ mod tests {
     #[test]
     fn every_definition_and_wire_spelling_has_an_effect() {
         let defs = sandbox_definitions();
-        assert_eq!(defs.len(), 19, "classify new Sandbox definitions explicitly");
+        assert_eq!(defs.len(), 30, "classify new Sandbox definitions explicitly");
         for def in defs {
             let effect = sandbox_effect(def.name).expect(def.name);
             assert_eq!(sandbox_effect(def.api_name), Some(effect), "{}", def.name);
