@@ -7790,6 +7790,15 @@ pub struct App {
     /// is opened.
     #[rust]
     console: Console,
+    /// How many seconds of AUDIBLE time the wave lanes show. The widget
+    /// owns the live value; this is what is written down, so a zoom the
+    /// operator picked is still there next launch.
+    wave_zoom_secs: f64,
+    /// Pushed into the widget once, when the surface first has one. Not
+    /// every frame: the wheel moves the widget first and reports after,
+    /// so re-asserting the stored value each pass would undo the notch
+    /// that is on its way.
+    wave_zoom_applied: bool,
     /// What the lists were last given, so the strip only re-sizes them when
     /// the number actually moves.
     #[rust]
@@ -20361,11 +20370,12 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
             self.key_notation.index(),
+            self.wave_zoom_secs,
             self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
@@ -20389,6 +20399,18 @@ p2 {}
                         self.explorer_columns = ColumnLayout::from_text(value)
                     }
                     "queue_columns" => self.queue_columns = ColumnLayout::from_text(value),
+                    "wave_zoom" => {
+                        // Clamped on the way in as well as on the way out:
+                        // the file is the operator's to edit.
+                        self.wave_zoom_secs = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::ZOOM_DEFAULT_SECS)
+                            .clamp(
+                                crate::music_view::ZOOM_MIN_SECS,
+                                crate::music_view::ZOOM_MAX_SECS,
+                            )
+                    }
                     _ => self.console.apply_line(key, value),
                 }
             }
@@ -24651,6 +24673,10 @@ p2 {}
 
             // Waveforms.
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
+                if !self.wave_zoom_applied {
+                    self.wave_zoom_applied = true;
+                    scroll.set_zoom(cx, self.wave_zoom_secs);
+                }
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
                 scroll.set_loop_span(cx, deck, loop_span, None);
@@ -28470,7 +28496,16 @@ p2 {}
                     };
                     self.run_deck_cmds(cx, cmds);
                 }
-                WaveEvent::Zoom { .. } => {}
+                WaveEvent::Zoom { secs } => {
+                    // The widget has already moved; this is only about
+                    // remembering it. Written on the notch rather than on
+                    // some later settle, because there is no gesture end to
+                    // hang it on and the file is small.
+                    if (secs - self.wave_zoom_secs).abs() > 1e-9 {
+                        self.wave_zoom_secs = secs;
+                        self.save_preprocess_settings();
+                    }
+                }
                 // Every frame of a drag: hand the lanes the playhead the
                 // mixer is actually at, so a scratch tracks at display rate.
                 WaveEvent::Tick => self.push_wave_positions(cx),
