@@ -943,6 +943,11 @@ mod imp {
                         widget.height,
                         widget.window_index,
                     ));
+                    out.push_str(&format!(
+                        ",\"window_id\":{},\"enabled\":{}",
+                        json_str(&widget.window_id),
+                        widget.enabled,
+                    ));
                     if let Some(text) = &widget.text {
                         if !text.is_empty() {
                             out.push_str(&format!(",\"t\":{}", json_str(text)));
@@ -953,6 +958,9 @@ mod imp {
                     }
                     if let Some(checked) = widget.checked {
                         out.push_str(&format!(",\"c\":{}", if checked { 1 } else { 0 }));
+                    }
+                    if let Some(selected) = &widget.selected {
+                        out.push_str(&format!(",\"selected\":{}", json_str(selected)));
                     }
                     if !widget.visible {
                         out.push_str(",\"v\":0");

@@ -104,8 +104,7 @@ workspace.members = [
     # === xr app ===
     "xr",
     # === studio ===
-    "studio/hub",
-    "studio/desktop",
+    "apps/studio",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===

@@ -9,6 +9,11 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
+# AppKit cursor creation must run on the process main thread.
+[[test]]
+name = "macos_cursors"
+harness = false
+
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }

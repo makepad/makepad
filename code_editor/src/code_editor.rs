@@ -276,6 +276,15 @@ impl KeepCursorInView {
 }
 
 impl CodeEditor {
+    /// The current IME anchor in editor-local layout coordinates. A canvas
+    /// host can map this to its screen area after drawing the editor.
+    pub fn ime_anchor(&self, cx: &Cx) -> (Area, Vec2d) {
+        let area = self.scroll_bars.area();
+        let pos = self.viewport_rect.pos - area.clipped_rect(cx).pos
+            + self.last_cursor_screen_pos.unwrap_or_default() + dvec2(0.0, self.cell_size.y);
+        (area, pos)
+    }
+
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }

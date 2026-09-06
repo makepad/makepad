@@ -40,6 +40,9 @@ pub struct Session {
 }
 
 impl Session {
+    /// PID of this session’s shell, for exact host activity relationships.
+    pub fn child_pid(&self) -> i32 { self.pty.child_pid() }
+
     pub fn spawn(
         cols: usize,
         rows: usize,

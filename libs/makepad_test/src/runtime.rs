@@ -1,37 +1,25 @@
+use crate::app_process::{self, LaunchSpec, OwnedApp, ShutdownOutcome};
 use crate::error::{IntoTestResult, TestError, TestResult};
+use crate::remote::{KeyKind, MouseInput, MouseKind};
 use crate::selector::Selector;
-use crate::studio_remote::StudioRemoteClient;
-use makepad_micro_serde::{SerBin, SerJson};
-use makepad_studio_hub::{HubConfig, HubConnection, MountConfig, StudioHub};
-use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, LogEntry, QueryId};
-use makepad_studio_protocol::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
-    RemoteMouseMove, RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec, WidgetSnapshot,
-};
+use makepad_micro_serde::SerJson;
+use makepad_studio_protocol::{KeyCode, KeyModifiers, StudioToApp, WidgetSnapshot};
 use std::cell::RefCell;
-use std::cmp;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
-const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-const STARTUP_RETRIES: usize = 2;
-const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAG_STEPS: usize = 6;
-const PUMP_TICKS: usize = 3;
 const RECENT_LOG_LINES: usize = 200;
-const DEFAULT_STUDIO_ADDR: &str = "127.0.0.1:8001";
-const DEFAULT_STUDIO_MOUNT: &str = "makepad";
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -73,12 +61,19 @@ impl WidgetMatch {
 #[derive(Clone, Debug)]
 pub struct TestConfig {
     pub package_name: String,
-    pub mount_name: String,
+    /// The bin target to launch when the package builds more than one.
+    pub bin_name: Option<String>,
     pub manifest_dir: PathBuf,
     pub test_name: String,
     pub artifacts_dir: PathBuf,
-    pub listen_address: SocketAddr,
+    /// Extra environment for the app process. `CARGO_TARGET_DIR`, when set,
+    /// also applies to the build. `MAKEPAD_HEADLESS_DPI=N` scales screenshots
+    /// to N pixels per layout point.
     pub env: HashMap<String, String>,
+    /// Extra arguments appended after `--remote`.
+    pub app_args: Vec<String>,
+    /// Show the window (unfocused). Default is hidden (`MAKEPAD_HIDE_WINDOWS=1`).
+    pub visible: bool,
     pub startup_timeout: Duration,
     pub action_timeout: Duration,
     pub poll_interval: Duration,
@@ -103,23 +98,17 @@ impl TestConfig {
             .join(sanitize_path_component(&test_name));
 
         let mut env = HashMap::new();
-        if !visible_mode_enabled() {
-            env.insert("MAKEPAD".to_string(), "headless".to_string());
-        }
         env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
-        env.insert(
-            "CARGO_TARGET_DIR".to_string(),
-            manifest_dir.join("target").to_string_lossy().to_string(),
-        );
 
         Ok(Self {
-            mount_name: package_name.clone(),
             package_name,
+            bin_name: None,
             manifest_dir,
             test_name,
             artifacts_dir,
-            listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             env,
+            app_args: Vec::new(),
+            visible: visible_mode_enabled(),
             startup_timeout: STARTUP_TIMEOUT,
             action_timeout: ACTION_TIMEOUT,
             poll_interval: POLL_INTERVAL,
@@ -136,48 +125,36 @@ impl TestConfig {
     ) -> TestResult<Self> {
         Self::new(manifest_dir, package_name, test_name)
     }
-}
 
-enum TestConnection {
-    InProcess(HubConnection),
-    Remote(StudioRemoteClient),
-}
-
-impl TestConnection {
-    fn send(&mut self, msg: ClientToHub) -> TestResult<QueryId> {
-        match self {
-            Self::InProcess(connection) => Ok(connection.send(msg)),
-            Self::Remote(connection) => connection.send(msg),
+    fn launch_spec(&self) -> LaunchSpec {
+        LaunchSpec {
+            manifest_dir: self.manifest_dir.clone(),
+            artifacts_dir: self.artifacts_dir.clone(),
+            env: self.env.clone(),
+            args: self.app_args.clone(),
+            visible: self.visible,
+            startup_timeout: self.startup_timeout,
+            poll_interval: self.poll_interval,
         }
     }
 
-    fn recv_timeout(&self, timeout: Duration) -> Option<HubToClient> {
-        match self {
-            Self::InProcess(connection) => connection.recv_timeout(timeout),
-            Self::Remote(connection) => connection.recv_timeout(timeout),
-        }
+    /// Screenshot scale that honours `MAKEPAD_HEADLESS_DPI` from `env`: the
+    /// old software backend rendered at that dpi, so a suite that asked for
+    /// `1` expects layout points to equal PNG pixels.
+    fn requested_screenshot_dpi(&self) -> Option<f64> {
+        self.env
+            .get("MAKEPAD_HEADLESS_DPI")
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|dpi| *dpi > 0.0)
     }
 }
 
 struct TestAppInner {
     config: TestConfig,
-    connection: TestConnection,
-    build_id: QueryId,
-    build_stopped: Option<Option<i32>>,
-}
-
-impl TestAppInner {
-    fn observe_message(&mut self, msg: &HubToClient) {
-        if let HubToClient::BuildStopped {
-            build_id,
-            exit_code,
-        } = msg
-        {
-            if *build_id == self.build_id {
-                self.build_stopped = Some(*exit_code);
-            }
-        }
-    }
+    app: OwnedApp,
+    /// Window that received the last pointer interaction; app-level key and
+    /// text input follows it, as keyboard input follows a click on a desktop.
+    focus_window: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -192,27 +169,14 @@ impl TestApp {
         }
         fs::create_dir_all(&config.artifacts_dir)?;
 
-        let mut last_error = None;
-        for attempt in 0..STARTUP_RETRIES {
-            match Self::start_once(config.clone()) {
-                Ok(app) => return Ok(app),
-                Err(err) if attempt + 1 < STARTUP_RETRIES && startup_error_is_retryable(&err) => {
-                    last_error = Some(err);
-                    thread::sleep(STARTUP_RETRY_DELAY);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| TestError::new("failed to start test app")))
-    }
-
-    fn start_once(config: TestConfig) -> TestResult<Self> {
-        let (connection, build_id) = if visible_mode_enabled() {
-            start_visible_app(&config)?
-        } else {
-            start_headless_app(&config)?
-        };
+        let executable = app_process::build_release_binary(
+            &config.manifest_dir,
+            &config.package_name,
+            config.bin_name.as_deref(),
+            &config.artifacts_dir,
+            config.env.get("CARGO_TARGET_DIR").map(String::as_str),
+        )?;
+        let app = app_process::launch(&config.launch_spec(), &executable)?;
 
         if config.startup_pause > Duration::ZERO {
             thread::sleep(config.startup_pause);
@@ -221,9 +185,8 @@ impl TestApp {
         Ok(Self {
             inner: Rc::new(RefCell::new(TestAppInner {
                 config,
-                connection,
-                build_id,
-                build_stopped: None,
+                app,
+                focus_window: None,
             })),
         })
     }
@@ -235,6 +198,21 @@ impl TestApp {
         }
     }
 
+    /// The owned process id, for diagnostics.
+    pub fn pid(&self) -> u32 {
+        self.inner.borrow().app.pid
+    }
+
+    /// `host:port` of the owned app's remote surface, for diagnostics.
+    pub fn remote_endpoint(&self) -> String {
+        self.inner.borrow().app.client.endpoint()
+    }
+
+    /// The directory the app writes its own grabs into (`/g`).
+    pub fn grab_dir(&self) -> PathBuf {
+        self.inner.borrow().app.grab_dir.clone()
+    }
+
     pub fn type_text(&self, text: impl AsRef<str>) {
         if let Err(err) = self.try_type_text(text) {
             panic_for_error(err);
@@ -242,9 +220,9 @@ impl TestApp {
     }
 
     pub fn try_type_text(&self, text: impl AsRef<str>) -> TestResult<()> {
-        let text = text.as_ref().to_string();
-        let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::TypeText { build_id, text })?;
+        self.ensure_running()?;
+        let window = self.focus_window();
+        self.client().text(window, text.as_ref(), true)?;
         self.pace_after_action();
         Ok(())
     }
@@ -256,13 +234,7 @@ impl TestApp {
     }
 
     pub fn try_press_return(&self) -> TestResult<()> {
-        let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::Return {
-            build_id,
-            auto_dump: Some(false),
-        })?;
-        self.pace_after_action();
-        Ok(())
+        self.try_press_key(KeyCode::ReturnKey)
     }
 
     pub fn press_key(&self, key_code: KeyCode) {
@@ -286,17 +258,15 @@ impl TestApp {
         key_code: KeyCode,
         modifiers: KeyModifiers,
     ) -> TestResult<()> {
-        let event = KeyEvent {
-            key_code,
-            is_repeat: false,
-            modifiers,
-            time: now_seconds(),
-        };
-        self.try_forward(vec![StudioToApp::KeyDown(event), StudioToApp::KeyUp(event)])?;
+        self.ensure_running()?;
+        let window = self.focus_window();
+        self.client()
+            .key(window, KeyKind::Press, key_code, modifiers, true)?;
         self.pace_after_action();
         Ok(())
     }
 
+    /// Grab the primary window to a PNG in the app's own grab directory.
     pub fn screenshot(&self) -> PathBuf {
         match self.try_screenshot() {
             Ok(path) => path,
@@ -306,17 +276,15 @@ impl TestApp {
 
     pub fn try_screenshot(&self) -> TestResult<PathBuf> {
         self.ensure_running()?;
-        let build_id = self.build_id();
-        let query_id = self.send(ClientToHub::Screenshot {
-            build_id,
-            kind_id: Some(0),
-        })?;
-        self.wait_for_reply(SCREENSHOT_TIMEOUT, move |msg| match msg {
-            HubToClient::Screenshot {
-                query_id: id, path, ..
-            } if id == query_id => Some(Ok(PathBuf::from(path))),
-            _ => None,
-        })
+        let windows = self.client().windows()?;
+        let window = windows
+            .first()
+            .ok_or_else(|| TestError::new("screenshot: the app has no window"))?;
+        let scale = match self.inner.borrow().config.requested_screenshot_dpi() {
+            Some(dpi) if window.dpi > 0.0 => dpi / window.dpi,
+            _ => 1.0,
+        };
+        self.client().grab(Some(window.id), scale)
     }
 
     pub fn widget_dump(&self) -> String {
@@ -328,15 +296,7 @@ impl TestApp {
 
     pub fn try_widget_dump(&self) -> TestResult<String> {
         self.ensure_running()?;
-        self.try_pump_ui()?;
-        let build_id = self.build_id();
-        let query_id = self.send(ClientToHub::WidgetTreeDump { build_id })?;
-        self.wait_for_reply(self.action_timeout(), move |msg| match msg {
-            HubToClient::WidgetTreeDump {
-                query_id: id, dump, ..
-            } if id == query_id => Some(Ok(dump)),
-            _ => None,
-        })
+        self.client().dump()
     }
 
     pub fn widget_snapshot(&self) -> Vec<WidgetSnapshot> {
@@ -348,17 +308,7 @@ impl TestApp {
 
     pub fn try_widget_snapshot(&self) -> TestResult<Vec<WidgetSnapshot>> {
         self.ensure_running()?;
-        self.try_pump_ui()?;
-        let build_id = self.build_id();
-        let query_id = self.send(ClientToHub::WidgetSnapshot { build_id })?;
-        self.wait_for_reply(self.action_timeout(), move |msg| match msg {
-            HubToClient::WidgetSnapshot {
-                query_id: id,
-                widgets,
-                ..
-            } if id == query_id => Some(Ok(widgets)),
-            _ => None,
-        })
+        self.client().snapshot()
     }
 
     pub fn wait_for_log_contains(&self, needle: &str) {
@@ -369,21 +319,24 @@ impl TestApp {
 
     pub fn try_wait_for_log_contains(&self, needle: &str) -> TestResult<()> {
         let deadline = Instant::now() + self.action_timeout();
-        while Instant::now() < deadline {
-            let entries = self.query_logs_once(Some(needle.to_string()))?;
-            if entries
-                .iter()
-                .any(|(_, entry)| entry.message.contains(needle))
-            {
+        loop {
+            self.ensure_running()?;
+            let tail = self.client().log_since(0)?;
+            if tail.lines.iter().any(|line| line.contains(needle)) {
                 return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(TestError::new(format!(
+                    "timed out waiting for log containing `{needle}`"
+                )));
             }
             thread::sleep(self.poll_interval());
         }
-        Err(TestError::new(format!(
-            "timed out waiting for log containing `{needle}`"
-        )))
     }
 
+    /// Raw escape hatch: replay protocol events through the remote input
+    /// routes. Only pointer, scroll, key and text events have a standalone
+    /// equivalent; anything else is an explicit error.
     pub fn forward(&self, msgs: Vec<StudioToApp>) {
         if let Err(err) = self.try_forward(msgs) {
             panic_for_error(err);
@@ -391,65 +344,109 @@ impl TestApp {
     }
 
     pub fn try_forward(&self, msgs: Vec<StudioToApp>) -> TestResult<()> {
-        let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::ForwardToApp {
-            build_id,
-            msg_bin: StudioToAppVec(msgs).serialize_bin(),
-        })
+        self.ensure_running()?;
+        let window = self.focus_window();
+        let count = msgs.len();
+        for (index, msg) in msgs.into_iter().enumerate() {
+            let wait = index + 1 == count;
+            match msg {
+                StudioToApp::MouseDown(event) => self.client().mouse(&MouseInput {
+                    button: button_index(event.button_raw_bits),
+                    modifiers: event.modifiers.into_key_modifiers(),
+                    wait,
+                    ..MouseInput::at(MouseKind::Down, window, event.x, event.y)
+                })?,
+                StudioToApp::MouseUp(event) => self.client().mouse(&MouseInput {
+                    button: button_index(event.button_raw_bits),
+                    modifiers: event.modifiers.into_key_modifiers(),
+                    wait,
+                    ..MouseInput::at(MouseKind::Up, window, event.x, event.y)
+                })?,
+                StudioToApp::MouseMove(event) => self.client().mouse(&MouseInput {
+                    modifiers: event.modifiers.into_key_modifiers(),
+                    wait,
+                    ..MouseInput::at(MouseKind::Move, window, event.x, event.y)
+                })?,
+                StudioToApp::Scroll(event) => self.client().mouse(&MouseInput {
+                    dx: event.sx,
+                    dy: event.sy,
+                    modifiers: event.modifiers.into_key_modifiers(),
+                    wait,
+                    ..MouseInput::at(MouseKind::Scroll, window, event.x, event.y)
+                })?,
+                StudioToApp::KeyDown(event) => self.client().key(
+                    window,
+                    KeyKind::Down,
+                    event.key_code,
+                    event.modifiers,
+                    wait,
+                )?,
+                StudioToApp::KeyUp(event) => self.client().key(
+                    window,
+                    KeyKind::Up,
+                    event.key_code,
+                    event.modifiers,
+                    wait,
+                )?,
+                StudioToApp::TextInput(event) => {
+                    self.client().text(window, &event.input, wait)?
+                }
+                other => {
+                    return Err(TestError::new(format!(
+                        "forward: {} has no equivalent on the standalone app remote route",
+                        studio_msg_name(&other)
+                    )))
+                }
+            }
+        }
+        Ok(())
     }
 
     fn try_click_center(&self, target: &WidgetSnapshot) -> TestResult<()> {
         self.ensure_running()?;
-        let (x, y) = snapshot_center(target);
-        let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::Click { build_id, x, y })?;
+        let (x, y) = snapshot_center_f64(target);
+        let window = Some(target.window_index);
+        self.client()
+            .mouse(&MouseInput::at(MouseKind::Click, window, x, y))?;
+        self.inner.borrow_mut().focus_window = window;
         self.pace_after_action();
         Ok(())
     }
 
     fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
+        self.ensure_running()?;
         let (x, y) = snapshot_center_f64(target);
-        self.try_forward(vec![StudioToApp::Scroll(RemoteScroll {
-            time: now_seconds(),
-            sx,
-            sy,
-            x,
-            y,
-            is_mouse: true,
-            modifiers: RemoteKeyModifiers::default(),
-        })])?;
+        self.client().mouse(&MouseInput {
+            dx: sx,
+            dy: sy,
+            ..MouseInput::at(MouseKind::Scroll, Some(target.window_index), x, y)
+        })?;
         self.pace_after_action();
         Ok(())
     }
 
     fn try_drag_from(&self, target: &WidgetSnapshot, dx: f64, dy: f64) -> TestResult<()> {
+        self.ensure_running()?;
         let (start_x, start_y) = snapshot_center_f64(target);
-        let button_raw_bits = MouseButton::PRIMARY.bits();
-        let mut msgs = Vec::with_capacity(DRAG_STEPS + 2);
-        msgs.push(StudioToApp::MouseDown(RemoteMouseDown {
-            button_raw_bits,
-            x: start_x,
-            y: start_y,
-            time: now_seconds(),
-            modifiers: RemoteKeyModifiers::default(),
-        }));
+        let window = Some(target.window_index);
+        let client = self.client();
+        client.mouse(&MouseInput::at(MouseKind::Down, window, start_x, start_y))?;
         for step in 1..=DRAG_STEPS {
             let progress = step as f64 / DRAG_STEPS as f64;
-            msgs.push(StudioToApp::MouseMove(RemoteMouseMove {
-                time: now_seconds() + progress * 0.01,
-                x: start_x + dx * progress,
-                y: start_y + dy * progress,
-                modifiers: RemoteKeyModifiers::default(),
-            }));
+            client.mouse(&MouseInput::at(
+                MouseKind::Move,
+                window,
+                start_x + dx * progress,
+                start_y + dy * progress,
+            ))?;
         }
-        msgs.push(StudioToApp::MouseUp(RemoteMouseUp {
-            time: now_seconds() + 0.02,
-            button_raw_bits,
-            x: start_x + dx,
-            y: start_y + dy,
-            modifiers: RemoteKeyModifiers::default(),
-        }));
-        self.try_forward(msgs)?;
+        client.mouse(&MouseInput::at(
+            MouseKind::Up,
+            window,
+            start_x + dx,
+            start_y + dy,
+        ))?;
+        self.inner.borrow_mut().focus_window = window;
         self.pace_after_action();
         Ok(())
     }
@@ -475,102 +472,26 @@ impl TestApp {
         Ok(matches)
     }
 
-    fn query_logs_once(&self, pattern: Option<String>) -> TestResult<Vec<(usize, LogEntry)>> {
-        let query_id = self.send_unchecked(ClientToHub::QueryLogs {
-            build_id: Some(self.build_id()),
-            level: None,
-            source: None,
-            file: None,
-            pattern,
-            is_regex: Some(false),
-            since_index: None,
-            live: Some(false),
-        })?;
-        self.wait_for_reply(self.action_timeout(), move |msg| match msg {
-            HubToClient::QueryLogResults {
-                query_id: id,
-                entries,
-                done: _,
-            } if id == query_id => Some(Ok(entries)),
-            _ => None,
-        })
-    }
-
     fn collect_logs_text(&self) -> TestResult<String> {
-        let mut entries = self.query_logs_once(None)?;
-        if entries.len() > RECENT_LOG_LINES {
-            let split = entries.len() - RECENT_LOG_LINES;
-            entries = entries.split_off(split);
+        let tail = self.client().log_since(0)?;
+        let mut lines = tail.lines;
+        if lines.len() > RECENT_LOG_LINES {
+            let split = lines.len() - RECENT_LOG_LINES;
+            lines = lines.split_off(split);
         }
         let mut out = String::new();
-        for (index, entry) in entries {
-            let _ = writeln!(
-                &mut out,
-                "[{index}] {:?} {:?}: {}",
-                entry.source, entry.level, entry.message
-            );
+        for line in lines {
+            let _ = writeln!(&mut out, "{line}");
         }
         Ok(out)
     }
 
-    fn send(&self, msg: ClientToHub) -> TestResult<QueryId> {
-        self.ensure_running()?;
-        self.send_unchecked(msg)
+    fn client(&self) -> crate::remote::RemoteClient {
+        self.inner.borrow().app.client.clone()
     }
 
-    fn send_unchecked(&self, msg: ClientToHub) -> TestResult<QueryId> {
-        let mut inner = self.inner.borrow_mut();
-        inner.connection.send(msg)
-    }
-
-    fn send_no_wait(&self, msg: ClientToHub) -> TestResult<()> {
-        let _ = self.send(msg)?;
-        Ok(())
-    }
-
-    fn try_pump_ui(&self) -> TestResult<()> {
-        self.try_forward((0..pump_ticks()).map(|_| StudioToApp::Tick).collect())
-    }
-
-    fn wait_for_reply<T, F>(&self, timeout: Duration, mut matcher: F) -> TestResult<T>
-    where
-        F: FnMut(HubToClient) -> Option<TestResult<T>>,
-    {
-        let deadline = Instant::now() + timeout;
-        loop {
-            self.ensure_running()?;
-            if Instant::now() >= deadline {
-                return Err(TestError::new("timed out waiting for hub response"));
-            }
-            let slice = cmp::min(
-                self.poll_interval(),
-                deadline.saturating_duration_since(Instant::now()),
-            );
-            let Some(msg) = self.recv_timeout(slice) else {
-                continue;
-            };
-            if let HubToClient::Error { message } = &msg {
-                return Err(TestError::new(message.clone()));
-            }
-            if let Some(result) = matcher(msg) {
-                return result;
-            }
-        }
-    }
-
-    fn recv_timeout(&self, timeout: Duration) -> Option<HubToClient> {
-        let msg = {
-            let inner = self.inner.borrow();
-            inner.connection.recv_timeout(timeout)
-        };
-        if let Some(ref msg) = msg {
-            self.inner.borrow_mut().observe_message(msg);
-        }
-        msg
-    }
-
-    fn build_id(&self) -> QueryId {
-        self.inner.borrow().build_id
+    fn focus_window(&self) -> Option<usize> {
+        self.inner.borrow().focus_window
     }
 
     fn action_timeout(&self) -> Duration {
@@ -600,57 +521,31 @@ impl TestApp {
     }
 
     fn ensure_running(&self) -> TestResult<()> {
-        let inner = self.inner.borrow();
-        if let Some(exit_code) = inner.build_stopped {
-            return Err(match exit_code {
-                Some(code) => TestError::new(format!(
-                    "app build {} exited unexpectedly with code {code}",
-                    inner.build_id.0
-                )),
-                None => TestError::new(format!(
-                    "app build {} exited unexpectedly",
-                    inner.build_id.0
-                )),
-            });
+        let mut inner = self.inner.borrow_mut();
+        if let Some(status) = inner.app.poll_exit() {
+            let pid = inner.app.pid;
+            return Err(TestError::new(format!(
+                "app process {pid} exited unexpectedly ({status}); stderr tail:\n{}",
+                inner.app.stderr_tail()
+            )));
         }
         Ok(())
     }
 
-    fn shutdown(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        {
-            let mut inner = self.inner.borrow_mut();
-            if inner.build_stopped.is_some() {
-                return;
-            }
-            let build_id = inner.build_id;
-            let _ = inner.connection.send(ClientToHub::ClearBuild { build_id });
-        }
-
-        loop {
-            if Instant::now() >= deadline {
-                return;
-            }
-            {
-                let inner = self.inner.borrow();
-                if inner.build_stopped.is_some() {
-                    return;
-                }
-            }
-            let slice = cmp::min(
-                POLL_INTERVAL,
-                deadline.saturating_duration_since(Instant::now()),
-            );
-            let msg = {
-                let inner = self.inner.borrow();
-                inner.connection.recv_timeout(slice)
-            };
-            let Some(msg) = msg else {
-                continue;
-            };
-            let mut inner = self.inner.borrow_mut();
-            inner.observe_message(&msg);
-        }
+    fn shutdown(&self) -> ShutdownOutcome {
+        let mut inner = self.inner.borrow_mut();
+        let poll = inner.config.poll_interval;
+        let outcome = inner.app.shutdown(poll);
+        let note = match outcome {
+            ShutdownOutcome::Graceful => "graceful: owned process exited after /gq or /quit",
+            ShutdownOutcome::AlreadyExited => "process had already exited before shutdown",
+            ShutdownOutcome::Killed => "fallback: owned pid killed after /gq and /quit did not end it",
+        };
+        let _ = fs::write(
+            inner.config.artifacts_dir.join("shutdown.txt"),
+            format!("pid {}\n{note}\n", inner.app.pid),
+        );
+        outcome
     }
 }
 
@@ -835,13 +730,13 @@ impl Locator {
     pub fn try_assert_enabled(&self, expected: bool) -> TestResult<()> {
         let widget = self.resolve_unique_readable()?;
         if widget.enabled == expected {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(TestError::new(format!(
+                "selector `{}` expected enabled state `{expected}`, found `{}`",
+                self.selector.describe(), widget.enabled
+            )))
         }
-        Err(TestError::new(format!(
-            "selector `{}` expected enabled state `{expected}`, found `{}`",
-            self.selector.describe(),
-            widget.enabled
-        )))
     }
 
     pub fn wait_enabled(self, expected: bool) -> Self {
@@ -1175,176 +1070,6 @@ pub fn run_current_package_test<F, R>(
     }
 }
 
-fn start_headless_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
-    let mut connection = TestConnection::InProcess(
-        StudioHub::start_in_process(HubConfig {
-            listen_address: config.listen_address,
-            mounts: vec![MountConfig {
-                name: config.mount_name.clone(),
-                path: config.manifest_dir.clone(),
-            }],
-            enable_in_process_gateway: true,
-            ..Default::default()
-        })
-        .map_err(TestError::new)?,
-    );
-
-    let _ = connection.send(ClientToHub::Run {
-        mount: config.mount_name.clone(),
-        process: config.package_name.clone(),
-        args: Vec::new(),
-        standalone: None,
-        env: Some(config.env.clone()),
-        buildbox: None,
-    })?;
-
-    let build_id = wait_for_run_ready(
-        &connection,
-        &config.mount_name,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
-
-    Ok((connection, build_id))
-}
-
-fn start_visible_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
-    let studio_addr = studio_addr_from_env();
-    let mount = studio_mount_from_env();
-    let mut connection = TestConnection::Remote(StudioRemoteClient::connect(&studio_addr)?);
-
-    clear_existing_visible_builds(
-        &mut connection,
-        &mount,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
-
-    let _ = connection.send(ClientToHub::Run {
-        mount: mount.clone(),
-        process: config.package_name.clone(),
-        args: Vec::new(),
-        standalone: None,
-        env: Some(config.env.clone()),
-        buildbox: None,
-    })?;
-
-    let build_id = wait_for_run_ready(
-        &connection,
-        &mount,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
-
-    Ok((connection, build_id))
-}
-
-fn clear_existing_visible_builds(
-    connection: &mut TestConnection,
-    mount: &str,
-    package: &str,
-    timeout: Duration,
-) -> TestResult<()> {
-    let _ = connection.send(ClientToHub::ListBuilds)?;
-    let builds = wait_for_builds(connection, timeout)?;
-    for build in builds
-        .into_iter()
-        .filter(|build| build.mount == mount && build.package == package)
-    {
-        let _ = connection.send(ClientToHub::ClearBuild {
-            build_id: build.build_id,
-        })?;
-    }
-    Ok(())
-}
-
-fn wait_for_builds(
-    connection: &TestConnection,
-    timeout: Duration,
-) -> TestResult<Vec<makepad_studio_protocol::hub_protocol::BuildInfo>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(TestError::new("timed out waiting for studio build list"));
-        }
-        let slice = cmp::min(
-            POLL_INTERVAL,
-            deadline.saturating_duration_since(Instant::now()),
-        );
-        let Some(msg) = connection.recv_timeout(slice) else {
-            continue;
-        };
-        match msg {
-            HubToClient::Builds { builds } => return Ok(builds),
-            HubToClient::Error { message } => return Err(TestError::new(message)),
-            _ => {}
-        }
-    }
-}
-
-fn wait_for_run_ready(
-    connection: &TestConnection,
-    mount: &str,
-    package: &str,
-    timeout: Duration,
-) -> TestResult<QueryId> {
-    let deadline = Instant::now() + timeout;
-    let mut build_started = None;
-    let mut app_started = None;
-
-    loop {
-        if let (Some(build_id), Some(app_build_id)) = (build_started, app_started) {
-            if build_id == app_build_id {
-                return Ok(build_id);
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(TestError::new(format!(
-                "timed out waiting for `{package}` to start"
-            )));
-        }
-        let slice = cmp::min(
-            POLL_INTERVAL,
-            deadline.saturating_duration_since(Instant::now()),
-        );
-        let Some(msg) = connection.recv_timeout(slice) else {
-            continue;
-        };
-        match msg {
-            HubToClient::BuildStarted {
-                build_id,
-                mount: msg_mount,
-                package: msg_package,
-            } if msg_mount == mount && msg_package == package => {
-                build_started = Some(build_id);
-                if app_started == Some(build_id) {
-                    return Ok(build_id);
-                }
-            }
-            HubToClient::AppStarted { build_id } => {
-                app_started = Some(build_id);
-                if build_started == Some(build_id) {
-                    return Ok(build_id);
-                }
-            }
-            HubToClient::BuildStopped {
-                build_id,
-                exit_code,
-            } => {
-                let detail = match exit_code {
-                    Some(code) => {
-                        format!("build {build_id:?} exited with code {code} before startup")
-                    }
-                    None => format!("build {build_id:?} exited before startup"),
-                };
-                return Err(TestError::new(detail));
-            }
-            HubToClient::Error { message } => return Err(TestError::new(message)),
-            _ => {}
-        }
-    }
-}
-
 fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
     let artifact_dir = app.artifacts_dir();
     let _ = fs::create_dir_all(&artifact_dir);
@@ -1405,8 +1130,42 @@ fn panic_for_error(err: TestError) -> ! {
     panic!("{}", err.message())
 }
 
-fn startup_error_is_retryable(err: &TestError) -> bool {
-    err.message().contains("before startup")
+fn studio_msg_name(msg: &StudioToApp) -> &'static str {
+    match msg {
+        StudioToApp::Screenshot(_) => "Screenshot",
+        StudioToApp::RunViewFrameRequest(_) => "RunViewFrameRequest",
+        StudioToApp::WidgetTreeDump(_) => "WidgetTreeDump",
+        StudioToApp::WidgetQuery(_) => "WidgetQuery",
+        StudioToApp::WidgetSnapshot(_) => "WidgetSnapshot",
+        StudioToApp::KeepAlive => "KeepAlive",
+        StudioToApp::LiveChange { .. } => "LiveChange",
+        StudioToApp::Swapchain(_) => "Swapchain",
+        StudioToApp::WindowGeomChange { .. } => "WindowGeomChange",
+        StudioToApp::Tick => "Tick",
+        StudioToApp::MouseDown(_) => "MouseDown",
+        StudioToApp::MouseUp(_) => "MouseUp",
+        StudioToApp::MouseMove(_) => "MouseMove",
+        StudioToApp::TweakRay(_) => "TweakRay",
+        StudioToApp::KeyDown(_) => "KeyDown",
+        StudioToApp::KeyUp(_) => "KeyUp",
+        StudioToApp::TextInput(_) => "TextInput",
+        StudioToApp::TextCopy => "TextCopy",
+        StudioToApp::TextCut => "TextCut",
+        StudioToApp::Scroll(_) => "Scroll",
+        StudioToApp::GameInput(_) => "GameInput",
+        StudioToApp::Custom(_) => "Custom",
+        StudioToApp::None => "None",
+        StudioToApp::Kill => "Kill",
+    }
+}
+
+/// The remote takes a button index (`b=0` left); protocol events carry the
+/// raw bit set, where the primary button is bit 0.
+fn button_index(raw_bits: u32) -> u32 {
+    if raw_bits == 0 {
+        return 0;
+    }
+    raw_bits.trailing_zeros()
 }
 
 fn sanitize_path_component(value: &str) -> String {
@@ -1486,38 +1245,12 @@ fn snapshot_summary(widget: &WidgetSnapshot) -> String {
     fields.join(" ")
 }
 
-/// Ticks forwarded before each query. Every one of them costs the app a full
-/// rendered frame when anything is dirty, so this is the multiplier on the cost
-/// of a snapshot — worth lowering for a suite whose app renders slowly.
-fn pump_ticks() -> usize {
-    std::env::var("MAKEPAD_TEST_PUMP_TICKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(PUMP_TICKS)
-}
-
 fn parallel_tests_enabled() -> bool {
     env_truthy("MAKEPAD_TEST_PARALLEL")
 }
 
 fn visible_mode_enabled() -> bool {
     env_truthy("MAKEPAD_TEST_VISIBLE")
-}
-
-fn studio_addr_from_env() -> String {
-    std::env::var("MAKEPAD_TEST_STUDIO")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_STUDIO_ADDR.to_string())
-}
-
-fn studio_mount_from_env() -> String {
-    std::env::var("MAKEPAD_TEST_STUDIO_MOUNT")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_STUDIO_MOUNT.to_string())
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -1535,13 +1268,6 @@ fn env_duration_ms(name: &str) -> Duration {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::ZERO)
-}
-
-fn now_seconds() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
 }
 
 fn primary_shortcut_modifiers() -> KeyModifiers {
@@ -1564,12 +1290,12 @@ fn primary_shortcut_modifiers() -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::{
-        env_duration_ms, primary_window_scope, sanitize_path_component, snapshot_is_visible,
-        snapshot_sort_key, studio_addr_from_env, studio_mount_from_env, visible_mode_enabled,
-        TestError, TestResult, WidgetMatch,
+        button_index, env_duration_ms, primary_window_scope, sanitize_path_component,
+        snapshot_is_visible, snapshot_sort_key, visible_mode_enabled, TestError, TestResult,
+        WidgetMatch,
     };
     use crate::{Selector, TestConfig};
-    use makepad_studio_protocol::WidgetSnapshot;
+    use makepad_studio_protocol::{MouseButton, WidgetSnapshot};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
@@ -1619,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn config_uses_expected_artifact_dir() {
+    fn config_uses_expected_artifact_dir_and_hidden_default() {
         let _guard = ENV_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -1637,11 +1363,14 @@ mod tests {
                 .join("makepad-example")
                 .join("ui__test")
         );
-        assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+        assert!(!config.visible);
+        assert!(!config.env.contains_key("MAKEPAD"));
+        assert!(!config.env.contains_key("CARGO_TARGET_DIR"));
+        assert_eq!(config.requested_screenshot_dpi(), None);
     }
 
     #[test]
-    fn visible_mode_omits_headless_env() {
+    fn visible_mode_comes_from_env() {
         let _guard = ENV_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -1652,25 +1381,17 @@ mod tests {
         let config =
             TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
         restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
-
-        assert!(!config.env.contains_key("MAKEPAD"));
+        assert!(config.visible);
     }
 
     #[test]
-    fn visible_mode_uses_expected_studio_defaults() {
-        let _guard = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_studio = std::env::var("MAKEPAD_TEST_STUDIO").ok();
-        let old_mount = std::env::var("MAKEPAD_TEST_STUDIO_MOUNT").ok();
-        std::env::remove_var("MAKEPAD_TEST_STUDIO");
-        std::env::remove_var("MAKEPAD_TEST_STUDIO_MOUNT");
-
-        assert_eq!(studio_addr_from_env(), "127.0.0.1:8001");
-        assert_eq!(studio_mount_from_env(), "makepad");
-        restore_env_var("MAKEPAD_TEST_STUDIO", old_studio);
-        restore_env_var("MAKEPAD_TEST_STUDIO_MOUNT", old_mount);
+    fn headless_dpi_env_scales_screenshots() {
+        let mut config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
+        config
+            .env
+            .insert("MAKEPAD_HEADLESS_DPI".to_string(), "1".to_string());
+        assert_eq!(config.requested_screenshot_dpi(), Some(1.0));
     }
 
     #[test]
@@ -1737,5 +1458,12 @@ mod tests {
         left.x = 10;
         right.x = 20;
         assert!(snapshot_sort_key(&left) < snapshot_sort_key(&right));
+    }
+
+    #[test]
+    fn button_bits_map_to_remote_indices() {
+        assert_eq!(button_index(MouseButton::PRIMARY.bits()), 0);
+        assert_eq!(button_index(0b100), 2);
+        assert_eq!(button_index(0), 0);
     }
 }

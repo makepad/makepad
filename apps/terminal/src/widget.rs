@@ -280,6 +280,9 @@ pub struct MpTerm {
     session: Option<Session>,
     #[rust]
     pub cwd: Option<PathBuf>,
+    /// A transformed host supplies its screen area and local-to-screen mapping.
+    #[rust]
+    pub canvas_ime_anchor: Option<(Area, PopupAnchorTransform)>,
     /// A one-shot job instead of the interactive shell (`--preview` runs
     /// the pager on a file); the session ends when it exits.
     #[rust]
@@ -358,6 +361,8 @@ impl ScriptHook for MpTerm {
 }
 
 impl MpTerm {
+    pub fn child_pid(&self) -> Option<i32> { self.session.as_ref().map(Session::child_pid) }
+
     /// Rows currently painted in the widget, or the last `lines` rows of
     /// scrollback plus the active grid. Used by the terminal's AI service;
     /// row text comes from the same cell content the renderer uses.
@@ -1401,7 +1406,13 @@ impl Widget for MpTerm {
                 self.pad_x + s.0 as f64 * self.cell_w,
                 self.pad_y + (s.1 + 1) as f64 * self.cell_h,
             );
-            cx.show_text_ime(self.area, ime);
+            if let Some((anchor, transform)) = self.canvas_ime_anchor {
+                let screen = (self.area.clipped_rect(cx).pos + ime) * transform.scale + transform.translation;
+                let cursor = screen - anchor.rect(cx).pos;
+                cx.show_text_ime(anchor, cursor);
+            } else {
+                cx.show_text_ime(self.area, ime);
+            }
         }
         DrawStep::done()
     }
