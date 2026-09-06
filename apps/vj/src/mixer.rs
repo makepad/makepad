@@ -2605,6 +2605,13 @@ struct DeckShadow {
     /// callback later.
     slipping: bool,
     roll_depth: usize,
+    /// A position and a transport the handle has asked for but no
+    /// callback has applied yet, each with the snapshot serial that was
+    /// current when it was sent. The published snapshot wins the moment
+    /// its serial moves past that -- by then the engine has rendered a
+    /// buffer with the command in it, and its answer is the true one.
+    seek_intent: Option<(u64, f64)>,
+    play_intent: Option<(u64, bool)>,
 }
 
 /// The UI-side handle. `Clone`, cheap, and never blocks: every mutation is
@@ -3103,6 +3110,10 @@ impl Mixer {
                 // was slipping or rolling over went with it.
                 slipping: false,
                 roll_depth: 0,
+                // A fresh record is at its start and stopped, and no
+                // intent about the last one survives it.
+                seek_intent: None,
+                play_intent: None,
             };
             Self::send_in(&self.shared, ui, MixCmd::InstallDeck { deck, pcm });
         });
@@ -3166,7 +3177,11 @@ impl Mixer {
     }
 
     pub fn set_deck_playing(&self, deck: DeckId, playing: bool) {
-        self.run_cmd(MixCmd::SetPlaying { deck, playing });
+        let serial = self.snapshot().serial;
+        self.ui.with(|ui| {
+            ui.deck[deck.index()].play_intent = Some((serial, playing));
+            Self::send_in(&self.shared, ui, MixCmd::SetPlaying { deck, playing });
+        });
     }
 
     /// Install or replace a grid. Frame conversion is deliberately done
@@ -3209,13 +3224,24 @@ impl Mixer {
     /// arrived, so a jump past the decoded edge waits there.
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
         let Some(fraction) = knob64(fraction, 0.0, 1.0) else { return };
-        self.run_cmd(MixCmd::SeekFraction { deck, fraction });
+        let serial = self.snapshot().serial;
+        self.ui.with(|ui| {
+            let shadow = &mut ui.deck[deck.index()];
+            shadow.seek_intent = Some((serial, fraction * shadow.expected_len as f64));
+            Self::send_in(&self.shared, ui, MixCmd::SeekFraction { deck, fraction });
+        });
     }
 
     /// Absolute seek in source seconds.
     pub fn seek_deck_seconds(&self, deck: DeckId, secs: f64) {
         let Some(secs) = knob64(secs, 0.0, f64::from(u32::MAX)) else { return };
-        self.run_cmd(MixCmd::SeekSeconds { deck, secs });
+        let serial = self.snapshot().serial;
+        self.ui.with(|ui| {
+            let shadow = &mut ui.deck[deck.index()];
+            let frames = secs * shadow.sample_rate.max(1) as f64;
+            shadow.seek_intent = Some((serial, frames.min(shadow.expected_len as f64)));
+            Self::send_in(&self.shared, ui, MixCmd::SeekSeconds { deck, secs });
+        });
     }
 
     /// Relative seek: `delta_secs` from wherever the playhead is when the
@@ -3364,6 +3390,10 @@ impl Mixer {
                 sync_locked: ui.deck[deck.index()].sync_locked,
                 slipping: false,
                 roll_depth: 0,
+                // A fresh record is at its start and stopped, and no
+                // intent about the last one survives it.
+                seek_intent: None,
+                play_intent: None,
             };
             Self::send_in(&self.shared, ui, MixCmd::InstallOver { deck, pcm, keep_playing });
         });
@@ -4000,10 +4030,12 @@ impl Mixer {
     pub fn deck_snapshots(&self) -> [DeckSnapshot; 2] {
         let shadows = self.ui.with(|ui| ui.deck);
         let snapshot = self.snapshot();
-        std::array::from_fn(|i| Self::deck_snapshot_from(shadows[i], snapshot.decks[i]))
+        std::array::from_fn(|i| {
+            Self::deck_snapshot_from(shadows[i], snapshot.decks[i], snapshot.serial)
+        })
     }
 
-    fn deck_snapshot_from(shadow: DeckShadow, snap: DeckSnap) -> DeckSnapshot {
+    fn deck_snapshot_from(shadow: DeckShadow, snap: DeckSnap, serial: u64) -> DeckSnapshot {
         if !shadow.has_pcm {
             return DeckSnapshot {
                 position_secs: 0.0,
@@ -4018,10 +4050,22 @@ impl Mixer {
             };
         }
         let rate = shadow.sample_rate.max(1) as f64;
+        // An intent stands until a buffer has been rendered with it in:
+        // the serial only moves when the callback publishes, so a command
+        // sent since the last publish is still on its way.
+        let fresh = |at: u64| serial <= at;
+        let playhead = match shadow.seek_intent {
+            Some((at, frames)) if fresh(at) => frames,
+            _ => snap.playhead_frames,
+        };
+        let playing = match shadow.play_intent {
+            Some((at, playing)) if fresh(at) => playing,
+            _ => snap.playing,
+        };
         DeckSnapshot {
-            position_secs: snap.playhead_frames / rate,
+            position_secs: playhead / rate,
             duration_secs: shadow.expected_len as f64 / rate,
-            playing: snap.playing,
+            playing,
             scratching: snap.scratching,
             platter_rate: snap.platter_rate,
             clock: snap.clock,
@@ -4316,6 +4360,10 @@ impl MixEngine {
     #[cfg(test)]
     pub fn sync(&mut self) {
         self.drain_commands();
+        // The serial moves, exactly as a rendered buffer would move it:
+        // it is what tells the handle that everything it had sent has
+        // been applied, and a sync applies everything a render would.
+        self.serial = self.serial.wrapping_add(1);
         Self::publish_snapshot(&self.state, &self.shared, self.serial);
     }
 
@@ -10578,6 +10626,29 @@ fn a_censor_under_a_latched_slip_leaves_the_operators_ghost_running() {
         // HEAD's ClearDeck dispatch does not reset the deck's chain (see
         // "missing"); until it does, this assertion fails.
         assert!(!deck_frozen(&mixer, DeckId::A), "an unload must have let it go");
+    }
+
+
+    #[test]
+    fn a_seek_shows_in_the_snapshot_before_the_next_callback() {
+        // The UI seeks and reads back in the same tick; the answer must not
+        // lag a buffer behind.
+        //
+        // Read through `Mixer`'s own methods explicitly (bypassing
+        // `TestMixer`'s Deref-shadowed `deck_snapshot`/`deck_position`,
+        // which call the test-only `MixEngine::sync()` before every read --
+        // exactly the safety net a real UI thread does not have, and which
+        // would silently hide the gap this test exists to catch).
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 96_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.seek_deck_seconds(DeckId::A, 1.25);
+        let snapshot = Mixer::deck_snapshot(&mixer, DeckId::A);
+        assert!((snapshot.position_secs - 1.25).abs() < 1e-9, "{}", snapshot.position_secs);
+        assert!(snapshot.playing);
+        assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
+        let (position, duration, playing) = Mixer::deck_position(&mixer, DeckId::A);
+        assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
     }
 
 }
