@@ -230,6 +230,14 @@ impl FoldHeader {
     pub fn opened(&self) -> f64 {
         self.opened
     }
+
+    /// Where the header strip is, as against `area()`, which is the whole
+    /// fold. A panel coordinating several folds needs the strip: the fold's
+    /// own rect grows to include the body, so a pointer anywhere in an open
+    /// section's text would otherwise read as a pointer on its heading.
+    pub fn header_rect(&self, cx: &Cx) -> Rect {
+        self.header.area().rect(cx)
+    }
 }
 
 impl FoldHeaderRef {
@@ -245,5 +253,10 @@ impl FoldHeaderRef {
 
     pub fn opened(&self) -> f64 {
         self.borrow().map_or(1.0, |inner| inner.opened())
+    }
+
+    /// Where the header strip is; an empty rect if there is no fold here.
+    pub fn header_rect(&self, cx: &Cx) -> Rect {
+        self.borrow().map(|inner| inner.header_rect(cx)).unwrap_or_default()
     }
 }

@@ -384,18 +384,21 @@ impl Widget for Accordion {
                 }
             }
             if let Event::MouseMove(me) = event {
-                // The header row is the band the fold mark sits in, across
-                // the section's own width. The header slot itself is a
-                // field of the fold header rather than a child of it, so
-                // asking the widget tree for it answers nothing.
+                // The whole HEADER STRIP, not the fold mark inside it. The
+                // mark is a small square in a padded row, so a band its
+                // height leaves most of the heading dead: the pointer has
+                // to come to rest inside those few pixels for the dwell to
+                // ever finish, which reads as hover not working at all.
+                // Asking for the strip rather than the fold's own rect
+                // matters just as much, since the fold's rect grows to
+                // include an open body.
                 let over = self.sections().iter().position(|section| {
-                    let mark = section.widget(cx, ids!(fold_button)).area().rect(cx);
-                    let whole = section.area().rect(cx);
-                    mark.size.y > 0.0
-                        && me.abs.y >= mark.pos.y
-                        && me.abs.y <= mark.pos.y + mark.size.y
-                        && me.abs.x >= whole.pos.x
-                        && me.abs.x <= whole.pos.x + whole.size.x
+                    let head = section.as_fold_header().header_rect(cx);
+                    head.size.y > 0.0
+                        && me.abs.y >= head.pos.y
+                        && me.abs.y <= head.pos.y + head.size.y
+                        && me.abs.x >= head.pos.x
+                        && me.abs.x <= head.pos.x + head.size.x
                 });
                 if over != self.dwelling {
                     cx.stop_timer(self.dwell_timer);
