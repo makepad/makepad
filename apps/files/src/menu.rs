@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::contents::ViewMode;
+use crate::{contents::ViewMode, treemap_view::MapProjection};
 
 /// Everything the context menu can ask for. There is nothing here that the
 /// shell does not do.
@@ -32,6 +32,13 @@ pub enum MenuAction {
     OpenInTerminal,
     ShowHidden,
     SetMode(ViewMode),
+    SetProjection(MapProjection),
+    StorageFilter,
+    ScanSystem,
+    Rescan,
+    Columns,
+    EditPath,
+    Chat,
     /// One app from the Open With submenu, by its index in
     /// [`open_with_apps`]'s answer.
     OpenWithApp(usize),
@@ -180,6 +187,34 @@ pub fn empty_menu(mode: ViewMode, clipboard: usize, show_hidden: bool) -> Vec<Me
     rows
 }
 
+/// Secondary toolbar actions, shared with the keyboard/context command paths.
+pub fn toolbar_menu(mode: ViewMode, show_hidden: bool, chat: bool, terminal: bool) -> Vec<MenuRow> {
+    let mut rows = vec![
+        MenuRow::new(MenuAction::NewFolder, "New Folder", "⇧⌘N"),
+        MenuRow::new(MenuAction::EditPath, "Go to Folder…", "⌃L"),
+        MenuRow::new(MenuAction::Properties, "Get Info", "⌘I").sep(),
+        MenuRow::new(MenuAction::Preview, "Preview Selection", "Space"),
+    ];
+    if terminal { rows.push(MenuRow::new(MenuAction::OpenInTerminal, "Open in Terminal", "")); }
+    if chat { rows.push(MenuRow::new(MenuAction::Chat, "Ask about Files", "")); }
+    if matches!(mode, ViewMode::List | ViewMode::Compact) {
+        rows.push(MenuRow::new(MenuAction::Columns, "List Columns…", "").sep());
+    }
+    rows.push(MenuRow::new(MenuAction::ShowHidden, if show_hidden {"Hide Hidden Files"} else {"Show Hidden Files"}, "⌃H").sep());
+    rows
+}
+
+pub fn storage_menu(projection: MapProjection, filter_open: bool, scan_all: bool) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    for (value, title) in [(MapProjection::Flat, "Flat"), (MapProjection::Ortho, "Isometric"), (MapProjection::Persp, "Perspective")] {
+        rows.push(MenuRow::new(MenuAction::SetProjection(value), &format!("{}{}", if projection == value {"• "} else {"   "}, title), ""));
+    }
+    rows.push(MenuRow::new(MenuAction::StorageFilter, if filter_open {"Hide Filters"} else {"Show Filters"}, "").sep());
+    rows.push(MenuRow::new(MenuAction::ScanSystem, if scan_all {"Exclude System Files"} else {"Include System Files"}, ""));
+    rows.push(MenuRow::new(MenuAction::Rescan, "Rescan Folder", "").sep());
+    rows
+}
+
 /// The apps offered for one file, in the order the submenu lists them: the
 /// association first, then the terminal's pager, then the desktop's own
 /// opener. `available` decides whether a sibling binary is actually there —
@@ -212,6 +247,18 @@ mod tests {
         assert!(entry_menu(1, true).len() <= MAX_ROWS);
         assert!(entry_menu(9, false).len() <= MAX_ROWS);
         assert!(empty_menu(ViewMode::Icons, 3, false).len() <= MAX_ROWS);
+        for mode in [ViewMode::Icons,ViewMode::List,ViewMode::Compact,ViewMode::Treemap] {
+            assert!(toolbar_menu(mode,false,true,true).len()<=MAX_ROWS);
+            let rows=toolbar_menu(mode,false,false,false);
+            assert!(!rows.iter().any(|r|matches!(r.action,MenuAction::Chat|MenuAction::OpenInTerminal)));
+            assert_eq!(rows.iter().any(|r|r.action==MenuAction::Columns),matches!(mode,ViewMode::List|ViewMode::Compact));
+        }
+        for projection in [MapProjection::Flat,MapProjection::Ortho,MapProjection::Persp] {
+            let rows=storage_menu(projection,false,false);
+            assert!(rows.len()<=MAX_ROWS);
+            assert_eq!(rows.iter().filter(|r|r.label.starts_with('•')).count(),1);
+            assert!(rows.iter().any(|r|r.action==MenuAction::Rescan));
+        }
     }
 
     #[test]
