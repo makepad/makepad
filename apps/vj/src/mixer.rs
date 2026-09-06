@@ -5197,6 +5197,10 @@ impl MixEngine {
     /// here waits on anyone: the commands are drained from a ring, the
     /// slot audio is read from rings, and the state is this engine's own.
     pub fn render(&mut self, device_rate: f64, output: &mut AudioBuffer) {
+        // Every buffer, not once: the flag is per thread and some hosts
+        // reset it between callbacks. See
+        // `music_dsp::flush_denormals_to_zero`.
+        crate::music_dsp::flush_denormals_to_zero();
         if device_rate <= 0.0 {
             return;
         }
@@ -9893,6 +9897,23 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         assert_eq!(Arc::strong_count(&first), 2, "the original is waiting to be reaped");
         mixer.reap_retired();
         assert_eq!(Arc::strong_count(&first), 1);
+    }
+
+
+    #[test]
+    fn every_callback_arms_flush_to_zero() {
+        // Some hosts reset the flag behind the app's back between buffers,
+        // so the callback cannot arm it once and trust it: each render
+        // re-arms. Disarm here as such a host would, render one buffer, and
+        // the thread must be flushing again.
+        crate::music_dsp::set_flush_denormals(false);
+        let mixer = TestMixer::new();
+        let mut buffer = AudioBuffer::new_with_size(64, 2);
+        mixer.render(48_000.0, &mut buffer);
+        let tiny = std::hint::black_box(f32::MIN_POSITIVE);
+        let half = std::hint::black_box(0.5f32);
+        assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
+        crate::music_dsp::set_flush_denormals(false);
     }
 
 }
