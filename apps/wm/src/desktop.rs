@@ -46,7 +46,7 @@ impl StyleTween {
         self.value([0.0, 0.0, 54.0, 34.0, 0.0])
     }
     pub fn title_height(&self) -> f64 {
-        self.value([0.0, 32.0, 34.0, 24.0, 26.0])
+        self.value([0.0, 32.0, 34.0, 20.0, 22.0])
     }
 }
 #[cfg(test)]
@@ -87,6 +87,7 @@ script_mod! {
         selected: 0.0
         top_only: 0.0
         title_gradient: 0.0
+        title_gradient_end: #a6caf0
         frame_width: 0.0
         pixel: fn() {
             let p = self.pos * self.rect_size
@@ -103,7 +104,7 @@ script_mod! {
             let pixel=floor(p*self.draw_pass.dpi_factor)
             let checker=modf(pixel.x+pixel.y,2.0)
             let fill=mix(self.color.rgb,vec3(1.0),self.selected*checker)
-            let base=mix(fill,vec3(0.063,0.518,0.816),self.pos.x*self.title_gradient)
+            let base=mix(fill,self.title_gradient_end.rgb,self.pos.x*self.title_gradient)
             let tl=min(p.x,p.y)
             let br=min(self.rect_size.x-p.x,self.rect_size.y-p.y)
             let outer=if tl<br {mix(vec3(0.831,0.816,0.784),vec3(0.502),self.pressed)}else{mix(vec3(0.251),vec3(1.0),self.pressed)}
@@ -164,6 +165,8 @@ pub struct DrawDesktopChrome {
     pub top_only: f32,
     #[live]
     pub title_gradient: f32,
+    #[live]
+    pub title_gradient_end: Vec4f,
     #[live]
     pub frame_width: f32,
 }

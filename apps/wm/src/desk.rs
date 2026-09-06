@@ -45,6 +45,35 @@ pub const GAPS_OUT: f64 = 10.0;
 pub const TILE_GAP: f64 = GAPS_IN * 2.0;
 /// Border thickness, drawn just inside the window box (hard corners).
 pub const BORDER_SIZE: f64 = 2.0;
+
+/// Caption symbols were tiny bitmaps, with a low underline and a heavy
+/// top edge on the maximize box. Modern scalable outline icons look wrong.
+fn draw_retro_caption(draw: &mut ShellDraw, cx: &mut Cx2d, button: Rect,
+    hit: ChromeHit, next: bool, pressed: bool, opacity: f32) {
+    use crate::shell::{alpha, rgb, ui::rect};
+    let offset = if pressed {1.0} else {0.0};
+    let x = button.pos.x + ((button.size.x - 10.0) * 0.5).floor() + offset;
+    let y = button.pos.y + ((button.size.y - 10.0) * 0.5).floor() + offset;
+    let ink = alpha(rgb(0,0,0),opacity);
+    match hit {
+        ChromeHit::Close => {
+            for i in 0..8 {
+                let i=i as f64;
+                draw.solid(cx,rect(x+1.0+i,y+1.0+i,if next {1.0}else{2.0},1.0),ink);
+                draw.solid(cx,rect(x+8.0-i,y+1.0+i,if next {1.0}else{2.0},1.0),ink);
+            }
+        }
+        ChromeHit::Minimize if !next => draw.solid(cx,rect(x+1.0,y+7.0,6.0,2.0),ink),
+        ChromeHit::Maximize | ChromeHit::Minimize => {
+            // NeXT's miniaturize button is a tiny window, on the left.
+            draw.solid(cx,rect(x,y+1.0,10.0,2.0),ink);
+            draw.solid(cx,rect(x,y+3.0,1.0,6.0),ink);
+            draw.solid(cx,rect(x+9.0,y+3.0,1.0,6.0),ink);
+            draw.solid(cx,rect(x,y+9.0,10.0,1.0),ink);
+        }
+        _ => {}
+    }
+}
 /// The tab strip a grouped tile wears, just inside its border — hyprland's
 /// `group:groupbar:height`. It comes off the CHILD's rect, not the tile's,
 /// so the strip never covers the window it is labelling.
@@ -1089,13 +1118,14 @@ impl WmDesk {
         let dpi = cx.current_dpi_factor().max(1.0);
         draw_rect = snap_to_device(draw_rect, dpi);
 
-        let inset = BORDER_SIZE * (self.style.weights[0] + self.style.weights[3] + self.style.weights[4]);
+        let inset = self.style.value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0]);
+        let resize_bar = self.style.weights[4] * 8.0;
         let mut inner = snap_child_rect(
             Rect {
                 pos: draw_rect.pos + dvec2(inset, inset),
                 size: dvec2(
                     (draw_rect.size.x - inset * 2.0).max(1.0),
-                    (draw_rect.size.y - inset * 2.0).max(1.0),
+                    (draw_rect.size.y - inset * 2.0 - resize_bar).max(1.0),
                 ),
             },
             dpi,
@@ -1192,7 +1222,7 @@ impl WmDesk {
                 pos: settled.pos + dvec2(inset, inset),
                 size: dvec2(
                     (settled.size.x - inset * 2.0).max(1.0),
-                    (settled.size.y - inset * 2.0).max(1.0),
+                    (settled.size.y - inset * 2.0 - resize_bar).max(1.0),
                 ),
             },
             dpi,
@@ -1414,25 +1444,49 @@ impl WmDesk {
         let classic = t.weights[3] as f32;
         let next = t.weights[4] as f32;
         let retro = classic + next;
+        self.chrome.pressed=0.0;
         self.chrome.top_only=0.0;self.chrome.title_gradient=0.0;
         self.chrome.radius=t.value([0.0,10.0,8.0,0.0,0.0]) as f32;
         self.chrome.bevel=retro;
         self.chrome.color=alpha(if t.dark && t.target.supports_dark() {rgb(40,40,42)}else{rgb(212,208,200)},opacity);
-        self.chrome.frame_width=2.0;
+        self.chrome.frame_width=t.value([2.0,2.0,2.0,3.0,1.0]) as f32;
         self.chrome.color.w *= retro;
         self.chrome.draw_abs(cx,r);
         self.chrome.frame_width=0.0;
-        let edge=2.0*(t.weights[3]+t.weights[4]);
+        let edge=3.0*t.weights[3]+t.weights[4];
         let title=rect(r.pos.x+edge,r.pos.y+edge,r.size.x-edge*2.0,h);
         self.chrome.top_only=1.0;
-        self.chrome.title_gradient=classic * focus as f32;
+        self.chrome.title_gradient=classic;
+        self.chrome.title_gradient_end=if focus>0.5 {rgb(166,202,240)}else{rgb(192,192,192)};
         // The compositor masks the complete window, including its content.
         // The title fills that surface without an independently inset edge.
         self.chrome.radius=0.0;
         self.chrome.bevel=0.0;
-        self.chrome.color=lerp_color(alpha(if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)},opacity),alpha(if focus>0.5 {rgb(0,0,128)}else{rgb(128,128,128)},opacity),classic as f64);
+        self.chrome.color=lerp_color(alpha(if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)},opacity),alpha(if focus>0.5 {rgb(10,36,106)}else{rgb(128,128,128)},opacity),classic as f64);
         self.chrome.color=lerp_color(self.chrome.color,alpha(if focus>0.5 {rgb(0,0,0)}else{rgb(85,85,85)},opacity),next as f64);
-        self.chrome.draw_abs(cx,title);
+        let title_fill=rect(title.pos.x,title.pos.y,title.size.x,(h-2.0*classic as f64).max(1.0));
+        self.chrome.draw_abs(cx,title_fill);
+        if classic>0.01 {
+            self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y+h-2.0,title.size.x,2.0),alpha(rgb(212,208,200),opacity*classic));
+        }
+        if next>0.01 {
+            // NeXT's fine title bevel and three-section bottom resize bar.
+            let ink=alpha(rgb(0,0,0),opacity*next);
+            let light=alpha(rgb(255,255,255),opacity*next);
+            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,r.size.x,1.0),ink);
+            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,1.0,r.size.y),ink);
+            self.shell_draw.solid(cx,rect(r.pos.x+r.size.x-1.0,r.pos.y,1.0,r.size.y),ink);
+            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y+r.size.y-1.0,r.size.x,1.0),ink);
+            self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y,title.size.x,1.0),light);
+            self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y+h-1.0,title.size.x,1.0),ink);
+            let bottom=r.pos.y+r.size.y-9.0;
+            self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,8.0),alpha(rgb(170,170,170),opacity*next));
+            self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,1.0),light);
+            for x in [r.pos.x+28.0,r.pos.x+r.size.x-29.0] {
+                self.shell_draw.solid(cx,rect(x,bottom,1.0,8.0),ink);
+                self.shell_draw.solid(cx,rect(x+1.0,bottom,1.0,8.0),light);
+            }
+        }
         self.title_hits.push((client,title,ChromeHit::Title));
         let ink=alpha(if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
         let text=self.titles.get(&client).cloned().unwrap_or_default();
@@ -1449,16 +1503,22 @@ impl WmDesk {
         for (i,hit,ico,color) in [(0,ChromeHit::Close,Ico::Close,rgb(255,95,86)),(1,ChromeHit::Minimize,Ico::WindowMin,rgb(255,189,46)),(2,ChromeHit::Maximize,Ico::WindowMax,rgb(39,201,63))] {
             if t.target == DesktopStyle::NextStep && hit == ChromeHit::Maximize { continue; }
             let slot=if i==0 {0}else if i==1 {2}else{1};
-            let width=t.value([30.0,30.0,46.0,18.0,22.0]);
+            let width=t.value([30.0,30.0,46.0,16.0,14.0]);
             let right=title.pos.x+title.size.x-width-2.0-(slot as f64)*(width+2.0);
             let left=title.pos.x+10.0+(i as f64)*22.0;
             let bw=width+(18.0-width)*mac;
             let modern = t.target == DesktopStyle::Windows;
-            let button=if t.target==DesktopStyle::NextStep {rect(if hit==ChromeHit::Minimize {title.pos.x+2.0}else{title.pos.x+title.size.x-24.0},title.pos.y+2.0,22.0,(h-4.0).max(1.0))}else if modern {rect(title.pos.x+title.size.x-(slot as f64+1.0)*width,title.pos.y,width,h)}else{rect(right+(left-right)*mac,title.pos.y+3.0,bw,(h-6.0).max(1.0))};
+            let button=if t.target==DesktopStyle::NextStep {
+                rect(if hit==ChromeHit::Minimize {title.pos.x+3.0}else{title.pos.x+title.size.x-17.0},title.pos.y+4.0,14.0,14.0)
+            }else if t.target==DesktopStyle::Windows2000 {
+                let gap=if slot>0 {2.0}else{0.0};
+                rect(title.pos.x+title.size.x-2.0-16.0*(slot as f64+1.0)-gap,title.pos.y+2.0,16.0,14.0)
+            }else if modern {rect(title.pos.x+title.size.x-(slot as f64+1.0)*width,title.pos.y,width,h)}else{rect(right+(left-right)*mac,title.pos.y+3.0,bw,(h-6.0).max(1.0))};
             let hovered = self.chrome_hover == Some((client, hit));
             let pressed = hovered && self.chrome_pressed == Some((client, hit));
             self.chrome.radius=(mac*12.0) as f32;
             self.chrome.bevel=retro;
+            self.chrome.pressed=if pressed {retro}else{0.0};
             self.chrome.color=lerp_color(alpha(rgb(212,208,200),opacity*classic),alpha(color,opacity),mac);
             if next>0.01 {self.chrome.color=alpha(if pressed {rgb(128,128,128)}else{rgb(170,170,170)},opacity);}
             if modern && hovered {
@@ -1470,12 +1530,22 @@ impl WmDesk {
             }
             let face=if mac>0.99 {rect(button.pos.x+2.0,button.pos.y+(button.size.y-12.0)*0.5,12.0,12.0)}else{button};
             self.chrome.draw_abs(cx,face);
-            if mac<0.99 { self.shell_draw.icon_centered(cx,ico,button,11.0,alpha(if (modern && hovered && hit == ChromeHit::Close) || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(20,20,20)},opacity*(1.0-mac) as f32)); }
+            if t.target==DesktopStyle::NextStep {
+                let light=alpha(rgb(255,255,255),opacity);
+                let shadow=alpha(rgb(0,0,0),opacity);
+                self.shell_draw.solid(cx,button,shadow);
+                self.shell_draw.solid(cx,rect(button.pos.x,button.pos.y,button.size.x-1.0,button.size.y-1.0),if pressed {shadow}else{light});
+                self.shell_draw.solid(cx,rect(button.pos.x+1.0,button.pos.y+1.0,button.size.x-2.0,button.size.y-2.0),alpha(rgb(170,170,170),opacity));
+            }
+            if matches!(t.target,DesktopStyle::Windows2000|DesktopStyle::NextStep) {
+                draw_retro_caption(&mut self.shell_draw,cx,button,hit,t.target==DesktopStyle::NextStep,pressed,opacity);
+            }else if mac<0.99 { self.shell_draw.icon_centered(cx,ico,button,11.0,alpha(if (modern && hovered && hit == ChromeHit::Close) || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(20,20,20)},opacity*(1.0-mac) as f32)); }
             if mac>0.99 && self.chrome_hover.is_some_and(|(c,_)| c==client) {
                 self.shell_draw.icon_centered(cx,ico,face,6.0,alpha(rgb(64,44,32),opacity*0.8));
             }
             self.title_hits.push((client,button,hit));
         }
+        self.chrome.pressed=0.0;
         for (edge,x,y) in [
             (rect(r.pos.x,r.pos.y+12.0,5.0,(r.size.y-24.0).max(0.0)),-1,0),
             (rect(r.pos.x+r.size.x-5.0,r.pos.y+12.0,5.0,(r.size.y-24.0).max(0.0)),1,0),

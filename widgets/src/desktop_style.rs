@@ -66,8 +66,8 @@ impl DesktopStyle {
             Self::Omarchy => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
-            Self::Windows2000 => 24.0,
-            Self::NextStep => 26.0,
+            Self::Windows2000 => 20.0,
+            Self::NextStep => 22.0,
             Self::Ios | Self::Android => 0.0,
         }
     }
