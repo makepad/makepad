@@ -200,6 +200,12 @@ impl Widget for Modal {
 }
 
 impl Modal {
+    /// Whether the modal is showing. A widget built on one needs this as
+    /// much as a caller holding a reference does.
+    pub fn is_open(&self) -> bool {
+        self.is_open
+    }
+
     pub fn open(&mut self, cx: &mut Cx) {
         self.is_open = true;
         // Redraw the overlay draw_list directly so the first open is visible
