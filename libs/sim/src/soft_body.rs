@@ -662,6 +662,26 @@ impl SoftBodyState {
         Ok(())
     }
 
+    /// Carry the existing deformation into a new drive orientation without
+    /// injecting angular inertia. Character controllers use this for changes
+    /// of facing; translation, gravity and contacts still go through `step`.
+    /// Unlike `reset`, this preserves both deformation and its velocity.
+    pub fn transport_rotation(&mut self, rotation: [f32; 4]) -> Result<(), String> {
+        let next = SoftBodyPose { rotation, ..self.pose };
+        next.validate()?;
+        if rotation == self.pose.rotation { return Ok(()); }
+        let old = self.pose;
+        for point in self.positions.iter_mut().chain(&mut self.previous) {
+            *point = next.point(old.local(*point));
+        }
+        for velocity in &mut self.velocities {
+            *velocity = rotate(rotation, rotate(conjugate(old.rotation), *velocity));
+        }
+        self.pose = next;
+        self.clear_lambdas();
+        Ok(())
+    }
+
     /// An impulse is kg*m/s in world axes, applied through the same embedded
     /// point used for collision. Pinned core particles absorb their share.
     pub fn apply_impulse(&mut self, binding: SoftBodyBinding, impulse: V3) -> Result<(), String> {

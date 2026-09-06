@@ -250,3 +250,91 @@ fn accessory_affine_weights_fail_during_edit_and_valid_root_binding_remains_publ
     apply(&mut d,"valid-affine-hat",operations).unwrap();
     SkinnedModel::parse_glb_validated(&d.compile(None).unwrap().glb).unwrap();
 }
+
+fn parsed_soft_settings(extra:&str)->makepad_gltf::SoftBodySettings {
+    let limits=Limits{max_joints:128,..Default::default()};
+    let source=format!(r#"[{{"op":"soft_body_bind","object":"body"{extra}}}]"#);
+    let mut operations=parse_operations(&json::parse(source.as_bytes()).unwrap(),&limits).unwrap();
+    let Operation::SoftBody(bind)=operations.remove(0) else{unreachable!()};bind.settings
+}
+
+#[test]
+fn explicit_yarn_preset_is_firm_and_preserves_generic_and_serialized_settings() {
+    let generic=parsed_soft_settings("");
+    assert_eq!(generic.edge_compliance,0.02);assert_eq!(generic.pose_compliance,0.02);assert_eq!(generic.damping,4.);
+    let yarn=parsed_soft_settings(r#", "preset":"yarn_ball""#);
+    let mut expected=generic;expected.edge_compliance=0.001;expected.pose_compliance=0.001;expected.damping=22.;
+    assert_eq!(yarn,expected,"preset changes only the textile response knobs");
+    let overrides=parsed_soft_settings(r#", "preset":"yarn_ball", "config":{"edge_compliance":0.002,"damping":30}"#);
+    assert_eq!(overrides.edge_compliance,0.002);assert_eq!(overrides.pose_compliance,0.001);assert_eq!(overrides.damping,30.);
+    // Full stored config wins even if a caller retains the preset label.
+    assert_eq!(parsed_soft_settings(&format!(r#", "preset":"yarn_ball", "config":{}"#,generic.to_value().to_json())),generic);
+    for preset in [false,true]{
+        let mut doc=fixture();let mut operation=parse_operations(&json::parse(format!(r#"[{{"op":"soft_body_bind","object":"body"{}}}]"#,if preset{r#", "preset":"yarn_ball""#}else{""}).as_bytes()).unwrap(),doc.limits()).unwrap();
+        apply(&mut doc,"bind-preset",std::mem::take(&mut operation)).unwrap();
+        let settings=doc.soft_body().unwrap().settings;
+        for bytes in [doc.to_bytes(None).unwrap(),doc.to_snapshot_bytes(None).unwrap()]{
+            let restored=Document::from_bytes(&bytes,doc.limits().clone(),None).unwrap();
+            assert_eq!(restored.soft_body().unwrap().settings,settings);
+        }
+        assert_eq!(settings,if preset{yarn}else{generic});
+    }
+}
+
+#[test]
+fn yarn_preset_keeps_acceleration_landing_and_facing_motion_small_at_three_sizes() {
+    use makepad_game_sim::soft_body::{SoftBodyDefinition,SoftBodySettings,SoftBodyState,SoftBodyPose,SoftBodyCollider,SoftBodyFrame};
+    use std::sync::Arc;
+    let yarn=parsed_soft_settings(r#", "preset":"yarn_ball""#);
+    let settings=SoftBodySettings{edge_compliance:yarn.edge_compliance,pose_compliance:yarn.pose_compliance,damping:yarn.damping,..Default::default()};
+    for radius in [0.225f32,0.45,0.9]{for scenario in ["acceleration","landing","turn"]{
+        let definition=Arc::new(SoftBodyDefinition::ellipsoid([0.,radius*1.7,0.],[radius;3]).unwrap());
+        let start=SoftBodyPose{translation:[0.,if scenario=="landing"{radius*0.7}else{0.},0.],..Default::default()};
+        let mut state=SoftBodyState::new(definition.clone(),settings,start).unwrap();
+        let mut generic=(scenario=="acceleration").then(||SoftBodyState::new(definition.clone(),SoftBodySettings::default(),start).unwrap());
+        let mut generic_frame=SoftBodyFrame::default();let mut generic_peak=0.0f32;
+        let mut frame=SoftBodyFrame::default();let mut max_displacement=0.0f32;let mut final_displacement=0.0f32;
+        let mut max_strain=0.0f32;let mut contacts=0u64;let mut previous=Vec::<[f32;3]>::new();let mut turn_delta=0.0f32;
+        for tick in 0..180{
+            let mut pose=start;let mut colliders=Vec::new();
+            match scenario{
+                "acceleration"=>{
+                    pose.translation[0]=if tick<60{0.}else if tick<90{let t=(tick-60)as f32/60.;radius*6.*t*t}
+                        else if tick<120{radius*1.5+radius*6.*(tick-90)as f32/60.}else{radius*4.5};
+                },
+                "landing"=>{
+                    let t=(tick as f32/60.-1.).max(0.);pose.translation[1]=(radius*0.7-4.9*t*t).max(0.);
+                    // The body's padded rest surface sits on this plane.
+                    // Exclude contact skin thickness from textile strain.
+                    colliders.push(SoftBodyCollider::Plane{normal:[0.,1.,0.],offset:radius*0.7-settings.contact_radius});
+                },
+                "turn"=>{
+                    let yaw=if tick<60{0.}else{(tick-59)as f32*std::f32::consts::PI*0.75};
+                    pose.rotation=[0.,(yaw*0.5).sin(),0.,(yaw*0.5).cos()];state.transport_rotation(pose.rotation).unwrap();
+                },_=>unreachable!(),
+            }
+            let stats=state.step(1./60.,pose,&colliders).unwrap();
+            if let Some(generic)=&mut generic{
+                assert!(!generic.step(1./60.,pose,&colliders).unwrap().recovered);
+                generic.write_frame(&mut generic_frame);
+                generic_peak=generic_peak.max(generic_frame.positions.iter().zip(&definition.rest_positions).map(|(a,b)|a.iter().zip(b).map(|(a,b)|(a-b).powi(2)).sum::<f32>().sqrt()).fold(0.,f32::max));
+            }
+            assert!(!stats.recovered,"{scenario}, radius {radius}: solver recovered");
+            assert!(stats.min_volume_ratio>0.9,"{scenario}, radius {radius}: lost volume");
+            max_strain=max_strain.max(stats.max_edge_strain);contacts+=stats.contacts as u64;state.write_frame(&mut frame);
+            final_displacement=frame.positions.iter().zip(&definition.rest_positions).map(|(a,b)|a.iter().zip(b).map(|(a,b)|(a-b).powi(2)).sum::<f32>().sqrt()).fold(0.,f32::max);
+            max_displacement=max_displacement.max(final_displacement);
+            if scenario=="turn"&&tick>=60{turn_delta=turn_delta.max(frame.positions.iter().zip(&previous).map(|(a,b)|a.iter().zip(b).map(|(a,b)|(a-b).powi(2)).sum::<f32>().sqrt()).fold(0.,f32::max));}
+            previous.clone_from(&frame.positions);
+        }
+        eprintln!("yarn response radius={radius} scenario={scenario} max/radius={} final/radius={} edge_strain={max_strain} contacts={contacts} turn_delta/radius={} generic_peak/radius={}",max_displacement/radius,final_displacement/radius,turn_delta/radius,generic_peak/radius);
+        assert!(max_displacement/radius<0.01,"{scenario}: textile deformation exceeded 1% of radius");
+        assert!(final_displacement/radius<0.0025,"{scenario}: textile did not settle within 0.25% of radius");
+        if scenario=="turn"{assert!(turn_delta/radius<0.001,"turning injected visible deformation");}
+        if scenario=="acceleration"{
+            assert!(max_displacement/radius>0.0005,"textile secondary motion was eliminated");
+            assert!(max_displacement<generic_peak*0.2,"yarn preset did not materially reduce generic softness");
+        }
+        if scenario=="landing"{assert!(contacts>0,"landing did not exercise actual contact constraints");}
+    }}
+}

@@ -2,6 +2,26 @@ use makepad_model::{json::{self, Value}, *};
 fn args(v:&str)->Value {json::parse(v.as_bytes()).unwrap()}
 
 #[test]
+fn missing_subdivision_level_reports_the_field_and_allows_an_atomic_retry() {
+    let mut engine=Engine::new(Limits::default());
+    engine.open("d",None,None).unwrap();
+    let head=engine.document("d").unwrap().head();
+    let before=engine.document("d").unwrap().to_bytes(None).unwrap();
+    let batch=|id,operations|json::obj(vec![("document",json::s("d")),
+        ("request_id",json::s(id)),("expected",head_json(head)),("operations",operations)]);
+    let error=engine.execute("model.apply",&batch("bad",args(r#"[
+        {"op":"cube","object":"head","size":[0.88,0.83,0.52]},
+        {"op":"subdivide","object":"head"}]"#)),None).unwrap_err().to_string();
+    assert!(error.contains("levels") && error.contains("subdivide"),"{error}");
+    assert_eq!(engine.document("d").unwrap().to_bytes(None).unwrap(),before);
+    engine.execute("model.apply",&batch("corrected",args(r#"[
+        {"op":"cube","object":"head","size":[0.88,0.83,0.52]},
+        {"op":"subdivide","object":"head","levels":2}]"#)),None).unwrap();
+    assert_ne!(engine.document("d").unwrap().head(),head);
+    assert!(engine.document("d").unwrap().object("head").is_some());
+}
+
+#[test]
 fn overview_reports_complete_transformed_dimensions_without_editing_source() {
     let mut engine=Engine::new(Limits::default());
     assert_eq!(engine.open("d",None,None).unwrap().get("bounds"),Some(&Value::Null));

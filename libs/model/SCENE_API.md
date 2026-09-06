@@ -3,6 +3,13 @@
 All operations are transactional and require the expected document head.
 Scene transforms use local TRS; attachments may target root, an object, or a joint.
 
+`object_node` replaces the entire node; omitted parent/link fields become null
+and omitted TRS components become zero translation, identity rotation and unit
+scale. `dimensions` sets that node's scale from evaluated local mesh extents; it
+does not resize source vertices. Place/rotate with `object_node` BEFORE calling
+`dimensions`, or preserve the existing complete TRS when repositioning a sized
+part. `model.inspect` domain `scene_nodes` exposes the current node transforms.
+
 | op | Additional fields |
 |---|---|
 | object_node | object, node: {parent?, linked_to?, transform?} |

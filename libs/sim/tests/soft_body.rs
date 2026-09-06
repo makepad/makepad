@@ -47,6 +47,40 @@ fn max_displacement(def: &SoftBodyDefinition, frame: &SoftBodyFrame) -> f32 {
 }
 
 #[test]
+fn transported_turns_preserve_deformation_and_velocity_without_twisting() {
+    let def = sphere();
+    let binding = def.bind_point([0.35, 0.1, 0.]).unwrap();
+    let origin = pose(2., 1., -3.);
+    let mut control = SoftBodyState::new(def.clone(), quiet(), origin).unwrap();
+    let mut turning = SoftBodyState::new(def.clone(), quiet(), origin).unwrap();
+    for state in [&mut control, &mut turning] {
+        state.apply_impulse(binding, [0.015, 0.008, 0.]).unwrap();
+        state.step(1. / 60., origin, &[]).unwrap();
+    }
+    assert!(max_displacement(&def, &frame(&turning)) > 0.0001);
+    for i in 0..30 {
+        // Abrupt reversals and a full revolution must not reset an existing
+        // impact or add twist; the local trajectory matches the unturned body.
+        let half = i as f32 * 0.7;
+        let drive = SoftBodyPose { rotation: [0., half.sin(), 0., half.cos()], ..origin };
+        turning.transport_rotation(drive.rotation).unwrap();
+        let before = frame(&turning);
+        let expected = frame(&control);
+        for (a, b) in before.positions.iter().zip(&expected.positions) {
+            assert!(length(sub(*a, *b)) < 2e-5);
+        }
+        assert!(!turning.step(1. / 60., drive, &[]).unwrap().recovered);
+        control.step(1. / 60., origin, &[]).unwrap();
+        for (a, b) in frame(&turning).positions.iter().zip(&frame(&control).positions) {
+            assert!(length(sub(*a, *b)) < 5e-5, "rotation changed local motion: {a:?} vs {b:?}");
+        }
+    }
+    let before = frame(&turning).positions;
+    assert!(turning.transport_rotation([0.; 4]).is_err());
+    assert_eq!(frame(&turning).positions, before, "invalid turn mutated the solver");
+}
+
+#[test]
 fn enclosing_cage_preserves_smooth_authored_points_and_rest_affine_identity() {
     let center = [0.1, -0.2, 0.3];
     let radii = [0.5, 0.6, 0.4];

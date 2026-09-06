@@ -69,6 +69,9 @@ impl SelectionOperation{
     }
 }
 fn save(state:&mut State,object:&str,name:&str,mut vertices:Vec<mesh::VertexId>,mut faces:Vec<mesh::FaceId>,limits:&Limits)->Result<OperationResult>{vertices.sort();vertices.dedup();faces.sort();faces.dedup();let m=&state.objects[object];if vertices.iter().any(|v|m.vertex(*v).is_none())||faces.iter().any(|f|m.face(*f).is_none()){return Err(Error::Invalid("selection element missing"));}
+    // Earlier edits in this atomic batch may have removed elements belonging
+    // to other groups. Mark those stale before validating the fresh query.
+    state.selections.reconcile(&state.objects);
     if state.selections.groups.len()>=128&&!state.selections.groups.contains_key(&(object.into(),name.into())){return Err(Error::Budget("named selections"));}
     let result=OperationResult{object:object.into(),vertices:vertices.clone(),faces:faces.clone(),..Default::default()};state.selections.groups.insert((object.into(),name.into()),SelectionGroup{object:object.into(),name:name.into(),vertices,faces,stale:false});state.selections.validate(state,limits)?;Ok(result)}
 fn space(v:&Value)->Result<bool>{match text(v,"space")?{"local"=>Ok(false),"world"=>Ok(true),_=>Err(Error::Invalid("selection coordinate space"))}}
