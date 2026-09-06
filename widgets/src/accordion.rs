@@ -181,14 +181,25 @@ impl FoldPolicy {
     pub fn showing(&self) -> Vec<usize> {
         (0..self.wanted.len()).filter(|i| self.shows(*i)).collect()
     }
+
+    /// The section asked for most recently that is actually on screen.
+    ///
+    /// This is the one a pane beside the panel should be showing: when a
+    /// person opens a section they are asking to look at it, and a preview
+    /// that stayed on whichever section happens to sit highest would be
+    /// answering a question nobody asked.
+    pub fn newest(&self) -> Option<usize> {
+        self.order.iter().copied().find(|i| self.shows(*i))
+    }
 }
 
 /// What an accordion reports.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum AccordionAction {
-    /// The set of open sections changed, by a press or by the room
-    /// changing.
-    Changed,
+    /// The set of open sections changed, by a press, by the pointer or by
+    /// the room changing. Carries the section asked for most recently that
+    /// is on screen, which is the one a pane beside the panel should show.
+    Changed(usize),
     #[default]
     None,
 }
@@ -304,9 +315,21 @@ impl Accordion {
         self.view.redraw(cx);
     }
 
+    /// Say that the open set changed, and which section a pane beside the
+    /// panel should now be showing.
+    fn report(&self, cx: &mut Cx) {
+        let newest = self.policy.newest().unwrap_or(0);
+        cx.widget_action(self.widget_uid(), AccordionAction::Changed(newest));
+    }
+
     /// The sections on screen, by index.
     pub fn showing(&self) -> Vec<usize> {
         self.policy.showing()
+    }
+
+    /// The section asked for most recently that is on screen.
+    pub fn newest(&self) -> Option<usize> {
+        self.policy.newest()
     }
 
     /// The policy, for a host that wants to read or drive it directly.
@@ -338,7 +361,7 @@ impl Widget for Accordion {
                     // the panel would close what it just opened.
                     if !self.policy.shows(index) && self.policy.press(index) {
                         self.apply(cx, Animate::Yes);
-                        cx.widget_action(self.widget_uid(), AccordionAction::Changed);
+                        self.report(cx);
                     }
                 }
             }
@@ -405,7 +428,7 @@ impl Widget for Accordion {
         // the panel does about it, and then every section is told.
         if self.policy.press(index) {
             self.apply(cx, Animate::Yes);
-            cx.widget_action(self.widget_uid(), AccordionAction::Changed);
+            self.report(cx);
         } else {
             // The press changed nothing, so put the header back where the
             // policy says it should be: the last open section stays open.
@@ -430,11 +453,19 @@ impl AccordionRef {
         self.borrow().map(|inner| inner.showing()).unwrap_or_default()
     }
 
-    pub fn changed(&self, actions: &Actions) -> bool {
-        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
-            return matches!(action.cast::<AccordionAction>(), AccordionAction::Changed);
+    /// The section a pane beside the panel should show, if the open set
+    /// changed this pass.
+    pub fn changed(&self, actions: &Actions) -> Option<usize> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<AccordionAction>() {
+            AccordionAction::Changed(index) => Some(index),
+            _ => None,
         }
-        false
+    }
+
+    /// The section asked for most recently that is on screen.
+    pub fn newest(&self) -> Option<usize> {
+        self.borrow().and_then(|inner| inner.newest())
     }
 
     /// How many sections may be open at once; zero lifts the limit.
@@ -528,6 +559,25 @@ mod tests {
         // for two takes it and the next most recently asked for, which is
         // section 0 — not the one that merely sits next to it.
         assert_eq!(p.showing(), vec![0, 2], "the room takes the newest first");
+    }
+
+    /// The newest showing section is what a pane beside the panel follows,
+    /// so it must be the one most recently ASKED for, not the one that
+    /// happens to sit highest.
+    #[test]
+    fn the_newest_section_is_the_one_last_asked_for() {
+        let mut p = FoldPolicy::new(3);
+        p.set_room(Some(2));
+        assert_eq!(p.newest(), Some(0), "nothing asked for yet: the first one");
+        p.press(2);
+        assert_eq!(p.newest(), Some(2), "asking for a section makes it the newest");
+        p.press(1);
+        assert_eq!(p.newest(), Some(1));
+        // Folding the newest hands the pane to whatever is still showing,
+        // never to a section the room does not afford.
+        p.press(1);
+        assert_eq!(p.newest(), Some(2));
+        assert!(p.showing().contains(&2));
     }
 
     /// A panel that gains or loses sections keeps what it knew about the
