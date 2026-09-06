@@ -32,6 +32,12 @@
 //! by default and it waits: a panel that rearranges itself as the pointer
 //! crosses it on the way somewhere else is hostile, so the dwell has to be
 //! long enough that passing over a header is not an instruction.
+//!
+//! `hover_secs: 0.0` drops the wait, which is right for exactly one shape:
+//! the panel is a list of things to look at, a pane beside it shows the one
+//! being pointed at, and there is nothing else on that side to reach past.
+//! Then the sweep IS the browsing and a delay only makes it feel stuck. Any
+//! panel with something to press below it should keep the wait.
 
 use crate::{
     animator::Animate,
@@ -220,7 +226,7 @@ script_mod! {
         closed_first: []
         /** a section opens when the pointer rests on its header */
         open_on_hover: false
-        /** how long the pointer must rest before it counts 0..2 step 0.05 */
+        /** how long the pointer must rest before it counts; 0 is at once 0..2 step 0.05 */
         hover_secs: 0.45
     }
 
@@ -232,6 +238,12 @@ script_mod! {
     /** The panel that opens whichever section the pointer rests on. */
     mod.widgets.AccordionHover = mod.widgets.AccordionSingle{
         open_on_hover: true
+    }
+
+    /** The panel that follows the pointer without a wait, for a list of
+     * things to look at with a pane beside it showing the one pointed at. */
+    mod.widgets.AccordionSweep = mod.widgets.AccordionHover{
+        hover_secs: 0.0
     }
 }
 
@@ -248,7 +260,8 @@ pub struct Accordion {
     /// A section opens when the pointer rests on its header.
     #[live]
     pub open_on_hover: bool,
-    /// How long the pointer must rest before that counts.
+    /// How long the pointer must rest before that counts; zero opens the
+    /// section the moment the pointer arrives.
     #[live(0.45)]
     pub hover_secs: f64,
     #[rust]
@@ -315,6 +328,17 @@ impl Accordion {
         self.view.redraw(cx);
     }
 
+    /// The pointer has settled on a section: open it.
+    ///
+    /// Only ever OPENS. A pointer resting on an open section's header must
+    /// not fold it, or crossing the panel would close what it just opened.
+    fn open_dwelt(&mut self, cx: &mut Cx, index: usize) {
+        if !self.policy.shows(index) && self.policy.press(index) {
+            self.apply(cx, Animate::Yes);
+            self.report(cx);
+        }
+    }
+
     /// Say that the open set changed, and which section a pane beside the
     /// panel should now be showing.
     fn report(&self, cx: &mut Cx) {
@@ -355,14 +379,8 @@ impl Widget for Accordion {
         if self.open_on_hover {
             if self.dwell_timer.is_event(event).is_some() {
                 self.dwell_timer = Timer::empty();
-                if let Some(index) = self.dwelling.take() {
-                    // Only ever OPENS: a pointer resting on an open
-                    // section's header must not fold it, or moving across
-                    // the panel would close what it just opened.
-                    if !self.policy.shows(index) && self.policy.press(index) {
-                        self.apply(cx, Animate::Yes);
-                        self.report(cx);
-                    }
+                if let Some(index) = self.dwelling {
+                    self.open_dwelt(cx, index);
                 }
             }
             if let Event::MouseMove(me) = event {
@@ -383,8 +401,16 @@ impl Widget for Accordion {
                     cx.stop_timer(self.dwell_timer);
                     self.dwell_timer = Timer::empty();
                     self.dwelling = over;
-                    if over.is_some() {
-                        self.dwell_timer = cx.start_timeout(self.hover_secs.max(0.0));
+                    if let Some(index) = over {
+                        if self.hover_secs <= 0.0 {
+                            // No wait asked for: the arrival IS the
+                            // instruction. `dwelling` still remembers the
+                            // section, so the layout shifting under a
+                            // pointer that has not moved cannot ask again.
+                            self.open_dwelt(cx, index);
+                        } else {
+                            self.dwell_timer = cx.start_timeout(self.hover_secs);
+                        }
                     }
                 }
             }
