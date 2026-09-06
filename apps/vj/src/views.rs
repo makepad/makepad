@@ -14,9 +14,11 @@
 use makepad_asset_data::AssetId;
 use makepad_widgets::*;
 use crate::decks::{FadeCurve, FADE_CURVES};
+use crate::popup_layout::{ChoiceEvent, ChoiceLayout};
 use crate::gen::{GenJob, GenJobState, GenJobTone, StageChip};
 
 script_mod! {
+    let vj = mod.vj_theme
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
@@ -400,7 +402,7 @@ script_mod! {
         // height (the same widget is a 200px console preview and a 4K
         // projector output), so this is only the family and a sane default.
         draw_lyric +: {
-            color: #xf2f6fa
+            color: vj.text
             text_style: theme.font_bold{font_size: 24}
         }
     }
@@ -506,8 +508,8 @@ script_mod! {
             // radius 0 = the plain full-quad image every other host gets.
             radius: instance(0.0)
             border_size: instance(1.0)
-            border_color: instance(#xffffff2e)
-            border_color_selected: instance(#xff5c39)
+            border_color: instance(vj.border)
+            border_color_selected: instance(vj.accent)
             selected: instance(0.0)
             pixel: fn() {
                 let color = mix(self.get_color(), #3, self.async_load)
@@ -545,7 +547,7 @@ script_mod! {
         draw_bg +: {
             spin: instance(0.0)
             failed: instance(0.0)
-            color_ring: uniform(#xff5c39)
+            color_ring: uniform(vj.accent)
             color_fail: uniform(#xff5c5c)
             pixel: fn() {
                 let p = (self.pos - vec2(0.5, 0.5)) * self.rect_size
@@ -577,14 +579,14 @@ script_mod! {
         }
     }
     let TileCell = RoundedView{
-        width: 164
+        width: Fill{basis: 164.0 min: 120.0 max: 240.0}
         height: 104
         padding: 0
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x1e232b
-            border_color: #xffffff2a
-            border_color_selected: #xff5c39
+            color: vj.control_down
+            border_color: vj.border
+            border_color_selected: vj.accent
             selected: instance(0.0)
             border_size: 1.0
             border_radius: 7.0
@@ -620,8 +622,8 @@ script_mod! {
                         // this shader's 14.0.
                         radius: 14.0
                         border_size: 1.0
-                        border_color: #xffffff2a
-                        border_color_selected: #xff5c39
+                        border_color: vj.border
+                        border_color_selected: vj.accent
                     }
                 }
             }
@@ -639,7 +641,7 @@ script_mod! {
                     View{width: Fill height: 1}
                     grid_state := Label{
                         text: ""
-                        draw_text.color: #xff5c39
+                        draw_text.color: vj.accent
                         draw_text.text_style.font_size: 8
                     }
                 }
@@ -650,7 +652,7 @@ script_mod! {
                     flow: Down
                     padding: Inset{left: 6.0 right: 6.0 top: 8.0 bottom: 5.0}
                     draw_bg +: {
-                        color: #x000000b8
+                        color: vj.surface
                         // The label backdrop follows the card's bottom
                         // radius — a square band over rounded corners is
                         // exactly the mismatch the tile law bans.
@@ -664,14 +666,14 @@ script_mod! {
                     grid_title := Label{
                         width: Fill
                         text: ""
-                        draw_text.color: #xf2f6fa
-                        draw_text.text_style.font_size: 9
+                        draw_text.color: vj.text
+                        draw_text.text_style.font_size: vj.label_size
                     }
                     grid_sub := Label{
                         width: Fill
                         text: ""
-                        draw_text.color: #xb4bec8
-                        draw_text.text_style.font_size: 8
+                        draw_text.color: vj.text_secondary
+                        draw_text.text_style.font_size: (vj.label_size - 1.0)
                     }
                 }
             }
@@ -684,7 +686,7 @@ script_mod! {
         height: 6
         draw_bg +: {
             progress: uniform(0.0)
-            color_track: uniform(#x343e4a)
+            color_track: uniform(vj.control)
             color_fill: uniform(#x4f9ee8)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -717,8 +719,8 @@ script_mod! {
                 spacing: 4
                 padding: 7
                 draw_bg +: {
-                    color: #x222831
-                    border_color: #xffffff2a
+                    color: vj.surface_raised
+                    border_color: vj.border
                     border_size: 1.0
                     border_radius: 6.0
                 }
@@ -731,7 +733,7 @@ script_mod! {
                     job_title := Label{
                         width: Fill
                         text: ""
-                        draw_text.color: #xe5edf5
+                        draw_text.color: vj.text
                         draw_text.text_style.font_size: 9
                     }
                     job_progress_text := Label{
@@ -755,7 +757,7 @@ script_mod! {
                     job_canvas := Label{
                         visible: false
                         text: ""
-                        draw_text.color: #x8a97a6
+                        draw_text.color: vj.text_secondary
                         draw_text.text_style.font_size: 8
                     }
                 }
@@ -777,7 +779,7 @@ script_mod! {
                 align: Align{x: 0.5, y: 0.5}
                 Label{
                     text: "empty"
-                    draw_text.color: #x8e9aa7
+                    draw_text.color: vj.text_secondary
                 }
             }
         }
@@ -814,7 +816,7 @@ script_mod! {
                 align: Align{x: 0.5, y: 0.5}
                 empty_label := Label{
                     text: "no results"
-                    draw_text.color: #x8e9aa7
+                    draw_text.color: vj.text_secondary
                 }
             }
         }
@@ -826,9 +828,9 @@ script_mod! {
         padding: 0
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x1d222a
-            border_color: #xffffff2e
-            border_color_selected: #xff5c39
+            color: vj.surface
+            border_color: vj.border
+            border_color_selected: vj.accent
             selected: instance(0.0)
             empty: instance(0.0)
             border_size: 1.0
@@ -875,8 +877,8 @@ script_mod! {
                     draw_bg +: {
                         radius: 10.0
                         border_size: 1.0
-                        border_color: #xffffff2e
-                        border_color_selected: #xff5c39
+                        border_color: vj.border
+                        border_color_selected: vj.accent
                     }
                 }
             }
@@ -892,7 +894,7 @@ script_mod! {
                     flow: Flow.Right{wrap: false}
                     max_lines: 1
                     text: ""
-                    draw_text.color: #xd6dee6
+                    draw_text.color: vj.text
                     draw_text.text_style.font_size: 7
                 }
                 grid_sub := Label{
@@ -916,10 +918,10 @@ script_mod! {
         ..mod.draw.DrawQuad
         wave: texture_2d(float)
 
-        color_bg: uniform(#x0b1016)
+        color_bg: uniform(vj.inset)
         color_wave: uniform(#x2fb894)
         color_core: uniform(#x9df3d8)
-        color_grid: uniform(#xffffff2b)
+        color_grid: uniform(vj.border)
         color_grid_bar: uniform(#xffffffa0)
         color_dead: uniform(#x243039)
 
@@ -1002,8 +1004,8 @@ script_mod! {
     set_type_default() do #(DrawBeatLed::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_off: uniform(#x1b232c)
-        color_rim: uniform(#xffffff2e)
-        color_beat: uniform(#xff5c39)
+        color_rim: uniform(vj.border)
+        color_beat: uniform(vj.accent)
         color_down: uniform(#xfff1c8)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -1040,9 +1042,9 @@ script_mod! {
         // The drop caret; a chip wedged between its own < > cutters
         // switches it off — the neighbours already say it has stops.
         arrow: uniform(1.0)
-        color: uniform(#x272e38)
-        color_hover: uniform(#x2f3842)
-        border_color: uniform(#xffffff26)
+        color: uniform(vj.control)
+        color_hover: uniform(vj.control_hover)
+        border_color: uniform(vj.border)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
@@ -1061,15 +1063,15 @@ script_mod! {
     }
     mod.widgets.VjBeatsDropBase = #(VjBeatsDrop::register_widget(vm))
     mod.widgets.VjBeatsDrop = set_type_default() do mod.widgets.VjBeatsDropBase{
-        width: 34
-        height: 22
+        width: 44
+        height: vj.control_height
         draw_text +: {
-            color: #xf4f7fa
+            color: vj.text
             text_style: theme.font_bold{font_size: 9}
         }
         draw_panel +: {
-            color: #x181c23
-            border_color: #xffffff2e
+            color: vj.surface
+            border_color: vj.border
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
@@ -1079,7 +1081,7 @@ script_mod! {
             }
         }
         draw_hover +: {
-            color: #xff5c39
+            color: vj.selection
         }
     }
 
@@ -1088,15 +1090,15 @@ script_mod! {
     // instead of a word, so they are wider and a little taller.
     mod.widgets.VjCurveDropBase = #(VjCurveDrop::register_widget(vm))
     mod.widgets.VjCurveDrop = set_type_default() do mod.widgets.VjCurveDropBase{
-        width: 34
-        height: 22
+        width: 44
+        height: vj.control_height
         draw_text +: {
-            color: #xf4f7fa
+            color: vj.text
             text_style: theme.font_bold{font_size: 8}
         }
         draw_panel +: {
-            color: #x181c23
-            border_color: #xffffff2e
+            color: vj.surface
+            border_color: vj.border
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
@@ -1109,17 +1111,17 @@ script_mod! {
         // out the icon under it — so the row under the pointer gets a wash
         // and the drawing survives it.
         draw_hover +: {
-            color: #xff5c3938
+            color: vj.selection
         }
         // One file per law, in FADE_CURVES order. The tint replaces the
         // white the drawings ship with, so they wear the panel's own ink.
-        icon_power +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_power.svg") }
-        icon_linear +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_linear.svg") }
-        icon_dip +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_dip.svg") }
-        icon_slowfade +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_slowfade.svg") }
-        icon_slowcut +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_slowcut.svg") }
-        icon_fastcut +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_fastcut.svg") }
-        icon_transition +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_transition.svg") }
+        icon_power +: { color: vj.text svg: crate_resource("self:resources/icons/curve_power.svg") }
+        icon_linear +: { color: vj.text svg: crate_resource("self:resources/icons/curve_linear.svg") }
+        icon_dip +: { color: vj.text svg: crate_resource("self:resources/icons/curve_dip.svg") }
+        icon_slowfade +: { color: vj.text svg: crate_resource("self:resources/icons/curve_slowfade.svg") }
+        icon_slowcut +: { color: vj.text svg: crate_resource("self:resources/icons/curve_slowcut.svg") }
+        icon_fastcut +: { color: vj.text svg: crate_resource("self:resources/icons/curve_fastcut.svg") }
+        icon_transition +: { color: vj.text svg: crate_resource("self:resources/icons/curve_transition.svg") }
     }
 
     // JOG WHEEL: a horizontal drum seen side-on — vertical ridges spaced
@@ -1136,11 +1138,11 @@ script_mod! {
         phase: uniform(0.0)
         hover: uniform(0.0)
         inert: uniform(0.0)
-        color_well: uniform(#x1d222a)
-        color_rim: uniform(#xffffff26)
+        color_well: uniform(vj.surface)
+        color_rim: uniform(vj.border)
         color_ridge: uniform(#x8b96a3)
-        color_marker: uniform(#xe8eef4)
-        color_hot: uniform(#xff5c39)
+        color_marker: uniform(vj.text)
+        color_hot: uniform(vj.accent)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let w = self.rect_size.x
@@ -1172,7 +1174,7 @@ script_mod! {
     mod.widgets.VjSlowmoWheelBase = #(VjSlowmoWheel::register_widget(vm))
     mod.widgets.VjSlowmoWheel = set_type_default() do mod.widgets.VjSlowmoWheelBase{
         width: 110
-        height: 22
+        height: vj.control_height
     }
 
     mod.widgets.VjPadMatrixBase = #(VjPadMatrix::register_widget(vm))
@@ -1181,14 +1183,16 @@ script_mod! {
         height: Fill
         flow: Down
         spacing: 4
-        View{
+        pad_viewport := ScrollXYView{
             width: Fill
             height: Fill
             flow: Right
             spacing: 4
             View{
                 width: Fill
+                min_width: 380.0
                 height: Fill
+                min_height: 236.0
                 flow: Down
                 spacing: 4
                 r0 := View{
@@ -1230,7 +1234,7 @@ script_mod! {
             margin: Inset{top: 4}
         }
         draw_track +: {
-            color: #x2b343f
+            color: vj.control
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
@@ -1239,7 +1243,7 @@ script_mod! {
             }
         }
         draw_thumb +: {
-            color: #xff5c39
+            color: vj.accent
             hover: instance(0.0)
             down: instance(0.0)
             pixel: fn() {
@@ -2458,6 +2462,8 @@ pub struct VjBeatsDrop {
     hover_row: Option<usize>,
     #[rust]
     area: Area,
+    #[rust]
+    menu_layout: ChoiceLayout,
 }
 
 impl VjBeatsDrop {
@@ -2469,19 +2475,7 @@ impl VjBeatsDrop {
         }
     }
 
-    fn panel_rect(&self, cx: &mut Cx) -> Rect {
-        let chip = self.area.rect(cx);
-        Rect {
-            pos: dvec2(
-                chip.pos.x + (chip.size.x - BEATS_PANEL_W) * 0.5,
-                chip.pos.y + chip.size.y + BEATS_PANEL_GAP,
-            ),
-            size: dvec2(
-                BEATS_PANEL_W,
-                self.rows().len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0,
-            ),
-        }
-    }
+
 
     fn face(&self) -> &'static str {
         if self.dash {
@@ -2516,21 +2510,6 @@ impl VjBeatsDrop {
         }
     }
 
-    /// Select the row under `y` (if any), emit, close.
-    fn pick_at(&mut self, cx: &mut Cx, uid: WidgetUid, panel: Rect, y: f64) {
-        let index = ((y - panel.pos.y - BEATS_PANEL_PAD) / BEATS_ROW_H).floor();
-        if index >= 0.0 && (index as usize) < self.rows().len() {
-            let (value, _) = self.rows()[index as usize];
-            // On the sweep rows zero is the free-running dash and keeps the
-            // old value; on the loop rows zero is X, a value like any other.
-            if self.loop_rows || value != 0 {
-                self.value = value;
-            }
-            cx.widget_action(uid, VjBeatsDropAction::Picked(value));
-        }
-        self.set_open(cx, false);
-    }
-
     fn set_open(&mut self, cx: &mut Cx, open: bool) {
         if self.open != open {
             self.open = open;
@@ -2555,76 +2534,36 @@ impl Widget for VjBeatsDrop {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.draw_bg.draw_abs(cx, rect);
-        // INERT = the empty-deck ghost: the chip shader dims the well, and
-        // the face text dims WITH it — a bright "1" on a dead deck reads
-        // as a live control.
-        self.draw_text.color = if self.inert {
-            Vec4f::from_u32(0x39404a88)
-        } else {
-            Vec4f::from_u32(0xf4f7faff)
-        };
-        // centre the face text, biased left of the drop arrow. GLYPHS, not
-        // bytes: the infinity face is one glyph in three bytes, and the
-        // byte count marched it off to the left.
-        let face = self.face();
-        let glyphs = face.chars().count() as f64;
-        self.draw_text.draw_abs(
-            cx,
-            dvec2(
-                rect.pos.x + (rect.size.x - 10.0) * 0.5 - 2.0 * glyphs + 1.0,
-                rect.pos.y + 5.0,
-            ),
-            face,
-        );
+        self.draw_text.color = crate::theme::color(cx, if self.inert { id!(text_muted) } else { id!(text) });
+        let label = self.face();
+        self.draw_text.draw_abs(cx, dvec2(rect.pos.x + (rect.size.x - 10.0) * 0.5 - label.chars().count() as f64 * 3.0,
+            rect.pos.y + (rect.size.y - 13.0) * 0.5), label);
         cx.end_turtle_with_area(&mut self.area);
-
         if self.open {
-            // 'static, so hoisting it out frees `self` for the draw_list
-            // borrow below.
             let rows = self.rows();
-            if let Some(draw_list) = self.draw_list.as_mut() {
-                // The proven popup idiom: turtle content at the overlay
-                // root, shifted under the chip.
+            let count = rows.len();
+            let height = crate::theme::control_height(cx);
+            self.menu_layout = ChoiceLayout::new(self.area.rect(cx), cx.current_pass_size(), count, height, 64.0);
+            let menu = self.menu_layout;
+            let mut lifted = self.draw_list.take();
+            if let Some(draw_list) = lifted.as_mut() {
                 draw_list.begin_overlay_reuse(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
-                let h = rows.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0;
-                self.draw_panel.begin(
-                    cx,
-                    Walk::fixed(BEATS_PANEL_W, h),
-                    Layout::default(),
-                );
-                let panel = cx.turtle().rect();
-                if let Some(row) = self.hover_row {
-                    self.draw_hover.draw_abs(
-                        cx,
-                        Rect {
-                            pos: dvec2(
-                                panel.pos.x + 2.0,
-                                panel.pos.y + BEATS_PANEL_PAD + row as f64 * BEATS_ROW_H,
-                            ),
-                            size: dvec2(BEATS_PANEL_W - 4.0, BEATS_ROW_H),
-                        },
-                    );
+                self.draw_panel.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: menu.panel.size });
+                self.draw_text.color = crate::theme::color(cx, id!(text));
+                for index in 0..count {
+                    let mut cell = menu.cell(index);
+                    cell.pos -= menu.panel.pos;
+                    if self.hover_row == Some(index) { self.draw_hover.draw_abs(cx, cell); }
+                    let (_, label) = rows[index];
+                    self.draw_text.draw_abs(cx, cell.pos + dvec2(12.0, (cell.size.y - 13.0) * 0.5), label);
                 }
-                for (row, (_, label)) in rows.iter().enumerate() {
-                    self.draw_text.draw_abs(
-                        cx,
-                        dvec2(
-                            panel.pos.x + 14.0,
-                            panel.pos.y + BEATS_PANEL_PAD + row as f64 * BEATS_ROW_H + 3.0,
-                        ),
-                        label,
-                    );
-                }
-                self.draw_panel.end(cx);
                 let chip = self.area.rect(cx);
-                cx.end_pass_sized_turtle_with_shift(
-                    self.area,
-                    dvec2((chip.size.x - BEATS_PANEL_W) * 0.5, chip.size.y + BEATS_PANEL_GAP),
-                );
+                cx.end_pass_sized_turtle_with_shift(self.area, menu.panel.pos - chip.pos);
                 draw_list.end(cx);
             }
+            self.draw_list = lifted;
         }
         DrawStep::done()
     }
@@ -2632,77 +2571,30 @@ impl Widget for VjBeatsDrop {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.open {
-            let panel = self.panel_rect(cx);
-            match event {
-                Event::MouseMove(me) => {
-                    let row = if panel.contains(me.abs) {
-                        let index = ((me.abs.y - panel.pos.y - BEATS_PANEL_PAD)
-                            / BEATS_ROW_H)
-                            .floor();
-                        // self.rows(), not BEATS_ROWS: the loop ladder is nine
-                        // rungs and the sweep table six, so counting the wrong
-                        // one left 32, 64 and the infinity rung unhighlightable.
-                        (index >= 0.0 && (index as usize) < self.rows().len())
-                            .then(|| index as usize)
-                    } else {
-                        None
-                    };
-                    if row != self.hover_row {
-                        self.hover_row = row;
-                        if let Some(draw_list) = &self.draw_list {
-                            draw_list.redraw(cx);
-                        }
-                    }
-                }
-                Event::MouseDown(me) => {
-                    if panel.contains(me.abs) {
-                        // The panel floats OVER the library: claim the press
-                        // or the row underneath takes it as well, and picking
-                        // "64" also loads whatever track it happened to
-                        // cover. A claimed press is dead to every later hit
-                        // test (Event::hits refuses a handled press).
-                        me.handled.set(self.area);
-                        self.pick_at(cx, uid, panel, me.abs.y);
-                    } else {
-                        let chip = self.area.rect(cx);
-                        if !chip.contains(me.abs) {
-                            self.set_open(cx, false);
-                        }
-                    }
-                }
-                Event::MouseUp(me) => {
-                    // THE MENU GESTURE (macOS/DAW standard): press on the
-                    // chip, DRAG onto an item, release = select + close —
-                    // one fluid motion. A release back on the chip keeps
-                    // the list open (the click-then-click mode); a release
-                    // in dead space dismisses.
-                    if panel.contains(me.abs) {
-                        self.pick_at(cx, uid, panel, me.abs.y);
-                    } else {
-                        let chip = self.area.rect(cx);
-                        if !chip.contains(me.abs) {
-                            self.set_open(cx, false);
-                        }
-                    }
-                }
-                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+            match crate::popup_layout::handle_event(event, self.area, self.area.rect(cx), self.menu_layout) {
+                ChoiceEvent::Pick(index) => {
+                        let (value, _) = self.rows()[index];
+                        if self.loop_rows || value != 0 { self.value = value; }
+                        cx.widget_action(uid, VjBeatsDropAction::Picked(value));
                     self.set_open(cx, false);
+                    return;
                 }
+                ChoiceEvent::Hover(row) if self.hover_row != row => {
+                    self.hover_row = row;
+                    if let Some(list) = &self.draw_list { list.redraw(cx); }
+                }
+                ChoiceEvent::Dismiss => { self.set_open(cx, false); return; }
                 _ => {}
             }
         }
         match event.hits(cx, self.area) {
             Hit::FingerHoverIn(_) => {
-                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
-                self.area.redraw(cx);
+                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]); self.area.redraw(cx);
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
-                self.area.redraw(cx);
+                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]); self.area.redraw(cx);
             }
-            Hit::FingerDown(_) if !self.inert => {
-                self.set_open(cx, !self.open);
-            }
+            Hit::FingerDown(_) if !self.inert => self.set_open(cx, !self.open),
             _ => {}
         }
     }
@@ -2778,6 +2670,8 @@ pub struct VjCurveDrop {
     hover_row: Option<usize>,
     #[rust]
     area: Area,
+    #[rust]
+    menu_layout: ChoiceLayout,
 }
 
 impl VjCurveDrop {
@@ -2785,19 +2679,7 @@ impl VjCurveDrop {
         FADE_CURVES[self.value.min(FADE_CURVES.len() - 1)].0
     }
 
-    fn panel_rect(&self, cx: &mut Cx) -> Rect {
-        let chip = self.area.rect(cx);
-        Rect {
-            pos: dvec2(
-                chip.pos.x + (chip.size.x - CURVE_PANEL_W) * 0.5,
-                chip.pos.y + chip.size.y + CURVE_PANEL_GAP,
-            ),
-            size: dvec2(
-                CURVE_PANEL_W,
-                FADE_CURVES.len() as f64 * CURVE_ROW_H + CURVE_PANEL_PAD * 2.0,
-            ),
-        }
-    }
+
 
     /// The icon that stands for row `index`, in [`FADE_CURVES`] order.
     ///
@@ -2824,16 +2706,6 @@ impl VjCurveDrop {
         }
     }
 
-    /// Select the row under `y` (if any), emit, close.
-    fn pick_at(&mut self, cx: &mut Cx, uid: WidgetUid, panel: Rect, y: f64) {
-        let index = ((y - panel.pos.y - CURVE_PANEL_PAD) / CURVE_ROW_H).floor();
-        if index >= 0.0 && (index as usize) < FADE_CURVES.len() {
-            self.value = index as usize;
-            cx.widget_action(uid, VjCurveDropAction::Picked(self.value));
-        }
-        self.set_open(cx, false);
-    }
-
     fn set_open(&mut self, cx: &mut Cx, open: bool) {
         if self.open != open {
             self.open = open;
@@ -2858,85 +2730,37 @@ impl Widget for VjCurveDrop {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.draw_bg.draw_abs(cx, rect);
-        // There is no room for a word on a 34-point chip, so the icon IS
-        // the face — inside the same 10-point right gutter the beats chip
-        // leaves for its drop arrow.
         let value = self.value.min(FADE_CURVES.len() - 1);
-        // Smaller than the well it sits in: a drawing that touches the
-        // chip's edges reads as a pressed state rather than as a picture.
-        let face_h = 12.0f64.min(rect.size.y);
-        let face = Rect {
-            pos: dvec2(rect.pos.x + 5.0, rect.pos.y + (rect.size.y - face_h) * 0.5),
-            size: dvec2((rect.size.x - 18.0).max(1.0), face_h),
-        };
-        self.icon(value).draw_abs(cx, face);
+        let face_h = 16.0f64.min(rect.size.y);
+        self.icon(value).draw_abs(cx, Rect {
+            pos: dvec2(rect.pos.x + 6.0, rect.pos.y + (rect.size.y - face_h) * 0.5),
+            size: dvec2((rect.size.x - 20.0).max(1.0), face_h),
+        });
         cx.end_turtle_with_area(&mut self.area);
-
         if self.open {
-            let value = self.value;
-            // The list is LIFTED out of `self` for the pass and put back
-            // after: the rows draw through `self.icon(row)`, and a method
-            // that borrows all of `self` cannot coexist with a borrow of
-            // one of its fields.
+            let count = FADE_CURVES.len();
+            let height = crate::theme::control_height(cx);
+            self.menu_layout = ChoiceLayout::new(self.area.rect(cx), cx.current_pass_size(), count, height, 156.0);
+            let menu = self.menu_layout;
             let mut lifted = self.draw_list.take();
             if let Some(draw_list) = lifted.as_mut() {
-                // The proven popup idiom: turtle content at the overlay
-                // root, shifted under the chip.
                 draw_list.begin_overlay_reuse(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
-                let h = FADE_CURVES.len() as f64 * CURVE_ROW_H + CURVE_PANEL_PAD * 2.0;
-                self.draw_panel.begin(
-                    cx,
-                    Walk::fixed(CURVE_PANEL_W, h),
-                    Layout::default(),
-                );
-                let panel = cx.turtle().rect();
-                if let Some(row) = self.hover_row {
-                    self.draw_hover.draw_abs(
-                        cx,
-                        Rect {
-                            pos: dvec2(
-                                panel.pos.x + 2.0,
-                                panel.pos.y + CURVE_PANEL_PAD + row as f64 * CURVE_ROW_H,
-                            ),
-                            size: dvec2(CURVE_PANEL_W - 4.0, CURVE_ROW_H),
-                        },
-                    );
+                self.draw_panel.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: menu.panel.size });
+                self.draw_text.color = crate::theme::color(cx, id!(text));
+                for index in 0..count {
+                    let mut cell = menu.cell(index);
+                    cell.pos -= menu.panel.pos;
+                    if self.hover_row == Some(index) { self.draw_hover.draw_abs(cx, cell); }
+                    self.icon(index).draw_abs(cx, Rect {
+                        pos: cell.pos + dvec2(6.0, (cell.size.y - 16.0) * 0.5),
+                        size: dvec2(34.0, 16.0),
+                    });
+                    self.draw_text.draw_abs(cx, cell.pos + dvec2(46.0, (cell.size.y - 13.0) * 0.5), FADE_CURVES[index].1);
                 }
-                for (row, (_curve, label)) in FADE_CURVES.iter().enumerate() {
-                    let top = panel.pos.y + CURVE_PANEL_PAD + row as f64 * CURVE_ROW_H;
-                    let cell = Rect {
-                        pos: dvec2(
-                            panel.pos.x + CURVE_PANEL_PAD,
-                            top + (CURVE_ROW_H - CURVE_GRAPH_H) * 0.5,
-                        ),
-                        size: dvec2(CURVE_GRAPH_W, CURVE_GRAPH_H),
-                    };
-                    self.icon(row).draw_abs(cx, cell);
-                    // The chip can only show a shape, so the open list is the
-                    // one place the current pick gets named: it keeps full
-                    // white and the rest step back a shade.
-                    self.draw_text.color = if row == value {
-                        Vec4f::from_u32(0xf4f7faff)
-                    } else {
-                        Vec4f::from_u32(0x9aa4b0ff)
-                    };
-                    self.draw_text.draw_abs(
-                        cx,
-                        dvec2(
-                            panel.pos.x + CURVE_PANEL_PAD + CURVE_GRAPH_W + 6.0,
-                            top + 5.0,
-                        ),
-                        label,
-                    );
-                }
-                self.draw_panel.end(cx);
                 let chip = self.area.rect(cx);
-                cx.end_pass_sized_turtle_with_shift(
-                    self.area,
-                    dvec2((chip.size.x - CURVE_PANEL_W) * 0.5, chip.size.y + CURVE_PANEL_GAP),
-                );
+                cx.end_pass_sized_turtle_with_shift(self.area, menu.panel.pos - chip.pos);
                 draw_list.end(cx);
             }
             self.draw_list = lifted;
@@ -2947,77 +2771,29 @@ impl Widget for VjCurveDrop {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.open {
-            let panel = self.panel_rect(cx);
-            match event {
-                Event::MouseMove(me) => {
-                    let row = if panel.contains(me.abs) {
-                        let index = ((me.abs.y - panel.pos.y - CURVE_PANEL_PAD)
-                            / CURVE_ROW_H)
-                            .floor();
-                        // FADE_CURVES.len(), never a row count borrowed from
-                        // the beats table: the two lists are different lengths
-                        // and the bottom rows would go unhighlightable.
-                        (index >= 0.0 && (index as usize) < FADE_CURVES.len())
-                            .then(|| index as usize)
-                    } else {
-                        None
-                    };
-                    if row != self.hover_row {
-                        self.hover_row = row;
-                        if let Some(draw_list) = &self.draw_list {
-                            draw_list.redraw(cx);
-                        }
-                    }
-                }
-                Event::MouseDown(me) => {
-                    if panel.contains(me.abs) {
-                        // The panel floats OVER the transport strip: claim the
-                        // press or whatever is underneath takes it as well, and
-                        // picking a curve also nudges the control it covered. A
-                        // claimed press is dead to every later hit test
-                        // (Event::hits refuses a handled press).
-                        me.handled.set(self.area);
-                        self.pick_at(cx, uid, panel, me.abs.y);
-                    } else {
-                        let chip = self.area.rect(cx);
-                        if !chip.contains(me.abs) {
-                            self.set_open(cx, false);
-                        }
-                    }
-                }
-                Event::MouseUp(me) => {
-                    // THE MENU GESTURE (macOS/DAW standard): press on the
-                    // chip, DRAG onto a row, release = select + close — one
-                    // fluid motion. A release back on the chip keeps the list
-                    // open (the click-then-click mode); a release in dead
-                    // space dismisses.
-                    if panel.contains(me.abs) {
-                        self.pick_at(cx, uid, panel, me.abs.y);
-                    } else {
-                        let chip = self.area.rect(cx);
-                        if !chip.contains(me.abs) {
-                            self.set_open(cx, false);
-                        }
-                    }
-                }
-                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+            match crate::popup_layout::handle_event(event, self.area, self.area.rect(cx), self.menu_layout) {
+                ChoiceEvent::Pick(index) => {
+                        self.value = index;
+                        cx.widget_action(uid, VjCurveDropAction::Picked(index));
                     self.set_open(cx, false);
+                    return;
                 }
+                ChoiceEvent::Hover(row) if self.hover_row != row => {
+                    self.hover_row = row;
+                    if let Some(list) = &self.draw_list { list.redraw(cx); }
+                }
+                ChoiceEvent::Dismiss => { self.set_open(cx, false); return; }
                 _ => {}
             }
         }
         match event.hits(cx, self.area) {
             Hit::FingerHoverIn(_) => {
-                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
-                self.area.redraw(cx);
+                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]); self.area.redraw(cx);
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
-                self.area.redraw(cx);
+                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]); self.area.redraw(cx);
             }
-            Hit::FingerDown(_) => {
-                self.set_open(cx, !self.open);
-            }
+            Hit::FingerDown(_) => self.set_open(cx, !self.open),
             _ => {}
         }
     }
@@ -3470,13 +3246,13 @@ impl Widget for VjTileGrid {
         // area stays as the fallback for a host that walks with no width.
         let width = {
             let peeked = cx.peek_walk_turtle(walk).size.x;
-            if peeked > CARD_W {
+            if peeked > 0.0 {
                 peeked
             } else {
                 self.view.area().rect(cx).size.x
             }
         };
-        if width > CARD_W {
+        if width > 0.0 {
             self.last_cols = (((width + CARD_SPACING) / (CARD_W + CARD_SPACING)) as usize)
                 .clamp(1, GRID_SLOTS);
         }
