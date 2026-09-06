@@ -32,6 +32,11 @@ script_mod! {
             Tip{text: "Aimed at this one" arrow: true Button{text: "Arrow"}}
             Tip{text: "Aimed from above" arrow: true place: Top Button{text: "Arrow, above"}}
         }
+        StoryNote{text: "A tip beside a control turns its pointer a quarter turn, so it still aims at the thing it belongs to."}
+        StoryRow{
+            Tip{text: "Aimed from the left" arrow: true place: Left Button{text: "Arrow, left"}}
+            Tip{text: "Aimed from the right" arrow: true place: Right Button{text: "Arrow, right"}}
+        }
 
         StoryHeading{text: "Room for a sentence"}
         StoryNote{text: "A wrap width turns a phrase into a paragraph, for the tip that has to explain rather than name."}
