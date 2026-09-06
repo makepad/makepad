@@ -239,7 +239,10 @@ impl StoryNavigatorRef {
 
     pub fn select(&self, cx: &mut Cx, key: &str) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.select(cx, key);
+            // Named explicitly: the library's `Select` widget generates a
+            // `select(cx, ids)` accessor that is otherwise a better match
+            // for this call than the navigator's own method.
+            StoryNavigator::select(&mut inner, cx, key);
         }
     }
 
