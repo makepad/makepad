@@ -678,6 +678,22 @@ impl ToasterRef {
     }
 
     /// How many are on screen.
+    /// Move the stack to another corner. A host that adapts its layout can
+    /// say so at runtime rather than declaring one corner for good.
+    pub fn set_place(&self, cx: &mut Cx, place: ToastPlace) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.place != place {
+                inner.place = place;
+                inner.redraw(cx);
+            }
+        }
+    }
+
+    /// Which corner the stack sits in.
+    pub fn place(&self) -> ToastPlace {
+        self.borrow().map(|inner| inner.place).unwrap_or(ToastPlace::BottomCenter)
+    }
+
     pub fn showing(&self) -> usize {
         self.borrow().map(|inner| inner.live.len()).unwrap_or(0)
     }
