@@ -633,9 +633,16 @@ pub struct MenuLayer {
     area: Area,
     #[rust]
     levels: Vec<Level>,
-    /// The window rect from the last draw; placement clamps against it.
+    /// The room a menu has to fit in, from the last draw: the whole pass,
+    /// NOT this layer's own rect. A layer declared as the last child of a
+    /// page gets whatever space is left at the bottom of it, and clamping
+    /// menus to that strip would drag every one of them down there.
     #[rust]
     window: Rect,
+    /// Where this layer sits, which is the origin its overlay pass is
+    /// shifted from. Only ever that.
+    #[rust]
+    origin: DVec2,
     /// True while this layer holds the sweep lock.
     #[rust]
     locked: bool,
@@ -1051,8 +1058,10 @@ impl MenuLayer {
 impl Widget for MenuLayer {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
-        let window = cx.turtle().rect();
+        let origin = cx.turtle().rect().pos;
         cx.end_turtle_with_area(&mut self.area);
+        self.origin = origin;
+        let window = Rect { pos: dvec2(0.0, 0.0), size: cx.current_pass_size() };
         self.window = window;
         if self.levels.is_empty() {
             return DrawStep::done();
@@ -1175,7 +1184,7 @@ impl Widget for MenuLayer {
             }
         }
 
-        cx.end_pass_sized_turtle_with_shift(self.area, dvec2(0.0, 0.0) - window.pos);
+        cx.end_pass_sized_turtle_with_shift(self.area, dvec2(0.0, 0.0) - origin);
         self.draw_list.end(cx);
         DrawStep::done()
     }
