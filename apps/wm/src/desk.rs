@@ -1505,7 +1505,7 @@ impl WmDesk {
             let slot=if i==0 {0}else if i==1 {2}else{1};
             let width=t.value([30.0,30.0,46.0,16.0,14.0]);
             let right=title.pos.x+title.size.x-width-2.0-(slot as f64)*(width+2.0);
-            let left=title.pos.x+10.0+(i as f64)*22.0;
+            let left=title.pos.x+10.0+(i as f64)*23.0;
             let bw=width+(18.0-width)*mac;
             let modern = t.target == DesktopStyle::Windows;
             let button=if t.target==DesktopStyle::NextStep {
@@ -1516,7 +1516,7 @@ impl WmDesk {
             }else if modern {rect(title.pos.x+title.size.x-(slot as f64+1.0)*width,title.pos.y,width,h)}else{rect(right+(left-right)*mac,title.pos.y+3.0,bw,(h-6.0).max(1.0))};
             let hovered = self.chrome_hover == Some((client, hit));
             let pressed = hovered && self.chrome_pressed == Some((client, hit));
-            self.chrome.radius=(mac*12.0) as f32;
+            self.chrome.radius=(mac*14.0) as f32;
             self.chrome.bevel=retro;
             self.chrome.pressed=if pressed {retro}else{0.0};
             self.chrome.color=lerp_color(alpha(rgb(212,208,200),opacity*classic),alpha(color,opacity),mac);
@@ -1528,8 +1528,22 @@ impl WmDesk {
                     if pressed {rgb(82,82,86)}else{rgb(64,64,68)}
                 } else if pressed {rgb(196,196,200)}else{rgb(218,218,222)},opacity);
             }
-            let face=if mac>0.99 {rect(button.pos.x+2.0,button.pos.y+(button.size.y-12.0)*0.5,12.0,12.0)}else{button};
+            let face=if mac>0.99 {rect(button.pos.x+2.0,button.pos.y+(button.size.y-14.0)*0.5,14.0,14.0)}else{button};
+            use crate::desktop::MacCaption;
+            let group_hover = self.chrome_hover.is_some_and(|(c,h)| c==client && matches!(h,ChromeHit::Close|ChromeHit::Minimize|ChromeHit::Maximize));
+            self.chrome.caption = if mac>0.99 && group_hover {match hit {
+                ChromeHit::Close => MacCaption::Close,
+                ChromeHit::Minimize => MacCaption::Minimize,
+                _ => MacCaption::Maximize,
+            }} else {MacCaption::None};
+            self.chrome.caption_ink = alpha(match hit {
+                ChromeHit::Close => rgb(153,35,30),
+                ChromeHit::Minimize => rgb(153,112,0),
+                _ => rgb(0,108,25),
+            },opacity);
+            if mac>0.99 && pressed {self.chrome.color = lerp_color(self.chrome.color,alpha(rgb(0,0,0),opacity),0.12);}
             self.chrome.draw_abs(cx,face);
+            self.chrome.caption = MacCaption::None;
             if t.target==DesktopStyle::NextStep {
                 let light=alpha(rgb(255,255,255),opacity);
                 let shadow=alpha(rgb(0,0,0),opacity);
@@ -1540,9 +1554,6 @@ impl WmDesk {
             if matches!(t.target,DesktopStyle::Windows2000|DesktopStyle::NextStep) {
                 draw_retro_caption(&mut self.shell_draw,cx,button,hit,t.target==DesktopStyle::NextStep,pressed,opacity);
             }else if mac<0.99 { self.shell_draw.icon_centered(cx,ico,button,11.0,alpha(if (modern && hovered && hit == ChromeHit::Close) || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(20,20,20)},opacity*(1.0-mac) as f32)); }
-            if mac>0.99 && self.chrome_hover.is_some_and(|(c,_)| c==client) {
-                self.shell_draw.icon_centered(cx,ico,face,6.0,alpha(rgb(64,44,32),opacity*0.8));
-            }
             self.title_hits.push((client,button,hit));
         }
         self.chrome.pressed=0.0;

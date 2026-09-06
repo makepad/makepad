@@ -75,9 +75,20 @@ use crate::shell::{
 use makepad_widgets::app_icon::AppIconDraw;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum MacCaption {
+    #[pick]
+    None = 0,
+    Close = 1,
+    Minimize = 2,
+    Maximize = 3,
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
+    let MacCaption = set_type_default() do #(MacCaption::script_api(vm))
     set_type_default() do #(DrawDesktopChrome::script_shader(vm)) {
         ..mod.draw.DrawQuad
         color: #eeeeee
@@ -89,6 +100,8 @@ script_mod! {
         title_gradient: 0.0
         title_gradient_end: #a6caf0
         frame_width: 0.0
+        caption: MacCaption.None
+        caption_ink: #0000
         pixel: fn() {
             let p = self.pos * self.rect_size
             let sdf = Sdf2d.viewport(p)
@@ -119,6 +132,34 @@ script_mod! {
                 return vec4(color*self.color.w,self.color.w)
             }
             sdf.fill(vec4(color,self.color.w))
+            let c = self.rect_size * 0.5
+            match self.caption {
+                MacCaption.Close => {
+                    sdf.move_to(c.x-2.8,c.y-2.8)
+                    sdf.line_to(c.x+2.8,c.y+2.8)
+                    sdf.move_to(c.x-2.8,c.y+2.8)
+                    sdf.line_to(c.x+2.8,c.y-2.8)
+                    sdf.stroke(self.caption_ink,1.35)
+                }
+                MacCaption.Minimize => {
+                    sdf.move_to(c.x-3.25,c.y)
+                    sdf.line_to(c.x+3.25,c.y)
+                    sdf.stroke(self.caption_ink,1.5)
+                }
+                MacCaption.Maximize => {
+                    sdf.move_to(c.x-3.1,c.y-0.9)
+                    sdf.line_to(c.x+0.9,c.y+3.1)
+                    sdf.line_to(c.x-3.1,c.y+3.1)
+                    sdf.close_path()
+                    sdf.fill(self.caption_ink)
+                    sdf.move_to(c.x+3.1,c.y+0.9)
+                    sdf.line_to(c.x-0.9,c.y-3.1)
+                    sdf.line_to(c.x+3.1,c.y-3.1)
+                    sdf.close_path()
+                    sdf.fill(self.caption_ink)
+                }
+                _ => {}
+            }
             return sdf.result
         }
     }
@@ -169,6 +210,10 @@ pub struct DrawDesktopChrome {
     pub title_gradient_end: Vec4f,
     #[live]
     pub frame_width: f32,
+    #[live]
+    pub caption: MacCaption,
+    #[live]
+    pub caption_ink: Vec4f,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShelfHit {
