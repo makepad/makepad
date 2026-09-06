@@ -43,6 +43,7 @@ pub mod chip;
 pub mod menu;
 pub mod accordion;
 pub mod dialog;
+pub mod drawer;
 pub mod toast;
 pub mod browser;
 pub mod button;
@@ -174,6 +175,7 @@ pub use crate::{
     menu::*,
     accordion::*,
     dialog::*,
+    drawer::*,
     toast::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -660,6 +662,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::dialog::script_mod(vm);
+    crate::drawer::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
@@ -810,6 +813,37 @@ mod button_group_registration_tests {
         assert!(group.contains("mod.widgets.SegmentedControl = mod.widgets.SegmentedControlFlat{"));
         assert_eq!(group.matches("set_type_default() do mod.widgets.ButtonGroupBase").count(), 1);
         assert_eq!(group.matches("set_type_default() do mod.widgets.SegmentedControlBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod drawer_registration_tests {
+    /// The drawer registers after the modal it is built on and the dialog
+    /// it sits beside, with one type default and its two sheet presets.
+    #[test]
+    fn test_drawer_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let drawer = include_str!("drawer.rs");
+        assert!(lib.contains("pub mod drawer;"));
+        assert!(lib.contains("drawer::*"));
+        let at = lib.find("crate::drawer::script_mod(vm);").expect("drawer registered");
+        for base in [
+            "crate::modal::script_mod(vm);",
+            "crate::button::script_mod(vm);",
+            "crate::label::script_mod(vm);",
+        ] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before the drawer");
+        }
+        assert!(drawer.contains("mod.widgets.DrawerBase = #(Drawer::register_widget(vm))"));
+        assert!(drawer.contains("mod.widgets.Drawer = set_type_default()"));
+        assert!(drawer.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
+        assert!(drawer.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
+        assert_eq!(drawer.matches("set_type_default() do mod.widgets.DrawerBase").count(), 1);
+        // The widget derive takes any field type beginning with "Draw" for
+        // a shader layer, which is why these two are not called DrawerSide
+        // and DrawerSize.
+        assert!(!drawer.contains("pub enum DrawerSide"));
+        assert!(!drawer.contains("pub enum DrawerSize"));
     }
 }
 
