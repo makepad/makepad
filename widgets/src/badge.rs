@@ -406,7 +406,10 @@ script_mod! {
                         sdf.fill(color * self.opacity)
                         sdf.circle(cx, cy - r * 0.5, r * 0.16)
                         sdf.fill(self.color_on_info * self.opacity)
-                        sdf.box(cx - r * 0.14, cy - r * 0.2, r * 0.28, r * 0.85, 0.0)
+                        // A rect, not a box with no radius: sdf.box's interior
+                        // distance is twice the radius, so at zero the fill gets
+                        // no coverage and the stem of the "i" never appeared.
+                        sdf.rect(cx - r * 0.14, cy - r * 0.2, r * 0.28, r * 0.85)
                         sdf.fill(self.color_on_info * self.opacity)
                     }
                     StatusKind.InProgress => {
