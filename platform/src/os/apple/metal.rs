@@ -2972,16 +2972,13 @@ impl Cx {
     }
 }
 
-/// Renderer-owned capture requests (texture ids awaiting a pass that
-/// renders them) and finished results. Statics rather than Cx state because
-/// results are pushed from Metal completion threads (the
-/// SCREENSHOT_FILE_SINKS pattern in cx_shared.rs).
-static RENDER_TEXTURE_CAPTURE_REQUESTS: Mutex<Vec<crate::texture::TextureId>> =
-    Mutex::new(Vec::new());
-#[allow(clippy::type_complexity)]
-static RENDER_TEXTURE_CAPTURE_RESULTS: Mutex<
-    Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
-> = Mutex::new(Vec::new());
+// Requests and the receiving endpoint belong only to the UI thread. GPU
+// completion callbacks hold a cloned bounded sender, never a lock the UI uses.
+type RenderCaptureResult = (crate::texture::TextureId, usize, usize, Vec<u8>);
+thread_local! {
+    static RENDER_TEXTURE_CAPTURE_REQUESTS: std::cell::RefCell<Vec<crate::texture::TextureId>> = const { std::cell::RefCell::new(Vec::new()) };
+    static RENDER_TEXTURE_CAPTURE_BUS: (std::sync::mpsc::SyncSender<RenderCaptureResult>, std::sync::mpsc::Receiver<RenderCaptureResult>) = std::sync::mpsc::sync_channel(8);
+}
 
 impl Cx {
     /// RENDERER-OWNED capture of a render-target texture — the race-free
@@ -2999,11 +2996,12 @@ impl Cx {
     /// native 4-byte layout (BGRA8 = BGRA), full allocated size.
     pub fn request_render_texture_capture(&mut self, texture: &Texture) -> bool {
         let tid = texture.texture_id();
-        let mut requests = RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap();
-        if !requests.contains(&tid) {
-            requests.push(tid);
-        }
-        true
+        RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests| {
+            let mut requests=requests.borrow_mut();
+            if requests.contains(&tid){return true;}
+            if requests.len()>=8{return false;}
+            requests.push(tid);true
+        })
     }
 
     /// Drain every finished renderer-owned capture:
@@ -3012,7 +3010,7 @@ impl Cx {
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        std::mem::take(&mut *RENDER_TEXTURE_CAPTURE_RESULTS.lock().unwrap())
+        RENDER_TEXTURE_CAPTURE_BUS.with(|(_,receive)|receive.try_iter().collect())
     }
 
     /// The encode half of the capture (called from `draw_pass` right after
@@ -3025,7 +3023,7 @@ impl Cx {
         draw_pass_id: DrawPassId,
         command_buffer: ObjcId,
     ) {
-        if RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap().is_empty() {
+        if RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests|requests.borrow().is_empty()) {
             return;
         }
         let tids: Vec<crate::texture::TextureId> = self.passes[draw_pass_id]
@@ -3034,8 +3032,8 @@ impl Cx {
             .map(|ct| ct.texture.texture_id())
             .collect();
         for tid in tids {
-            let requested = {
-                let mut requests = RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap();
+            let requested = RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests| {
+                let mut requests = requests.borrow_mut();
                 match requests.iter().position(|r| *r == tid) {
                     Some(at) => {
                         requests.remove(at);
@@ -3043,7 +3041,7 @@ impl Cx {
                     }
                     None => false,
                 }
-            };
+            });
             if !requested {
                 continue;
             }
@@ -3095,6 +3093,7 @@ impl Cx {
                 let () = msg_send![blit, synchronizeTexture: staging.as_id() slice: 0 level: 0];
                 let () = msg_send![blit, endEncoding];
                 let capture = Mutex::new(Some((tid, width, height, bpp, staging)));
+                let sender = RENDER_TEXTURE_CAPTURE_BUS.with(|(sender,_)|sender.clone());
                 let () = msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |_cmd: ObjcId| {
@@ -3119,10 +3118,9 @@ impl Cx {
                                 mipmapLevel: 0
                                 slice: 0
                             ];
-                            RENDER_TEXTURE_CAPTURE_RESULTS
-                                .lock()
-                                .unwrap()
-                                .push((tid, width, height, bytes));
+                            if sender.try_send((tid,width,height,bytes)).is_err() {
+                                crate::error!("render texture capture queue full; caller must retry");
+                            }
                         }
                     })
                 ];

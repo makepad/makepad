@@ -1233,6 +1233,7 @@ pub struct GlassRadio {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[action_data]
@@ -1494,6 +1495,7 @@ pub struct GlassButton {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[action_data]
@@ -1874,6 +1876,7 @@ pub struct GlassSlider {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[action_data]
@@ -2084,6 +2087,7 @@ pub struct GlassSegmented {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[action_data]

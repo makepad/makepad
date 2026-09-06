@@ -132,6 +132,10 @@ script_mod! {
         color_text_val: theme.color_u_3
         color_text_hl: theme.color_text
         color_text_hover: theme.color_text
+        color_text_on_accent: #xffffff
+        color_text_active: theme.color_text
+        color_focus: #x7aa2f7
+        color_ctrl_selected: theme.color_focus
         color_text_focus: theme.color_text
         color_text_down: theme.color_text
         color_text_disabled: theme.color_u_1

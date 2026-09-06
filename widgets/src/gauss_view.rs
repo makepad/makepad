@@ -151,6 +151,8 @@ script_mod! {
             tint_color: instance(#b8b8b8)
             tint_alpha: uniform(0.08)
             surface_alpha: uniform(0.88)
+            // Compositor opacity is independent of the material transmission.
+            layer_opacity: instance(1.0)
             border_color: instance(#fff)
             border_alpha: instance(0.36)
             border_width: instance(1.0)
@@ -372,7 +374,7 @@ script_mod! {
                         self.border_width
                     )
                 }
-                return sdf.result
+                return sdf.result * self.layer_opacity
             }
         }
     }
@@ -468,7 +470,7 @@ script_mod! {
                         self.border_width
                     )
                 }
-                return sdf.result
+                return sdf.result * self.layer_opacity
             }
         }
     }
@@ -541,7 +543,7 @@ script_mod! {
                         self.border_width
                     )
                 }
-                return sdf.result
+                return sdf.result * self.layer_opacity
             }
         }
     }
@@ -560,6 +562,14 @@ pub struct GaussRoundedView {
 }
 
 impl GaussRoundedView {
+    /// Draw only this material against an explicit compositor checkpoint. No
+    /// overlay capture or widget walk: a compositor can stamp it for each layer.
+    pub fn draw_surface_with_backdrop(&mut self, cx: &mut Cx2d, rect: Rect, snapshot: Option<GaussBlurSnapshot>, opacity: f32) {
+        self.view.draw_bg.draw_vars.set_dyn_instance(cx, live_id!(layer_opacity), &[opacity.clamp(0.0, 1.0)]);
+        self.bind_snapshot(cx, snapshot);
+        self.view.draw_bg.draw_abs(cx, rect);
+    }
+
     fn bind_snapshot(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
         let draw_bg = &mut self.view.draw_bg.draw_vars;
         if let Some(snapshot) = snapshot {

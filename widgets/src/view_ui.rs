@@ -353,6 +353,37 @@ script_mod! {
         }
     }
 
+    // Application surfaces share a material contract. Classic styles replace
+    // the rounded edge with a two-line raised/sunken frame in widgets.splash.
+    mod.widgets.PanelView = mod.widgets.RoundedView {
+        draw_bg +: {
+            color: theme.color_bg_container
+            border_radius: min(theme.container_corner_radius 12.0)
+            bevel: uniform(0.0)
+            sunken: uniform(0.0)
+            bevel_light: uniform(#ffffff)
+            bevel_dark: uniform(#808080)
+            bevel_shadow: uniform(#000000)
+            pixel: fn() {
+                let p = self.pos * self.rect_size
+                if self.bevel > 0.5 {
+                    let tl = min(p.x, p.y)
+                    let br = min(self.rect_size.x - p.x, self.rect_size.y - p.y)
+                    let d = min(tl, br)
+                    let upper = if self.sunken > 0.5 {tl > br} else {tl < br}
+                    let light = if d < 1.0 {self.bevel_light} else {self.color}
+                    let dark = if d < 1.0 {self.bevel_shadow} else {self.bevel_dark}
+                    return if d < 2.0 {if upper {light} else {dark}} else {self.color}
+                }
+                let sdf = Sdf2d.viewport(p)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
+                sdf.fill(self.color)
+                return sdf.result
+            }
+        }
+    }
+    mod.widgets.InsetPanelView = mod.widgets.PanelView {draw_bg +: {sunken: 1.0}}
+
     mod.widgets.RoundedXView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {

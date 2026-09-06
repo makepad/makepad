@@ -408,8 +408,12 @@ script_mod! {
                 // past that the SDF used to degenerate into a rotated diamond
                 // (e.g. a 22px disc with r=11), instead of saturating at a circle.
                 let k = min(2. * r, min(size.x, size.y));
-                let bp = max(abs(p - size.xy) - (size.xy - vec2(k, k).xy), vec2(0., 0.));
-                self.dist = (length(bp) - k) / self.scale_factor;
+                let q = abs(p - size.xy) - (size.xy - vec2(k, k).xy);
+                // A square still has a negative interior distance. Omitting this
+                // term made a zero-radius box all boundary: its stroke covered
+                // the entire face, instead of just its edges.
+                let bp = max(q, vec2(0., 0.));
+                self.dist = (min(max(q.x, q.y), 0.) + length(bp) - k) / self.scale_factor;
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
             }

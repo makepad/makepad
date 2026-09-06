@@ -854,7 +854,16 @@ impl Cx {
                 return true;
             }
             StudioToApp::Custom(data) => {
-                self.call_event_handler(&Event::Custom(data));
+                if crate::ime::HostedBack::parse(&data).is_some_and(|back| back.handled.is_none()) {
+                    let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
+                    self.call_event_handler(&event);
+                    let Event::BackPressed { handled } = event else { unreachable!() };
+                    Self::send_studio_message(AppToStudio::Custom(crate::ime::HostedBack {
+                        handled: Some(handled.get()),
+                    }.to_json()));
+                } else {
+                    self.call_event_handler(&Event::Custom(data));
+                }
             }
             StudioToApp::KeepAlive | StudioToApp::None => {}
             StudioToApp::LiveChange { file_name, content } => {

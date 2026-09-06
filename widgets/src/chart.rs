@@ -1699,6 +1699,9 @@ pub struct TrendChart {
     pub color_accent: Vec4f,
     #[live(2.0)]
     pub line_width: f64,
+    /// Compact history when the surrounding UI already displays its value.
+    #[live]
+    pub sparkline: bool,
 
     #[rust]
     series: Vec<f64>,
@@ -1760,7 +1763,8 @@ impl Widget for TrendChart {
             }
             (min, max, self.series.len())
         };
-        if n < 2 || rect.size.x < 80.0 || rect.size.y < 60.0 {
+        if n < 2 || rect.size.x < (if self.sparkline { 12.0 } else { 80.0 })
+            || rect.size.y < (if self.sparkline { 8.0 } else { 60.0 }) {
             return DrawStep::done();
         }
         let pad = (max - min).max(1e-9) * 0.08;
@@ -1769,42 +1773,44 @@ impl Widget for TrendChart {
         let range = max - min;
 
         let gutter = 54.0;
-        let plot = Rect {
-            pos: rect.pos + dvec2(10.0, 8.0),
-            size: rect.size - dvec2(gutter + 18.0, 18.0),
+        let plot = if self.sparkline {
+            Rect { pos: rect.pos + dvec2(2.0, 2.0), size: rect.size - dvec2(4.0, 4.0) }
+        } else {
+            Rect { pos: rect.pos + dvec2(10.0, 8.0), size: rect.size - dvec2(gutter + 18.0, 18.0) }
         };
         let py = |v: f64| plot.pos.y + (1.0 - (v - min) / range) * plot.size.y;
 
-        // horizontal grid at nice ticks, labels in the right gutter
-        let step = Self::nice_step(range / 5.0);
-        let mut tick = (min / step).ceil() * step;
-        self.draw_grid.color = self.color_grid;
-        self.draw_text.color = self.color_text;
-        while tick < max {
-            let y = py(tick);
-            self.draw_grid.draw_abs(cx, Rect {
-                pos: dvec2(plot.pos.x, y),
-                size: dvec2(plot.size.x, 1.0),
-            });
-            let label = if step >= 1.0 {
-                format!("{:.0}", tick)
-            } else {
-                format!("{:.2}", tick)
-            };
-            self.draw_text
-                .draw_abs(cx, dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0), &label);
-            tick += step;
+        if !self.sparkline {
+            // horizontal grid at nice ticks, labels in the right gutter
+            let step = Self::nice_step(range / 5.0);
+            let mut tick = (min / step).ceil() * step;
+            self.draw_grid.color = self.color_grid;
+            self.draw_text.color = self.color_text;
+            while tick < max {
+                let y = py(tick);
+                self.draw_grid.draw_abs(cx, Rect {
+                    pos: dvec2(plot.pos.x, y),
+                    size: dvec2(plot.size.x, 1.0),
+                });
+                let label = if step >= 1.0 {
+                    format!("{:.0}", tick)
+                } else {
+                    format!("{:.2}", tick)
+                };
+                self.draw_text
+                    .draw_abs(cx, dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0), &label);
+                tick += step;
+            }
+            // vertical grid every ~90px
+            let vticks = (plot.size.x / 90.0).max(1.0) as usize;
+            for i in 1..=vticks {
+                let x = plot.pos.x + plot.size.x * i as f64 / vticks as f64;
+                self.draw_grid.draw_abs(cx, Rect {
+                    pos: dvec2(x, plot.pos.y),
+                    size: dvec2(1.0, plot.size.y),
+                });
+            }
         }
-        // vertical grid every ~90px
-        let vticks = (plot.size.x / 90.0).max(1.0) as usize;
-        for i in 1..=vticks {
-            let x = plot.pos.x + plot.size.x * i as f64 / vticks as f64;
-            self.draw_grid.draw_abs(cx, Rect {
-                pos: dvec2(x, plot.pos.y),
-                size: dvec2(1.0, plot.size.y),
-            });
-        }
-
         if !self.candles.is_empty() {
             let slot = plot.size.x / n as f64;
             let bw = (slot * 0.62).max(1.0);
@@ -1880,24 +1886,26 @@ impl Widget for TrendChart {
                 };
                 self.draw_seg.draw_abs(cx, r);
             }
-            // last-value marker line + label
-            let last = *self.series.last().unwrap();
-            let y = py(last);
-            self.draw_grid.color = self.color_accent;
-            let mut x = plot.pos.x;
-            while x < plot.pos.x + plot.size.x {
-                self.draw_grid.draw_abs(cx, Rect {
-                    pos: dvec2(x, y),
-                    size: dvec2(4.0, 1.0),
-                });
-                x += 8.0;
+            if !self.sparkline {
+                // last-value marker line + label
+                let last = *self.series.last().unwrap();
+                let y = py(last);
+                self.draw_grid.color = self.color_accent;
+                let mut x = plot.pos.x;
+                while x < plot.pos.x + plot.size.x {
+                    self.draw_grid.draw_abs(cx, Rect {
+                        pos: dvec2(x, y),
+                        size: dvec2(4.0, 1.0),
+                    });
+                    x += 8.0;
+                }
+                self.draw_text.color = self.color_accent;
+                self.draw_text.draw_abs(
+                    cx,
+                    dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0),
+                    &format!("{:.2}", last),
+                );
             }
-            self.draw_text.color = self.color_accent;
-            self.draw_text.draw_abs(
-                cx,
-                dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0),
-                &format!("{:.2}", last),
-            );
         }
         DrawStep::done()
     }

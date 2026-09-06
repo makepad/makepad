@@ -119,22 +119,22 @@ impl Cx {
 
             if self.script_data.resources.is_http_resource(request_id) {
                 let resource_info = {
-                    let handle = self
+                    let path = self
                         .script_data
                         .resources
                         .http_resources
                         .iter()
                         .find(|r| r.request_id == request_id)
-                        .map(|r| r.handle);
-                    if let Some(handle) = handle {
+                        .map(|r| r.abs_path.as_str());
+                    if let Some(path) = path {
                         let resources = self.script_data.resources.resources.borrow();
-                        if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
+                        if let Some(res) = resources.iter().find(|r| r.abs_path == path) {
                             format!(
                                 "abs_path={} web_url={:?} dependency_path={:?}",
                                 res.abs_path, res.web_url, res.dependency_path
                             )
                         } else {
-                            format!("handle={:?} (resource entry not found)", handle)
+                            format!("path={:?} (resource entry not found)", path)
                         }
                     } else {
                         "unknown resource".to_string()

@@ -140,6 +140,10 @@ fn derive_script_impl_inner(
                 .iter()
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
+                // Runtime widget state survives a stylesheet reapply. Explicit
+                // edits and ordinary source reloads still update the property.
+                let preserve_state = field.attrs.iter().any(|a| a.name == "apply_state");
+                if preserve_state { tb.add("if !matches!(apply, Apply::ScriptReapply) {"); }
                 tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
                     .add(").into(), apply);");
@@ -159,6 +163,7 @@ fn derive_script_impl_inner(
                     .add(",vm, apply, scope, v);");
                 tb.add("}");
                 tb.add("}");
+                if preserve_state { tb.add("}"); }
             }
             if field
                 .attrs

@@ -101,6 +101,7 @@ pub struct View {
     event_order: EventOrder,
 
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
     #[live(false)]
     skip_widget_tree_search: bool,
@@ -127,6 +128,8 @@ pub struct View {
 
     #[rust]
     script_async: ScriptAsyncCalls,
+    #[rust]
+    applying_style_render: bool,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -165,6 +168,13 @@ struct ViewTextureCache {
     pass: DrawPass,
     _depth_texture: Texture,
     color_texture: Texture,
+}
+
+/// Frozen cached framebuffer, including the pass and attachments that own it.
+/// Retain this until the compositor has finished presenting the old frame.
+pub struct ViewTextureSnapshot { cache: ViewTextureCache }
+impl ViewTextureSnapshot {
+    pub fn texture(&self) -> &Texture { &self.cache.color_texture }
 }
 
 impl ScriptHook for View {
@@ -256,7 +266,11 @@ impl ScriptHook for View {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
         if !self.scroll_bars.is_zero() {
-            if self.scroll_bars_obj.is_none() {
+            if let Some(bars) = self.scroll_bars_obj.as_mut() {
+                if apply.is_reload() {
+                    bars.script_apply(vm, apply, scope, self.scroll_bars.as_object().into());
+                }
+            } else {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::script_from_value(
                     vm,
                     self.scroll_bars.as_object().into(),
@@ -265,6 +279,11 @@ impl ScriptHook for View {
         }
 
         vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        // Dynamic children emitted by on_render have no declaration in this
+        // source vec. Re-render them against the new style too, preserving edits.
+        if matches!(apply,Apply::ScriptReapply) && !self.applying_style_render && self.on_render.as_object()!=ScriptObject::ZERO {
+            let _=self.script_call(vm,id!(render_style),NIL);
+        }
     }
 }
 
@@ -786,7 +805,7 @@ impl Widget for View {
         method: LiveId,
         args: ScriptValue,
     ) -> ScriptAsyncResult {
-        if method == live_id!(render) {
+        if method == live_id!(render) || method == live_id!(render_style) {
             // `me` protos off `self.source`, and the caller's `args` object
             // travels into the VM that owns `on_render` — both are heap values,
             // and a heap value means nothing outside the heap that minted it.
@@ -808,7 +827,7 @@ impl Widget for View {
                     self.source.clone(),
                     self.on_render.clone(),
                     args,
-                    id!(render),
+                    method,
                 )
             });
         }
@@ -820,7 +839,7 @@ impl Widget for View {
             return;
         };
 
-        if call.method() == id!(render) {
+        if call.method() == id!(render) || call.method()==id!(render_style) {
             if result.is_err() {
                 // An error mid-closure abandons every child emitted before it
                 // and used to do so with ZERO diagnostics — the "on_render
@@ -850,7 +869,10 @@ impl Widget for View {
                 // the next `make_render_me` protos off it (see there), and `me` is a
                 // throwaway whose children already hold their own refs.
                 let declaration = self.source.clone();
-                self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
+                let style=call.method()==id!(render_style);
+                self.applying_style_render=style;
+                self.script_apply(vm, &if style {Apply::ScriptReapply}else{Apply::Reload}, &mut Scope::empty(), me_obj.into());
+                self.applying_style_render=false;
                 self.source = declaration;
                 self.redraw(vm.cx_mut());
             }

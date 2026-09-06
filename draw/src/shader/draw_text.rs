@@ -3446,6 +3446,7 @@ pub struct FontFamily {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
     handle: ScriptHandle,
+    resource_path: String,
     id: String,
     asc: f32,
     desc: f32,
@@ -3478,9 +3479,12 @@ impl FontFamily {
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
-                let font_data = cx.get_resource_font_bytes(member.handle);
+                let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
 
                 if let Some(data) = font_data {
+                    if std::env::var_os("MAKEPAD_TRACE_FONT_LOAD").is_some() {
+                        log!("font load: member={} path={} id={:?} bytes={}", member.id, member.resource_path, font_id, data.len());
+                    }
                     if let Some(family) = member.lazy {
                         log!("lazy font family loaded: {:?} ({})", family, member.id);
                     }
@@ -3559,11 +3563,11 @@ impl FontFamily {
                         .lazy
                         .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
                 })
-                .map(|member| member.handle)
+                .map(|member| member.resource_path.as_str())
                 .collect::<Vec<_>>()
         };
-        for handle in handles {
-            cx.load_script_resource(handle);
+        for path in handles {
+            cx.load_script_resource_by_path(path);
         }
         {
             let fonts_ref = fonts.borrow();
@@ -3597,15 +3601,15 @@ impl FontFamily {
                             text,
                             has_missing_glyph,
                         )
-                        .then_some(member.handle)
+                        .then_some(member.resource_path.as_str())
                 })
                 .collect::<Vec<_>>()
         };
         if handles.is_empty() {
             return;
         }
-        for handle in handles {
-            cx.load_script_resource(handle);
+        for path in handles {
+            cx.load_script_resource_by_path(path);
         }
 
         self.update_font_definitions(cx, &mut fonts.borrow_mut());
@@ -3625,7 +3629,7 @@ fn font_member_weight(member: &FontMemberDef) -> Option<f32> {
 
 fn font_member_font_id(member: &FontMemberDef) -> FontId {
     let mut hasher = DefaultHasher::new();
-    member.handle.index().hash(&mut hasher);
+    member.resource_path.hash(&mut hasher);
     member.asc.to_bits().hash(&mut hasher);
     member.desc.to_bits().hash(&mut hasher);
     member.weight.to_bits().hash(&mut hasher);
@@ -3671,8 +3675,6 @@ impl ScriptHook for FontFamily {
             return false;
         };
 
-        // Use the object index as the unique id
-        self.id = LiveId(obj.index() as u64);
         self.members.clear();
         let selected_set = vm.cx().font_set().as_str().to_string();
         let map = vm.bx.heap.map_ref(obj);
@@ -3692,8 +3694,15 @@ impl ScriptHook for FontFamily {
             let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
             let member = FontMember::script_from_value(vm, kv.value);
             if let Some(ref handle_ref) = member.res {
+                let heap_key = vm.bx.heap.heap_key();
+                let Some(resource_path) = vm.cx().script_data.resources
+                    .path_for_handle(heap_key, handle_ref.as_handle()) else {
+                    error!("Font resource is not registered in its owning script heap");
+                    continue;
+                };
                 self.members.push(FontMemberDef {
                     handle: handle_ref.as_handle(),
+                    resource_path,
                     id: kv
                         .key
                         .as_id()
@@ -3710,6 +3719,17 @@ impl ScriptHook for FontFamily {
                 });
             }
         }
+
+        // Object and handle indices are local to a script heap. Font caches
+        // belong to Cx, so identify the complete ordered family by its actual
+        // resources and metrics. Identical families can safely share a cache
+        // across isolates, while different ones can never alias by index.
+        let mut hasher = DefaultHasher::new();
+        for member in &self.members {
+            font_member_font_id(member).hash(&mut hasher);
+            (member.lazy.map(|v| v as u32)).hash(&mut hasher);
+        }
+        self.id = LiveId(hasher.finish());
 
         // Don't eagerly register fonts here. Font registration is deferred
         // to ensure_fonts_loaded() which is called at draw time.

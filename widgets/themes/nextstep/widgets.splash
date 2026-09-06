@@ -1,0 +1,77 @@
+use mod.prelude.widgets_internal.*
+mod.widgets.Button.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.Button.draw_bg.border_radius = 0.0
+mod.widgets.Button.draw_bg.border_size = 2.0
+mod.widgets.Button.draw_bg.color_2 = #aaaaaa
+mod.widgets.TextInput.draw_bg.border_radius = 0.0
+mod.widgets.Window.pass.clear_color = #aaaaaa
+
+// Raised gray command buttons, with a depressed face while held.
+mod.widgets.Button.draw_bg.pixel = fn() {
+    let p=self.pos*self.rect_size
+    let size=self.rect_size
+    let sunken=self.down>0.5
+    let fill=#aaaaaa
+
+    let tl=min(p.x,p.y)
+    let br=min(size.x-p.x,size.y-p.y)
+    let d=min(tl,br)
+    let upper=tl<br
+    let raised_light=if d<1.0 {#ffffff}else{#aaaaaa}
+    let raised_dark=if d<1.0 {#555555}else{#808080}
+    let light=if sunken {#ffffff}else{raised_light}
+    let dark=if sunken {if d<1.0 {#808080}else{#555555}}else{raised_dark}
+    let edge=if upper {if sunken {dark}else{light}}else{if sunken {light}else{dark}}
+    let color=if d<2.0 {edge}else{fill}
+    let focus_p=p-vec2(4.0)
+    let focus_q=size-p-vec2(4.0)
+    let fd=min(min(focus_p.x,focus_p.y),min(focus_q.x,focus_q.y))
+    let dot=fract((floor(p.x)+floor(p.y))*0.5)<0.5
+    return if self.focus>0.5 && fd>=0.0 && fd<1.0 && dot {#000000}else{color}
+}
+// Sunken white edit fields, independent of the light theme's gradient material.
+mod.widgets.TextInput.draw_bg.pixel = fn() {
+    let p=self.pos*self.rect_size
+    let size=self.rect_size
+    let sunken=true
+    let fill=if self.disabled>0.5 {#aaaaaa}else{#ffffff}
+
+    let tl=min(p.x,p.y)
+    let br=min(size.x-p.x,size.y-p.y)
+    let d=min(tl,br)
+    let upper=tl<br
+    let raised_light=if d<1.0 {#ffffff}else{#aaaaaa}
+    let raised_dark=if d<1.0 {#555555}else{#808080}
+    let light=if sunken {#ffffff}else{raised_light}
+    let dark=if sunken {if d<1.0 {#808080}else{#555555}}else{raised_dark}
+    let edge=if upper {if sunken {dark}else{light}}else{if sunken {light}else{dark}}
+    let color=if d<2.0 {edge}else{fill}
+    return color
+}
+
+// A white combo field and a separate raised arrow button.
+mod.widgets.DropDown.draw_bg.pixel = fn() {
+    let p=self.pos*self.rect_size
+    let size=self.rect_size
+    let tl=min(p.x,p.y)
+    let br=min(size.x-p.x,size.y-p.y)
+    let edge=if tl<br {if tl<1.0 {#808080}else{#555555}}else{#ffffff}
+    let field=if min(tl,br)<2.0 {edge}else{if self.disabled>0.5 {#aaaaaa}else{#ffffff}}
+    let q=p-vec2(size.x-18.0,2.0)
+    let bs=vec2(16.0,size.y-4.0)
+    if q.x>=0.0 && q.y>=0.0 && q.x<bs.x && q.y<bs.y {
+        let a=min(q.x,q.y)
+        let b=min(bs.x-q.x,bs.y-q.y)
+        let pressed=self.down>0.5 || self.active>0.5
+        let face=if min(a,b)<1.0 {if (a<b)!=pressed {#ffffff}else{#808080}}else{#aaaaaa}
+        let ay=q.y-(bs.y*0.5-1.0)
+        let arrow=ay>=0.0 && ay<=3.0 && abs(q.x-bs.x*0.5)<=3.0-ay
+        return if arrow {if self.disabled>0.5 {#808080}else{#000000}}else{face}
+    }
+    return field
+}
+true
+
+// Square two-line panel frames; the app keeps the same resident widgets.
+mod.widgets.PanelView.draw_bg.bevel = 1.0
+mod.widgets.PanelView.draw_bg.border_radius = 0.0

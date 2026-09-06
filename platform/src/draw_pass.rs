@@ -142,7 +142,12 @@ impl DrawPass {
     pub fn new(cx: &mut Cx) -> Self {
         let uniforms_gen = cx.next_uniform_gen();
         let pass = cx.passes.alloc();
-        cx.passes[pass.draw_pass_id()].pass_uniforms_gen = uniforms_gen;
+        // A recycled capture pass can carry a window-local transform and
+        // frozen attachments. A new owner must start with a clean pass.
+        cx.passes[pass.draw_pass_id()] = CxDrawPass {
+            pass_uniforms_gen: uniforms_gen,
+            ..Default::default()
+        };
         pass
     }
 }
@@ -671,6 +676,34 @@ pub(crate) fn depth_attachment_size(
         let size = pass_size * dpi_factor;
         (size.x as usize, size.y as usize)
     })
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn a_recycled_capture_does_not_shift_the_next_compositor_pass() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let capture = DrawPass::new(&mut cx);
+        let id = capture.draw_pass_id();
+        let generation = cx.passes[id].pass_uniforms_gen;
+        cx.passes[id].view_shift = dvec2(82.0, 104.0);
+        cx.passes[id].view_scale = dvec2(0.5, 0.5);
+        cx.passes[id].pass_rect = Some(CxDrawPassRect::Size(dvec2(994.0, 644.0)));
+        cx.passes[id].keep_camera_matrix = true;
+        cx.passes[id].dont_clear = true;
+        drop(capture);
+
+        let scene = DrawPass::new(&mut cx);
+        assert_eq!(scene.draw_pass_id(), id);
+        let pass = &cx.passes[id];
+        assert_eq!(pass.view_shift, dvec2(0.0, 0.0));
+        assert_eq!(pass.view_scale, dvec2(1.0, 1.0));
+        assert!(pass.pass_rect.is_none());
+        assert!(!pass.keep_camera_matrix && !pass.dont_clear);
+        assert_ne!(pass.pass_uniforms_gen, generation);
+    }
 }
 
 #[cfg(test)]
