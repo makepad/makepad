@@ -15,11 +15,6 @@ pub struct Selected {
     pub title: String,
 }
 
-/// How long after a face or viewport change before the camera returns to
-/// the selected picture: the grid re-cuts its packing a beat after any
-/// resize, and the picture's place on the wall only exists after that.
-pub const REFOCUS_DELAY: f64 = 0.6;
-
 /// The most characters a tile caption carries before eliding.
 pub const CAPTION_CHARS: usize = 56;
 
