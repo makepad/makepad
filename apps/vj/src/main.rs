@@ -32669,7 +32669,17 @@ mod sync_tests {
         beat.period = Duration::from_millis(500);
         beat.next_beat = now - Duration::from_millis(625);
         let advanced = extrapolate_beat(&beat, now);
-        assert_eq!(advanced.next_beat, now + Duration::from_millis(375));
+        // How far ahead, not which f64. `Instant` is one f64 of seconds
+        // with a derived PartialEq, so `assert_eq!` on it is exact float
+        // equality -- and the two sides reach the same instant by
+        // different routes: the extrapolation goes 625ms back and adds
+        // two whole periods, this line goes 375ms forward. Those land one
+        // ULP apart or not depending on where the process clock happens
+        // to be, which made this test fail about half the time. The claim
+        // is that the next beat is 375ms out; a microsecond of tolerance
+        // is two parts per million of a 120 BPM period.
+        let ahead = (advanced.next_beat - now).as_secs_f64();
+        assert!((ahead - 0.375).abs() < 1e-6, "next beat {ahead}s out, want 0.375");
         assert_eq!(advanced.beat_index, 2);
         // Already in the future: untouched.
         beat.next_beat = now + Duration::from_millis(80);
