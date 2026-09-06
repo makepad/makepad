@@ -2837,7 +2837,7 @@ impl TreemapView {
         let last = names.len().saturating_sub(1);
         for (depth, name) in names.iter().enumerate() {
             let text = if depth == 0 {
-                name.clone()
+                "All files".to_string()
             } else {
                 format!("› {name}")
             };
