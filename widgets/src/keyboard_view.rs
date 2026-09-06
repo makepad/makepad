@@ -49,6 +49,10 @@ pub struct KeyboardView {
     /// so the cursor isn't pressed flush against the keyboard.
     #[live]
     keyboard_min_shift: f64,
+    /// Reflow content into the space above the keyboard instead of panning
+    /// the focused field. Useful for terminals and other full-window editors.
+    #[live]
+    keyboard_resize: bool,
     #[rust]
     next_frame: NextFrame,
 
@@ -112,6 +116,9 @@ impl KeyboardView {
         if keyboard_height <= 0.0 {
             return 0.0;
         }
+        if self.keyboard_resize {
+            return keyboard_height;
+        }
         let ime_rect = cx.get_ime_area_rect();
         // Without a registered IME area there is no field to keep visible.
         if ime_rect.size.y <= 0.0 {
@@ -139,7 +146,7 @@ impl KeyboardView {
 
     fn set_keyboard_shift(&mut self, cx: &mut Cx, shift: f64) {
         self.keyboard_shift = shift.max(0.0);
-        cx.keyboard_shift = self.keyboard_shift;
+        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
     }
 
     fn animate_to_shift(
@@ -188,7 +195,7 @@ impl KeyboardView {
         cx.begin_turtle(
             walk,
             self.outer_layout
-                .with_scroll(dvec2(0., self.keyboard_shift)),
+                .with_scroll(dvec2(0., if self.keyboard_resize { 0.0 } else { self.keyboard_shift })),
         );
     }
 
@@ -212,11 +219,11 @@ impl Widget for KeyboardView {
                     if dt < duration && duration > 0.0 {
                         let t = ease.map(dt / duration);
                         self.keyboard_shift = from_shift + (to_shift - from_shift) * t;
-                        cx.keyboard_shift = self.keyboard_shift;
+                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
                         self.next_frame = cx.new_next_frame();
                     } else {
                         self.keyboard_shift = to_shift;
-                        cx.keyboard_shift = self.keyboard_shift;
+                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
                         self.anim_state = AnimState::Open;
                     }
                     self.redraw(cx);
@@ -231,7 +238,7 @@ impl Widget for KeyboardView {
                     if dt < duration && duration > 0.0 {
                         let t = ease.map(dt / duration);
                         self.keyboard_shift = from_shift * (1.0 - t);
-                        cx.keyboard_shift = self.keyboard_shift;
+                        cx.keyboard_shift = if self.keyboard_resize { 0.0 } else { self.keyboard_shift };
                         self.next_frame = cx.new_next_frame();
                     } else {
                         self.keyboard_shift = 0.0;
@@ -330,7 +337,10 @@ impl Widget for KeyboardView {
         }) {
             self.begin(cx, walk);
         }
-        if let Some(walk) = self.draw_state.get() {
+        if let Some(mut walk) = self.draw_state.get() {
+            if self.keyboard_resize {
+                walk.height = Size::Fixed((cx.turtle().rect().size.y - self.keyboard_shift).max(1.0));
+            }
             self.view.draw_walk(cx, scope, walk)?;
         }
         self.end(cx);

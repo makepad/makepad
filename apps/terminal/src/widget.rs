@@ -120,7 +120,21 @@ script_mod! {
         pad_y: 4.0
         draw_bg +: {
             color: uniform(#x1a1b26)
+            inset: uniform(0.0)
             pixel: fn() {
+                let p = self.pos * self.rect_size
+                let tl = min(p.x, p.y)
+                let br = min(self.rect_size.x - p.x, self.rect_size.y - p.y)
+                if min(tl, br) < self.inset {
+                    // Classic sunken client edge: shadow then black at the
+                    // top/left, highlight then button face at bottom/right.
+                    let edge = if tl < br {
+                        if tl < 1.0 {#808080} else {#000000}
+                    } else {
+                        if br < 1.0 {#ffffff} else {theme.color_bg_app}
+                    }
+                    return edge
+                }
                 return vec4(self.color.rgb * self.color.a, self.color.a)
             }
         }
@@ -325,10 +339,14 @@ pub struct MpTerm {
 
 impl ScriptHook for MpTerm {
     fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        self.opaque_style = matches!(desktop_style::current_style(vm), desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
+        let style = desktop_style::current_style(vm);
+        let retro = matches!(style, desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
+        self.opaque_style = retro || style == desktop_style::DesktopStyle::Android;
+        self.draw_bg.draw_vars.set_uniform(vm.cx_mut(), id!(inset), &[if retro {2.0} else {0.0}]);
         self.style_colors = if desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
             makepad_wm_theme::current_for_vm(vm).and_then(|p| {
-                Some((parse_hex_rgb(p.get("foreground")?)?, parse_hex_rgb(p.get("background")?)?))
+                Some((parse_hex_rgb(p.get("term.foreground").or_else(|| p.get("foreground"))?)?,
+                    parse_hex_rgb(p.get("term.background").or_else(|| p.get("background"))?)?))
             })
         } else { None };
         if let (Some(session), Some((mut palette, fg, bg))) = (&mut self.session, self.original_colors) {

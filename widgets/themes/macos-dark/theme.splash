@@ -130,4 +130,7 @@ mod.theme.color_bevel_inset_2_drag = #5b5b60
 mod.theme.color_bevel_outset_1_drag = #5b5b60
 mod.theme.color_bevel_outset_2_drag = #5b5b60
 mod.theme.color_text_on_accent = #ffffff
+// Terminal surfaces follow the app unless this style supplies a console palette.
+mod.theme.color_terminal_bg = mod.theme.color_bg_app
+mod.theme.color_terminal_text = mod.theme.color_text
 true

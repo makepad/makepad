@@ -157,6 +157,8 @@ fn resolve_palette(vm: &mut ScriptVm, style: Option<&str>, path: Option<&str>) -
         ("accent", "color_focus"),
         ("selection", "color_bg_highlight"),
         ("muted", "color_bevel_outset_2"),
+        ("term.background", "color_terminal_bg"),
+        ("term.foreground", "color_terminal_text"),
     ] {
         if let Some(c) = vm
             .bx
@@ -355,6 +357,28 @@ mod tests {
             let p = current_for_vm(vm).unwrap();
             assert_eq!(p.get("background"), Some("#f3f3f3"), "{:?}", p);
             assert!(p.light_mode);
+        });
+    }
+
+    #[test]
+    fn terminal_colors_follow_the_style_without_changing_application_surfaces() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            for (style, dark, background, terminal) in [
+                (desktop_style::DesktopStyle::Windows2000, false, "#d4d0c8", Some("#000000")),
+                (desktop_style::DesktopStyle::NextStep, false, "#aaaaaa", Some("#ffffff")),
+                (desktop_style::DesktopStyle::Android, false, "#fef7ff", Some("#000000")),
+                (desktop_style::DesktopStyle::Android, true, "#141218", Some("#000000")),
+                (desktop_style::DesktopStyle::Macos, false, "#ececec", Some("#ececec")),
+            ] {
+                desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(makepad_widgets::widgets_mod);
+                apply(vm);
+                let p = current_for_vm(vm).unwrap();
+                assert_eq!(p.get("background"), Some(background), "{style:?}");
+                assert_eq!(p.get("term.background"), terminal, "{style:?}");
+            }
         });
     }
 
