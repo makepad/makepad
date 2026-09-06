@@ -1,0 +1,18 @@
+# weather — a small Makepad app with two resident faces: the full forecast
+# view and a compact home-widget tile, both fed by one Open-Meteo fetch. The
+# WM picks the face on the same window/swapchain via `HostedView`.
+
+[package]
+name = "makepad-weather"
+version = "0.1.0"
+edition = "2021"
+default-run = "weather"
+
+[[bin]]
+name = "weather"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }

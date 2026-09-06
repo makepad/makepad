@@ -69,6 +69,8 @@ let RunStudioExt = RunItem{
     on_run: fn(id){
         hub.run(
             {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
+    RunStudioRelease{name: "makepad-clock"}
+    RunStudioRelease{name: "makepad-weather"}
             "cargo", 
             ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json" "--bind=0.0.0.0"],
         )

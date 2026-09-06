@@ -7,6 +7,16 @@
 //! standalone window and in a module's isolate, where no `Startup` event
 //! ever arrives. Wheel zooms around the cursor, drag pans, a click logs
 //! the picture; `show` glides the camera onto one.
+//!
+//! The wall has two faces on the same widget: the full view, and the
+//! compact face a window manager asks for with `HostedViewMode` over
+//! `Event::Custom` (the home-screen tile). The compact face is the SAME
+//! grid over the same library and store worker, drawn small under a
+//! caption, with the camera on the picture the person last picked; nothing
+//! is rebuilt on a switch, so the filter, the pick and the library survive
+//! it (and a style reload) untouched.
+
+pub mod tile;
 
 use crate::library;
 use makepad_ai_services::wire::ToolResult;
@@ -15,6 +25,7 @@ use makepad_image_tiles::{Library, TileGrid, TileGridAction};
 use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 use makepad_widgets::*;
 use std::path::Path;
+use tile::{presentation, Presentation, Selected, REFOCUS_DELAY};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -25,35 +36,93 @@ script_mod! {
     mod.widgets.PhotosView = set_type_default() do mod.widgets.PhotosViewBase{
         width: Fill
         height: Fill
-        flow: Down
-        // The as-you-type search: every keystroke re-hangs the wall to the
-        // matches, the pictures flying to their new places.
-        search_row := View{
-            width: Fill
-            height: Fit
-            flow: Right
-            align: Align{y: 0.5}
-            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-            spacing: 8
-            search := TextInput{
-                width: Fill
-                height: Fit
-                empty_text: "Search the wall  (⌘F, Esc clears)"
-            }
-        }
-        grid_wrap := View{
+        flow: Overlay
+        // The full face: search, the wall, the status line.
+        full_face := View{
             width: Fill
             height: Fill
-            grid := TileGrid{}
+            flow: Down
+            // The as-you-type search: every keystroke re-hangs the wall to the
+            // matches, the pictures flying to their new places.
+            search_row := View{
+                width: Fill
+                height: Fit
+                flow: Right
+                align: Align{y: 0.5}
+                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+                spacing: 8
+                search := TextInput{
+                    width: Fill
+                    height: Fit
+                    empty_text: "Search photos"
+                }
+            }
+            grid_wrap := View{
+                width: Fill
+                height: Fill
+                grid := TileGrid{}
+            }
+            status := Label{
+                width: Fill
+                height: Fit
+                padding: Inset{left: 12 right: 12 top: 5 bottom: 5}
+                text: ""
+                draw_text +: {
+                    color: theme.color_text_meta
+                    text_style: theme.font_regular{font_size: 8.5}
+                }
+            }
         }
-        status := Label{
+        // The compact face's caption, over the same wall drawn small. It
+        // sits outside `grid_wrap` so its redraw never re-uploads the wall.
+        tile_caption := View{
+            visible: false
             width: Fill
-            height: Fit
-            padding: Inset{left: 12 right: 12 top: 5 bottom: 5}
-            text: ""
-            draw_text +: {
-                color: theme.color_text_meta
-                text_style: theme.font_regular{font_size: 8.5}
+            height: Fill
+            flow: Down
+            align: Align{x: 0.0 y: 1.0}
+            padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
+            caption_pill := RoundedView{
+                width: Fit
+                height: Fit
+                flow: Down
+                spacing: 2
+                padding: Inset{left: 12 right: 12 top: 7 bottom: 7}
+                draw_bg +: {color: #000a border_radius: 12.0}
+                caption_app := Label{
+                    padding: 0
+                    text: "Photos"
+                    draw_text +: {color: #ffff text_style: theme.font_bold{font_size: 10.0}}
+                }
+                caption_title := Label{
+                    padding: 0
+                    text: ""
+                    draw_text +: {color: #fffc text_style: theme.font_regular{font_size: 9.0}}
+                }
+            }
+        }
+        // The compact face when nothing is baked: says so, never a wall of
+        // stand-ins that could pass for the person's pictures.
+        tile_empty := View{
+            visible: false
+            width: Fill
+            height: Fill
+            flow: Down
+            spacing: 6
+            align: Align{x: 0.5 y: 0.5}
+            padding: 14
+            show_bg: true
+            draw_bg +: {color: theme.color_bg_container}
+            empty_icon := AppIcon{name: "photos" width: 40 height: 40}
+            empty_title := Label{
+                padding: 0
+                text: "No photo library"
+                draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 12.0}}
+            }
+            empty_body := Label{
+                padding: 0
+                text: "Add photos to your library to see them here."
+                draw_text +: {color: theme.color_text_meta text_style: theme.font_regular{font_size: 9.0}}
             }
         }
     }
@@ -62,12 +131,28 @@ script_mod! {
 /// The most matches a search reports.
 pub const SEARCH_LIMIT: usize = 12;
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct PhotosView {
     #[source]
     source: ScriptObjectRef,
     #[deref]
     view: View,
+    /// Which face the host asked for (`HostedViewMode` over `Event::Custom`).
+    #[rust]
+    mode: HostedViewMode,
+    /// The picture the person last clicked: the compact face's subject.
+    #[rust]
+    selected: Option<Selected>,
+    /// What the face widgets were last told; re-pushed after a mode switch
+    /// or a style reload (which re-applies the DSL over them).
+    #[rust]
+    applied: Option<Presentation>,
+    /// A pending return of the camera to the selected picture, armed when
+    /// the viewport or the face changed and the wall re-cuts itself.
+    #[rust]
+    refocus: Option<Timer>,
+    #[rust]
+    last_size: Vec2d,
     /// The collection to open (`None` = the default); set before the first
     /// event by the module's `create` or the standalone window.
     #[rust]
@@ -102,7 +187,69 @@ pub struct PendingAdd {
     done: TaskHandle<Result<makepad_image_tiles::bake::BakeSummary, String>>,
 }
 
+impl ScriptHook for PhotosView {
+    /// Every apply (the first, a hot reload, a style reapply) writes the
+    /// DSL over the face widgets: the face is pushed again on the next draw.
+    fn on_after_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        self.applied = None;
+    }
+}
+
 impl PhotosView {
+    /// The face the host asked for.
+    pub fn mode(&self) -> HostedViewMode {
+        self.mode
+    }
+
+    /// Switch faces. Nothing is rebuilt: the same grid draws at the new
+    /// size, and once it has re-cut its packing the camera returns to the
+    /// selected picture (the tile's subject; the full view opens on it).
+    pub fn set_mode(&mut self, cx: &mut Cx, mode: HostedViewMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.applied = None;
+        self.arm_refocus(cx);
+        self.view.redraw(cx);
+    }
+
+    /// The picture the person last picked.
+    pub fn selected(&self) -> Option<&Selected> {
+        self.selected.as_ref()
+    }
+
+    fn arm_refocus(&mut self, cx: &mut Cx) {
+        if self.selected.is_none() {
+            return;
+        }
+        if let Some(old) = self.refocus.take() {
+            cx.stop_timer(old);
+        }
+        self.refocus = Some(cx.start_timeout(REFOCUS_DELAY));
+    }
+
+    /// Push the current face into the widgets, once per change.
+    fn apply_presentation(&mut self, cx: &mut Cx) {
+        let (visible, query) = self
+            .view
+            .widget(cx, ids!(grid))
+            .borrow::<TileGrid>()
+            .map(|g| (g.visible_count(), g.query().to_string()))
+            .unwrap_or_default();
+        let wanted = presentation(self.mode, self.selected.as_ref(), self.pictures, visible, &query);
+        if self.applied.as_ref() == Some(&wanted) {
+            return;
+        }
+        self.view.widget(cx, ids!(search_row)).set_visible(cx, wanted.chrome);
+        self.view.widget(cx, ids!(status)).set_visible(cx, wanted.chrome);
+        self.view.widget(cx, ids!(tile_caption)).set_visible(cx, wanted.caption);
+        self.view.widget(cx, ids!(tile_empty)).set_visible(cx, wanted.empty);
+        self.view.label(cx, ids!(caption_app)).set_text(cx, &wanted.caption_app);
+        self.view.label(cx, ids!(caption_title)).set_text(cx, &wanted.caption_title);
+        self.applied = Some(wanted);
+        self.view.redraw(cx);
+    }
     /// Filter the wall to `query` as the person (or the assistant) types:
     /// the matches fly into a fresh packing, the rest shrink away, an
     /// empty query brings everything back. The box shows the query too.
@@ -175,6 +322,14 @@ impl PhotosView {
             .map(|grid| grid.items())
             .unwrap_or_default();
         search_items(&items, query)
+    }
+
+    /// Whether `item` is on the wall right now (a re-open renumbers).
+    fn search_item(&self, cx: &mut Cx, item: ItemId) -> Option<ItemId> {
+        self.view
+            .widget(cx, ids!(grid))
+            .borrow::<TileGrid>()
+            .and_then(|grid| grid.items().into_iter().find(|(id, _, _)| *id == item).map(|(id, _, _)| id))
     }
 
     /// The picture whose link is exactly `link` (an added file's path).
@@ -339,6 +494,23 @@ pub fn search_items(items: &[(ItemId, String, String)], query: &str) -> Vec<(Ite
 
 impl Widget for PhotosView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The host's face request. Anything else in a Custom message is
+        // not ours (the app around us reads its own vocabulary).
+        if let Event::Custom(json) = event {
+            if let Some(mode) = HostedViewMode::parse(json) {
+                self.set_mode(cx, mode);
+            }
+        }
+        if self.refocus.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
+            self.refocus = None;
+            if let Some(item) = self.selected.as_ref().map(|s| s.item) {
+                self.show(cx, item);
+            }
+        }
+        if matches!(event,Event::BackPressed{..}) && !self.query(cx).is_empty() && event.back_pressed() {
+            self.set_query(cx, "");
+            return;
+        }
         self.ensure_open(cx);
         self.poll_adds(cx);
         // ⌘F (or Ctrl+F, or a bare `/` while the wall has the keys) puts the
@@ -366,6 +538,14 @@ impl Widget for PhotosView {
                 match widget_action.cast::<TileGridAction>() {
                     TileGridAction::Opened { count, error: None } => {
                         self.pictures = count;
+                        self.applied = None;
+                        // A re-opened wall (an add) has new ids: the pick is
+                        // only kept when it is still on the wall.
+                        if let Some(item) = self.selected.as_ref().map(|s| s.item) {
+                            if self.search_item(cx, item).is_none() {
+                                self.selected = None;
+                            }
+                        }
                         let text = format!("{count} pictures — {}", self.library_root);
                         self.set_status(cx, text);
                         // A re-opened wall (an add) keeps the words in the box.
@@ -383,20 +563,46 @@ impl Widget for PhotosView {
                     }
                     TileGridAction::Opened { error: Some(e), .. } => {
                         self.pictures = 0;
+                        self.selected = None;
+                        self.applied = None;
                         self.set_status(cx, format!("{e} — {}", library::how_to_bake()));
                     }
                     TileGridAction::Clicked { item, title, link, .. } => {
                         let text = format!("#{item}  {}  {link}", title.chars().take(140).collect::<String>());
                         self.set_status(cx, text);
+                        self.selected = Some(Selected { item, title });
+                        self.applied = None;
                     }
                     TileGridAction::None => {}
                 }
+            }
+        }
+        if let Event::Actions(_) = event {
+            if self.applied.is_none() {
+                self.apply_presentation(cx);
             }
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ensure_open(cx);
+        if self.applied.is_none() {
+            self.apply_presentation(cx);
+        }
+        // A new viewport (the host's tile size, a rotation) re-cuts the
+        // wall: the camera returns to the pick once that has settled.
+        let size = cx.turtle().rect().size;
+        if size.x >= 1.0 && (size.x - self.last_size.x).abs() + (size.y - self.last_size.y).abs() > 0.5 {
+            if self.last_size.x >= 1.0 {
+                self.arm_refocus(cx);
+            }
+            let short = size.y < 150.0;
+            self.view.widget(cx, ids!(empty_body)).set_visible(cx, !short);
+            let icon_size = if short {28.0} else {40.0};
+            let mut icon = self.view.widget(cx, ids!(empty_icon));
+            script_apply_eval!(cx, icon, {width: #(icon_size) height: #(icon_size)});
+            self.last_size = size;
+        }
         self.view.draw_walk(cx, scope, walk)
     }
 }
