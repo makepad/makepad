@@ -798,6 +798,42 @@ script_mod! {
             color: #x8e9aa7
             text_style: theme.font_bold{font_size: 8}
         }
+        draw_mark_top +: {
+            color: #xe5484d
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let split = h * 0.58
+                sdf.move_to(0.5, 0.5)
+                sdf.line_to(w - 0.5, 0.5)
+                sdf.line_to(w - 0.5, split)
+                sdf.line_to(w * 0.5, h - 0.5)
+                sdf.line_to(0.5, split)
+                sdf.close_path()
+                sdf.fill_keep(self.color)
+                sdf.stroke(#x00000066, 1.0)
+                return sdf.result
+            }
+        }
+        draw_mark_bottom +: {
+            color: #xf5c542
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let split = h * 0.42
+                sdf.move_to(w * 0.5, 0.5)
+                sdf.line_to(w - 0.5, split)
+                sdf.line_to(w - 0.5, h - 0.5)
+                sdf.line_to(0.5, h - 0.5)
+                sdf.line_to(0.5, split)
+                sdf.close_path()
+                sdf.fill_keep(self.color)
+                sdf.stroke(#x00000066, 1.0)
+                return sdf.result
+            }
+        }
         draw_head +: {
             color: uniform(#xffffff)
             glow: uniform(#x46e8a8)
@@ -4912,6 +4948,14 @@ pub struct WaveLane {
     pub loop_span: Option<(f64, f64)>,
     /// One-based loop slot shown at the overlay's top-left.
     pub loop_slot: Option<u8>,
+    /// The operator's own marks, in source seconds — the tile timebase,
+    /// like `loop_span`. The cue, the saved slots with the colour each
+    /// is wearing, and the loops the finder offered. Named apart from
+    /// `loop_slot` above, which is a different thing: that one is which
+    /// pad the RUNNING loop came from.
+    pub cue_secs: f64,
+    pub saved_slots: Vec<(u16, f64, f64, u32)>,
+    pub found_loops: Vec<(f64, f64)>,
     /// Playback rate, so the grid rules where the music actually lands.
     pub rate: f64,
     pub playing: bool,
@@ -5008,6 +5052,18 @@ impl WaveLane {
         (cols_per_px as f64 * rate.abs().max(0.01)) as f32
     }
 
+    /// Where a mark at `secs` of SOURCE time lands on this lane, in
+    /// screen x: the tile column it sits on, measured from the column
+    /// under the middle of the lane, over this lane's own zoom.
+    ///
+    /// The whole-track strip answers the same question by a fraction of
+    /// the record's length. That is the other surface's space and cannot
+    /// be borrowed: this one scrolls, and what is under the middle
+    /// changes every frame.
+    pub fn mark_x(secs: f64, centre_col: f64, lane_cols: f64, middle_x: f64) -> f64 {
+        middle_x + (secs * ZOOM_COLS_PER_SEC - centre_col) / lane_cols.max(1e-4)
+    }
+
     /// Beat period in tile columns, and a downbeat column, for the ruling.
     /// The grid is in SOURCE time, which is exactly the tile timebase, so
     /// the rate does not enter here — a tempo-matched deck rules the same
@@ -5075,6 +5131,14 @@ pub struct VjWaveScroll {
     draw_lane: DrawWaveLane,
     #[live]
     draw_head: DrawQuad,
+    /// The mark chips. Two shapes and not four: a chip hanging from the
+    /// top edge and a chip standing on the bottom one. The colour is a
+    /// per-instance field, so one drawer serves the cue and every saved
+    /// slot's own hue without a uniform lingering between draws.
+    #[live]
+    draw_mark_top: DrawColor,
+    #[live]
+    draw_mark_bottom: DrawColor,
     #[live]
     draw_text: DrawText,
     #[rust]
@@ -5309,6 +5373,35 @@ impl VjWaveScroll {
 
     /// Push the deck's stem knobs into the lane: a layer shrinks as its
     /// knob comes down and vanishes when it is killed.
+    /// The marks for one deck. Named as the strip's are, so the two
+    /// surfaces read the same at the call site.
+    pub fn set_cue_marker(&mut self, cx: &mut Cx, deck: DeckId, secs: f64) {
+        let lane = &mut self.lanes[deck.index()];
+        if (lane.cue_secs - secs).abs() < 1e-9 {
+            return;
+        }
+        lane.cue_secs = secs;
+        self.area.redraw(cx);
+    }
+
+    pub fn set_loop_slots(&mut self, cx: &mut Cx, deck: DeckId, slots: &[(u16, f64, f64, u32)]) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.saved_slots == slots {
+            return;
+        }
+        lane.saved_slots = slots.to_vec();
+        self.area.redraw(cx);
+    }
+
+    pub fn set_found_loops(&mut self, cx: &mut Cx, deck: DeckId, spans: &[(f64, f64)]) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.found_loops == spans {
+            return;
+        }
+        lane.found_loops = spans.to_vec();
+        self.area.redraw(cx);
+    }
+
     pub fn set_stem_gain(&mut self, cx: &mut Cx, deck: DeckId, gains: [f32; 4]) {
         let lane = &mut self.lanes[deck.index()];
         if lane.stem_gain == gains {
@@ -5617,6 +5710,81 @@ impl Widget for VjWaveScroll {
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
             set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now));
             self.draw_lane.draw_abs(cx, lane_rect);
+        }
+
+        // The operator's own marks, over the wave. The same shapes and
+        // colours the whole-track strip uses -- the two surfaces are one
+        // visual language -- but never its coordinate space: the strip
+        // maps a fraction of the whole record, this maps tile columns
+        // around the head. Found loops ride the bottom edge and everything
+        // else the top, which is what keeps the two rows from colliding.
+        //
+        // Drawn in the strip's own order, so a coincidence resolves the
+        // same way on both: the cue under the saved slots, because the
+        // numbered pad is the one that has to be read correctly to be
+        // played. All of it under the head, which is the only thing here
+        // that is happening now.
+        for index in 0..2 {
+            if !self.lanes[index].loaded {
+                continue;
+            }
+            let lane_cols =
+                WaveLane::lane_zoom(cols_per_px, self.lanes[index].rate).max(1e-4) as f64;
+            // The captured centre only while a loop is really running --
+            // the same filter the waveform itself takes. A span that never
+            // opened can leave a centre latched, and marks standing still
+            // against a scrolling wave are worse than no marks.
+            let centre = self.loop_centres[index]
+                .filter(|_| moving_heads[index])
+                .unwrap_or_else(|| self.lanes[index].head_column_at(now));
+            let lane_rect = self.lane_rects[index];
+            let (chip_w, chip_h) = (9.0f64, 11.0f64);
+            let middle_x = rect.pos.x + rect.size.x * 0.5;
+            let x_of = |secs: f64| WaveLane::mark_x(secs, centre, lane_cols, middle_x);
+            // Off the lane is SKIPPED, never clamped: a chip parked at the
+            // edge would claim a mark is there when it is seconds away.
+            let visible = |x: f64| {
+                x + chip_w * 0.5 >= lane_rect.pos.x
+                    && x - chip_w * 0.5 <= lane_rect.pos.x + lane_rect.size.x
+            };
+            // Snapped to whole pixels. The chip is nine wide with a
+            // one-pixel stroke: at a fractional x that stroke straddles
+            // two pixels and halves its weight in each, and since the
+            // centre moves every frame the blur crawls as the wave
+            // scrolls. The same reason the waveform snaps its own centre.
+            let top_at = |x: f64| Rect {
+                pos: dvec2((x - chip_w * 0.5).round(), lane_rect.pos.y),
+                size: dvec2(chip_w, chip_h),
+            };
+            let bottom_at = |x: f64| Rect {
+                pos: dvec2(
+                    (x - chip_w * 0.5).round(),
+                    lane_rect.pos.y + lane_rect.size.y - chip_h,
+                ),
+                size: dvec2(chip_w, chip_h),
+            };
+
+            for k in 0..self.lanes[index].found_loops.len() {
+                let (start, _) = self.lanes[index].found_loops[k];
+                let x = x_of(start);
+                if visible(x) {
+                    self.draw_mark_bottom.color = Vec4f::from_u32(0xf5c542ff);
+                    self.draw_mark_bottom.draw_abs(cx, bottom_at(x));
+                }
+            }
+            let cue_x = x_of(self.lanes[index].cue_secs);
+            if visible(cue_x) {
+                self.draw_mark_top.color = Vec4f::from_u32(0xe5484dff);
+                self.draw_mark_top.draw_abs(cx, top_at(cue_x));
+            }
+            for k in 0..self.lanes[index].saved_slots.len() {
+                let (_, start, _, colour) = self.lanes[index].saved_slots[k];
+                let x = x_of(start);
+                if visible(x) {
+                    self.draw_mark_top.color = Vec4f::from_u32(colour);
+                    self.draw_mark_top.draw_abs(cx, top_at(x));
+                }
+            }
         }
 
         // Slot number at the visible top-left of the active band. Text is
@@ -8401,6 +8569,29 @@ mod tests {
             unscaled(&a),
             unscaled(&b)
         );
+    }
+
+    /// A mark is drawn where the record says it is, in the lane's own
+    /// scrolling space rather than the strip's whole-track one.
+    #[test]
+    fn a_mark_lands_where_the_record_says_it_is() {
+        let centre = 12.0 * ZOOM_COLS_PER_SEC;
+        let middle = 500.0;
+        let cols = 4.0;
+        // The second the head is on sits under the middle of the lane.
+        assert!((WaveLane::mark_x(12.0, centre, cols, middle) - middle).abs() < 1e-9);
+        // One second later is one second's worth of columns to the right,
+        // at this lane's own zoom...
+        let ahead = WaveLane::mark_x(13.0, centre, cols, middle);
+        assert!((ahead - middle - ZOOM_COLS_PER_SEC / cols).abs() < 1e-9, "{ahead}");
+        // ...and one second earlier is the same distance the other way.
+        let behind = WaveLane::mark_x(11.0, centre, cols, middle);
+        assert!((middle - behind - ZOOM_COLS_PER_SEC / cols).abs() < 1e-9, "{behind}");
+        // A lane showing more seconds in the same pixels draws the same
+        // mark nearer the middle, which is what keeps a mark agreeing
+        // with the waveform under it.
+        let wider = WaveLane::mark_x(13.0, centre, cols * 2.0, middle);
+        assert!(wider < ahead && wider > middle, "{wider} against {ahead}");
     }
 
     #[test]

@@ -7795,8 +7795,8 @@ pub struct App {
     /// operator picked is still there next launch.
     ///
     /// Seeded with the lane's OWN default rather than left at zero: it is
-    /// pushed into the widget on first sight, and a zero clamps to the
-    /// tightest zoom there is -- which opened every session an inch from
+    /// pushed into the widget on first sight, and a zero would clamp to
+    /// the tightest zoom there is and open every session an inch from
     /// the playhead.
     #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
     wave_zoom_secs: f64,
@@ -24124,6 +24124,37 @@ p2 {}
         }
     }
 
+    /// What a deck has marked, in the shape both wave surfaces take: the
+    /// cue, the saved slots with the colour each is wearing, and the loops
+    /// the finder offered.
+    ///
+    /// One rule in one place. The lane and the strip drawing an operator's
+    /// own marks differently would be a bug nobody could explain, and the
+    /// binding path and the per-frame path are two callers of the same
+    /// question.
+    fn deck_marks(
+        state: &crate::decks::DeckState,
+    ) -> (f64, Vec<(u16, f64, f64, u32)>, Vec<(f64, f64)>) {
+        let slots = state
+            .loop_slots
+            .iter()
+            .map(|entry| {
+                (
+                    entry.slot,
+                    entry.span.start_secs,
+                    entry.span.end_secs,
+                    entry.shown_colour(),
+                )
+            })
+            .collect();
+        let found = state
+            .found_loops
+            .iter()
+            .map(|span| (span.start_secs, span.end_secs))
+            .collect();
+        (state.cue_secs, slots, found)
+    }
+
     /// Bind a deck's tiles + grid into the scrolling lane and its overview.
     fn push_deck_wave(&mut self, cx: &mut Cx, deck: DeckId) {
         let index = deck.index();
@@ -24135,6 +24166,7 @@ p2 {}
             .map(|analysis| analysis.tiles.zoom.len())
             .unwrap_or(0);
         let state = self.decks.deck(deck);
+        let (cue_secs, saved_slots, found_loops) = Self::deck_marks(state);
         let lane = WaveLane {
             pyramid,
             stem_pyramid,
@@ -24158,6 +24190,12 @@ p2 {}
             ],
             // Stamped by the widget when it takes the lane.
             stamp: 0.0,
+            // Carried, not defaulted: `set_lane` REPLACES the lane, so a
+            // binding built without these would blank the marks the pump
+            // had already put there and keep blanking them.
+            cue_secs,
+            saved_slots,
+            found_loops,
         };
         let waves = self.ui.widget(cx, ids!(music_waves));
         if let Some(mut scroll) = waves.borrow_mut::<VjWaveScroll>() {
@@ -24397,24 +24435,7 @@ p2 {}
                 DeckLoad::Empty | DeckLoad::Loading { .. } => false,
             };
             let loop_on = state.loop_on();
-            let loop_slots: Vec<(u16, f64, f64, u32)> = state
-                .loop_slots
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.slot,
-                        entry.span.start_secs,
-                        entry.span.end_secs,
-                        entry.shown_colour(),
-                    )
-                })
-                .collect();
-            let found_loops: Vec<(f64, f64)> = state
-                .found_loops
-                .iter()
-                .map(|span| (span.start_secs, span.end_secs))
-                .collect();
-            let cue_secs = state.cue_secs;
+            let (cue_secs, loop_slots, found_loops) = Self::deck_marks(state);
             let loop_beats = state.loop_ticks;
             let loop_armed = state.loop_armed.is_some();
             let refined_by_beats = self.deck_analysis[index]
@@ -24686,6 +24707,12 @@ p2 {}
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
                 scroll.set_loop_span(cx, deck, loop_span, None);
+                // The same marks the strip gets, from the same locals: the
+                // lane is the surface an operator actually mixes against,
+                // and it was the one that could not show them.
+                scroll.set_cue_marker(cx, deck, cue_secs);
+                scroll.set_loop_slots(cx, deck, &loop_slots);
+                scroll.set_found_loops(cx, deck, &found_loops);
                 scroll.set_stem_gain(cx, deck, stem_gains);
             };
             if let Some(mut strip) =
