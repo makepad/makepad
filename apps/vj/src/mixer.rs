@@ -5389,6 +5389,7 @@ impl MixEngine {
                     .unwrap_or(0.0);
                 let scratch_rate = d.scratch.tick(rate, deck_rate, pos_secs);
                 let scratching = d.scratch.active();
+                let reverse = scratching && scratch_rate < 0.0;
                 let mut stem_gain = [0.0f32; STEM_COUNT];
                 for ((slot, ramp), blend) in stem_gain
                     .iter_mut()
@@ -5519,7 +5520,15 @@ impl MixEngine {
                 // A span owns the playhead, on both read paths. Wrap BEFORE
                 // the read so no frame past the out point is ever emitted.
                 if let Some((start, end)) = d.loop_span {
-                    if d.playhead_frames() >= end {
+                    // Two-sided, because a record running backwards leaves
+                    // a loop at IN. `wrapped_into_span` already folds a
+                    // position below the span (it is a remainder, not a
+                    // clamp), so the landing needs nothing new. The GHOST's
+                    // own wrap above stays one-sided on purpose: its step
+                    // is latched from the deck's tempo when it is armed and
+                    // never goes negative, so it only ever leaves at OUT.
+                    let head = d.playhead_frames();
+                    if head >= end || (reverse && head < start) {
                         // Land MODULO the length, keeping the overshoot.
                         // Resetting to IN exactly discards up to a step
                         // per lap — a held loop walks audibly early —
