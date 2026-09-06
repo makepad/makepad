@@ -239,7 +239,7 @@ script_mod! {
     let PanelText = Label{
         width: Fill
         draw_text +: {
-            color: #x22303c
+            color: theme.color_text
             text_style: theme.font_regular{font_size: 9}
         }
     }
@@ -254,21 +254,21 @@ script_mod! {
             margin: Inset{left: 22}
         }
         draw_text +: {
-            color: #x223038
-            color_hover: #x000000
-            color_down: #x000000
-            color_active: #x223038
-            color_focus: #x223038
+            color: theme.color_text
+            color_hover: theme.color_text_hover
+            color_down: theme.color_text_hover
+            color_active: theme.color_text
+            color_focus: theme.color_text
             text_style: theme.font_regular{font_size: 11}
         }
     }
 
     let AppButton = Button{
         draw_text +: {
-            color: #x223038
-            color_hover: #x000000
-            color_focus: #x223038
-            color_down: #x000000
+            color: theme.color_text
+            color_hover: theme.color_text_hover
+            color_focus: theme.color_text
+            color_down: theme.color_text_hover
             text_style: theme.font_regular{font_size: 12}
         }
     }
@@ -489,7 +489,7 @@ script_mod! {
                                 spacing: 2
                                 draw_bg +: {
                                     corner_radius: 12.0
-                                    tint_color: #xf8fbff
+                                    tint_color: theme.color_bg_container
                                     tint_alpha: 0.30
                                 }
                                 // View-effects group first: these two act
@@ -504,7 +504,7 @@ script_mod! {
                                 // popover, so keep it readable.
                                 warp_check := LayerCheck{
                                     text: "Space warp"
-                                    draw_text +: { color_disabled: #x8a8f98 }
+                                    draw_text +: { color_disabled: theme.color_text_disabled }
                                 }
                                 Hr{
                                     height: 16
@@ -531,12 +531,12 @@ script_mod! {
                                 margin: Inset{left: 14, bottom: 6}
                                 padding: Inset{left: 12, right: 12, top: 7, bottom: 7}
                                 draw_bg +: {
-                                    color: #xf8fbfff0
+                                    color: theme.color_bg_container
                                     border_radius: 8.0
                                 }
                                 location_status_text := Label{
                                     draw_text +: {
-                                        color: #x223038
+                                        color: theme.color_text
                                         text_style: theme.font_regular{font_size: 10}
                                     }
                                 }
@@ -569,18 +569,19 @@ script_mod! {
                             testmap_panel := mod.widgets.glass.Panel{
                                 visible: false
                                 flow: Down
-                                width: 520
+                                width: Fill
+                                max_width: 520
                                 height: Fit
                                 padding: Inset{left: 24, right: 24, top: 20, bottom: 20}
                                 spacing: 8
                                 draw_bg +: {
                                     corner_radius: 14.0
-                                    tint_color: #xf8fbff
+                                    tint_color: theme.color_bg_container
                                     tint_alpha: 0.36
                                 }
                                 Label{
                                     draw_text +: {
-                                        color: #x223038
+                                        color: theme.color_text
                                         text_style: theme.font_bold{font_size: 13}
                                     }
                                     text: "Amsterdam test map"
@@ -588,25 +589,25 @@ script_mod! {
                                 testmap_headline := Label{
                                     width: Fill
                                     draw_text +: {
-                                        color: #x223038
+                                        color: theme.color_text
                                         text_style: theme.font_bold{font_size: 10.5}
                                     }
                                 }
                                 // Track and fill: the fill's width is set
                                 // from the bake fraction each frame.
                                 RoundedView{
-                                    width: 470
+                                    width: Fill
                                     height: 10
                                     margin: Inset{top: 2, bottom: 2}
                                     draw_bg +: {
-                                        color: #x22303820
+                                        color: theme.color_bevel_inset_2
                                         border_radius: 5.0
                                     }
                                     testmap_bar := RoundedView{
                                         width: 0
                                         height: Fill
                                         draw_bg +: {
-                                            color: #x1d4ed8
+                                            color: theme.color_focus
                                             border_radius: 5.0
                                         }
                                     }
@@ -615,7 +616,7 @@ script_mod! {
                                 testmap_log := Label{
                                     width: Fill
                                     draw_text +: {
-                                        color: #x6b7784
+                                        color: theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 8.5}
                                     }
                                 }
@@ -2681,4 +2682,9 @@ mod tests {
         assert_eq!(map.source_config(), Some(&config));
         assert_eq!(config, TileSourceConfig::http_archive(crate::provisioner::demo::HOSTED_CONFIG.tiles));
     }
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

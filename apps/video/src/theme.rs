@@ -6,7 +6,7 @@
 //! square either way. Flat fills only: no gradients, no rounded corners.
 
 use makepad_widgets::*;
-use std::sync::OnceLock;
+
 
 /// Every color video paints, as `#rrggbb` strings.
 #[derive(Clone, Debug)]
@@ -41,15 +41,15 @@ impl Palette {
         }
     }
 
-    /// The palette for this process, read once.
-    pub fn shared() -> &'static Palette {
-        static PALETTE: OnceLock<Palette> = OnceLock::new();
-        PALETTE.get_or_init(Palette::load)
+    /// Resolve against the owning Splash VM on each application/style reload.
+    pub fn for_vm(vm: &mut ScriptVm) -> Self {
+        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
     }
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
+    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
+    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
 
-    /// The palette wm exported for this process, or Tokyo Night.
-    pub fn load() -> Self {
-        let Some(p) = makepad_wm_theme::current() else {
+        let Some(p) = palette else {
             return Self::tokyo_night();
         };
         Self {

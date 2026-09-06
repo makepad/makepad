@@ -32,7 +32,7 @@ script_mod! {
         width: Fill
         height: 20
         draw_text +: {
-            color: #x8da0b5
+            color: theme.color_text_disabled
             text_style: theme.font_bold{font_size: 9.0}
         }
     }
@@ -41,7 +41,7 @@ script_mod! {
         width: Fill
         height: Fit
         draw_text +: {
-            color: #x667789
+            color: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 9.0}
         }
     }
@@ -50,7 +50,7 @@ script_mod! {
         width: Fill
         height: Fit
         draw_text +: {
-            color: #xa9b6c4
+            color: theme.color_text
             text_style: theme.font_regular{font_size: 9.0}
         }
     }
@@ -58,16 +58,16 @@ script_mod! {
     let ToolButton = Button {
         height: 30
         draw_bg +: {
-            color: #x27313c
-            color_hover: #x334252
-            color_down: #x1d252e
-            border_color: #x52677c
+            color: theme.color_outset
+            color_hover: theme.color_outset_hover
+            color_down: theme.color_outset_down
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
         }
         draw_text +: {
-            color: #xe7edf3
-            color_hover: #xffffffff
+            color: theme.color_text
+            color_hover: theme.color_text
             text_style: theme.font_bold{font_size: 9.5}
         }
     }
@@ -101,21 +101,23 @@ script_mod! {
         height: 24
         padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
         draw_bg +: {
-            color: #x1b232c
-            color_hover: #x2a3542
-            color_down: #x151b22
-            border_color: #x1b232c
+            color: theme.color_inset
+            color_hover: theme.color_outset_hover
+            color_down: theme.color_outset_down
+            border_color: theme.color_inset
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
         }
         draw_text +: {
-            color: #x9aa8b7
-            color_hover: #xffffffff
+            color: theme.color_text_disabled
+            color_hover: theme.color_text
             text_style: theme.font_bold{font_size: 9.0}
         }
     }
     mod.widgets.FabricMeasurementGridBase = #(FabricMeasurementGrid::register_widget(vm))
     mod.widgets.FabricMeasurementGrid = set_type_default() do mod.widgets.FabricMeasurementGridBase {
+        color_text: theme.color_text
+        color_dim: theme.color_text_disabled
         width: Fill
         height: Fill
         grid := DataGrid {
@@ -126,17 +128,17 @@ script_mod! {
             default_col_width: 110.0
             default_row_height: 24.0
             row_header_width: 30.0
-            color_bg: #x161d25
-            color_cell: #x1a222c
-            color_cell_alt: #x1d2631
-            color_text: #xdbe4ee
-            color_header: #x222c38
-            color_header_active: #x2f3d4d
-            color_header_text: #x9aa8b7
-            color_selection: #x4fa3ff26
-            color_selection_border: #x4fa3ff
-            draw_text +: {color: #xdbe4ee}
-            draw_text_bold +: {color: #xdbe4ee}
+            color_bg: theme.color_bg_app
+            color_cell: theme.color_bg_container
+            color_cell_alt: theme.color_inset
+            color_text: theme.color_text
+            color_header: theme.color_inset
+            color_header_active: theme.color_outset_hover
+            color_header_text: theme.color_text_disabled
+            color_selection: theme.color_bg_highlight
+            color_selection_border: theme.color_focus
+            draw_text +: {color: theme.color_text}
+            draw_text_bold +: {color: theme.color_text}
             Editor := TextInput {
                 width: Fill
                 height: Fill
@@ -145,16 +147,16 @@ script_mod! {
                 draw_bg +: {
                     border_radius: 0.0
                     border_size: 2.0
-                    border_color: #x4fa3ff
-                    border_color_hover: #x4fa3ff
-                    border_color_focus: #x4fa3ff
-                    color: #x0f151c
-                    color_hover: #x0f151c
-                    color_focus: #x0f151c
+                    border_color: theme.color_focus
+                    border_color_hover: theme.color_focus
+                    border_color_focus: theme.color_focus
+                    color: theme.color_inset
+                    color_hover: theme.color_inset
+                    color_focus: theme.color_inset
                 }
                 draw_text +: {
                     text_style: theme.font_code{font_size: 9.0}
-                    color: #xffffffff
+                    color: theme.color_text
                 }
             }
         }
@@ -182,7 +184,7 @@ script_mod! {
                         width: Fill
                         height: Fit
                         draw_text +: {
-                            color: #xa9b6c4
+                            color: theme.color_text
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
@@ -190,7 +192,7 @@ script_mod! {
                         width: Fit
                         height: Fit
                         draw_text +: {
-                            color: #x667789
+                            color: theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 8.0}
                         }
                     }
@@ -213,32 +215,41 @@ script_mod! {
             main_window := Window {
                 window.title: "Fabric"
                 window.inner_size: vec2(1400, 900)
-                pass +: {clear_color: #x0b1016}
+                pass +: {clear_color: theme.color_bg_app}
                 body +: {
                     width: Fill
                     height: Fill
-                    flow: Right
+                    flow: Down
                     spacing: 1
                     padding: 0
+                    phone_pages := View{
+                        visible: false width: Fill height: Fit
+                        flow: Right{wrap: true} padding: 8 spacing: 6
+                        phone_design := Button{text: "Design"}
+                        phone_model := Button{text: "Model"}
+                        phone_measures := Button{text: "Measures"}
+                    }
+                    workspace := View{width: Fill height: Fill flow: Right spacing: 1
                     // Events go to children in draw order here, first come first
                     // served: the licence modal lives inside the LEFT column and
                     // must get a click before the body view under it does.
                     event_order: EventOrder.Down
 
-                    left_panel := SolidView {
+                    left_panel := ScrollYView {
+                        show_bg: true
                         width: 320
                         height: Fill
                         flow: Down
                         spacing: 8
                         padding: 14
-                        draw_bg +: {color: #x161d25}
+                        draw_bg +: {color: theme.color_bg_app}
 
                         Label {
                             width: Fill
                             height: 28
                             text: "FABRIC"
                             draw_text +: {
-                                color: #xf0f4f8
+                                color: theme.color_text
                                 text_style: theme.font_bold{font_size: 15.0}
                             }
                         }
@@ -259,10 +270,10 @@ script_mod! {
                             align: Align{x: 0.5 y: 0.5}
                             show_bg: true
                             draw_bg +: {
-                                color: #x111820
-                                border_color: #x405164
+                                color: theme.color_bg_container
+                                border_color: theme.color_bevel_inset_2
                                 border_size: 1.0
-                                border_radius: 4.0
+                                border_radius: theme.corner_radius
                                 pixel: fn() {
                                     let p = self.pos * self.rect_size
                                     let edge_x = min(p.x, self.rect_size.x - p.x)
@@ -292,7 +303,7 @@ script_mod! {
                                 height: Fit
                                 text: "drop a photo"
                                 draw_text +: {
-                                    color: #xd1dae4
+                                    color: theme.color_text
                                     text_style: theme.font_bold{font_size: 11.0}
                                 }
                             }
@@ -313,7 +324,7 @@ script_mod! {
                                 height: Fit
                                 text: "HEIGHT"
                                 draw_text +: {
-                                    color: #x8da0b5
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_bold{font_size: 9.0}
                                 }
                             }
@@ -326,7 +337,7 @@ script_mod! {
                                 width: 22
                                 height: Fit
                                 text: "cm"
-                                draw_text +: {color: #x667789}
+                                draw_text +: {color: theme.color_text_disabled}
                             }
                         }
                         View {
@@ -356,7 +367,7 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Down
-                        draw_bg +: {color: #x11161d}
+                        draw_bg +: {color: theme.color_bg_app}
                         split := Splitter {
                             width: Fill
                             height: Fill
@@ -364,10 +375,10 @@ script_mod! {
                             align: SplitterAlign.Weighted(0.42)
                             size: 6.0
                             draw_bg +: {
-                                color_bg: #x11161d
-                                color: #x1f2731
-                                color_hover: #x2f3d4d
-                                color_drag: #x4fa3ff
+                                color_bg: theme.color_bg_app
+                                color: theme.color_outset
+                                color_hover: theme.color_outset_hover
+                                color_drag: theme.color_focus
                             }
                             a: View {
                                 width: Fill
@@ -428,7 +439,7 @@ script_mod! {
                                     flow: Down
                                     spacing: 8
                                     padding: 12
-                                    draw_bg +: {color: #x141a22}
+                                    draw_bg +: {color: theme.color_bg_container}
                                     SectionTitle{text: "DESIGN"}
                                     design_select := DropDown {
                                         width: Fill
@@ -452,7 +463,7 @@ script_mod! {
                         flow: Down
                         spacing: 8
                         padding: 14
-                        draw_bg +: {color: #x161d25}
+                        draw_bg +: {color: theme.color_bg_app}
                         View {
                             width: Fill
                             height: 20
@@ -465,13 +476,13 @@ script_mod! {
                                 height: 18
                                 padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
                                 show_bg: true
-                                draw_bg +: {color: #x293440 border_radius: 9.0}
+                                draw_bg +: {color: theme.color_outset border_radius: 9.0}
                                 sample_tag_label := Label {
                                     width: Fit
                                     height: Fit
                                     text: "sample body"
                                     draw_text +: {
-                                        color: #x8998a8
+                                        color: theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 8.0}
                                     }
                                 }
@@ -488,6 +499,7 @@ script_mod! {
                         }
                         Hint{text: "click and drag to select · ⌘C copies as tab-separated text · double-click a value to correct it"}
                     }
+                    } // workspace
                 }
             }
         }
@@ -505,6 +517,10 @@ enum MeasurementListAction {
 /// into a spreadsheet. Double-click (or type on) a value to correct it.
 #[derive(Script, ScriptHook, Widget)]
 struct FabricMeasurementGrid {
+    #[live]
+    color_text: Vec4f,
+    #[live]
+    color_dim: Vec4f,
     #[source]
     source: ScriptObjectRef,
     #[deref]
@@ -662,12 +678,8 @@ impl Widget for FabricMeasurementGrid {
             }
             grid.set_grid_size(MEASUREMENT_KEYS.len(), 2);
             let entries = self.values.entries();
-            let value_color = if self.sample {
-                vec4(0.55, 0.61, 0.67, 1.0)
-            } else {
-                vec4(0.92, 0.95, 0.98, 1.0)
-            };
-            let key_color = vec4(0.66, 0.72, 0.78, 1.0);
+            let value_color = if self.sample { self.color_dim } else { self.color_text };
+            let key_color = self.color_text;
             while let Some(cell) = grid.next_cell(cx) {
                 let Some((key, value)) = entries.get(cell.row).copied() else {
                     continue;
@@ -845,6 +857,8 @@ impl MeasurementSettler {
 
 #[derive(Script, ScriptHook)]
 pub struct App {
+    #[rust] compact: bool,
+    #[rust] phone_page: usize,
     #[live]
     ui: WidgetRef,
     #[rust]
@@ -1441,43 +1455,16 @@ impl App {
             return;
         }
         self.drag_over = active;
-        let color = if active {
-            Vec4f {
-                x: 0.10,
-                y: 0.18,
-                z: 0.24,
-                w: 1.0,
-            }
-        } else {
-            Vec4f {
-                x: 0.067,
-                y: 0.094,
-                z: 0.125,
-                w: 1.0,
-            }
-        };
-        let border = if active {
-            Vec4f {
-                x: 0.31,
-                y: 0.78,
-                z: 1.0,
-                w: 1.0,
-            }
-        } else {
-            Vec4f {
-                x: 0.25,
-                y: 0.32,
-                z: 0.39,
-                w: 1.0,
-            }
-        };
         let mut zone = self.ui.view(cx, ids!(drop_zone));
-        script_apply_eval!(cx, zone, {
-            draw_bg +: {
-                color: #(color)
-                border_color: #(border)
-            }
-        });
+        if active {
+            script_apply_eval!(cx, zone, {
+                draw_bg +: {color: mod.theme.color_bg_highlight border_color: mod.theme.color_focus}
+            });
+        } else {
+            script_apply_eval!(cx, zone, {
+                draw_bg +: {color: mod.theme.color_bg_container border_color: mod.theme.color_bevel_inset_2}
+            });
+        }
     }
 
     fn handle_file_drop(&mut self, cx: &mut Cx, event: &Event) {
@@ -1545,8 +1532,23 @@ impl App {
     }
 }
 
+impl App {
+    fn apply_phone_layout(&mut self,cx:&mut Cx) {
+        self.ui.view(cx,ids!(phone_pages)).set_visible(cx,self.compact);
+        for (index,path,wide) in [(0,ids!(centre_panel),0.0),(1,ids!(left_panel),320.0),(2,ids!(right_panel),380.0)] {
+            let panel=self.ui.view(cx,path);
+            panel.set_visible(cx,!self.compact || self.phone_page==index);
+            if let Some(mut view)=panel.borrow_mut() {view.walk.width=if self.compact || wide==0.0 {Size::fill()}else{Size::Fixed(wide)};};
+        }
+        self.ui.redraw(cx);
+    }
+}
+
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for (page,path) in [ids!(phone_design),ids!(phone_model),ids!(phone_measures)].iter().enumerate() {
+            if self.ui.button(cx,*path).clicked(actions) {self.phone_page=page;self.apply_phone_layout(cx);}
+        }
         if self.ui.button(cx, ids!(measure_button)).clicked(actions) {
             self.start_measurement(cx);
         }
@@ -1617,6 +1619,13 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::WindowGeomChange(e)=event {
+            self.compact=e.new_geom.inner_size.x<1000.0;
+            self.apply_phone_layout(cx);
+            let axis=if e.new_geom.inner_size.x<650.0 {SplitterAxis::Vertical}else{SplitterAxis::Horizontal};
+            self.ui.splitter(cx,ids!(split)).set_axis(cx,axis);
+        }
+        if self.compact && self.phone_page!=0 && matches!(event,Event::BackPressed{..}) && event.back_pressed() {self.phone_page=0;self.apply_phone_layout(cx);return;}
         if let Event::Startup = event {
             self.startup(cx);
             // The bar shows our title when the window manager hosts us.
@@ -1799,4 +1808,9 @@ mod tests {
             assert!(!settler.settled);
         }
     }
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

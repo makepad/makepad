@@ -172,7 +172,7 @@ impl App {
         // `mp` (see theme.rs and the layout headers).
         let body = format!(
             "{}{}",
-            Palette::shared().splash_preamble(),
+            Palette::for_cx(cx).splash_preamble(),
             load_layout_body(file)
         );
         let splash = self.splash_ref(cx);
@@ -377,11 +377,12 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        Palette::shared().install(vm);
+        Palette::for_vm(vm).install(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event,Event::LiveEdit) {self.load_layout(cx);}
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

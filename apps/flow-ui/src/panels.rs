@@ -37,7 +37,7 @@ script_mod! {
         show_bg: true
         draw_bg +: {
             color: theme.flow_surface
-            border_radius: 10.0
+            border_radius: mod.theme.container_corner_radius
             border_size: 1.0
             border_color: theme.flow_surface_raised
         }
@@ -47,7 +47,7 @@ script_mod! {
         width: 8
         height: 8
         draw_bg +: {
-            border_radius: 4.0
+            border_radius: mod.theme.corner_radius
             color: theme.flow_success
         }
     }
@@ -126,13 +126,13 @@ script_mod! {
         height: 26
         align: Align{x: 0.5 y: 0.5}
         draw_bg +: {
-            border_radius: 7.0
+            border_radius: mod.theme.container_corner_radius
             color: theme.flow_surface_raised
         }
         icon := Icon{
             icon_walk: Walk{width: 14 height: Fit}
             draw_icon +: {
-                color: theme.flow_text_white
+                color: theme.flow_text
             }
         }
     }
@@ -152,7 +152,7 @@ script_mod! {
             show_bg: true
             draw_bg +: {
                 color: theme.flow_surface
-                border_radius: 10.0
+                border_radius: mod.theme.container_corner_radius
                 border_size: 1.0
                 border_color: theme.flow_surface_raised
             }
@@ -559,14 +559,14 @@ script_mod! {
                     show_bg: true
                     draw_bg +: {
                         color: theme.flow_surface
-                        border_radius: 8
+                        border_radius: mod.theme.container_corner_radius
                     }
                     thumb := RoundedView{
                         width: 64
                         height: 64
                         flow: Overlay
                         show_bg: true
-                        draw_bg +: {color: theme.flow_surface_raised border_radius: 6}
+                        draw_bg +: {color: theme.flow_surface_raised border_radius: mod.theme.corner_radius}
                         image := Image{visible: false width: Fill height: Fill fit: ImageFit.Smallest}
                         kind_badge := Label{
                             width: Fill
@@ -628,7 +628,7 @@ script_mod! {
             show_bg: true
             draw_bg +: {
                 color: theme.flow_surface
-                border_radius: 14.0
+                border_radius: mod.theme.container_corner_radius
                 border_size: 1.0
                 border_color: theme.flow_edge_soft
             }

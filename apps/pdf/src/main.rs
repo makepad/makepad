@@ -57,9 +57,11 @@ script_mod! {
                         spacing: 0
                         padding: 0
 
-                        toolbar := RectView{
+                        toolbar := ScrollXView{
                             width: Fill
-                            height: 32
+                            height: Fit
+                            min_height: 44
+                            show_bg: true
                             flow: Right
                             spacing: 2
                             align: Align{y: 0.5}
@@ -263,7 +265,7 @@ impl MatchEvent for App {
         // is exported; patch the pass clear color explicitly too so the
         // ground behind the toolbar is right either way.
         {
-            let color = Palette::shared().bg_vec4();
+            let color = Palette::for_cx(cx).bg_vec4();
             let mut window = self.ui.window(cx, ids!(main_window));
             script_apply_eval!(cx, window, {
                 pass +: { clear_color: #(color) }
@@ -488,7 +490,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        Palette::shared().publish(vm);
+        Palette::for_vm(vm).publish(vm);
         makepad_pdf::thumbs::script_mod(vm);
         makepad_pdf::widget::script_mod(vm);
         self::script_mod(vm)

@@ -97,7 +97,7 @@ script_mod! {
                 cursor: MouseCursor.Hand
                 capture_overload: true
                 show_bg: true
-                draw_bg +: {color: theme.flow_surface border_radius: 6}
+                draw_bg +: {color: theme.flow_surface border_radius: mod.theme.corner_radius}
                 select := ButtonFlatter{
                     width: 56 height: 20 text: "#1"
                     padding: Inset{left: 2 right: 2 top: 0 bottom: 0}

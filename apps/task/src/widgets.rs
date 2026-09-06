@@ -30,7 +30,7 @@ script_mod! {
         text_color: #xa9b1d6
         muted_color: #x565f89
         draw_text +: {
-            text_style: theme.font_code{font_size: 8.0}
+            text_style: theme.font_regular{font_size: 9.0}
             color: #xa9b1d6
         }
     }
@@ -44,7 +44,7 @@ script_mod! {
         color_text: #x565f89
         line_width: 1.5
         draw_text +: {
-            text_style: theme.font_code{font_size: 8.0}
+            text_style: theme.font_regular{font_size: 9.0}
             color: #x565f89
         }
     }
@@ -61,56 +61,58 @@ script_mod! {
 
         toolbar := View{
             width: Fill
-            height: 28
-            flow: Right
+            height: Fit
+            flow: Right{wrap: true}
             spacing: 8
             align: Align{y: 0.5}
 
             tree_toggle := Button{
-                width: 74
-                height: 24
-                text: "TREE"
+                width: 90
+                height: 30
+                text: "Process list"
                 padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                 draw_bg +: {
-                    border_radius: 0.0
+                    border_radius: theme.corner_radius
                     border_size: 1.0
                 }
                 draw_text +: {
-                    text_style: theme.font_code{font_size: 8.5}
+                    text_style: theme.font_regular{font_size: 9.5}
                 }
             }
             kill_button := Button{
-                width: 128
-                height: 24
-                text: "KILL"
+                width: 114
+                height: 30
+                text: "End process"
                 padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                 draw_bg +: {
-                    border_radius: 0.0
+                    border_radius: theme.corner_radius
                     border_size: 1.0
                 }
                 draw_text +: {
-                    text_style: theme.font_code{font_size: 8.5}
+                    text_style: theme.font_regular{font_size: 9.5}
                 }
             }
             filter_label := Label{
-                text: "FILTER"
-                draw_text +: {color: #x7aa2f7 text_style: theme.font_code{font_size: 9.0}}
+                padding: 0
+                text: "Search"
+                draw_text +: {color: #x7aa2f7 text_style: theme.font_regular{font_size: 9.0}}
             }
             // The well behind the text is makepad_wm_theme's business (it flattens the
             // stock inset gradient app-wide); only the monospace face is ours.
             filter_input := TextInput{
-                width: 260
-                height: 24
-                empty_text: "program name"
+                width: Fill{basis: 180 min: 140}
+                height: 30
+                empty_text: "Find a process"
                 padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
                 draw_text +: {
-                    text_style: theme.font_code{font_size: 9.0}
+                    text_style: theme.font_regular{font_size: 9.0}
                 }
             }
             process_status := Label{
+                padding: 0
                 width: Fill
                 text: "waiting for the first sample"
-                draw_text +: {color: #x565f89 text_style: theme.font_code{font_size: 8.0}}
+                draw_text +: {color: #x565f89 text_style: theme.font_regular{font_size: 9.0}}
             }
         }
 
@@ -123,12 +125,13 @@ script_mod! {
             draw_bg +: {
                 color: #x16161e
                 border_color: #x24283b
-                border_size: 1.0
+                border_size: 0.0
             }
             confirm_label := Label{
+                padding: 0
                 width: Fill
                 text: ""
-                draw_text +: {color: #x565f89 text_style: theme.font_code{font_size: 8.0}}
+                draw_text +: {color: #x565f89 text_style: theme.font_regular{font_size: 9.0}}
             }
         }
 
@@ -138,13 +141,13 @@ script_mod! {
             rows: 0
             cols: 8
             show_row_headers: false
-            zebra_stripes: true
+            zebra_stripes: false
             allow_col_resize: true
             allow_row_resize: false
             allow_col_reorder: false
             default_col_width: 110.0
-            default_row_height: 21.0
-            col_header_height: 24.0
+            default_row_height: 28.0
+            col_header_height: 30.0
             color_bg: #x1a1b26
             color_cell: #x1a1b26
             color_cell_alt: #x1e2030
@@ -156,9 +159,9 @@ script_mod! {
             color_selection_border: #x7aa2f7
             color_drag_marker: #x7aa2f7
             color_resize_guide: #x7aa2f766
-            draw_cell +: {border_color: #x292e42 border_size: 1.0}
-            draw_text +: {text_style: theme.font_code{font_size: 8.5}}
-            draw_text_bold +: {text_style: theme.font_code{font_size: 8.5}}
+            draw_cell +: {border_color: #x292e42 border_size: 0.0}
+            draw_text +: {text_style: theme.font_regular{font_size: 9.5}}
+            draw_text_bold +: {text_style: theme.font_regular{font_size: 9.5}}
         }
     }
 }
@@ -354,49 +357,19 @@ impl AggregateGraph {
         self.draw_bg.redraw(cx);
     }
 
-    /// Legend as coloured swatch + `LABEL value`, laid out inside the plot so
-    /// the graph keeps its full height even in a tiny window.
-    fn draw_legend(&mut self, cx: &mut Cx2d, plot: Rect) {
-        let one_row = plot.size.x >= LEGEND_ROW_MIN_WIDTH;
-        let item_width = (plot.size.x / self.series.len().max(1) as f64).min(190.0);
-        // A panel behind the legend so the text stays readable where a line
-        // happens to run through it. Monospace, so the widest entry's
-        // character count is enough to size it.
-        let count = self.series.len() as f64;
-        let widest = self
-            .series
-            .iter()
-            .map(|item| item.label.chars().count() + item.value.chars().count() + 1)
-            .max()
-            .unwrap_or(0) as f64;
-        // font_size is in points; a monospace advance is about 0.6 em.
-        let text_width = widest * self.draw_text.text_style.font_size as f64 * (4.0 / 3.0) * 0.6;
-        let backing = if one_row {
-            Rect { pos: plot.pos, size: dvec2(item_width * count + 8.0, 16.0) }
-        } else {
-            Rect {
-                pos: plot.pos,
-                size: dvec2((text_width + 20.0).min(plot.size.x), count * 13.0 + 6.0),
-            }
-        };
-        self.draw_bg.color = with_alpha(self.color_bg, 0.82);
-        self.draw_bg.draw_abs(cx, backing);
+    /// Keep the legend above the chart so no series or axis runs through it.
+    fn draw_legend(&mut self, cx: &mut Cx2d, r: Rect) {
+        let columns = if r.size.x >= LEGEND_ROW_MIN_WIDTH {4} else {2};
+        let width = r.size.x / columns as f64;
         for (index, item) in self.series.iter().enumerate() {
-            let origin = if one_row {
-                dvec2(plot.pos.x + 4.0 + index as f64 * item_width, plot.pos.y + 3.0)
-            } else {
-                dvec2(plot.pos.x + 4.0, plot.pos.y + 3.0 + index as f64 * 13.0)
-            };
+            let origin = r.pos + dvec2((index % columns) as f64 * width + 4.0, (index / columns) as f64 * 22.0 + 2.0);
             self.draw_grid.color = item.color;
-            self.draw_grid.draw_abs(cx, Rect { pos: origin + dvec2(0.0, 3.0), size: dvec2(7.0, 7.0) });
-            self.draw_text.color = item.color;
-            self.draw_text.draw_abs(
-                cx,
-                origin + dvec2(11.0, 0.0),
-                &format!("{} {}", item.label, item.value),
-            );
+            self.draw_grid.draw_abs(cx, Rect {pos: origin + dvec2(0.0, 4.0), size: dvec2(7.0, 7.0)});
+            self.draw_text.color = self.color_text;
+            self.draw_text.draw_abs(cx, origin + dvec2(13.0, 0.0), &item.label);
         }
     }
+
 }
 
 impl Widget for AggregateGraph {
@@ -410,11 +383,13 @@ impl Widget for AggregateGraph {
             return DrawStep::done();
         }
 
-        // Right gutter for the axis labels; the legend floats over the plot.
+        // Separate legend band and right gutter for the percentage axis.
         let gutter = if rect.size.x > 220.0 { 30.0 } else { 0.0 };
+        let legend_height = if rect.size.x >= LEGEND_ROW_MIN_WIDTH {28.0} else {50.0};
+        self.draw_legend(cx, rect);
         let plot = Rect {
-            pos: rect.pos + dvec2(6.0, 6.0),
-            size: dvec2((rect.size.x - 12.0 - gutter).max(10.0), (rect.size.y - 12.0).max(10.0)),
+            pos: rect.pos + dvec2(6.0, legend_height + 6.0),
+            size: dvec2((rect.size.x - 12.0 - gutter).max(10.0), (rect.size.y - legend_height - 12.0).max(10.0)),
         };
         let py = |value: f64| plot.pos.y + (1.0 - value.clamp(0.0, 100.0) / 100.0) * plot.size.y;
 
@@ -461,7 +436,6 @@ impl Widget for AggregateGraph {
             }
         }
 
-        self.draw_legend(cx, plot);
         DrawStep::done()
     }
 }
@@ -486,6 +460,7 @@ const COMPACT_NAME_WIDTH: f64 = 220.0;
 /// columns that matter (who, how much memory, how much CPU) have to stay on
 /// screen, so the merely informative ones go rather than scroll away.
 const FULL_COLS: [usize; 8] = [COL_PID, COL_PPID, COL_NAME, COL_USER, COL_STATE, COL_THREADS, COL_MEM, COL_CPU];
+const PHONE_COLS: [usize; 3] = [COL_NAME, COL_MEM, COL_CPU];
 const COMPACT_COLS: [usize; 5] = [COL_PID, COL_NAME, COL_STATE, COL_MEM, COL_CPU];
 
 /// A drawn row: which process, and where it sits in the tree.
@@ -511,7 +486,7 @@ pub struct ProcessTable {
     sort_column: usize,
     #[rust]
     ascending: bool,
-    #[rust(true)]
+    #[rust]
     tree_mode: bool,
     /// pids whose subtree is folded away.
     #[rust]
@@ -530,6 +505,7 @@ pub struct ProcessTable {
     /// right stay on screen instead of needing a horizontal scroll.
     #[rust]
     compact: bool,
+    #[rust] viewport_width: f64,
     /// Last colour pushed to the status row, so the per-sample update can skip
     /// the script eval when nothing changed.
     #[rust]
@@ -589,15 +565,25 @@ impl ProcessTable {
 
     /// The data columns on screen right now.
     fn columns(&self) -> &'static [usize] {
-        if self.compact {
+        if self.viewport_width > 0.0 && self.viewport_width < 500.0 {
+            &PHONE_COLS
+        } else if self.compact {
             &COMPACT_COLS
         } else {
             &FULL_COLS
         }
     }
 
+    fn column_label(&self, col: usize) -> &'static str {
+        if self.viewport_width > 0.0 && self.viewport_width < 500.0 {
+            match col {COL_NAME => "Process", COL_MEM => "Memory", _ => "CPU %"}
+        } else { COLUMNS[col] }
+    }
+
     fn column_width(&self, data_col: usize) -> f64 {
-        if self.compact && data_col == COL_NAME {
+        if self.viewport_width > 0.0 && self.viewport_width < 500.0 {
+            match data_col {COL_NAME=>(self.viewport_width-160.0).max(100.0),COL_MEM=>84.0,_=>60.0}
+        } else if self.compact && data_col == COL_NAME {
             COMPACT_NAME_WIDTH
         } else {
             COL_WIDTHS[data_col]
@@ -606,7 +592,7 @@ impl ProcessTable {
 
     fn configure_columns(&self, cx: &mut Cx, grid: &DataGridRef) {
         let columns = self.columns();
-        grid.set_col_labels(columns.iter().map(|&col| COLUMNS[col].to_string()).collect());
+        grid.set_col_labels(columns.iter().map(|&col| self.column_label(col).to_string()).collect());
         grid.set_grid_size(self.rows.len(), columns.len());
         for (display, &data_col) in columns.iter().enumerate() {
             grid.set_col_width(display, self.column_width(data_col));
@@ -743,13 +729,12 @@ impl ProcessTable {
     fn update_status(&mut self, cx: &mut Cx) {
         let direction = if self.ascending { "asc" } else { "desc" };
         let column = COLUMNS.get(self.sort_column).copied().unwrap_or("CPU%");
-        let mode = if self.tree_mode { "TREE" } else { "FLAT" };
         let selection = self.selected_pid.map(|pid| format!(" · PID {pid}")).unwrap_or_default();
         // The key hints are the first thing to go in a narrow window: the
         // buttons next to this line already say what they do.
-        let hints = if self.compact { "" } else { " · T tree · SPACE fold · K kill" };
+        let hints = "";
         let status = format!(
-            "{mode} · {}/{} · {column} {direction}{selection}{hints}",
+            "{} of {} processes · {column} {direction}{selection}{hints}",
             self.rows.len(),
             self.processes.len()
         );
@@ -768,6 +753,8 @@ impl ProcessTable {
             ),
         };
         self.view.label(cx, ids!(process_status)).set_text(cx, &toolbar_text);
+        let narrow = self.viewport_width > 0.0 && self.viewport_width < 500.0;
+        self.view.view(cx, ids!(confirm_row)).set_visible(cx, !row_text.is_empty() && (!narrow || self.notice.is_some()));
         let mut label = self.view.label(cx, ids!(confirm_label));
         // This runs on every sample — ten times a second at the fastest
         // refresh — and each `script_apply_eval!` allocates script objects, so
@@ -785,7 +772,7 @@ impl ProcessTable {
         if self.kill_button_state != Some((killable, armed)) {
             self.kill_button_state = Some((killable, armed));
             let button = self.view.button(cx, ids!(kill_button));
-            button.set_text(cx, if armed { "KILL — FORCE" } else { "KILL" });
+            button.set_text(cx, if armed { "Force stop" } else { "End process" });
             button.set_enabled(cx, killable);
         }
     }
@@ -812,7 +799,7 @@ impl ProcessTable {
         self.notice = None;
         self.view
             .button(cx, ids!(tree_toggle))
-            .set_text(cx, if self.tree_mode { "TREE" } else { "FLAT" });
+            .set_text(cx, if self.tree_mode { "Process tree" } else { "Process list" });
         self.rebuild(cx);
     }
 
@@ -877,7 +864,7 @@ impl ProcessTable {
         self.accent_color = theme.accent;
         self.warning_color = theme.red;
         self.muted_color = theme.muted;
-        let background = theme.background;
+        let background = theme.panel;
         let foreground = theme.foreground;
         let dark = theme.surface;
         let muted = theme.muted;
@@ -894,7 +881,7 @@ impl ProcessTable {
             color_text: #(foreground)
             color_header: #(dark)
             color_header_active: #(panel)
-            color_header_text: #(accent)
+            color_header_text: #(foreground)
             color_selection: #(selection)
             color_selection_border: #(accent)
             color_drag_marker: #(accent)
@@ -908,7 +895,7 @@ impl ProcessTable {
         let mut confirm_row = self.view.view(cx, ids!(confirm_row));
         script_apply_eval!(cx, confirm_row, {draw_bg +: {color: #(dark) border_color: #(panel)}});
         let mut filter_label = self.view.label(cx, ids!(filter_label));
-        script_apply_eval!(cx, filter_label, {draw_text +: {color: #(accent)}});
+        script_apply_eval!(cx, filter_label, {draw_text +: {color: #(muted)}});
         let mut status = self.view.label(cx, ids!(process_status));
         script_apply_eval!(cx, status, {draw_text +: {color: #(muted)}});
     }
@@ -950,7 +937,7 @@ impl ProcessTable {
                 } else {
                     0.0
                 };
-                (format!("{}  {percent:>4.1}%", format_bytes(process.mem_rss)), right)
+                (if self.viewport_width > 0.0 && self.viewport_width < 500.0 {format_bytes(process.mem_rss)} else {format!("{}  {percent:>4.1}%", format_bytes(process.mem_rss))}, right)
             }
             _ => {
                 let color = if process.cpu_pct >= 80.0 { self.warning_color } else { self.accent_color };
@@ -965,12 +952,28 @@ impl ProcessTable {
 
 impl Widget for ProcessTable {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let width=cx.peek_walk_turtle(walk).size.x;
+        if (self.viewport_width-width).abs()>0.5 {
+            self.viewport_width=width;
+            self.initialized=false;
+            let narrow=width<500.0;
+            for path in [ids!(filter_label),ids!(process_status)] {self.view.widget(cx,path).set_visible(cx,!narrow);}
+            let height = if narrow {44.0} else {30.0};
+            for path in [ids!(tree_toggle), ids!(kill_button), ids!(filter_input)] {
+                let mut item = self.view.widget(cx, path);
+                script_apply_eval!(cx, item, {height: #(height)});
+            }
+            let mut grid = self.view.widget(cx, ids!(process_grid));
+            let row_height = if narrow {44.0} else {28.0};
+            script_apply_eval!(cx, grid, {default_row_height: #(row_height)});
+            self.update_status(cx);
+        }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut grid) = step.as_data_grid().borrow_mut() {
                 let columns = self.columns();
                 if !self.initialized {
                     self.initialized = true;
-                    grid.set_col_labels(columns.iter().map(|&col| COLUMNS[col].to_string()).collect());
+                    grid.set_col_labels(columns.iter().map(|&col| self.column_label(col).to_string()).collect());
                     for (display, &data_col) in columns.iter().enumerate() {
                         grid.set_col_width(display, self.column_width(data_col));
                     }

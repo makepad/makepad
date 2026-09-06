@@ -20,7 +20,7 @@ script_mod! {
         padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
         show_bg: true
         draw_bg +: {
-            color: #x20242b
+            color: mod.theme.color_bg_container
         }
 
         View {
@@ -34,7 +34,7 @@ script_mod! {
                 height: Fit
                 text: ""
                 draw_text +: {
-                    color: #xe8edf4
+                    color: mod.theme.color_text
                     text_style: theme.font_bold{font_size: 12}
                 }
             }
@@ -43,7 +43,7 @@ script_mod! {
                 height: Fit
                 text: "0 MB"
                 draw_text +: {
-                    color: #x8f9baa
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_regular{font_size: 10}
                 }
             }
@@ -67,7 +67,7 @@ script_mod! {
                 padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
                 show_bg: true
                 draw_bg +: {
-                    color: #x343a44
+                    color: mod.theme.color_outset
                     radius: 8.0
                 }
                 restriction := Label {
@@ -75,7 +75,7 @@ script_mod! {
                     height: Fit
                     text: "restricted"
                     draw_text +: {
-                        color: #xc7cfda
+                        color: mod.theme.color_text
                         text_style: theme.font_regular{font_size: 9}
                     }
                 }
@@ -93,7 +93,7 @@ script_mod! {
                 height: Fit
                 text: "not installed"
                 draw_text +: {
-                    color: #xaab4c2
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_regular{font_size: 10}
                 }
             }
@@ -120,8 +120,8 @@ script_mod! {
                     padding: 20
                     show_bg: true
                     draw_bg +: {
-                        color: #x16161b
-                        border_color: #xffffff18
+                        color: mod.theme.color_bg_container
+                        border_color: mod.theme.color_bevel_inset_2
                         border_size: 1.0
                         radius: 6.0
                     }
@@ -130,7 +130,7 @@ script_mod! {
                         height: Fit
                         text: "Before downloading model"
                         draw_text +: {
-                            color: #xf2f4f8
+                            color: mod.theme.color_text
                             text_style: theme.font_bold{font_size: 13}
                         }
                     }
@@ -138,7 +138,7 @@ script_mod! {
                         width: Fill
                         height: Fit
                         text: ""
-                        draw_text +: { color: #xc8d0dc }
+                        draw_text +: { color: mod.theme.color_text }
                     }
                     restriction_text := Label {
                         width: Fill
@@ -154,7 +154,7 @@ script_mod! {
                         height: Fit
                         text: ""
                         draw_text +: {
-                            color: #xaeb8c6
+                            color: mod.theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 11}
                         }
                     }
@@ -186,7 +186,7 @@ script_mod! {
             height: Fit
             text: "no models registered for this app"
             draw_text +: {
-                color: #x8f9baa
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 11}
             }
         }

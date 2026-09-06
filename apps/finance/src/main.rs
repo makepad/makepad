@@ -67,3 +67,8 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
+}

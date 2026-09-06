@@ -155,7 +155,7 @@ impl MpPdfThumbs {
         if self.pages.is_empty() {
             return;
         }
-        let palette = Palette::shared();
+        let palette = Palette::for_cx(cx);
         let accent = palette.accent_vec4();
         let plain = palette.bg_dark_vec4();
 

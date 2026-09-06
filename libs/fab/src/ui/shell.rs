@@ -387,6 +387,7 @@ pub struct FabShell {
     perf_shown: bool,
     #[rust]
     workspace: Option<Workspace>,
+    #[rust] phone_saved_layout: Option<HashMap<LiveId,DockItem>>,
     #[rust]
     maximized: Option<(usize, HashMap<LiveId, DockItem>)>,
     #[rust]
@@ -432,6 +433,7 @@ impl FabShell {
     fn set_workspace(&mut self, cx: &mut Cx, ws: Workspace) {
         self.workspace = Some(ws);
         self.maximized = None;
+        self.phone_saved_layout=None;
         let map = workspace_layout(ws);
         self.apply_layout(cx, map);
     }
@@ -627,6 +629,17 @@ impl Widget for FabShell {
             self.set_workspace(cx, ws);
         } else if want_max {
             self.toggle_maximize(cx);
+        }
+        let compact=cx.peek_walk_turtle(walk).size.x<700.0;
+        let dock=self.view.dock(cx,ids!(main.dock));
+        if compact && self.phone_saved_layout.is_none() {
+            self.phone_saved_layout=dock.clone_state();
+            let mut map=HashMap::new();
+            map.insert(live_id!(root),DockItem::Tabs{tabs:(0..6).map(area_tab_id).collect(),selected:0,closable:false,hide_tab_bar:false});
+            for slot in 0..6 {map.insert(area_tab_id(slot),DockItem::Tab{name:area_name(slot).into(),template:live_id!(PermanentTab),kind:area_kind(slot)});}
+            dock.load_state_preserving_items(cx,map);
+        }else if !compact {
+            if let Some(map)=self.phone_saved_layout.take() {dock.load_state_preserving_items(cx,map);}
         }
         let step = self.view.draw_walk(cx, scope, walk);
         if step.is_done() {

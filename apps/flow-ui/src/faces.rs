@@ -469,7 +469,7 @@ script_mod! {
         spacing: theme.space_2
         draw_bg +: {
             color: theme.flow_surface_deep
-            border_radius: 16.0
+            border_radius: mod.theme.container_corner_radius
             content_inset: uniform(2.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)

@@ -1,8 +1,8 @@
 //! task — the task manager / activity monitor of the Makepad app family.
 //!
-//! btop's layout: per-core CPU bars beside a 60-second load graph, a memory
-//! panel, network up/down graphs, and a process table that switches between a
-//! flat sortable list and a real parent/child tree.
+//! Resource summaries and live history above a sortable process list. Larger
+//! windows also show per-core, memory, and network detail; the process list
+//! can switch to a real parent/child tree.
 //!
 //! All numbers come from [`backend`], which is one trait with a native
 //! implementation per OS — never `ps`/`top` output.
@@ -26,32 +26,34 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    let Panel = RectView{
+    let Panel = PanelView{
         width: Fill
         height: Fill
         flow: Down
-        padding: 8
-        spacing: 5
+        padding: 14
+        spacing: 10
         draw_bg +: {
-            color: #x1a1b26
-            border_color: #x3b4261
-            border_size: 1.0
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_outset_2
+            border_size: 0.0
         }
     }
 
     let PanelTitle = Label{
+        padding: 0
         width: Fill
         height: 18
         draw_text +: {
-            color: #x7aa2f7
-            text_style: theme.font_code{font_size: 9.5}
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: 11.0}
         }
     }
 
     let MetricText = Label{
+        padding: 0
         draw_text +: {
             color: #xa9b1d6
-            text_style: theme.font_code{font_size: 8.5}
+            text_style: theme.font_regular{font_size: 9.0}
         }
     }
 
@@ -70,51 +72,88 @@ script_mod! {
         color_text: #x565f89
         color_accent: #xe0af68
         line_width: 1.5
+        sparkline: true
         draw_text +: {text_style: theme.font_code{font_size: 7.0}}
     }
 
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.title: "task"
+                window.title: "Task Manager"
                 window.inner_size: vec2(1400 900)
                 body +: {
                     app_bg := RectView{
                         width: Fill
                         height: Fill
                         flow: Down
-                        padding: 8
-                        spacing: 8
-                        draw_bg +: {color: #x1a1b26}
+                        padding: 16
+                        spacing: 14
+                        draw_bg +: {color: theme.color_bg_app}
+
+                        app_header := View{
+                            width: Fill height: 48 flow: Right spacing: 12 align: Align{y: 0.5}
+                            app_icon := AppIcon{name: "task" width: 38 height: 38}
+                            View{
+                                width: Fill height: Fit flow: Down spacing: 3
+                                app_title := Label{padding: 0 text: "Task Manager" draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 19.0}}}
+                                host_status := Label{padding: 0 text: "Live system activity" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
+                            }
+                        }
+                        mobile_tabs := View{
+                            visible: false width: Fill height: 44 flow: Right spacing: 6
+                            overview_tab := Button{width: Fill height: 44 text: "Overview"}
+                            processes_tab := Button{width: Fill height: 44 text: "Processes"}
+                        }
+                        summary_row := Grid{
+                            width: Fill height: 88 column_gap: 10 row_gap: 10
+                            columns: ["repeat(auto-fit, minmax(150px, 1fr))"]
+                            implicit_row_size: 76
+                            cpu_summary := Panel{
+                                Label{padding: 0 text: "CPU" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
+                                cpu_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
+                            }
+                            memory_summary := Panel{
+                                Label{padding: 0 text: "Memory used" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
+                                memory_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
+                            }
+                            down_summary := Panel{
+                                Label{padding: 0 text: "Network receive" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
+                                down_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
+                            }
+                            up_summary := Panel{
+                                Label{padding: 0 text: "Network send" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
+                                up_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
+                            }
+                        }
 
                         top_row := View{
                             width: Fill
-                            height: 330
+                            height: 240
                             flow: Right
                             spacing: 8
 
                             // The one panel that survives every breakpoint.
                             aggregate_panel := Panel{
                                 width: Fill
-                                aggregate_title := PanelTitle{text: "SYSTEM"}
+                                aggregate_title := PanelTitle{text: "Activity history"}
                                 aggregate_graph := AggregateGraph{}
                             }
 
                             cpu_panel := Panel{
-                                width: 420
+                                width: 290
                                 cpu_title := PanelTitle{text: "CPU  --.-%"}
-                                cpu_cores := MeterBars{height: 150 columns: 2}
+                                cpu_cores := MeterBars{height: 105 columns: 2}
                                 cpu_chart := TelemetryChart{}
                             }
 
                             side_column := View{
-                                width: 440
+                                width: 330
                                 height: Fill
                                 flow: Down
                                 spacing: 8
 
                                 memory_panel := Panel{
-                                    height: 176
+                                    height: 116
                                     memory_title := PanelTitle{text: "MEMORY"}
                                     View{
                                         width: Fill
@@ -122,7 +161,7 @@ script_mod! {
                                         flow: Right
                                         spacing: 8
                                         memory_bars := MeterBars{
-                                            width: 232
+                                            width: 175
                                             height: Fill
                                             columns: 1
                                             gradient: false
@@ -170,15 +209,15 @@ script_mod! {
                             height: Fill
                             process_header := View{
                                 width: Fill
-                                height: 22
+                                height: 30
                                 flow: Right
                                 spacing: 10
                                 align: Align{y: 0.5}
-                                process_title := PanelTitle{width: Fill text: "PROCESSES"}
-                                refresh_label := MetricText{text: "REFRESH"}
+                                process_title := PanelTitle{width: Fill text: "Processes"}
+                                refresh_label := MetricText{text: "Update every"}
                                 refresh_select := DropDown{
-                                    width: 86
-                                    height: 22
+                                    width: 90
+                                    height: 28
                                     labels: ["0.1 s" "0.2 s" "0.5 s" "1 s" "2 s" "5 s" "10 s"]
                                     selected_item: 0
                                 }
@@ -202,9 +241,9 @@ pub struct Theme {
     pub accent: Vec4f,
     /// Window and cell background.
     pub background: Vec4f,
-    /// Chart/input wells — one step darker than the background.
+    /// Recessed controls and process-table headers.
     pub surface: Vec4f,
-    /// Zebra rows, borders, meter tracks — one step lighter.
+    /// Resource cards, graph surfaces, and process rows.
     pub panel: Vec4f,
     pub foreground: Vec4f,
     pub muted: Vec4f,
@@ -239,13 +278,23 @@ impl Theme {
     /// The WM palette if one is exported, else the built-in fallback. Uses the
     /// same scanner `makepad_wm_theme::apply` retints `mod.theme` with, so the stock
     /// widgets and task's own drawing can never disagree.
-    fn from_environment() -> Self {
+    #[cfg(test)]
+    fn from_environment() -> Self { Self::from_palette(makepad_wm_theme::current()) }
+    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
         let fallback = Self::default();
-        let Some(palette) = makepad_wm_theme::current() else { return fallback };
+        let Some(palette) = palette else { return fallback };
         let pick = |key: &str, default: Vec4f| palette.get(key).and_then(parse_color).unwrap_or(default);
         // Imported omarchy themes carry their hues as the terminal palette;
         // take those when a theme does not name the colours directly.
+        let light = pick("background", fallback.background).x > 0.5;
         let hue = |key: &str, term: &str, default: Vec4f| {
+            let default = if light {
+                color(match key {
+                    "red" => "#d12b3a", "green" => "#39851e", "yellow" => "#986b00",
+                    "blue" => "#246bce", "cyan" => "#008398", "magenta" => "#8951bd",
+                    _ => "#246bce",
+                })
+            } else { default };
             palette
                 .get(key)
                 .or_else(|| palette.get(term))
@@ -314,9 +363,9 @@ const DEFAULT_REFRESH: usize = 0;
 
 /// Height of the metrics band when the process table is on screen. Matches
 /// `top_row`'s height in the DSL.
-const TOP_ROW_HEIGHT: f64 = 330.0;
+const TOP_ROW_HEIGHT: f64 = 240.0;
 /// The metrics band never shrinks past this, or the graph stops reading.
-const MIN_TOP_ROW_HEIGHT: f64 = 180.0;
+const MIN_TOP_ROW_HEIGHT: f64 = 140.0;
 
 /// How the window is laid out at the current size. One place, three states.
 ///
@@ -332,20 +381,19 @@ pub enum Density {
     Medium,
     /// The aggregate graph alone, filling the window.
     Small,
+    /// Phone portrait or a short landscape viewport: summaries and processes.
+    Phone,
 }
 
 impl Density {
-    /// Full needs room for the three top panels side by side (the two detail
-    /// columns are 420 + 440 wide) *and* a table worth reading underneath.
-    /// Medium still fits a table. Below that only the graph reads at all.
-    /// The table's own chrome (title, toolbar, status row, column header) is
-    /// about 110 pt before a single process row, and the metrics band never
-    /// goes below 180 pt, so under ~460 pt tall Medium would be a header with
-    /// nothing under it — better one graph shown properly than two clipped
-    /// halves. 620 pt wide is where the narrow column set stops fitting.
+    /// Full adds per-core and network detail beside the shared history.
+    /// Medium keeps summaries and the process list; very small windows keep
+    /// the history alone so neither labels nor process rows are clipped.
     pub fn for_size(size: Vec2d) -> Self {
-        if size.x < 620.0 || size.y < 460.0 {
+        if size.y < 260.0 {
             Density::Small
+        } else if size.x < 620.0 || size.y < 460.0 {
+            Density::Phone
         } else if size.x < 1180.0 || size.y < 780.0 {
             Density::Medium
         } else {
@@ -426,6 +474,10 @@ pub struct App {
     #[rust]
     density_applied: bool,
     #[rust]
+    layout_size: Vec2d,
+    #[rust]
+    phone_processes: bool,
+    #[rust]
     cpu_history: Vec<f64>,
     #[rust]
     memory_history: Vec<f64>,
@@ -490,14 +542,18 @@ impl App {
     }
 
     fn apply_snapshot(&mut self, cx: &mut Cx, snapshot: Snapshot) {
+        self.ui.label(cx, ids!(cpu_value)).set_text(cx, &format!("{:.1}%", snapshot.cpu_total));
+        self.ui.label(cx, ids!(memory_value)).set_text(cx, &format_bytes(snapshot.mem.used));
+        self.ui.label(cx, ids!(down_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.rx_per_second as u64)));
+        self.ui.label(cx, ids!(up_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.tx_per_second as u64)));
+        let status = if self.density == Density::Phone {
+            format!("{} processes · {} cores", snapshot.processes.len(), snapshot.cpu_cores.len())
+        } else {
+            format!("{} processes · {} cores · Uptime {}", snapshot.processes.len(), snapshot.cpu_cores.len(), format_uptime(snapshot.uptime_seconds))
+        };
+        self.ui.label(cx, ids!(host_status)).set_text(cx, &status);
         let cores = snapshot.cpu_cores.len();
-        self.ui.label(cx, ids!(cpu_title)).set_text(
-            cx,
-            &format!(
-                "CPU  {:>5.1}%   ·  {cores} CORES  ·  LOAD {:.2} {:.2} {:.2}",
-                snapshot.cpu_total, snapshot.load_avg[0], snapshot.load_avg[1], snapshot.load_avg[2]
-            ),
-        );
+        self.ui.label(cx, ids!(cpu_title)).set_text(cx, &format!("CPU cores · {cores}"));
 
         // Keep the bars readable: more cores means more columns, not thinner rows.
         let columns = if cores > 24 {
@@ -523,16 +579,7 @@ impl App {
 
         let memory = snapshot.mem;
         let total = memory.total.max(1) as f64;
-        self.ui.label(cx, ids!(memory_title)).set_text(
-            cx,
-            &format!(
-                "MEMORY  {} / {}  ·  SWAP {} / {}",
-                format_bytes(memory.used),
-                format_bytes(memory.total),
-                format_bytes(memory.swap_used),
-                format_bytes(memory.swap_total)
-            ),
-        );
+        self.ui.label(cx, ids!(memory_title)).set_text(cx, "Memory allocation");
         let memory_rows = [
             ("TOTAL", memory.total),
             ("USED", memory.used),
@@ -557,14 +604,7 @@ impl App {
         self.ui
             .label(cx, ids!(network_up))
             .set_text(cx, &format!("UP {:>10}/s", format_bytes(snapshot.net.tx_per_second as u64)));
-        self.ui.label(cx, ids!(network_title)).set_text(
-            cx,
-            &format!(
-                "NETWORK  ·  {} in  ·  {} out",
-                format_bytes(snapshot.net.rx_total),
-                format_bytes(snapshot.net.tx_total)
-            ),
-        );
+        self.ui.label(cx, ids!(network_title)).set_text(cx, "Network throughput");
 
         push_history(&mut self.cpu_history, snapshot.cpu_total);
         push_history(&mut self.memory_history, memory.used as f64 / total * 100.0);
@@ -577,14 +617,7 @@ impl App {
         self.ui.trend_chart(cx, ids!(up_chart)).set_series(cx, &self.up_history);
         self.update_aggregate(cx, &snapshot);
 
-        self.ui.label(cx, ids!(process_title)).set_text(
-            cx,
-            &format!(
-                "PROCESSES  ·  backend {}  ·  up {}",
-                snapshot.backend,
-                format_uptime(snapshot.uptime_seconds)
-            ),
-        );
+        self.ui.label(cx, ids!(process_title)).set_text(cx, "Processes");
         if let Some(mut table) = self.ui.widget(cx, ids!(process_table)).borrow_mut::<ProcessTable>() {
             table.set_processes(cx, snapshot.processes, memory.total);
         }
@@ -617,19 +650,19 @@ impl App {
                 points: self.cpu_history.clone(),
             },
             GraphSeries {
-                label: "MEM".to_string(),
+                label: "Memory".to_string(),
                 value: format!("{:.1}%", self.memory_history.last().copied().unwrap_or(0.0)),
                 color: self.theme.green,
                 points: self.memory_history.clone(),
             },
             GraphSeries {
-                label: "NET DN".to_string(),
+                label: "Receive".to_string(),
                 value: format!("{}/s", format_bytes(snapshot.net.rx_per_second as u64)),
                 color: self.theme.cyan,
                 points: scale(&self.down_history),
             },
             GraphSeries {
-                label: "NET UP".to_string(),
+                label: "Send".to_string(),
                 value: format!("{}/s", format_bytes(snapshot.net.tx_per_second as u64)),
                 color: self.theme.magenta,
                 points: scale(&self.up_history),
@@ -638,41 +671,73 @@ impl App {
         if let Some(mut graph) = self.ui.widget(cx, ids!(aggregate_graph)).borrow_mut::<AggregateGraph>() {
             graph.set_series(cx, series);
         }
-        self.ui.label(cx, ids!(aggregate_title)).set_text(
-            cx,
-            &format!(
-                "SYSTEM  ·  {} samples  ·  net axis peak {}/s",
-                self.cpu_history.len(),
-                format_bytes((peak * 1024.0) as u64)
-            ),
-        );
+        self.ui.label(cx, ids!(aggregate_title)).set_text(cx, "Activity history");
     }
 
     /// Fold the layout down as the window shrinks. Panels are hidden whole —
     /// never clipped in half — so nothing ever needs a scrollbar for chrome.
     fn apply_layout(&mut self, cx: &mut Cx, size: Vec2d) {
         let density = Density::for_size(size);
-        let changed = !self.density_applied || self.density != density;
+        let changed = !self.density_applied || self.density != density || self.layout_size != size;
+        self.layout_size = size;
         self.density = density;
         self.density_applied = true;
         let details = density == Density::Full;
         let table = density != Density::Small;
+        let phone = density == Density::Phone;
+        let short = size.y < 460.0;
+        let overview = !phone || !self.phone_processes;
         if changed {
+            self.ui.view(cx, ids!(app_header)).set_visible(cx, table);
+            self.ui.view(cx, ids!(mobile_tabs)).set_visible(cx, phone);
+            self.ui.widget(cx, ids!(refresh_label)).set_visible(cx, !phone);
+            self.ui.widget(cx, ids!(summary_row)).set_visible(cx, table && overview);
+            self.ui.view(cx, ids!(top_row)).set_visible(cx, overview);
+            let mut bg=self.ui.view(cx,ids!(app_bg));
+            let padding=16.0;
+            script_apply_eval!(cx,bg,{padding: #(padding) spacing: 10});
+            let header_height = if short {32.0} else {52.0};
+            self.ui.label(cx, ids!(host_status)).set_visible(cx, !short);
+            let summary_height = if phone && size.x < 620.0 {170.0} else if details {88.0} else {80.0};
+            let mut header = self.ui.view(cx, ids!(app_header));
+            script_apply_eval!(cx, header, {height: #(header_height)});
+            let mut summary = self.ui.widget(cx, ids!(summary_row));
+            script_apply_eval!(cx, summary, {height: #(summary_height)});
+            let summary_padding = if details { 14.0 } else { 12.0 };
+            let font_size = if phone {19.0} else {22.0};
+            for path in [ids!(cpu_value), ids!(memory_value), ids!(down_value), ids!(up_value)] {
+                let mut value = self.ui.label(cx, path);
+                script_apply_eval!(cx, value, {draw_text +: {text_style +: {font_size: #(font_size)}}});
+            }
+            for path in [ids!(cpu_summary), ids!(memory_summary), ids!(down_summary), ids!(up_summary)] {
+                let mut card = self.ui.view(cx, path);
+                script_apply_eval!(cx, card, {padding: #(summary_padding) spacing: 6});
+            }
             self.ui.view(cx, ids!(cpu_panel)).set_visible(cx, details);
             self.ui.view(cx, ids!(side_column)).set_visible(cx, details);
-            self.ui.view(cx, ids!(process_panel)).set_visible(cx, table);
+            self.ui.view(cx, ids!(process_panel)).set_visible(cx, table && (!phone || self.phone_processes));
+            let accent = self.theme.accent;
+            let muted = self.theme.muted;
+            for (path, selected) in [(ids!(overview_tab), !self.phone_processes), (ids!(processes_tab), self.phone_processes)] {
+                let mut tab = self.ui.button(cx, path);
+                let ink = if selected {accent} else {muted};
+                let background = if selected {self.theme.panel} else {self.theme.background};
+                script_apply_eval!(cx, tab, {draw_bg +: {color: #(background) color_hover: #(background) border_size: 0.0 border_radius: 10.0} draw_text +: {color: #(ink)}});
+            }
             if let Some(mut table) = self.ui.widget(cx, ids!(process_table)).borrow_mut::<ProcessTable>() {
                 table.set_compact(cx, !details);
             }
             log!("task: layout {density:?} at {:.0}x{:.0}", size.x, size.y);
         }
         // With the table gone the graph takes the whole window; with it there
-        // the metrics band keeps at most 45% so the table always has rows to
+        // the metrics band keeps at most 31% so the table always has rows to
         // show. The walk is set on the widget directly — `Fill` is a DSL name
         // and does not resolve inside a `script_apply_eval!` body.
         if let Some(mut top_row) = self.ui.widget(cx, ids!(top_row)).borrow_mut::<View>() {
-            top_row.walk.height = if table {
-                Size::Fixed(TOP_ROW_HEIGHT.min(size.y * 0.45).max(MIN_TOP_ROW_HEIGHT))
+            top_row.walk.height = if phone { Size::fill() } else if table {
+                Size::Fixed(if details {
+                    TOP_ROW_HEIGHT.min(size.y * 0.31).max(MIN_TOP_ROW_HEIGHT)
+                } else if phone {112.0} else { (size.y * 0.22).clamp(128.0, 190.0) })
             } else {
                 Size::fill()
             };
@@ -690,28 +755,33 @@ impl App {
     }
 
     fn apply_theme(&mut self, cx: &mut Cx) {
+        let classic = matches!(cx.with_vm(desktop_style::current_style), desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
+        if classic { self.theme.panel = self.theme.background; }
         let theme = self.theme;
         let background = theme.background;
         let foreground = theme.foreground;
         let surface = theme.surface;
-        let border = theme.panel;
-        let accent = theme.accent;
+        let panel = theme.panel;
+        let border = with_alpha(theme.foreground, 0.16);
         let muted = theme.muted;
 
         let mut app_bg = self.ui.view(cx, ids!(app_bg));
         script_apply_eval!(cx, app_bg, {draw_bg +: {color: #(background)}});
-        for path in [ids!(cpu_panel), ids!(memory_panel), ids!(network_panel), ids!(process_panel)] {
+        for path in [ids!(aggregate_panel), ids!(cpu_panel), ids!(memory_panel), ids!(network_panel), ids!(process_panel), ids!(cpu_summary), ids!(memory_summary), ids!(down_summary), ids!(up_summary)] {
             let mut view = self.ui.view(cx, path);
-            script_apply_eval!(cx, view, {draw_bg +: {color: #(background) border_color: #(border)}});
+            script_apply_eval!(cx, view, {draw_bg +: {color: #(panel) border_color: #(border)}});
         }
-        for path in [ids!(cpu_title), ids!(memory_title), ids!(network_title), ids!(process_title)] {
-            let mut label = self.ui.label(cx, path);
-            script_apply_eval!(cx, label, {draw_text +: {color: #(accent)}});
-        }
-        for path in [ids!(network_down), ids!(network_up)] {
+        for path in [ids!(aggregate_title), ids!(cpu_title), ids!(memory_title), ids!(network_title), ids!(process_title)] {
             let mut label = self.ui.label(cx, path);
             script_apply_eval!(cx, label, {draw_text +: {color: #(foreground)}});
         }
+        for path in [ids!(network_down), ids!(network_up), ids!(refresh_label)] {
+            let mut label = self.ui.label(cx, path);
+            script_apply_eval!(cx, label, {draw_text +: {color: #(foreground)}});
+        }
+        let mut aggregate = self.ui.widget(cx, ids!(aggregate_graph));
+        let grid = with_alpha(muted, 0.20);
+        script_apply_eval!(cx, aggregate, {color_bg: #(panel) color_grid: #(grid) color_text: #(muted)});
         self.apply_chart_theme(cx, ids!(cpu_chart), theme.blue);
         self.apply_chart_theme(cx, ids!(memory_chart), theme.green);
         self.apply_chart_theme(cx, ids!(down_chart), theme.cyan);
@@ -739,7 +809,7 @@ impl App {
 
     fn apply_chart_theme(&self, cx: &mut Cx, path: &[LiveId], series: Vec4f) {
         let mut chart = self.ui.trend_chart(cx, path);
-        let background = self.theme.surface;
+        let background = self.theme.panel;
         let grid = with_alpha(self.theme.muted, 0.35);
         let text = self.theme.muted;
         // Transparent: TrendChart's area pass paints nothing, leaving the bare
@@ -758,6 +828,13 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let page = if self.ui.button(cx, ids!(overview_tab)).clicked(actions) {Some(false)}
+            else if self.ui.button(cx, ids!(processes_tab)).clicked(actions) {Some(true)} else {None};
+        if let Some(processes) = page {
+            self.phone_processes = processes;
+            self.density_applied = false;
+            self.layout_from_window(cx);
+        }
         if let Some(choice) = self.ui.drop_down(cx, ids!(refresh_select)).changed(actions) {
             let millis = REFRESH_CHOICES_MS.get(choice).copied().unwrap_or(1000);
             if let Some(tx) = &self.sampler_interval_tx {
@@ -780,11 +857,17 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event,Event::LiveEdit) {
+            self.theme=Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
+            self.apply_theme(cx);
+            self.density_applied = false;
+            self.layout_from_window(cx);
+        }
         if let Event::Startup = event {
             // Checked once: a warm-pool instance stays dormant until
             // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
             self.dormancy = Dormancy::start(makepad_wm_api::warm_start());
-            self.theme = Theme::from_environment();
+            self.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
             self.apply_theme(cx);
             // `--size WxH` lets a test drive the breakpoints without a WM.
             if let Some(size) = size_from_args() {
@@ -970,4 +1053,9 @@ mod tests {
         assert!(dormancy.wake());
         assert!(!dormancy.is_dormant());
     }
+}
+
+#[cfg(test)]
+mod application_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

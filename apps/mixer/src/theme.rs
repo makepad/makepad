@@ -21,7 +21,7 @@
 //! `makepad_mixer::safety`.
 
 use makepad_widgets::*;
-use std::sync::OnceLock;
+
 
 /// A palette entry: the name the DSL reads it by, the key in the WM's
 /// theme.splash, and the Tokyo Night fallback.
@@ -52,16 +52,16 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The palette for this process, read once.
-    pub fn shared() -> &'static Palette {
-        static PALETTE: OnceLock<Palette> = OnceLock::new();
-        PALETTE.get_or_init(Palette::load)
+    /// Resolve against the owning Splash VM on each application/style reload.
+    pub fn for_vm(vm: &mut ScriptVm) -> Self {
+        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
     }
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
+    #[cfg(test)]
+    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
+    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
 
-    /// The palette wm exported for this process, with Tokyo Night standing
-    /// in for anything it does not name.
-    pub fn load() -> Self {
-        let wm = makepad_wm_theme::current();
+        let wm = palette;
         Palette {
             entries: KEYS
                 .iter()
@@ -130,7 +130,7 @@ impl Palette {
         // reads as a grey band above a Tokyo Night desk. Same keys, our
         // fallbacks.
         let c = |name: &str| self.get(name).to_string();
-        code.push_str(&format!(
+        if !desktop_style::current_name(vm).is_some_and(|s|s!="omarchy") { code.push_str(&format!(
             "mod.theme.color_b = {bg_dark}\n\
              mod.theme.color_b_h = {bg_dark}00\n\
              mod.theme.color_w = {fg_bright}\n\
@@ -160,6 +160,8 @@ impl Palette {
             accent = c("accent"),
         ));
 
+        }
+        code.push_str("true\n");
         vm.eval(ScriptMod {
             cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
             module_path: "mixer_theme".to_string(),
