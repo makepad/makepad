@@ -310,8 +310,12 @@ impl AppMain for App {
             remote::install(cx);
         }
         self.drain_requests(cx);
-        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // The tree first, then the app and the story's own handler: a
+        // handler that asks a widget what state it is in has to be asking
+        // after that widget has dealt with the same actions, or every
+        // readout in a story is a step behind what the screen shows.
+        self.match_event(cx, event);
         // After the tree has handled the event its index is current, so the
         // subject lookup lands on the story just built rather than on what
         // the index still held from before.
