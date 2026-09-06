@@ -5240,7 +5240,24 @@ impl MixEngine {
                 true => platter * frames as f64 / device_rate,
                 false => 0.0,
             };
-            voice.clock = DeckClock::at(voice.grid.as_ref(), pos_secs, platter, travel_secs);
+            // A span owns the playhead on the read path (below, per frame);
+            // the clock's single-shot prediction folds the same way, so a
+            // roll's landing does not publish a fraction the head is about
+            // to leave behind. Two-sided, because a reversed platter can
+            // leave a span at IN.
+            let predicted_secs = match voice.loop_span {
+                Some((start, end)) if source_rate > 0.0 => {
+                    let predicted = voice.pos + travel_secs * source_rate;
+                    let folded = if predicted >= end || (platter < 0.0 && predicted < start) {
+                        wrapped_into_span(predicted, start, end)
+                    } else {
+                        predicted
+                    };
+                    folded / source_rate
+                }
+                _ => pos_secs + travel_secs,
+            };
+            voice.clock = DeckClock::at(voice.grid.as_ref(), predicted_secs, platter, 0.0);
             let clock = voice.clock;
             // One call for the whole chain rather than a list per stage:
             // there are two chains to keep fed, and two hand-written lists
@@ -5501,9 +5518,14 @@ impl MixEngine {
                         // stranded past OUT by a live resize: modulo
                         // continues the subdivision in phase instead of
                         // re-triggering the downbeat at IN.
-                        let len = (end - start).max(1.0);
-                        let over = (d.playhead_frames() - start).rem_euclid(len);
-                        d.seek_frames(start + over);
+                        let landed = wrapped_into_span(d.playhead_frames(), start, end);
+                        // The finger did not come round with the record,
+                        // so its target does. Without this the error is a
+                        // whole loop wide and a hand on the record would
+                        // drive it at the clamp until it came off.
+                        let moved = landed - d.playhead_frames();
+                        d.scratch.note_wrap(moved / pcm.sample_rate().max(1) as f64);
+                        d.seek_frames(landed);
                     }
                 }
                 // Where THIS frame is read from, for the wrap crossfade
