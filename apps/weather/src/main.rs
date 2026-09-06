@@ -296,6 +296,10 @@ impl AppMain for App {
         if let Event::WindowGeomChange(e) = event {
             let short = e.new_geom.inner_size.y < 150.0;
             self.ui.widget(cx, ids!(tile_hilo)).set_visible(cx, !short);
+            if let Some(mut text) = self.ui.view(cx, ids!(tile_text)).borrow_mut() {
+                text.layout.padding.top = if short {6.0} else {16.0};
+                text.layout.padding.bottom = if short {6.0} else {16.0};
+            }
             let size = if short {22.0} else {32.0};
             let mut temperature = self.ui.widget(cx, ids!(tile_temp));
             script_apply_eval!(cx, temperature, {draw_text.text_style.font_size: #(size)});

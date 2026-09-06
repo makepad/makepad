@@ -277,6 +277,12 @@ impl ScriptHook for AppIcon {
     }
 }
 impl AppIcon {
+    pub fn set_size(&mut self, cx: &mut Cx, size: f64) {
+        self.walk.width = Size::Fixed(size);
+        self.walk.height = Size::Fixed(size);
+        self.area.redraw(cx);
+    }
+
     pub fn set_name(&mut self, cx: &mut Cx, name: &str) {
         if self.name.as_ref() != name {
             self.name.set(name);
