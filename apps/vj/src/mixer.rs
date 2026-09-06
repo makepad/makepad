@@ -1148,6 +1148,11 @@ struct PendingLoad {
     /// What the operator asked for: keep playing through the swap, or
     /// take the deck and stop.
     play: bool,
+    /// The new record's grid, when its analysis arrived before the swap
+    /// was spent. A load and its analysis are two errands and either can
+    /// finish first; a grid that lands during the fade belongs to the
+    /// record coming in, not the one going out.
+    grid: Option<TrackGrid>,
 }
 
 /// Latch a ghost at the deck's own playhead and rate.
@@ -4435,15 +4440,22 @@ impl MixEngine {
     /// Put a record on a silent deck. `keep_playing` is answered by the
     /// caller: a pending load carries the operator's intent from when they
     /// asked, not from when the fade happened to land.
-    fn seat_record(shared: &Shared, d: &mut DeckVoice, pcm: DeckPcm, play: bool) {
+    fn seat_record(
+        shared: &Shared,
+        d: &mut DeckVoice,
+        pcm: DeckPcm,
+        play: bool,
+        grid: Option<TrackGrid>,
+    ) {
         if let Some(old) = d.pcm.replace(pcm) {
             retire(shared, Retired::Pcm(old));
         }
         d.stems = None;
         d.splat = None;
-        // A fresh record has no grid until its analysis lands.
-        d.grid = None;
-        d.clock = DeckClock::default();
+        // Whatever the record brought with it, which is nothing unless its
+        // analysis landed while it was waiting out the fade.
+        d.grid = grid;
+        d.clock = DeckClock::at(d.grid.as_ref(), 0.0, deck_platter(d), 0.0);
         d.playing = play;
         d.pause_at = None;
         d.ended = false;
@@ -4560,8 +4572,20 @@ impl MixEngine {
                 d.pcm = Some(pcm);
                 d.stem_blend = ParamRamp::at(1.0);
                 d.playing = false;
+                // The last record's grid goes with the last record. Left
+                // behind, it rules the new one's beat until its own
+                // analysis lands -- so loops, jumps and every beat-locked
+                // effect would be measured against a tempo belonging to a
+                // track that is no longer on the deck.
+                d.grid = None;
+                d.clock = DeckClock::default();
+                // Nor does a fresh record owe the old one's pause a
+                // give-back to a position that means nothing on it.
+                d.pause_at = None;
                 d.seek_frames(0.0);
                 d.chain.eq_mut().reset();
+                // A hold does not outlive the record it was holding.
+                Self::silence_chain_tails(d);
                 d.reset_blend();
             }
             MixCmd::GrowStream { deck, stream } => {
@@ -4588,11 +4612,27 @@ impl MixEngine {
                 let d = &mut s.decks[deck.index()];
                 d.sync_locked = false;
                 Self::retire_deck_media(shared, d);
+                // A record waiting out a fade goes with the one that was
+                // leaving. Left parked, its fade would land on an empty
+                // deck a few milliseconds later and seat the very track
+                // the operator has just thrown away.
+                if let Some(load) = d.pending.take() {
+                    retire(shared, Retired::Pcm(load.pcm));
+                }
+                // And the fade itself stops, or the deck goes on counting
+                // down towards a swap that has nothing left to swap.
+                d.transport = Ramp::at(0.0);
                 d.playing = false;
+                d.grid = None;
+                d.clock = DeckClock::default();
                 // With no pcm the clamp parks the playhead at zero; this
                 // also clears `ended`, so a later install re-arms end
                 // reporting.
                 d.seek_frames(0.0);
+                // A hold does not outlive the record it was holding: a
+                // freeze or an echo tail left running would go on sounding
+                // over an empty deck.
+                Self::silence_chain_tails(d);
                 d.reset_blend();
             }
             MixCmd::InstallStems { deck, stems } => {
@@ -4619,6 +4659,16 @@ impl MixEngine {
             }
             MixCmd::SetPlaying { deck, playing } => {
                 let d = &mut s.decks[deck.index()];
+                // With a load parked, the deck the operator is aiming at is
+                // the one ARRIVING. Re-aim it and leave the outgoing
+                // track's fade alone: turning the transport back up here
+                // means it never reaches zero, so the swap never happens
+                // and the new record is stranded in the slot for good.
+                if let Some(load) = d.pending.as_mut() {
+                    load.play = playing;
+                    d.playing = playing;
+                    return;
+                }
                 if playing {
                     // Playing from the end restarts. A playhead at the
                     // DECODED edge of a streaming track is not at the end:
@@ -4791,7 +4841,7 @@ impl MixEngine {
                 // Silent already: nothing is leaving, so nothing has to be
                 // waited for.
                 if d.transport.current <= 0.0 {
-                    Self::seat_record(shared, d, pcm, false);
+                    Self::seat_record(shared, d, pcm, false, None);
                 } else {
                     if let Some(old) = d.pending.take() {
                         // Latest wins: two loads inside one fade and only
@@ -4806,7 +4856,7 @@ impl MixEngine {
                     // transport is above zero, so a stopping load leaves
                     // exactly the way a pause does.
                     d.playing = keep_playing;
-                    d.pending = Some(PendingLoad { pcm, play: keep_playing });
+                    d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
                     d.transport.slew(0.0, LOAD_SWAP_SECS);
                 }
             }
@@ -5004,6 +5054,14 @@ impl MixEngine {
             }
             MixCmd::SetGrid { deck, grid } => {
                 let d = &mut s.decks[deck.index()];
+                // A record is on its way in behind a fade: the grid is for
+                // THAT one. Writing it here would re-rule the outgoing
+                // track's last forty milliseconds to the incoming track's
+                // tempo, and then lose it at the swap.
+                if let Some(load) = d.pending.as_mut() {
+                    load.grid = grid;
+                    return;
+                }
                 d.grid = grid;
                 // Re-rule the clock on the spot rather than waiting for the
                 // next buffer: a grid landing mid-phrase should lock the
@@ -5363,7 +5421,7 @@ impl MixEngine {
         for d in s.decks.iter_mut() {
             if d.transport.current <= 0.0 {
                 if let Some(load) = d.pending.take() {
-                    Self::seat_record(shared, d, load.pcm, load.play);
+                    Self::seat_record(shared, d, load.pcm, load.play, load.grid);
                 }
             }
         }
@@ -10389,6 +10447,137 @@ fn a_censor_under_a_latched_slip_leaves_the_operators_ghost_running() {
             pressed_at - landed > 0.05,
             "and it is nowhere near where pause was pressed ({pressed_at})"
         );
+    }
+
+
+    /// The grid is the record's: a double carries it (a different grid on
+    /// the other deck proves it was carried, not kept), a clear drops it,
+    /// a fresh load starts without one, and a grid that lands while a
+    /// load is parked belongs to the record coming IN -- the outgoing one
+    /// keeps its own beat until it is gone.
+    #[test]
+    fn the_grid_travels_with_the_record_and_leaves_with_it() {
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        mixer.set_deck_grid(DeckId::B, Some(clock_grid(126.0)));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::B, true);
+        spin_render(&mixer, 4);
+        assert!((mixer.deck_snapshot(DeckId::B).clock.beat_secs_out - 60.0 / 126.0).abs() < 1e-9);
+        mixer.clone_deck(DeckId::A, DeckId::B);
+        spin_render(&mixer, 4);
+        let b = mixer.deck_snapshot(DeckId::B).clock;
+        assert!((b.beat_secs_out - 0.5).abs() < 1e-9, "the double reads its record's beat: {}", b.beat_secs_out);
+        mixer.clear_deck(DeckId::B);
+        spin_render(&mixer, 4);
+        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a cleared deck has no beat");
+        // A fresh load drops whatever grid was there, which a deck with
+        // no grid at all cannot prove: put a real one back on B, let its
+        // transport fade all the way down so the load takes the
+        // immediate branch, then load over it and watch it go.
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        mixer.set_deck_grid(DeckId::B, Some(clock_grid(140.0)));
+        mixer.set_deck_playing(DeckId::B, true);
+        spin_render(&mixer, 2);
+        assert!(mixer.deck_snapshot(DeckId::B).clock.has_grid, "the grid is there to lose");
+        mixer.set_deck_playing(DeckId::B, false);
+        spin_render(&mixer, 2); // the pause fade is one buffer; two is headroom
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        spin_render(&mixer, 4);
+        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a fresh record has none until its analysis lands");
+        // A load over the playing deck A parks the new record; the grid
+        // that lands now is the new record's.
+        mixer.install_deck_over(DeckId::A, tone_pcm(440.0, 48_000, 8.0), true);
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(126.0)));
+        let outgoing = mixer.deck_snapshot(DeckId::A).clock;
+        assert!((outgoing.beat_secs_out - 0.5).abs() < 1e-9, "the outgoing record keeps its beat while it fades");
+        spin_render(&mixer, 32);
+        let incoming = mixer.deck_snapshot(DeckId::A).clock;
+        assert!(incoming.has_grid, "the parked grid came in with the record");
+        assert!(
+            (incoming.beat_secs_out - 60.0 / 126.0).abs() < 1e-9,
+            "and it is the new record's: {}",
+            incoming.beat_secs_out
+        );
+    }
+
+    #[test]
+    fn an_unload_during_the_fade_cancels_the_parked_load() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        let parked = const_pcm(4_000, 192_000, 48_000);
+        mixer.install_deck_over(DeckId::A, parked.clone(), true);
+        mixer.clear_deck(DeckId::A);
+        mixer.sync();
+        mixer.reap_retired();
+        assert_eq!(Arc::strong_count(&parked), 1, "the parked load went with the unload");
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        // Nothing resurrects on an emptied deck.
+        assert!(
+            mixer.state().decks[DeckId::A.index()].pcm.is_none(),
+            "nothing resurrects on an emptied deck"
+        );
+        assert!(mixer.deck_snapshot(DeckId::A).duration_secs.abs() < 1e-9);
+    }
+
+    #[test]
+    fn play_pressed_during_the_fade_re_aims_the_load_rather_than_the_old_track() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        // Aimed to stop, then the operator changes their mind mid-fade.
+        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), false);
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..16 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(snap.playing, "the deck came up on the new track");
+        assert!((snap.duration_secs - 10.0).abs() < 1e-6);
+    }
+
+    /// A load over a playing deck, and an unload, both put a held
+    /// freeze away -- the swap on its own turn, the unload at once.
+    #[test]
+    fn a_load_and_an_unload_put_the_freeze_away() {
+        let rate = 48_000.0;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 20);
+        mixer.set_deck_freeze(DeckId::A, Some(0.1));
+        assert!(deck_frozen(&mixer, DeckId::A));
+        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
+        spin_render(&mixer, 8); // through the outgoing fade and the swap
+        assert!(!deck_frozen(&mixer, DeckId::A), "the swap must have let it go");
+        let out = render_out(&mixer, rate, 4, 512);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let expected = 8_192.0 / 32_768.0;
+        assert!(
+            (peak - expected).abs() < 0.02,
+            "the new record must be heard, unfrozen: {peak} vs {expected}"
+        );
+
+        mixer.set_deck_freeze(DeckId::A, Some(0.1));
+        assert!(deck_frozen(&mixer, DeckId::A));
+        mixer.clear_deck(DeckId::A);
+        // HEAD's ClearDeck dispatch does not reset the deck's chain (see
+        // "missing"); until it does, this assertion fails.
+        assert!(!deck_frozen(&mixer, DeckId::A), "an unload must have let it go");
     }
 
 }
