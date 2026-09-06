@@ -857,10 +857,21 @@ pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
     out
 }
 
-/// Several textured parts as one mesh (one primitive + material each).
-/// Identical image bytes are stored once and shared. Sampler is linear +
+/// Several textured parts as one mesh (one primitive per part).
+/// Identical image bytes and complete material records are stored once and shared. Sampler is linear +
 /// repeat so wall/floor UVs can tile.
 pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bool) -> Vec<u8> {
+    write_glb_mesh_textured_parts_filtered(parts, double_sided, 9987)
+}
+
+/// Shared atlases use linear filtering without generated mipmaps, preventing
+/// neighboring material tiles from bleeding together at lower mip levels.
+/// The repeat sampler remains unchanged; atlas exporters provide periodic gutters.
+pub fn write_glb_mesh_textured_parts_linear(parts: &[GlbTexturedPart], double_sided: bool) -> Vec<u8> {
+    write_glb_mesh_textured_parts_filtered(parts, double_sided, 9729)
+}
+
+fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_sided: bool, min_filter: u32) -> Vec<u8> {
     if parts.is_empty() {
         return write_glb_mesh(
             &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
@@ -870,6 +881,7 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
     let mut b = GlbBinBuilder::new();
     let mut prims = Vec::new();
     let mut materials = Vec::new();
+    let mut material_by_record = std::collections::HashMap::<String, usize>::new();
     let mut textures = Vec::new();
     let mut images = Vec::new();
     let mut image_by_bytes: std::collections::HashMap<&[u8], usize> =
@@ -962,7 +974,6 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             }
             _ => None,
         };
-        let mi = materials.len();
         let factor = match part.base_color_factor {
             Some([r, g, bl, a]) if part.base_color_factor != Some([1.0, 1.0, 1.0, 1.0]) => {
                 format!("\"baseColorFactor\":[{r},{g},{bl},{a}],")
@@ -986,9 +997,12 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
                 format!(",\"extras\":{{{}}}", bits.join(","))
             }
         };
-        materials.push(format!(
+        let material = format!(
             "{{\"pbrMetallicRoughness\":{{{factor}\"baseColorTexture\":{{\"index\":{ti}}},\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"doubleSided\":{double_sided}{extras}}}"
-        ));
+        );
+        let mi = *material_by_record.entry(material.clone()).or_insert_with(|| {
+            let index = materials.len(); materials.push(material); index
+        });
         prims.push(format!(
             "{{\"attributes\":{{\"POSITION\":{pos_acc},\"NORMAL\":{nrm_acc},\"TEXCOORD_0\":{uv_acc}{color_attr}{lm_attr}}},\"indices\":{idx_acc},\"material\":{mi},\"mode\":4}}"
         ));
@@ -1006,7 +1020,7 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             "\"meshes\":[{{\"primitives\":[{}]}}],",
             "\"materials\":[{}],",
             "\"textures\":[{}],",
-            "\"samplers\":[{{\"magFilter\":9729,\"minFilter\":9987,\"wrapS\":10497,\"wrapT\":10497}}],",
+            "\"samplers\":[{{\"magFilter\":9729,\"minFilter\":{},\"wrapS\":10497,\"wrapT\":10497}}],",
             "\"images\":[{}],",
             "\"accessors\":[{}],",
             "\"bufferViews\":[{}],",
@@ -1015,6 +1029,7 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
         prims.join(","),
         materials.join(","),
         textures.join(","),
+        min_filter,
         images.join(","),
         b.accessors.join(","),
         b.views.join(","),
@@ -1479,6 +1494,26 @@ mod tests {
         assert_eq!(prim.positions, positions);
         assert_eq!(prim.indices, indices);
         assert!(prim.colors0.is_none());
+    }
+
+    #[test]
+    fn textured_parts_share_only_identical_complete_material_records() {
+        let positions = [[0.0,0.0,0.0],[1.0,0.0,0.0],[0.0,1.0,0.0]];
+        let uvs = [[0.0,0.0],[1.0,0.0],[0.0,1.0]];
+        let indices = [0,1,2];
+        let base = || super::GlbTexturedPart {
+            positions: &positions, normals: None, uvs: &uvs, indices: &indices,
+            base_color_png: b"base", base_color_factor: None, colors: None,
+            lightmap_png: None, lightmap_uvs: None, detail_png: None, detail_scale: [0.0;2],
+        };
+        let lightmap = || super::GlbTexturedPart { lightmap_png: Some(b"lightmap"), lightmap_uvs: Some(&uvs), ..base() };
+        let parts = [base(), base(), super::GlbTexturedPart { base_color_factor: Some([0.5,1.0,1.0,1.0]), ..base() },
+            lightmap(), super::GlbTexturedPart { detail_png: Some(b"detail"), detail_scale: [2.0,2.0], ..base() }, lightmap()];
+        let glb = super::write_glb_mesh_textured_parts_linear(&parts, false);
+        let loaded = load_gltf_from_bytes(&glb, None).unwrap();
+        assert_eq!(loaded.document.materials_slice().len(), 4);
+        assert_eq!(loaded.document.meshes_slice()[0].primitives.iter().map(|p| p.material.unwrap()).collect::<Vec<_>>(), [0,0,1,2,3,2]);
+        assert!(String::from_utf8_lossy(&glb).contains("\"minFilter\":9729"));
     }
 
     #[test]

@@ -1,68 +1,77 @@
-// Shared helping thread pool for CSG evaluation and polygonal booleans.
-//
-// There is deliberately ONE pool. LocalGen jobs enter it through `spawn`,
-// and recursive boolean subtrees use the parallel helpers below. A worker
-// waiting for children helps run queued work, so nesting cannot deadlock even
-// when every worker is occupied by a top-level generation job.
+// CSG execution helpers. Standalone clients may use the legacy helping pool.
+// Platform-owned jobs enter with_serial: every recursive helper then runs on
+// that worker and never initializes or submits into an independent pool.
+
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self { Self::default() }
+    pub fn cancel(&self) { self.0.store(true, Ordering::Release); }
+    pub fn is_cancelled(&self) -> bool { self.0.load(Ordering::Acquire) }
+}
+
+thread_local! {
+    static CURRENT_CANCEL: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
+    static SERIAL_EXECUTION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(feature = "threads")]
+fn inherited_cancel() -> Option<CancelToken> {
+    CURRENT_CANCEL.with(|slot| slot.borrow().clone())
+}
+
+struct CancelScope(Option<CancelToken>);
+impl Drop for CancelScope {
+    fn drop(&mut self) {
+        CURRENT_CANCEL.with(|slot| { slot.replace(self.0.take()); });
+    }
+}
+
+fn run_with_inherited_cancel<R>(cancel: Option<CancelToken>, f: impl FnOnce() -> R) -> R {
+    let _scope = CancelScope(CURRENT_CANCEL.with(|slot| slot.replace(cancel)));
+    f()
+}
+
+/// Install cancellation for this worker, restoring its previous token even
+/// when an operation unwinds. This contract is identical without `threads`.
+pub fn with_cancel<R>(token: &CancelToken, f: impl FnOnce() -> R) -> R {
+    run_with_inherited_cancel(Some(token.clone()), f)
+}
+
+#[inline]
+pub fn cancelled() -> bool {
+    CURRENT_CANCEL.with(|slot| slot.borrow().as_ref().is_some_and(CancelToken::is_cancelled))
+}
+
+struct SerialScope(bool);
+impl Drop for SerialScope {
+    fn drop(&mut self) { SERIAL_EXECUTION.with(|slot| slot.set(self.0)); }
+}
+
+/// Keep all nested CSG work on the calling worker. Must be entered on an
+/// existing executor worker, never around heavy evaluation on the UI.
+pub fn with_serial<R>(f: impl FnOnce() -> R) -> R {
+    let _scope = SerialScope(SERIAL_EXECUTION.with(|slot| slot.replace(true)));
+    f()
+}
+
+#[cfg(any(feature = "threads", test))]
+fn serial_execution() -> bool { SERIAL_EXECUTION.with(Cell::get) }
 
 #[cfg(feature = "threads")]
 mod inner {
-    use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
     use std::thread;
 
     type Job = Box<dyn FnOnce() + Send>;
 
-    #[derive(Clone, Default)]
-    pub struct CancelToken(Arc<AtomicBool>);
-
-    impl CancelToken {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        pub fn cancel(&self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-
-        pub fn is_cancelled(&self) -> bool {
-            self.0.load(Ordering::Relaxed)
-        }
-    }
-
-    thread_local! {
-        static CURRENT_CANCEL: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
-    }
-
-    fn inherited_cancel() -> Option<CancelToken> {
-        CURRENT_CANCEL.with(|slot| slot.borrow().clone())
-    }
-
-    fn run_with_inherited_cancel(cancel: Option<CancelToken>, f: impl FnOnce()) {
-        CURRENT_CANCEL.with(|slot| {
-            let previous = slot.replace(cancel);
-            f();
-            slot.replace(previous);
-        });
-    }
-
-    pub fn with_cancel<R>(token: &CancelToken, f: impl FnOnce() -> R) -> R {
-        CURRENT_CANCEL.with(|slot| {
-            let previous = slot.replace(Some(token.clone()));
-            let out = f();
-            slot.replace(previous);
-            out
-        })
-    }
-
-    #[inline]
-    pub fn cancelled() -> bool {
-        CURRENT_CANCEL.with(|slot| {
-            slot.borrow().as_ref().is_some_and(CancelToken::is_cancelled)
-        })
-    }
+    use super::{inherited_cancel, run_with_inherited_cancel, serial_execution};
 
     struct Queue {
         jobs: Mutex<VecDeque<Job>>,
@@ -139,12 +148,12 @@ mod inner {
     }
 
     pub fn thread_count() -> usize {
-        get_pool().size
+        if serial_execution() { 1 } else { get_pool().size }
     }
 
     /// Queue one top-level task on the shared pool.
     pub fn spawn(f: impl FnOnce() + Send + 'static) {
-        get_pool().submit(f);
+        if serial_execution() { f() } else { get_pool().submit(f); }
     }
 
     fn receive_helping<R>(rx: mpsc::Receiver<R>) -> R {
@@ -169,7 +178,7 @@ mod inner {
         FA: FnOnce() -> A + Send + 'static,
         FB: FnOnce() -> B + Send + 'static,
     {
-        if get_pool().size < 2 {
+        if serial_execution() || get_pool().size < 2 {
             return (fa(), fb());
         }
         let (tx_a, rx_a) = mpsc::channel();
@@ -197,7 +206,7 @@ mod inner {
         R: Send + 'static,
         F: FnOnce() -> R + Send + 'static,
     {
-        if get_pool().size < 2 || tasks.len() < 2 {
+        if serial_execution() || get_pool().size < 2 || tasks.len() < 2 {
             return tasks.into_iter().map(|f| f()).collect();
         }
         let mut receivers = Vec::with_capacity(tasks.len());
@@ -244,18 +253,6 @@ mod inner {
 
 #[cfg(not(feature = "threads"))]
 mod inner {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    #[derive(Clone, Default)]
-    pub struct CancelToken(Arc<AtomicBool>);
-    impl CancelToken {
-        pub fn new() -> Self { Self::default() }
-        pub fn cancel(&self) { self.0.store(true, Ordering::Relaxed); }
-        pub fn is_cancelled(&self) -> bool { self.0.load(Ordering::Relaxed) }
-    }
-    pub fn with_cancel<R>(_: &CancelToken, f: impl FnOnce() -> R) -> R { f() }
-    pub fn cancelled() -> bool { false }
     pub fn thread_count() -> usize { 1 }
     pub fn spawn(f: impl FnOnce() + Send + 'static) { f() }
     pub fn parallel_do2<A, B, FA, FB>(fa: FA, fb: FB) -> (A, B)
@@ -269,6 +266,47 @@ mod inner {
 }
 
 pub use inner::{
-    cancelled, parallel_do2, parallel_do8, parallel_for, parallel_map, spawn, thread_count,
-    with_cancel, CancelToken,
+    parallel_do2, parallel_do8, parallel_for, parallel_map, spawn, thread_count,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_scope_keeps_nested_helpers_on_the_calling_worker() {
+        let owner = std::thread::current().id();
+        with_serial(|| {
+            assert_eq!(thread_count(), 1);
+            let check = move || {
+                assert_eq!(std::thread::current().id(), owner);
+                assert_eq!(thread_count(), 1);
+                parallel_do2(|| 3, || 4)
+            };
+            assert_eq!(parallel_do2(check, check), ((3, 4), (3, 4)));
+            assert_eq!(parallel_for(vec![check, check]).len(), 2);
+            assert_eq!(parallel_map(&[1, 2, 3], |values| values.to_vec()), [1, 2, 3]);
+            spawn(move || assert_eq!(std::thread::current().id(), owner));
+        });
+    }
+
+    #[test]
+    fn cancellation_and_serial_scopes_restore_after_unwind() {
+        assert!(!serial_execution());
+        let outer = CancelToken::new();
+        let inner = CancelToken::new();
+        inner.cancel();
+        with_cancel(&outer, || {
+            let failed = std::panic::catch_unwind(|| with_serial(|| with_cancel(&inner, || {
+                assert!(cancelled());
+                panic!("operation failed");
+            })));
+            assert!(failed.is_err());
+            assert!(!serial_execution());
+            assert!(!cancelled());
+            outer.cancel();
+            with_serial(|| parallel_do2(|| assert!(cancelled()), || assert!(cancelled())));
+        });
+        assert!(!cancelled());
+    }
+}
