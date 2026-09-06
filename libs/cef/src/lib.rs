@@ -76,8 +76,8 @@ mod native;
 #[cfg(any(target_os = "macos", windows))]
 pub use native::{
     accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
-    is_initialized, prepare, reexec_into_app_bundle_if_needed, set_background_color, shutdown,
-    startup_phases, AcceleratedStats, Browser, RenderMode,
+    is_initialized, prepare, reexec_into_app_bundle_if_needed, set_application_dark_mode,
+    set_background_color, shutdown, startup_phases, AcceleratedStats, Browser, RenderMode,
 };
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -110,6 +110,9 @@ pub fn accelerated_paint_requested() -> bool {
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn set_background_color(_argb: u32) {}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn set_application_dark_mode(_dark: bool) {}
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn background_color() -> u32 {

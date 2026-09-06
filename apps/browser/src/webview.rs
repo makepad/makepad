@@ -126,6 +126,7 @@ impl WebView {
         let palette = crate::palette();
         let wanted = (palette.is_dark(), palette.page_background_argb());
         if self.page_appearance == Some(wanted) { return; }
+        makepad_cef::set_application_dark_mode(wanted.0);
         makepad_cef::set_background_color(wanted.1);
         let mut applied = false;
         for tab in &mut self.tabs.tabs {

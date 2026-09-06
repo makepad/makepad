@@ -677,7 +677,7 @@ impl App {
                 alive: true,
                 // Connected AND past CreateWindow: it has a window and a
                 // frame, so a tile can show it this instant.
-                connected: slot.sender.is_some() && slot.ready,
+                connected: slot.sender.is_some() && slot.ready && slot.closing.is_none(),
             })
             .collect();
         let Some(client) = self.warm_pool.adopt(app_id, cwd_override, &status) else {
@@ -739,6 +739,13 @@ impl App {
     /// simply means the next launch of that app is a cold one.
     fn spawn_warm(&mut self, cx: &mut Cx, app_id: &str) {
         if !self.warm_pool.wants(app_id, host::now()) {
+            return;
+        }
+        // Let retired browsers release their profile lock before a replacement
+        // starts. This also coalesces quick light/dark toggles into one launch
+        // with the latest child environment.
+        if app_id == "browser" && self.state_mut().clients.values().any(|slot|
+            slot.app == "browser" && slot.warm && slot.closing.is_some()) {
             return;
         }
         let Some(app) = crate::clients::find_app(app_id) else {
@@ -2381,6 +2388,11 @@ impl App {
         // this run (a state file natively, the desk's storage on the web).
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
         host::persist_theme_choice(cx, name);
+        let style = self.state_mut().style.target;
+        if style == desktop::DesktopStyle::Omarchy {
+            let dark = desktop_app::browser_appearance(style, false, &source);
+            self.refresh_warm_browser_appearance(cx, dark);
+        }
         // Chrome DSL colors refresh fully on restart; borders, terminal
         // palette and backgrounds apply immediately.
         self.apply_background(cx, 0);
@@ -3736,6 +3748,8 @@ impl MatchEvent for App {
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
         let source = theme::load_theme_source(&theme_name);
+        self.warm_pool.set_browser_appearance(desktop_app::browser_appearance(
+            desktop::DesktopStyle::Omarchy, false, &source));
         let term_env = theme::scan_term_palette(&source)
             .map(|p| p.env_value())
             .unwrap_or_default();
