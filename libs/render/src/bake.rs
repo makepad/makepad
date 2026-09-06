@@ -479,7 +479,7 @@ impl LightBake {
     /// wedged against a wall darkens even though its top is open — a single
     /// centre sample cannot tell those apart.
     fn bake_ao(&mut self, world: &GameWorld) {
-        let t0 = std::time::Instant::now();
+        let t0 = Cx::monotonic_now();
         let dirs = hemisphere_dirs(self.settings.ao_rays);
         let terrain = world.terrain.as_ref();
         let mut near = Vec::new();
@@ -519,14 +519,14 @@ impl LightBake {
             self.ao.push((e.id, total / faces.len() as f32));
         }
         self.stats.statics = statics;
-        self.stats.ao_us = t0.elapsed().as_micros() as u64;
+        self.stats.ao_us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
     }
 
     /// Per-static sun visibility: one ray each, toward the sun. Cheap enough
     /// to redo whenever the sun swings, which is what lets a day cycle move
     /// the baked shadows instead of freezing them at dawn.
     fn bake_sun(&mut self, world: &GameWorld, sun: &SunLight) {
-        let t0 = std::time::Instant::now();
+        let t0 = Cx::monotonic_now();
         let terrain = world.terrain.as_ref();
         // A long ray: a tower should shadow the ground well away from it.
         let reach = 64.0;
@@ -558,7 +558,7 @@ impl LightBake {
             let lit = !Self::occluded(&near, terrain, self.terrain_max, probe, sun.dir, reach);
             self.probes.probes[i].1 = if lit { 1.0 } else { 0.0 };
         }
-        self.stats.sun_us = t0.elapsed().as_micros() as u64;
+        self.stats.sun_us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
     }
 
     fn probe_positions(&self) -> impl Iterator<Item = Vec3f> + '_ {
@@ -576,7 +576,7 @@ impl LightBake {
     /// Lay out the lattice over the world's contents and bake its sky term.
     /// Sun visibility is filled in by [`Self::bake_sun`].
     fn bake_probes_sky(&mut self, world: &GameWorld) {
-        let t0 = std::time::Instant::now();
+        let t0 = Cx::monotonic_now();
         let Some((min, max)) = world_bounds(world) else {
             self.probes = ProbeGrid::default();
             self.stats.probe_us = 0;
@@ -613,7 +613,7 @@ impl LightBake {
             self.probes.probes[i].0 = vis;
         }
         self.stats.probes = self.probes.probes.len() as u64;
-        self.stats.probe_us = t0.elapsed().as_micros() as u64;
+        self.stats.probe_us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
     }
 }
 

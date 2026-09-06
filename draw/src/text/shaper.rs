@@ -1,6 +1,7 @@
 use {
     super::{
         font::{Font, GlyphId},
+        font_family::FontDiagnostics,
         slice::SliceExt,
         substr::Substr,
     },
@@ -8,13 +9,23 @@ use {
     rustybuzz,
     rustybuzz::UnicodeBuffer,
     std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
+        sync::Mutex,
     },
     unicode_segmentation::UnicodeSegmentation,
 };
+
+static WARNED_MISSING_GLYPHS: Mutex<Option<HashSet<char>>> = Mutex::new(None);
+
+fn mark_missing_glyph_for_warning(warned: &Mutex<Option<HashSet<char>>>, ch: char) -> bool {
+    let Ok(mut warned) = warned.try_lock() else {
+        return false;
+    };
+    warned.get_or_insert_with(HashSet::new).insert(ch)
+}
 
 /// Returns `true` if `text` is guaranteed to contain no right-to-left
 /// characters, so that the Unicode Bidirectional Algorithm can be skipped
@@ -175,6 +186,7 @@ impl Shaper {
                     &params.fonts[0],
                     &params.fonts,
                     &params.features,
+                    &params.diagnostics,
                     Direction::Ltr,
                     0,
                     text.len(),
@@ -201,6 +213,7 @@ impl Shaper {
                         &params.fonts[0],
                         &params.fonts,
                         &params.features,
+                        &params.diagnostics,
                         Direction::Ltr,
                         0,
                         text.len(),
@@ -222,6 +235,7 @@ impl Shaper {
                             &params.fonts[0],
                             &params.fonts,
                             &params.features,
+                            &params.diagnostics,
                             direction,
                             run.start,
                             run.end,
@@ -257,20 +271,23 @@ impl Shaper {
     /// so ".notdef" boxes in the UI are explained in the log instead of being
     /// silently drawn (a missing arrow/symbol glyph is otherwise very hard to
     /// distinguish from a layout bug).
-    fn warn_missing_glyph_once(text: &str, cluster: usize) {
-        use std::collections::HashSet;
-        use std::sync::Mutex;
-        static WARNED: Mutex<Option<HashSet<char>>> = Mutex::new(None);
+    fn warn_missing_glyph_once(
+        text: &str,
+        cluster: usize,
+        diagnostics: &FontDiagnostics,
+    ) {
         let Some(ch) = text.get(cluster..).and_then(|s| s.chars().next()) else {
             return;
         };
-        let mut warned = WARNED.lock().unwrap();
-        if warned.get_or_insert_with(HashSet::new).insert(ch) {
-            crate::makepad_platform::log!(
-                "no loaded font has a glyph for '{}' (U+{:04X}); rendering .notdef",
-                ch,
-                ch as u32
-            );
+        // These misses are expected while their deferred policy face is in
+        // flight. The family arrival has one aggregate log line instead.
+        if crate::makepad_platform::LazyFontFamily::Cjk.contains(ch)
+            || crate::makepad_platform::LazyFontFamily::Emoji.contains(ch)
+        {
+            return;
+        }
+        if mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
+            crate::makepad_platform::log!("{}", missing_glyph_message(ch, diagnostics));
         }
     }
 
@@ -280,6 +297,7 @@ impl Shaper {
         primary_font: &Rc<Font>,
         fonts: &[Rc<Font>],
         features: &[(u32, u32)],
+        diagnostics: &FontDiagnostics,
         direction: Direction,
         start: usize,
         end: usize,
@@ -348,6 +366,7 @@ impl Shaper {
                         primary_font,
                         remaining_fonts,
                         features,
+                        diagnostics,
                         direction,
                         missing_start,
                         missing_end,
@@ -367,7 +386,7 @@ impl Shaper {
                 let glyph_group = glyph_groups[i];
                 if remaining_fonts.is_empty() {
                     for glyph in glyph_group.iter().filter(|glyph| glyph.id == 0) {
-                        Self::warn_missing_glyph_once(text, glyph.cluster);
+                        Self::warn_missing_glyph_once(text, glyph.cluster, diagnostics);
                     }
                 }
                 // If we've exhausted all fallback fonts and still have
@@ -459,6 +478,16 @@ impl Shaper {
     }
 }
 
+fn missing_glyph_message(ch: char, diagnostics: &FontDiagnostics) -> String {
+    format!(
+        "font miss U+{:04X} role={} set={} tried=[{}]",
+        ch as u32,
+        diagnostics.role,
+        diagnostics.set,
+        diagnostics.tried.join(",")
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub cache_size: usize,
@@ -473,6 +502,7 @@ pub struct ShapeParams {
     pub word_spacing: Ems,
     /// OpenType feature tag/value pairs for shaping.
     pub features: Rc<Vec<(u32, u32)>>,
+    pub diagnostics: Rc<FontDiagnostics>,
 }
 
 #[derive(Clone, Debug)]
@@ -490,4 +520,31 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_glyph_diagnostic_has_frozen_contract_fields() {
+        let diagnostics = FontDiagnostics {
+            role: "regular".to_string(),
+            set: "Latin".to_string(),
+            tried: vec!["ibm_plex_text".to_string()],
+        };
+        assert_eq!(
+            missing_glyph_message('中', &diagnostics),
+            "font miss U+4E2D role=regular set=Latin tried=[ibm_plex_text]"
+        );
+    }
+
+    #[test]
+    fn missing_glyph_warning_is_emitted_once_per_codepoint() {
+        let warned = Mutex::new(None);
+        assert!(mark_missing_glyph_for_warning(&warned, '⌘'));
+        assert!(!mark_missing_glyph_for_warning(&warned, '⌘'));
+        assert!(mark_missing_glyph_for_warning(&warned, '⇧'));
+        assert_eq!(warned.lock().unwrap().as_ref().unwrap().len(), 2);
+    }
 }

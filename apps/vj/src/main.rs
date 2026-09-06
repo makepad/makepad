@@ -43,6 +43,7 @@ mod billboard;
 mod catalog;
 mod chat;
 mod console_scale;
+mod clock;
 mod cue;
 mod deck_sections;
 mod deck_tabs;
@@ -77,6 +78,7 @@ mod fx_thumbs;
 mod import_ui;
 mod pipelines;
 mod gen;
+mod ironfish;
 mod lanes;
 // LIVECODING: the observed effect-document origins, and the compile answer
 // a coding agent polls after saving one. See apps/vj/LIVECODING.md.
@@ -101,8 +103,10 @@ mod midi_clock;
 mod midi_learn;
 mod mix;
 mod mixer;
+mod program_mix;
 // The lock-free hand-off across the audio thread's boundary, in either direction.
 mod spsc;
+mod synth;
 // One writer, any readers, never a lock: what the callback publishes per buffer.
 mod published;
 // The audio path pinned against what it rendered the day the reference was
@@ -257,7 +261,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// The PLATFORM clock, not `std::time`: the web has no monotonic
+// `std::time::Instant`, and this one is a drop-in for the surface used
+// here -- now, elapsed, the duration arithmetic and the ordering.
+use crate::clock::Instant;
+
+/// One `Cx`'s spawner, for tests that need a pool without a running app.
+#[cfg(test)]
+pub(crate) fn test_thread_spawner(
+) -> makepad_widgets::makepad_platform::thread::ThreadSpawner {
+    Cx::new(Box::new(|_, _| {})).thread_spawner()
+}
 
 app_main!(App);
 
@@ -2469,6 +2484,34 @@ script_mod! {
                                     flow: Right
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 62 text: "EQ SPLIT"}
+                                    sfx_eq_low_hz := Slider{
+                                        width: 170
+                                        text: "low | mid"
+                                        min: 80.0
+                                        max: 800.0
+                                        default: 250.0
+                                        taper: Log
+                                        unit: "Hz"
+                                        precision: 0
+                                    }
+                                    sfx_eq_high_hz := Slider{
+                                        width: 170
+                                        text: "mid | high"
+                                        min: 1000.0
+                                        max: 8000.0
+                                        default: 2500.0
+                                        taper: Log
+                                        unit: "Hz"
+                                        precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
                                     sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
                                     sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
                                     sfx_fx_feedback := Slider{
@@ -2623,16 +2666,6 @@ script_mod! {
                                             precision: 2
                                         }
                                     }
-                                    sfx_fx_phaser_feedback := Slider{
-                                        width: 170
-                                        text: "phaser feedback"
-                                        min: 0.0
-                                        max: 0.9
-                                        default: 0.3
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
                                     sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
                                     sfx_fx_phaser_locked := View{
                                         width: Fit
@@ -2651,6 +2684,16 @@ script_mod! {
                                             display_scale: 100.0
                                             precision: 0
                                         }
+                                    }
+                                    sfx_fx_phaser_feedback := Slider{
+                                        width: 170
+                                        text: "phaser feedback"
+                                        min: 0.0
+                                        max: 0.9
+                                        default: 0.3
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                 }
                                 View{
@@ -2706,7 +2749,8 @@ script_mod! {
                                         text: "width"
                                         min: 0.0
                                         max: 2.0
-                                        default: 1.5
+                                        default: 1.0
+                                        arc_from_origin: true
                                         unit: "x"
                                         precision: 2
                                     }
@@ -2755,6 +2799,43 @@ script_mod! {
                                         unit: "%"
                                         display_scale: 100.0
                                         precision: 0
+                                    }
+                                }
+                                // The compressor has no row in the levels
+                                // modal on purpose. Its makeup IS a level
+                                // rule -- derived from the threshold and
+                                // the ratio, so the loud parts come down
+                                // and the quiet ones come up by exactly
+                                // what those two say -- and hanging a
+                                // MATCH or a CAP off the slot as well
+                                // would be gain-staging the same signal
+                                // twice, the second stage undoing what
+                                // the first was asked for.
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
+                                    sfx_fx_compressor_threshold := Slider{
+                                        width: 170
+                                        text: "comp threshold"
+                                        min: -40.0
+                                        max: 0.0
+                                        default: -18.0
+                                        unit: "dB"
+                                        precision: 0
+                                    }
+                                    sfx_fx_compressor_ratio := Slider{
+                                        width: 170
+                                        text: "comp ratio"
+                                        min: 1.0
+                                        max: 20.0
+                                        default: 4.0
+                                        taper: Log
+                                        unit: ":1"
+                                        precision: 1
                                     }
                                 }
                             }
@@ -7583,6 +7664,12 @@ pub struct App {
     /// here rather than asked of it.
     #[rust]
     prep_in_flight: usize,
+    /// Rows the operator asked to have measured again, in the order they
+    /// were asked for. Taken ahead of whatever the ahead-window would have
+    /// chosen, and taken whether or not the pass is switched on: a hand on
+    /// the button is a request, not a preference.
+    #[rust]
+    prep_forced: VecDeque<TrackKey>,
     /// Bumped whenever the cache is emptied. A background decode that was
     /// already running is stamped with the generation it started under, and
     /// a result carrying a stale one is dropped rather than written back
@@ -7703,6 +7790,21 @@ pub struct App {
     /// is opened.
     #[rust]
     console: Console,
+    /// How many seconds of AUDIBLE time the wave lanes show. The widget
+    /// owns the live value; this is what is written down, so a zoom the
+    /// operator picked is still there next launch.
+    ///
+    /// Seeded with the lane's OWN default rather than left at zero: it is
+    /// pushed into the widget on first sight, and a zero would clamp to
+    /// the tightest zoom there is and open every session an inch from
+    /// the playhead.
+    #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
+    wave_zoom_secs: f64,
+    /// Pushed into the widget once, when the surface first has one. Not
+    /// every frame: the wheel moves the widget first and reports after,
+    /// so re-asserting the stored value each pass would undo the notch
+    /// that is on its way.
+    wave_zoom_applied: bool,
     /// What the lists were last given, so the strip only re-sizes them when
     /// the number actually moves.
     #[rust]
@@ -7710,6 +7812,17 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// How the three meters READ: master, deck A, deck B. Ticked once per
+    /// poll from the peaks the mixer has been collecting, and read by
+    /// whatever is drawing at whatever rate it draws at.
+    #[rust]
+    meter_ballistics: [crate::console::MeterBallistics; 3],
+    /// When they were last ticked. The poll is a 20 Hz timer that Windows
+    /// services late and coalesces, and it stops entirely while another
+    /// window is up, so the meters are given the time that actually passed
+    /// rather than the time that was asked for.
+    #[rust]
+    meters_ticked_at: Option<Instant>,
     /// When each beat chevron went down, per deck and per direction, so a
     /// tap can be told from a hold on release.
     #[rust]
@@ -8370,6 +8483,7 @@ impl App {
             stream: crate::archive_stream::StreamSwatch::open_as(
                 url,
                 crate::archive_stream::FrameFormat::Nv12,
+                cx.thread_spawner(),
             ),
             title,
             failed: false,
@@ -8510,8 +8624,8 @@ impl App {
     fn start_archive_import(&mut self, cx: &mut Cx) {
         let target = match self.up.as_ref() {
             Some(up) => match up.token.clone() {
-                Some(token) => Some(PublishTarget {
-                    endpoints: up.endpoints,
+                Some(token) => up.native_endpoints().ok().map(|endpoints| PublishTarget {
+                    endpoints,
                     server_id: up.server_id,
                     token,
                     cache: service::session_config_from_env().cache_parent,
@@ -11887,6 +12001,13 @@ p2 {}
         Self::save_ui_surface(self.apc.surface);
         self.ui.page_flip(cx, ids!(pages)).set_active_page(cx, page.into());
         self.console_page = page.into();
+        // Coming back to the decks: the pump stops re-arming itself for a
+        // playing deck while the lane is off screen, so the first frame
+        // has to be asked for here or the surface would sit at whatever
+        // it was showing when the operator left it.
+        if self.console_page == live_id!(music_page) {
+            self.music_pump = cx.new_next_frame();
+        }
         self.sync_mesh_liveness(cx);
         self.paint_tabs(cx, page);
         self.ui.redraw(cx);
@@ -13706,16 +13827,24 @@ p2 {}
                     // transport executes them against the fleet and
                     // publishes the result itself; the store only stores.
                     GenCmd::FetchProfiles { domain } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         self.pipelines.submit(PipeReq::Profiles {
                             domain: domain.to_string(),
                         });
                     }
                     GenCmd::Enqueue { tag, namespace, kind, body } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         if !self.pipelines.submit(PipeReq::EnqueueJob {
                             tag,
@@ -13744,8 +13873,12 @@ p2 {}
                     // than to this app. `Pipelines` holds the same verified
                     // endpoints and token on its own thread.
                     GenCmd::CreatePipeline { tag, namespace, title, prompt, stages } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         // The declaration verbatim — the exact document
                         // going on the wire, so a run can be read back
@@ -14671,6 +14804,15 @@ p2 {}
                 DeckCmd::SetLevelDefault { deck, mode } => {
                     self.mixer.set_deck_level_default(deck, mode)
                 }
+                DeckCmd::SetCompressor { deck, on } => {
+                    self.mixer.set_deck_compressor(deck, on)
+                }
+                DeckCmd::SetCompressorThreshold { deck, db } => {
+                    self.mixer.set_deck_compressor_threshold(deck, db)
+                }
+                DeckCmd::SetCompressorRatio { deck, ratio } => {
+                    self.mixer.set_deck_compressor_ratio(deck, ratio)
+                }
                 DeckCmd::SetCrossovers { deck, low_hz, high_hz } => {
                     self.mixer.set_deck_crossovers(deck, low_hz, high_hz)
                 }
@@ -14855,6 +14997,11 @@ p2 {}
             (deck.stereo_width_on, deck.stereo_width_amount as f64);
         let (plate_reverb_on, plate_reverb_size) =
             (deck.plate_reverb_on, deck.plate_reverb_size as f64);
+        let (compressor_on, compressor_threshold_db, compressor_ratio) = (
+            deck.compressor_on,
+            deck.compressor_threshold_db as f64,
+            deck.compressor_ratio as f64,
+        );
         let (moog_ladder_on, moog_ladder_cutoff, moog_ladder_resonance) = (
             deck.moog_ladder_on,
             deck.moog_ladder_cutoff as f64,
@@ -14863,6 +15010,7 @@ p2 {}
         let deck_level_default = deck.level_default;
         let lvl_echo = (deck.echo_level_mode, deck.echo_mix as f64, deck.echo_ceiling as f64);
         let (echo_rung, echo_pingpong) = (deck.echo_rung, deck.echo_pingpong);
+        let (eq_low_hz, eq_high_hz) = (deck.eq_low_hz as f64, deck.eq_high_hz as f64);
         let lvl_flanger = (deck.flanger_level_mode, deck.flanger_mix as f64, deck.flanger_ceiling as f64);
         let lvl_bitcrusher = (deck.bitcrusher_level_mode, deck.bitcrusher_mix as f64, deck.bitcrusher_ceiling as f64);
         let lvl_tremolo = (deck.tremolo_level_mode, deck.tremolo_mix as f64, deck.tremolo_ceiling as f64);
@@ -14881,6 +15029,8 @@ p2 {}
             (deck.phaser_sync_units, deck.phaser_beat_offset as f64),
             (deck.autopan_sync_units, deck.autopan_beat_offset as f64),
         ];
+        self.ui.slider(cx, ids!(sfx_eq_low_hz)).set_value(cx, eq_low_hz);
+        self.ui.slider(cx, ids!(sfx_eq_high_hz)).set_value(cx, eq_high_hz);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         // The echo's rung reads off, 1, 1/2 or 1/4; the chip beside it
         // lights whenever it is on at all.
@@ -14963,6 +15113,9 @@ p2 {}
         self.paint_chip(cx, ids!(sfx_fx_moog_ladder), moog_ladder_on, None);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).set_value(cx, moog_ladder_cutoff);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).set_value(cx, moog_ladder_resonance);
+        self.paint_chip(cx, ids!(sfx_fx_compressor), compressor_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).set_value(cx, compressor_threshold_db);
+        self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).set_value(cx, compressor_ratio);
 
         // The FX levels panel, when it is open. Read together, after the
         // deck borrow above has been let go by the tuples it filled.
@@ -15274,6 +15427,49 @@ p2 {}
         self.set_music_import_status(cx, &format!("measuring deck {name} again"));
     }
 
+    /// Measure the picked rows again, from nothing.
+    ///
+    /// CLEAR ALL DATA is the blunt version of this: it throws away every
+    /// track's work to fix one track's, and a library that took a night to
+    /// measure is not something to empty because one record's tempo came
+    /// out wrong. This forgets only what was picked -- the sidecar, the
+    /// memoized column answer, and the mark that says the lane has already
+    /// looked at it -- and then asks the background lane for those rows
+    /// first.
+    ///
+    /// The operator's own work is untouched, for the same reason the deck's
+    /// re-scan leaves it alone: marks and a corrected grid live outside
+    /// this cache, which is exactly why they live outside it.
+    fn rescan_rows(&mut self, cx: &mut Cx, rows: &[usize]) {
+        let keys: Vec<TrackKey> = rows
+            .iter()
+            .filter_map(|row| self.music_rows.get(*row).map(|entry| entry.key.clone()))
+            .collect();
+        if keys.is_empty() {
+            self.set_music_import_status(cx, "pick the rows to measure first");
+            return;
+        }
+        let mut asked = 0usize;
+        for key in keys {
+            // A row whose samples cannot be reached keeps what it has.
+            // Forgetting it would leave the columns blank with nothing
+            // able to fill them in again, which is worse than a stale
+            // answer and looks the same as a deletion.
+            let Some((cache_key, _)) = self.preprocess_source(&key) else { continue };
+            crate::wave_analysis::forget_cached(&crate::wave_analysis::cache_dir(), &cache_key);
+            self.track_summaries.remove(&cache_key);
+            self.prep_analysed.remove(&cache_key);
+            preprocess::push_forced(&mut self.prep_forced, key);
+            asked += 1;
+        }
+        self.music_rows_dirty = true;
+        match asked {
+            0 => self.set_music_import_status(cx, "none of those rows can be reached"),
+            1 => self.set_music_import_status(cx, "measuring one track again"),
+            n => self.set_music_import_status(cx, &format!("measuring {n} tracks again")),
+        }
+    }
+
     fn run_pad_cmds(&mut self, cmds: Vec<PadCmd>) {
         for cmd in cmds {
             match cmd {
@@ -15375,9 +15571,24 @@ p2 {}
         // The strip's one line, every pump: this is the only place these
         // numbers reach the operator. Everything above them goes to the log,
         // which nobody in a booth is reading.
+        // Taking the peaks is what empties them, so this is the one place
+        // that does it -- including on pages where no meter is drawn. Left
+        // undrained they would keep the loudest thing that ever happened,
+        // and coming back to the deck page would show a level from minutes
+        // ago as if it were now.
         let meters = self.mixer.meters();
-        let master = meters[crate::mixer::METER_MASTER];
-        self.console_clip.saw(master);
+        let decks = self.mixer.deck_levels();
+        let now = Instant::now();
+        let dt = self.meters_ticked_at.map_or(0.0, |then| (now - then).as_secs_f32());
+        self.meters_ticked_at = Some(now);
+        self.meter_ballistics[0].tick(meters[crate::mixer::METER_MASTER], dt);
+        self.meter_ballistics[1].tick(decks[0], dt);
+        self.meter_ballistics[2].tick(decks[1], dt);
+        // The printed figure is a share of full scale, so it gets the
+        // level as measured -- the square-root taper below is for a column
+        // of pixels, and would read half again too loud as a number.
+        let master = self.meter_ballistics[0].amplitude();
+        self.console_clip.saw(meters[crate::mixer::METER_MASTER]);
         let line = crate::console::summary_line(&health, master, self.console_clip.lit());
         self.set_status_label(cx, ids!(console_line), &line);
         // The opened pane is the same numbers with the room to lay them out.
@@ -15656,7 +15867,8 @@ p2 {}
                     // process's.
                     {
                         let up = self.up.as_ref().unwrap();
-                        let (endpoints, token) = (up.endpoints, up.token.clone());
+                        let Ok(endpoints) = up.native_endpoints() else { return };
+                        let token = up.token.clone();
                         self.pipelines.connect(endpoints, token);
                     }
                     // Seed the bundled vjeffect preset library into the local
@@ -15665,7 +15877,11 @@ p2 {}
                     // detached — the UI never waits on it.
                     if !self.fx_presets_seeded {
                         self.fx_presets_seeded = true;
-                        let endpoints = self.up.as_ref().unwrap().endpoints;
+                        let Some(endpoints) =
+                            self.up.as_ref().and_then(|up| up.native_endpoints().ok())
+                        else {
+                            return;
+                        };
                         let token = self.up.as_ref().unwrap().token.clone();
                         let cache = service::session_config_from_env()
                             .cache_parent
@@ -15799,7 +16015,9 @@ p2 {}
                 let cache = service::session_config_from_env()
                     .cache_parent
                     .join("cache-chat");
-                self.chat.connect(up.endpoints, up.token.clone(), cache);
+                if let Ok(endpoints) = up.native_endpoints() {
+                    self.chat.connect(endpoints, up.token.clone(), cache, cx.thread_spawner());
+                }
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
                 // dirty once a turn runs — so the line would sit there
@@ -16152,7 +16370,12 @@ p2 {}
                     self.video_tile_clicked(cx, asset, as_content);
                 }
             }
-            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { content, .. }) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 // The splash text is here: hand the render job to the hidden
                 // offscreen effect host. Small file, read in place.
                 self.fx_source_inflight.remove(&revision);
@@ -16274,8 +16497,13 @@ p2 {}
             }
             (
                 CatPurpose::FxSlotSource { slot, revision, title },
-                ClientOutput::Blob { path, .. },
+                ClientOutput::Blob { content, .. },
             ) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 // The splash text is here: load it into the slot's offscreen
                 // host. A newer click on the same slot supersedes this one.
                 if self.fx_slot_inflight[slot.index()] != Some(revision) {
@@ -16293,7 +16521,12 @@ p2 {}
                     }
                 }
             }
-            (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::Thumb { revision }, ClientOutput::Blob { content, .. }) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 self.thumb_stats.fetch_landed += 1;
                 let (mut sum, mut max) =
                     (self.thumb_stats.fetch_wait_ms, self.thumb_stats.fetch_wait_max);
@@ -16419,7 +16652,8 @@ p2 {}
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
                             continue;
                         };
-                        let ClientOutput::Blob { path, .. } = output else { continue };
+                        let ClientOutput::Blob { content, .. } = output else { continue };
+                        let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { continue };
                         match purpose {
                             MediaPurpose::Cue { gen } => {
                                 // Only the CURRENT plan entry advances the
@@ -16681,7 +16915,13 @@ p2 {}
             self.sync_import_ui(cx);
             return;
         };
-        let endpoints = up.endpoints;
+        // A static-site session cannot publish: there is no server to
+        // publish to. Say so rather than failing further in.
+        let Ok(endpoints) = up.native_endpoints() else {
+            self.import.status = "this session has no asset server".to_string();
+            self.sync_import_ui(cx);
+            return;
+        };
         let server_id = up.server_id;
         let token = up.token.clone();
         let cache = service::session_config_from_env().cache_parent;
@@ -16713,7 +16953,12 @@ p2 {}
             self.set_music_import_status(cx, "no asset server session yet");
             return;
         };
-        let (endpoints, server_id, token) = (up.endpoints, up.server_id, up.token.clone());
+        // A static-site session has no server to publish to.
+        let Ok(endpoints) = up.native_endpoints() else {
+            self.set_music_import_status(cx, "this session has no asset server");
+            return;
+        };
+        let (server_id, token) = (up.server_id, up.token.clone());
         let cache = service::session_config_from_env().cache_parent;
         if let Err(error) =
             self.music_import_run.start(paths, endpoints, server_id, token, cache)
@@ -18679,9 +18924,9 @@ p2 {}
         if let Some(view) = column_ref.as_mut() {
             if beside {
                 view.walk.width = Size::Fixed(extent);
-                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
             } else {
-                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.width = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.walk.height = Size::Fixed(extent);
             }
         }
@@ -18694,10 +18939,10 @@ p2 {}
         if let Some(view) = grip_ref.as_mut() {
             if beside {
                 view.walk.width = Size::Fixed(7.0);
-                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.cursor = Some(MouseCursor::ColResize);
             } else {
-                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.width = Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None };
                 view.walk.height = Size::Fixed(7.0);
                 view.cursor = Some(MouseCursor::RowResize);
             }
@@ -18849,7 +19094,7 @@ p2 {}
             label.walk.width = if wrapped {
                 Size::Fit { min: None, max: None }
             } else {
-                Size::Fill { weight: 100.0, min: None, max: None }
+                Size::Fill { weight: 100.0, basis: FitBound::Abs(0.0), shrink: 0.0, min: None, max: None }
             };
         }
         drop(label_ref);
@@ -19162,7 +19407,8 @@ p2 {}
                 Fold::Singles => console_scale::ConsoleFold::Singles,
             }));
             if let Size::Fill { weight, max, .. } = view.walk.height {
-                view.walk.height = Size::Fill { weight, min, max };
+                view.walk.height =
+                    Size::Fill { weight, basis: FitBound::Abs(0.0), shrink: 0.0, min, max };
             }
         }
         drop(region_ref);
@@ -20054,6 +20300,15 @@ p2 {}
                 FileDialog::new().set_title("Choose where cached analysis is kept".into()),
             );
         }
+        if self.ui.button(cx, ids!(prep_rescan_picked)).clicked(actions) {
+            let picked: Vec<usize> = self
+                .ui
+                .widget(cx, ids!(music_tracks))
+                .borrow::<VjTrackList>()
+                .map(|list| list.selection().to_vec())
+                .unwrap_or_default();
+            self.rescan_rows(cx, &picked);
+        }
         if self.ui.button(cx, ids!(prep_clear)).clicked(actions) {
             self.ask_preprocess_confirm(cx, PrepConfirm::ClearCache);
         }
@@ -20147,11 +20402,12 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
             self.key_notation.index(),
+            self.wave_zoom_secs,
             self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
@@ -20175,6 +20431,18 @@ p2 {}
                         self.explorer_columns = ColumnLayout::from_text(value)
                     }
                     "queue_columns" => self.queue_columns = ColumnLayout::from_text(value),
+                    "wave_zoom" => {
+                        // Clamped on the way in as well as on the way out:
+                        // the file is the operator's to edit.
+                        self.wave_zoom_secs = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::ZOOM_DEFAULT_SECS)
+                            .clamp(
+                                crate::music_view::ZOOM_MIN_SECS,
+                                crate::music_view::ZOOM_MAX_SECS,
+                            )
+                    }
                     _ => self.console.apply_line(key, value),
                 }
             }
@@ -23154,7 +23422,7 @@ p2 {}
     /// Cheap enough to run every pump: with nothing enabled it is one bool,
     /// and with everything done it is a set lookup per candidate.
     fn pump_preprocess(&mut self) {
-        if self.prep.group_off(PrepGroup::Analysis) {
+        if self.prep.group_off(PrepGroup::Analysis) && self.prep_forced.is_empty() {
             return;
         }
         // The machine belongs to the decks first. A record on its way in
@@ -23173,14 +23441,25 @@ p2 {}
             return;
         }
         self.prep_next_scan = Some(now + Duration::from_millis(PREPROCESS_SCAN_MS));
-        let (explorer, queue) = self.preprocess_sources();
-        let wanted = preprocess::work_list(
-            &self.prep,
-            PrepGroup::Analysis,
-            &explorer,
-            &queue,
-            &HashSet::new(),
-        );
+        // What the operator picked comes first, and comes even with the
+        // pass switched off. Only as many as there are free slots: the
+        // rest stay queued in order for the next pump rather than being
+        // handed out and lost at the concurrency check below.
+        let slots = self.prep.concurrency.saturating_sub(self.prep_in_flight);
+        let mut wanted = preprocess::take_forced(&mut self.prep_forced, slots);
+        if !self.prep.group_off(PrepGroup::Analysis) {
+            let (explorer, queue) = self.preprocess_sources();
+            // A picked row that the window would have reached anyway is
+            // skipped below on the `prep_analysed` mark the forced pass
+            // has already set, so it is decoded once and not twice.
+            wanted.extend(preprocess::work_list(
+                &self.prep,
+                PrepGroup::Analysis,
+                &explorer,
+                &queue,
+                &HashSet::new(),
+            ));
+        }
         for key in wanted {
             if self.prep_in_flight >= self.prep.concurrency {
                 return;
@@ -23871,6 +24150,37 @@ p2 {}
         }
     }
 
+    /// What a deck has marked, in the shape both wave surfaces take: the
+    /// cue, the saved slots with the colour each is wearing, and the loops
+    /// the finder offered.
+    ///
+    /// One rule in one place. The lane and the strip drawing an operator's
+    /// own marks differently would be a bug nobody could explain, and the
+    /// binding path and the per-frame path are two callers of the same
+    /// question.
+    fn deck_marks(
+        state: &crate::decks::DeckState,
+    ) -> (f64, Vec<(u16, f64, f64, u32)>, Vec<(f64, f64)>) {
+        let slots = state
+            .loop_slots
+            .iter()
+            .map(|entry| {
+                (
+                    entry.slot,
+                    entry.span.start_secs,
+                    entry.span.end_secs,
+                    entry.shown_colour(),
+                )
+            })
+            .collect();
+        let found = state
+            .found_loops
+            .iter()
+            .map(|span| (span.start_secs, span.end_secs))
+            .collect();
+        (state.cue_secs, slots, found)
+    }
+
     /// Bind a deck's tiles + grid into the scrolling lane and its overview.
     fn push_deck_wave(&mut self, cx: &mut Cx, deck: DeckId) {
         let index = deck.index();
@@ -23882,11 +24192,16 @@ p2 {}
             .map(|analysis| analysis.tiles.zoom.len())
             .unwrap_or(0);
         let state = self.decks.deck(deck);
+        let (cue_secs, saved_slots, found_loops) = Self::deck_marks(state);
         let lane = WaveLane {
             pyramid,
             stem_pyramid,
             cols,
             position_secs: state.position_secs,
+            duration_secs: state.duration_secs,
+            // The number shown at the overlay's corner belongs to a SAVED
+            // slot; a hand-set loop has no number to show.
+            loop_slot: None,
             grid: state.grid,
             loop_span: state.loop_span.map(|s| (s.start_secs, s.end_secs)),
             rate: state.rate,
@@ -23901,6 +24216,12 @@ p2 {}
             ],
             // Stamped by the widget when it takes the lane.
             stamp: 0.0,
+            // Carried, not defaulted: `set_lane` REPLACES the lane, so a
+            // binding built without these would blank the marks the pump
+            // had already put there and keep blanking them.
+            cue_secs,
+            saved_slots,
+            found_loops,
         };
         let waves = self.ui.widget(cx, ids!(music_waves));
         if let Some(mut scroll) = waves.borrow_mut::<VjWaveScroll>() {
@@ -24075,9 +24396,18 @@ p2 {}
         // Also from here, not only from the display-cadence pump: that pump
         // stops being scheduled the moment nothing is moving, and a deck
         // left holding a live reference would go on asking for frames
-        // forever, counting a record that has stopped.
+        // forever, counting a record that has stopped. ABOVE the visibility
+        // gate for exactly that reason -- the reference has to be let go
+        // whichever page is up.
         self.push_deck_beats(cx);
-        let levels = self.mixer.deck_levels();
+        // Nothing below this line is read by anything but the deck surface,
+        // and the deck surface is not on screen. It was costing two mixer
+        // locks and three widget pushes a frame while the operator was on
+        // another page -- and the audio callback `try_lock`s that same lock
+        // and goes silent when it cannot have it.
+        if self.console_page != live_id!(music_page) {
+            return;
+        }
         for deck in [DeckId::A, DeckId::B] {
             let index = deck.index();
             // One mixer lock per deck per frame: the audio callback
@@ -24130,24 +24460,7 @@ p2 {}
                 DeckLoad::Empty | DeckLoad::Loading { .. } => false,
             };
             let loop_on = state.loop_on();
-            let loop_slots: Vec<(u16, f64, f64, u32)> = state
-                .loop_slots
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.slot,
-                        entry.span.start_secs,
-                        entry.span.end_secs,
-                        entry.shown_colour(),
-                    )
-                })
-                .collect();
-            let found_loops: Vec<(f64, f64)> = state
-                .found_loops
-                .iter()
-                .map(|span| (span.start_secs, span.end_secs))
-                .collect();
-            let cue_secs = state.cue_secs;
+            let (cue_secs, loop_slots, found_loops) = Self::deck_marks(state);
             let loop_beats = state.loop_ticks;
             let loop_armed = state.loop_armed.is_some();
             let refined_by_beats = self.deck_analysis[index]
@@ -24223,11 +24536,20 @@ p2 {}
                     if synced { " SYNC" } else { "" }
                 ),
             );
+            // Elapsed and what is LEFT, rather than elapsed and the length.
+            // The length is a fact about the record that does not change and
+            // can be read off the row; how long there is before the deck
+            // needs the next one is the number being watched, and working it
+            // out in your head at the end of a set is how dead air happens.
             self.set_label(
                 cx,
                 base + 4,
                 &refs.time,
-                &format!("{} / {}", format_time(position), format_time(duration)),
+                &format!(
+                    "{} / -{}",
+                    format_time(position),
+                    format_time((duration - position).max(0.0))
+                ),
             );
             // This deck's QUANT chip mirrors the engine every pass
             // (set_value diffs, so an unchanged unit costs nothing).
@@ -24397,15 +24719,41 @@ p2 {}
                 self.paint_stem_knob(cx, deck, stem, knob, ids.stem_labels[stem], live);
             }
 
-            // The channel meter, with a little ballistic decay so it reads.
-            let level = levels[index].clamp(0.0, 1.0).sqrt();
-            refs.vu.set_uniform(cx, live_id!(level), &[level]);
+            // The channel meter. The ballistics are the pump's -- they have
+            // to be, because they must go on falling while this page is not
+            // being drawn -- so all that is left here is handing over a
+            // value when there is a new one worth drawing.
+            //
+            // And the redraw is not optional. `set_uniform` writes the
+            // widget's own copy and marks NOTHING dirty, so on its own it
+            // reaches the screen only when something else happens to redraw
+            // this view. That is what the meter has been living on: it
+            // moved because the labels beside it were changing. A meter
+            // that is only correct while its neighbours are busy is not a
+            // meter, and the deadband is what keeps saying so cheap --
+            // between pumps, and once the level has settled, there is
+            // nothing to say and nothing is redrawn.
+            if let Some((level, hold)) = self.meter_ballistics[1 + index].take_push() {
+                refs.vu.set_uniform(cx, live_id!(level), &[level]);
+                refs.vu.set_uniform(cx, live_id!(hold), &[hold]);
+                refs.vu.redraw(cx);
+            }
 
             // Waveforms.
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
+                if !self.wave_zoom_applied {
+                    self.wave_zoom_applied = true;
+                    scroll.set_zoom(cx, self.wave_zoom_secs);
+                }
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
-                scroll.set_loop_span(cx, deck, loop_span);
+                scroll.set_loop_span(cx, deck, loop_span, None);
+                // The same marks the strip gets, from the same locals: the
+                // lane is the surface an operator actually mixes against,
+                // and it was the one that could not show them.
+                scroll.set_cue_marker(cx, deck, cue_secs);
+                scroll.set_loop_slots(cx, deck, &loop_slots);
+                scroll.set_found_loops(cx, deck, &found_loops);
                 scroll.set_stem_gain(cx, deck, stem_gains);
             };
             if let Some(mut strip) =
@@ -24903,6 +25251,7 @@ p2 {}
                     .and_then(|revision| self.track_side_channels.get(&revision));
                 TrackRowEntry {
                     key,
+                    license: String::new(),
                     title,
                     artist,
                     album,
@@ -25173,6 +25522,7 @@ p2 {}
                         .unwrap_or_default();
                     TrackRowEntry {
                         key,
+                        license: String::new(),
                         title,
                         artist,
                         album,
@@ -25241,6 +25591,7 @@ p2 {}
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                 TrackRowEntry {
                     key,
+                    license: String::new(),
                     title,
                     artist,
                     album,
@@ -26156,13 +26507,12 @@ p2 {}
                         if ahead_cut {
                             continue;
                         }
-                        if let (Some(service), Some(start)) =
-                            (self.rife_service[i].as_ref(), self.app_start_instant)
-                        {
+                        if let Some(service) = self.rife_service[i].as_ref() {
                             let (pw, ph) = rife_proxy_dims(width, height);
-                            let deadline = start + std::time::Duration::from_secs_f64(
-                                (now + depth as f64 / step.pace).max(0.0),
-                            );
+                            // App SECONDS, not an instant: the service runs
+                            // on the web too, where there is no monotonic
+                            // clock to hand one across.
+                            let deadline = (now + depth as f64 / step.pace).max(0.0);
                             let _ = service.offer_next(flow_tween::RifeJob {
                                 generation,
                                 a: ahead.a,
@@ -28063,21 +28413,39 @@ p2 {}
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
+        // The beat reference is released from here whichever page is up,
+        // for the reason `refresh_music_surface` spells out: a deck left
+        // holding one would go on asking for frames for ever.
         self.push_deck_beats(cx);
-        self.push_wave_positions(cx);
+        // These two only feed the deck surface, and the deck surface is
+        // not on screen.
+        if self.console_page == live_id!(music_page) {
+            self.push_wave_positions(cx);
+            self.refresh_loop_score_preview(cx);
+        }
+        // These two are not surface work whatever page is up: a pre-listen
+        // player has to fold itself away when its tape runs out, and a
+        // timed transition has to go on landing -- an operator who starts
+        // one and walks to another page must come back to it finished, not
+        // to a fader stopped half way.
         self.push_phones_playhead(cx);
         self.track_crossfade(cx);
-        self.refresh_loop_score_preview(cx);
         self.schedule_music_frame(cx);
     }
 
     /// Ask for another frame while anything on the surface is moving.
     fn schedule_music_frame(&mut self, cx: &mut Cx) {
         let moving = self.xfade_target.is_some()
-            || [DeckId::A, DeckId::B].iter().any(|deck| {
-                let snapshot = self.mixer.deck_snapshot(*deck);
-                snapshot.playing || snapshot.scratching
-            })
+            // A playing deck asks for display-rate frames only while its
+            // own lane is on screen. Off the music page nobody is watching
+            // a playhead, and asking anyway held the whole app at the
+            // display's rate for the length of a set. The surface is
+            // brought back up to date the moment the page returns.
+            || (self.console_page == live_id!(music_page)
+                && [DeckId::A, DeckId::B].iter().any(|deck| {
+                    let snapshot = self.mixer.deck_snapshot(*deck);
+                    snapshot.playing || snapshot.scratching
+                }))
             // The pre-listen playhead moves at display cadence too.
             || self
                 .mixer
@@ -28202,7 +28570,16 @@ p2 {}
                     };
                     self.run_deck_cmds(cx, cmds);
                 }
-                WaveEvent::Zoom { .. } => {}
+                WaveEvent::Zoom { secs } => {
+                    // The widget has already moved; this is only about
+                    // remembering it. Written on the notch rather than on
+                    // some later settle, because there is no gesture end to
+                    // hang it on and the file is small.
+                    if (secs - self.wave_zoom_secs).abs() > 1e-9 {
+                        self.wave_zoom_secs = secs;
+                        self.save_preprocess_settings();
+                    }
+                }
                 // Every frame of a drag: hand the lanes the playhead the
                 // mixer is actually at, so a scratch tracks at display rate.
                 WaveEvent::Tick => self.push_wave_positions(cx),
@@ -28758,10 +29135,16 @@ impl MatchEvent for App {
         self.ui.drop_down(cx, ids!(gen_profile)).set_selected_item(cx, 2);
         if !self.audio_installed {
             self.audio_installed = true;
-            let mixer = self.mixer.clone();
+            // The ENGINE is moved into the callback, not a handle to it:
+            // this thread owns the mix state outright and answers to
+            // nobody, which is the whole point of the command ring. Taken
+            // once -- a second audio_output would find nothing left.
+            let mut engine = self.mixer.take_engine();
             cx.audio_output(0, move |info, output| {
                 output.zero();
-                mixer.render(info.sample_rate, output);
+                if let Some(engine) = engine.as_mut() {
+                    engine.render(info.sample_rate, output);
+                }
             });
             // The headphone cue rides slot 1 unconditionally: with no
             // second device requested the closure simply never runs. It
@@ -30605,6 +30988,33 @@ impl MatchEvent for App {
             self.run_deck_cmds(cx, cmds);
             self.save_fx_levels_settings();
         }
+        for (which, id) in [(0usize, ids!(sfx_eq_low_hz)), (1usize, ids!(sfx_eq_high_hz))] {
+            let Some(v) = self.ui.slider(cx, id).slided(actions) else {
+                continue;
+            };
+            // Both corners go every time: the engine holds them an octave
+            // apart and may move the one that was not touched, so sending
+            // only the dragged one would let the two disagree.
+            let send = |app: &mut Self, deck: DeckId| -> Vec<DeckCmd> {
+                let state = app.decks.deck(deck);
+                let (low, high) = match which {
+                    0 => (v as f32, state.eq_high_hz),
+                    _ => (state.eq_low_hz, v as f32),
+                };
+                app.decks.set_crossovers(deck, low, high)
+            };
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => send(self, DeckId::A),
+                FxTarget::B => send(self, DeckId::B),
+                FxTarget::Mix => {
+                    let mut cmds = send(self, DeckId::A);
+                    cmds.extend(send(self, DeckId::B));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
         if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
             // The chip is the quick on/off the deck strip's E used to be:
             // off when it is sounding, and back to a beat when it is not.
@@ -31073,6 +31483,44 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_moog_ladder_resonance(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_moog_ladder_resonance(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_compressor)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_compressor(DeckId::A),
+                FxTarget::B => self.decks.toggle_compressor(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).compressor_on;
+                    let mut cmds = self.decks.set_compressor(DeckId::A, on);
+                    cmds.extend(self.decks.set_compressor(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_compressor_threshold(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_compressor_threshold(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_compressor_threshold(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_compressor_threshold(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_compressor_ratio(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_compressor_ratio(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_compressor_ratio(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_compressor_ratio(DeckId::B, v as f32));
                     cmds
                 }
             };
@@ -32262,7 +32710,17 @@ mod sync_tests {
         beat.period = Duration::from_millis(500);
         beat.next_beat = now - Duration::from_millis(625);
         let advanced = extrapolate_beat(&beat, now);
-        assert_eq!(advanced.next_beat, now + Duration::from_millis(375));
+        // How far ahead, not which f64. `Instant` is one f64 of seconds
+        // with a derived PartialEq, so `assert_eq!` on it is exact float
+        // equality -- and the two sides reach the same instant by
+        // different routes: the extrapolation goes 625ms back and adds
+        // two whole periods, this line goes 375ms forward. Those land one
+        // ULP apart or not depending on where the process clock happens
+        // to be, which made this test fail about half the time. The claim
+        // is that the next beat is 375ms out; a microsecond of tolerance
+        // is two parts per million of a 120 BPM period.
+        let ahead = (advanced.next_beat - now).as_secs_f64();
+        assert!((ahead - 0.375).abs() < 1e-6, "next beat {ahead}s out, want 0.375");
         assert_eq!(advanced.beat_index, 2);
         // Already in the future: untouched.
         beat.next_beat = now + Duration::from_millis(80);

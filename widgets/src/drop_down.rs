@@ -5,6 +5,7 @@ use {
         makepad_draw::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         widget::*,
+        widget_async::CxSplashVmExt,
     },
     std::cell::RefCell,
     std::rc::Rc,
@@ -401,6 +402,73 @@ pub enum PopupMenuPosition {
     BelowInput,
 }
 
+/// Optional affine mapping for a dropdown drawn under a scaled/translated
+/// parent draw list. Popup menus themselves are window-space overlays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupAnchorTransform {
+    pub scale: f64,
+    pub translation: DVec2,
+}
+
+impl PopupAnchorTransform {
+    pub fn rect(self, rect: Rect) -> Rect {
+        Rect {
+            pos: rect.pos * self.scale + self.translation,
+            size: rect.size * self.scale,
+        }
+    }
+
+    fn point(self, point: DVec2) -> DVec2 {
+        point * self.scale + self.translation
+    }
+}
+
+fn transform_popup_event(event: &Event, transform: PopupAnchorTransform) -> Option<Event> {
+    Some(match event {
+        Event::MouseDown(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseDown(e)
+        }
+        Event::MouseMove(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            e.lock_delta *= transform.scale;
+            Event::MouseMove(e)
+        }
+        Event::MouseUp(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseUp(e)
+        }
+        Event::MouseLeave(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseLeave(e)
+        }
+        Event::Scroll(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            e.scroll *= transform.scale;
+            Event::Scroll(e)
+        }
+        Event::LongPress(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::LongPress(e)
+        }
+        Event::TouchUpdate(e) => {
+            let mut e = e.clone();
+            for touch in &mut e.touches {
+                touch.abs = transform.point(touch.abs);
+                touch.radius *= transform.scale;
+            }
+            Event::TouchUpdate(e)
+        }
+        _ => return None,
+    })
+}
+
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet, Animator)]
 pub struct DropDown {
     #[uid]
@@ -451,11 +519,18 @@ pub struct DropDown {
     #[live]
     icon_only: bool,
 
+    /// Popup rows drawn with the disabled palette while remaining selectable.
+    #[rust]
+    dimmed_items: Vec<bool>,
+
     #[live]
     popup_menu_position: PopupMenuPosition,
 
     #[rust]
     is_active: bool,
+
+    #[rust]
+    popup_anchor_transform: Option<PopupAnchorTransform>,
 
     /// The menu store this dropdown draws from, kept so `children()` (which
     /// gets no `Cx`) can surface the open menu's items to the widget tree.
@@ -474,7 +549,15 @@ pub struct DropDown {
 
 #[derive(Default, Clone)]
 struct PopupMenuGlobal {
-    map: Rc<RefCell<ComponentMap<ScriptValue, PopupMenu>>>,
+    map: Rc<RefCell<ComponentMap<PopupMenuKey, PopupMenu>>>,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct PopupMenuKey {
+    // ScriptValue only identifies an object within one heap. Popup menus are
+    // Cx-global, so the heap is part of their identity too.
+    heap: usize,
+    template: ScriptValue,
 }
 
 /// One entry of `DropDown::icons`.
@@ -543,8 +626,14 @@ impl ScriptHook for DropDown {
             };
 
             let popup_menu_val = self.popup_menu;
-            map.get_or_insert(cx, popup_menu_val, |cx| {
-                cx.with_vm(|vm| PopupMenu::script_from_value(vm, popup_menu_val))
+            let key = self.popup_menu_key();
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
+            map.get_or_insert(cx, key, |cx| {
+                cx.with_script_vm_id(vm_id, |vm| {
+                    PopupMenu::script_from_value(vm, popup_menu_val)
+                })
             });
         });
     }
@@ -558,6 +647,34 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    /// Remove every cached popup minted by one script heap before that heap's
+    /// isolate is freed. PopupMenu objects retain script refs (including their
+    /// item template), so allowing them to outlive the heap is both a leak and
+    /// an identity hazard when an allocator later reuses the heap address.
+    pub fn retire_popup_menus_for_heap(cx: &mut Cx, heap: usize) -> usize {
+        if heap == 0 {
+            return 0;
+        }
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let mut map = global.map.borrow_mut();
+        let before = map.len();
+        map.retain(|key, _| key.heap != heap);
+        before - map.len()
+    }
+
+    /// Test/diagnostic visibility for isolate lifecycle assertions.
+    #[doc(hidden)]
+    pub fn popup_menu_cache_len(cx: &mut Cx) -> usize {
+        cx.global::<PopupMenuGlobal>().map.borrow().len()
+    }
+
+    fn popup_menu_key(&self) -> PopupMenuKey {
+        PopupMenuKey {
+            heap: self.source.heap_key(),
+            template: self.popup_menu,
+        }
+    }
+
     pub fn selected_item_index(&self) -> usize {
         self.selected_item
     }
@@ -574,7 +691,7 @@ impl DropDown {
         self.draw_bg.redraw(cx);
         let global = cx.global::<PopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
-        let lb = map.get_mut(&self.popup_menu).unwrap();
+        let lb = map.get_mut(&self.popup_menu_key()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
         cx.sweep_lock(self.draw_bg.area());
@@ -648,7 +765,7 @@ impl DropDown {
         if self.is_active && !self.popup_menu.is_nil() {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
-            let popup_menu = map.get_mut(&self.popup_menu).unwrap();
+            let popup_menu = map.get_mut(&self.popup_menu_key()).unwrap();
 
             // One menu instance serves every dropdown with the same template,
             // so claim its items for this dropdown while they draw.
@@ -664,26 +781,44 @@ impl DropDown {
                         if i == self.selected_item {
                             item_pos = Some(cx.turtle().pos());
                         }
-                        popup_menu.draw_item_with_icon(cx, node_id, &item, self.icon_at(i));
+                        popup_menu.draw_item_full(
+                            cx,
+                            node_id,
+                            &item,
+                            self.icon_at(i),
+                            self.dimmed_items.get(i).copied().unwrap_or(false),
+                        );
                     }
 
+                    let area = self.draw_bg.area().rect(cx);
+                    let anchor = self
+                        .popup_anchor_transform
+                        .map(|transform| transform.rect(area))
+                        .unwrap_or(area);
                     popup_menu.end(
                         cx,
                         self.draw_bg.area(),
-                        -item_pos.unwrap_or(dvec2(0.0, 0.0)),
+                        anchor.pos - area.pos - item_pos.unwrap_or(dvec2(0.0, 0.0)),
                     );
                 }
                 PopupMenuPosition::BelowInput => {
                     for (i, item) in self.labels.iter().enumerate() {
                         let node_id = LiveId(i as u64).into();
-                        popup_menu.draw_item_with_icon(cx, node_id, &item, self.icon_at(i));
+                        popup_menu.draw_item_full(
+                            cx,
+                            node_id,
+                            &item,
+                            self.icon_at(i),
+                            self.dimmed_items.get(i).copied().unwrap_or(false),
+                        );
                     }
 
                     let area = self.draw_bg.area().rect(cx);
-                    let shift = Vec2d {
-                        x: 0.0,
-                        y: area.size.y,
-                    };
+                    let anchor = self
+                        .popup_anchor_transform
+                        .map(|transform| transform.rect(area))
+                        .unwrap_or(area);
+                    let shift = anchor.pos - area.pos + dvec2(0.0, anchor.size.y);
 
                     popup_menu.end(cx, self.draw_bg.area(), shift);
                 }
@@ -727,7 +862,7 @@ impl WidgetNode for DropDown {
         let Ok(map) = self.popup_global.map.try_borrow() else {
             return;
         };
-        let Some(menu) = map.get(&self.popup_menu) else {
+        let Some(menu) = map.get(&self.popup_menu_key()) else {
             return;
         };
         for (id, item) in menu.item_refs() {
@@ -762,11 +897,15 @@ impl Widget for DropDown {
         if self.is_active && !self.popup_menu.is_nil() {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
-            let menu = map.get_mut(&self.popup_menu).unwrap();
+            let menu = map.get_mut(&self.popup_menu_key()).unwrap();
             let mut close = false;
+            let popup_event = self
+                .popup_anchor_transform
+                .and_then(|transform| transform_popup_event(event, transform));
+            let popup_event = popup_event.as_ref().unwrap_or(event);
             menu.handle_event_with(
                 cx,
-                event,
+                popup_event,
                 self.draw_bg.area(),
                 &mut |cx, action| match action {
                     PopupMenuAction::WasSweeped(_node_id) => {}
@@ -788,7 +927,7 @@ impl Widget for DropDown {
             }
 
             // check if we clicked outside of the popup menu
-            if let Event::MouseDown(e) = event {
+            if let Event::MouseDown(e) = popup_event {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animator_play(cx, ids!(hover.off));
@@ -868,6 +1007,19 @@ impl Widget for DropDown {
 }
 
 impl DropDownRef {
+    pub fn set_popup_anchor_transform(
+        &self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.popup_anchor_transform != transform {
+                inner.popup_anchor_transform = transform;
+                inner.draw_bg.redraw(cx);
+            }
+        }
+    }
+
     pub fn set_labels_with<F: FnMut(&mut String)>(&self, cx: &mut Cx, mut f: F) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut i = 0;
@@ -891,6 +1043,15 @@ impl DropDownRef {
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Set which popup rows use the disabled palette. These rows deliberately
+    /// stay selectable (for example a hub model that will be acquired).
+    pub fn set_dimmed_items(&self, cx: &mut Cx, dimmed_items: Vec<bool>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.dimmed_items = dimmed_items;
             inner.draw_bg.redraw(cx);
         }
     }
@@ -976,5 +1137,105 @@ impl DropDownRef {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use crate::makepad_script::script;
+    use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+
+    fn popup(cx: &mut Cx) -> PopupMenu {
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                PopupMenu{}
+            });
+            PopupMenu::script_from_value(vm, value)
+        })
+    }
+
+    #[test]
+    fn popup_anchor_rect_applies_camera_scale_and_translation() {
+        let rect = Rect {
+            pos: dvec2(110.0, 70.0),
+            size: dvec2(80.0, 24.0),
+        };
+        let half = PopupAnchorTransform {
+            scale: 0.5,
+            translation: dvec2(20.0, -5.0),
+        }
+        .rect(rect);
+        assert_eq!(half.pos, dvec2(75.0, 30.0));
+        assert_eq!(half.size, dvec2(40.0, 12.0));
+
+        let double = PopupAnchorTransform {
+            scale: 2.0,
+            translation: dvec2(-30.0, 15.0),
+        }
+        .rect(rect);
+        assert_eq!(double.pos, dvec2(190.0, 155.0));
+        assert_eq!(double.size, dvec2(160.0, 48.0));
+
+        for transform in [
+            PopupAnchorTransform {
+                scale: 0.5,
+                translation: dvec2(20.0, -5.0),
+            },
+            PopupAnchorTransform {
+                scale: 2.0,
+                translation: dvec2(-30.0, 15.0),
+            },
+        ] {
+            let event = Event::Scroll(ScrollEvent {
+                window_id: WindowId(1, 1),
+                scroll: dvec2(8.0, -4.0),
+                abs: dvec2(110.0, 70.0),
+                modifiers: KeyModifiers::default(),
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+                is_mouse: true,
+                time: 0.0,
+                phase: ScrollPhase::None,
+            });
+            assert!(matches!(
+                transform_popup_event(&event, transform),
+                Some(Event::Scroll(event))
+                    if event.abs == transform.point(dvec2(110.0, 70.0))
+                        && event.scroll == dvec2(8.0, -4.0) * transform.scale
+            ));
+        }
+    }
+
+    #[test]
+    fn popup_cache_can_retire_one_isolate_heap() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let first = popup(&mut cx);
+        let second = popup(&mut cx);
+        {
+            let mut map = global.map.borrow_mut();
+            map.insert(
+                PopupMenuKey {
+                    heap: 11,
+                    template: ScriptValue::NIL,
+                },
+                first,
+            );
+            map.insert(
+                PopupMenuKey {
+                    heap: 22,
+                    template: ScriptValue::NIL,
+                },
+                second,
+            );
+        }
+        assert_eq!(DropDown::retire_popup_menus_for_heap(&mut cx, 11), 1);
+        let map = global.map.borrow();
+        assert!(!map.keys().any(|key| key.heap == 11));
+        assert!(map.keys().any(|key| key.heap == 22));
     }
 }

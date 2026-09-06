@@ -1,4 +1,4 @@
-use crate::file_dialogs::FileDialog;
+use crate::file_dialogs::{FileDialog, VirtualFileLimits};
 
 use {
     crate::{
@@ -149,10 +149,6 @@ impl<'a> CxSystemBrowser<'a> {
 
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static;
 
     fn start_stdin_service(&mut self) {}
     fn pre_start() -> bool {
@@ -362,6 +358,15 @@ pub enum CxOsOp {
     CancelHttpRequest {
         request_id: LiveId,
     },
+    #[cfg(target_arch = "wasm32")]
+    #[allow(private_interfaces)]
+    StorageRequest(crate::storage::StorageRequest),
+    #[cfg(target_arch = "wasm32")]
+    StorageRequestError {
+        request_id: crate::storage::StorageRequestId,
+        op: crate::storage::StorageOp,
+        error: crate::storage::StorageError,
+    },
 
     PrepareVideoPlayback(
         LiveId,
@@ -501,6 +506,10 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::HttpRequest { .. } => write!(f, "HttpRequest"),
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequest(..) => write!(f, "StorageRequest"),
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequestError { .. } => write!(f, "StorageRequestError"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
             Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
@@ -1196,12 +1205,19 @@ impl Cx {
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
+        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        {
+            self.drag_drop.start_internal_drag(items);
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
+        {
         self.platform_ops.iter().for_each(|p| {
             if let CxOsOp::StartDragging { .. } = p {
                 panic!("start drag twice");
             }
         });
         self.platform_ops.push_back(CxOsOp::StartDragging(items));
+        }
     }
 
     /// Starts a native drag-and-drop session that can leave the Makepad app.
@@ -1475,6 +1491,44 @@ impl Cx {
     pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
+        cxpass.repaint_requested = true;
+    }
+
+    /// Parent `child` under `parent` for painting order on behalf of
+    /// `attached_by`: the draw list being recorded, whose draw calls consume
+    /// the child's output. That list is remembered with its current redraw
+    /// id; when it is recorded again without calling this, the child is
+    /// orphaned and no longer painted. `None` (no list open) parents without
+    /// a record, like `DrawPass::set_pass_parent`.
+    pub fn attach_child_pass(
+        &mut self,
+        child: DrawPassId,
+        parent: DrawPassId,
+        attached_by: Option<DrawListId>,
+    ) {
+        let attached_by =
+            attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
+        let cxpass = &mut self.passes[child];
+        cxpass.parent = CxDrawPassParent::DrawPass(parent);
+        cxpass.attached_by = attached_by;
+    }
+
+    /// True when the draw list that attached `draw_pass_id` has been recorded
+    /// again since without re-attaching it, or was freed: nothing samples the
+    /// pass any more. Its own draw list is frozen at the frame that last began
+    /// it, and the geometries and textures those draw calls name may since
+    /// have been freed and their slots reused — painting it would draw
+    /// whatever now sits in them (the gauss scene pass after the window stopped
+    /// capturing was re-encoded every pan frame with the map's evicted tile
+    /// geometries under other tiles' meshes: tens of millions of triangles into
+    /// a texture nobody read).
+    pub fn pass_attachment_is_stale(&self, draw_pass_id: DrawPassId) -> bool {
+        let Some((list_id, redraw_id)) = self.passes[draw_pass_id].attached_by else {
+            return false;
+        };
+        // A dropped list (its widget is gone) keeps its slot and generation
+        // until reuse; that orphans the pass just the same.
+        self.draw_lists.is_id_freed(list_id) || self.draw_lists[list_id].redraw_id != redraw_id
     }
 
     pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
@@ -1630,6 +1684,17 @@ impl Cx {
             .find(|v| v.0 == TypeId::of::<T>())
             .unwrap();
         item.1.downcast_mut().unwrap()
+    }
+
+    /// Returns an immutable reference to a previously installed Cx-global.
+    ///
+    /// Unlike [`Cx::get_global`], this accessor does not require mutable access and
+    /// does not panic when the requested global has not been installed.
+    pub fn get_global_ref<T: 'static + Any>(&self) -> Option<&T> {
+        self.globals
+            .iter()
+            .find(|item| item.0 == TypeId::of::<T>())
+            .and_then(|item| item.1.downcast_ref())
     }
 
     pub fn has_global<T: 'static + Any>(&mut self) -> bool {
@@ -1926,17 +1991,39 @@ impl Cx {
     }
 
     pub fn open_system_openfile_dialog(&mut self) {
-        self.platform_ops
-            .push_back(CxOsOp::SelectFileDialog(FileDialog::new()));
+        self.open_select_file_dialog(FileDialog::new());
     }
 
-    /// Open the platform's native file picker, configured (title, start
+    /// Open the platform file picker, configured (title, start
     /// location, type filters, multi-select, id) by `dialog`. The answer
     /// arrives later as a [`crate::file_dialogs::FileDialogAction`] in the
-    /// actions pass — `FileSelected` with the chosen paths, or
-    /// `FileCancelled`; both carry the dialog's id back.
+    /// actions pass. Native dialogs return `FileSelected` paths by default;
+    /// `want_bytes(true)` and every web dialog return `FileLoaded` instead.
+    /// On web this should be called directly from a user input handler:
+    /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
+        self.file_dialogs.begin(&dialog);
         self.platform_ops.push_back(CxOsOp::SelectFileDialog(dialog));
+    }
+
+    /// Set the maximum bytes accepted for one virtual file and for one
+    /// multi-file selection/drop. Both limits default to 512 MiB.
+    pub fn set_virtual_file_limits(&mut self, max_file_size: u64, max_total_size: u64) {
+        let limits = VirtualFileLimits {
+            max_file_size,
+            max_total_size,
+        };
+        self.file_dialogs.set_limits(limits);
+        #[cfg(target_arch = "wasm32")]
+        self.os
+            .from_wasm(crate::os::web::from_wasm::FromWasmSetVirtualFileLimits {
+                max_file_size: max_file_size as f64,
+                max_total_size: max_total_size as f64,
+            });
+    }
+
+    pub fn virtual_file_limits(&self) -> VirtualFileLimits {
+        self.file_dialogs.limits()
     }
 
     /// Open the platform's native save panel. The OS asks about
@@ -1979,6 +2066,40 @@ pub fn can_play_type(mime: &str) -> &'static str {
 mod stale_window_tests {
     use super::*;
     use crate::window::WindowHandle;
+
+    #[test]
+    fn immutable_global_accessor_is_optional_and_preserves_the_value() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        assert_eq!(cx.get_global_ref::<u64>(), None);
+        cx.set_global(41_u64);
+        assert_eq!(cx.get_global_ref::<u64>(), Some(&41));
+    }
+
+    /// A hosted window (the host reports 930×848 points at dpi 2) whose app
+    /// shrank its own dpi to 1.6: it lays out 1.25× larger, and a host
+    /// pointer at (100, 100) must land at (125, 125) in its points.
+    #[test]
+    fn a_hosted_window_with_a_dpi_override_lays_out_larger_and_remaps_the_host_pointer() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        let window = WindowHandle::new(&mut cx);
+        let window_id = window.window_id();
+        cx.windows[window_id].is_created = true;
+        let native = crate::event::WindowGeom { dpi_factor: 2.0, inner_size: dvec2(930.0, 848.0), ..Default::default() };
+        let first = cx.windows.stdin_apply_native_geom(window_id, native.clone());
+        assert_eq!(first.new_geom.inner_size, dvec2(930.0, 848.0));
+        cx.windows[window_id].dpi_override = Some(1.6);
+        let again = cx.windows.stdin_apply_native_geom(window_id, native);
+        assert!((again.new_geom.inner_size.x - 1162.5).abs() < 1e-9, "{:?}", again.new_geom.inner_size);
+        assert!((again.new_geom.inner_size.y - 1060.0).abs() < 1e-9);
+        assert_eq!(again.new_geom.dpi_factor, 1.6);
+        let mut pos = dvec2(100.0, 100.0);
+        cx.dpi_override_scale(&mut pos, window_id);
+        assert!((pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9, "{pos:?}");
+        // The host's point (900, 800) is still inside the window: containment is in host points.
+        let (hit, origin) = cx.windows.window_id_contains(dvec2(900.0, 800.0));
+        assert_eq!(hit, window_id);
+        assert_eq!(origin, dvec2(0.0, 0.0));
+    }
 
     #[test]
     fn dpi_override_ignores_closed_and_out_of_range_windows() {

@@ -36,7 +36,7 @@ use crate::flow::FlowMap;
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use makepad_widgets::*;
 use std::path::Path;
-use std::time::Instant;
+use crate::clock::Instant;
 
 /// Decoded-endpoint cache ceiling (BGRA bytes). A VJ deck lives or dies by
 /// this ceiling: a clip UNDER it gets the whole warp instrument (any-rate
@@ -45,7 +45,11 @@ use std::time::Instant;
 /// the performance machine, not the minimum: 4 GB holds a 1920×1080 flow
 /// clip of ~480 endpoints (8.3 MB each) or ~40 s of 720p endpoints.
 /// Anything bigger logs and plays as plain video.
-pub const MAX_FLOW_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+pub const MAX_FLOW_CACHE_BYTES: usize = if usize::BITS >= 64 {
+    4_294_967_296_u64
+} else {
+    (usize::MAX - 1) as u64
+} as usize;
 
 /// Largest mp4 the `mkfl` scan will lift into memory to parse the box walk.
 pub const MAX_FLOW_SCAN_BYTES: u64 = 256 * 1024 * 1024;

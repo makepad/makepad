@@ -132,6 +132,8 @@ mod imp {
             tx: Sender<Reply>,
         },
         Dump(Sender<Reply>),
+        /// The task pool's one-line summary (workers, jobs, queue waits).
+        PoolSummary(Sender<Reply>),
         Snap {
             window: Option<usize>,
             needle: String,
@@ -150,6 +152,14 @@ mod imp {
             args: Vec<(String, String)>,
             /// Answer only after the next frame is drawn, so a following
             /// grab sees the applied change on screen.
+            wait: bool,
+            tx: Sender<Reply>,
+        },
+        /// An AI-overlay operation (`/ai`, `/ai/transcript`): parsed here,
+        /// answered by `Cx::ai_callback` (registered by the aichat crate).
+        Ai {
+            op: String,
+            args: Vec<(String, String)>,
             wait: bool,
             tx: Sender<Reply>,
         },
@@ -822,6 +832,9 @@ mod imp {
                 };
                 let _ = tx.send(Reply::Text(dump));
             }
+            Cmd::PoolSummary(tx) => {
+                let _ = tx.send(Reply::Text(cx.task_pool_summary()));
+            }
             Cmd::ShaderConsts { shader, tx } => {
                 let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
             }
@@ -949,6 +962,27 @@ mod imp {
                 let result = match cx.tweak_callback {
                     Some(callback) => callback(cx, &op, &args),
                     None => Err("no tweaker (this app has no widgets ui root)".to_string()),
+                };
+                match result {
+                    Ok(json) => {
+                        if wait {
+                            frame_waiters()
+                                .lock()
+                                .unwrap()
+                                .push((cx.repaint_id + 1, tx, Some(json)));
+                        } else {
+                            let _ = tx.send(Reply::Text(json));
+                        }
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(Reply::Err(msg));
+                    }
+                }
+            }
+            Cmd::Ai { op, args, wait, tx } => {
+                let result = match cx.ai_callback {
+                    Some(callback) => callback(cx, &op, &args),
+                    None => Err("no AI overlay (this app does not link makepad-aichat)".to_string()),
                 };
                 match result {
                     Ok(json) => {
@@ -1107,6 +1141,7 @@ mod imp {
             "/k" | "/key" => route_key(p),
             "/t" | "/text" => route_text(p),
             "/log" => route_log(p),
+            "/trace" => route_trace(p),
             "/d" | "/dump" => match ask(|tx| Cmd::Dump(tx), 4) {
                 Reply::Text(text) => Out::Text(200, text),
                 other => reply_to_out(other),
@@ -1132,6 +1167,11 @@ mod imp {
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next
             // drawn frame so a following grab sees the change.
+            // The AI chat overlay (apps/aichat, seated in every Window on F10):
+            // `/ai?on=1|0` toggles, `/ai?say=TEXT` types a line, `/ai/transcript`
+            // reads the conversation. Answered by `Cx::ai_callback`.
+            "/ai" => route_ai(if p.get(&["say"]).is_some() { "say" } else { "toggle" }, p, true),
+            "/ai/transcript" => route_ai("transcript", p, false),
             "/tweak" => route_tweak("toggle", p, true),
             "/tweak/state" => route_tweak("state", p, false),
             "/tweak/apply" => route_tweak("apply", p, true),
@@ -1263,10 +1303,11 @@ mod imp {
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
              /log?n=50         {{\"n\":lastseq,\"l\":[lines]}}; /log?since=N for everything after seq N\n\
+             /trace             get topics; ?topics=gpu.pass,wm sets them; ?off=1 clears them\n\
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
-             /tweak?on=1|0     the TWEAKER design-feedback overlay (also F12 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
              /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
@@ -1286,6 +1327,28 @@ mod imp {
             status.windows.len(),
             dir,
         )
+    }
+
+    fn route_trace(p: &Params) -> Out {
+        if p.flag(&["off"]) {
+            crate::makepad_error_log::set_trace_topics("");
+        } else if let Some(topics) = p.get(&["topics"]) {
+            crate::makepad_error_log::set_trace_topics(topics);
+        }
+        Out::Json(
+            200,
+            format!(
+                "{{\"topics\":{}}}",
+                json_str(&crate::makepad_error_log::trace_topics())
+            ),
+        )
+    }
+
+    fn route_ai(op: &str, p: &Params, wait: bool) -> Out {
+        let op = op.to_string();
+        let args = p.0.clone();
+        let timeout = if wait { 6 } else { 4 };
+        reply_to_out(ask(move |tx| Cmd::Ai { op, args, wait, tx }, timeout))
     }
 
     fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
@@ -1497,16 +1560,24 @@ mod imp {
     }
 
     fn route_log(p: &Params) -> Out {
+        // Asked before the ring is locked: the answer comes from the UI thread.
+        let pool = match ask(Cmd::PoolSummary, 2) {
+            Reply::Text(text) => text,
+            _ => String::new(),
+        };
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
             .get(&["n", "count", "tail"])
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(50);
+        // The ring already tails and already carries the newest sequence,
+        // so the count is applied by the read rather than by trimming a
+        // vector afterwards.
         let (newest, lines) = match since {
             Some(since) => crate::log_ring::read_since(since, usize::MAX),
             None => crate::log_ring::read_since(0, count),
         };
-        let mut out = format!("{{\"n\":{newest},\"l\":[");
+        let mut out = format!("{{\"n\":{newest},\"pool\":{},\"l\":[", json_str(&pool));
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
                 out.push(',');

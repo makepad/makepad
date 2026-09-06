@@ -9,6 +9,7 @@ use crate::*;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 impl<T> ScriptHook for Vec<T> where T: ScriptApply + ScriptNew + 'static + ScriptDeriveMarker {}
 impl<T> ScriptNew for Vec<T>
@@ -214,6 +215,46 @@ impl ScriptApply for Vec<u8> {
         } else {
             script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "wrong vec type in apply");
         }
+    }
+    fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
+        vm.bx.heap.new_array_from_slice_u8(self).into()
+    }
+}
+
+impl ScriptDeriveMarker for Arc<[u8]> {}
+impl ScriptHook for Arc<[u8]> {}
+impl ScriptNew for Arc<[u8]> {
+    fn script_type_id_static() -> ScriptTypeId {
+        ScriptTypeId::of::<Self>()
+    }
+    fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
+        <Vec<u8> as ScriptNew>::script_type_check(heap, value)
+    }
+    fn script_default(vm: &mut ScriptVm) -> ScriptValue {
+        <Vec<u8> as ScriptNew>::script_default(vm)
+    }
+    fn script_new(_vm: &mut ScriptVm) -> Self {
+        Arc::from([])
+    }
+    fn script_proto_build(vm: &mut ScriptVm, props: &mut ScriptTypeProps) -> ScriptValue {
+        <Vec<u8> as ScriptNew>::script_proto_build(vm, props)
+    }
+}
+
+impl ScriptApply for Arc<[u8]> {
+    fn script_type_id(&self) -> ScriptTypeId {
+        ScriptTypeId::of::<Self>()
+    }
+    fn script_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        let mut bytes = self.to_vec();
+        bytes.script_apply(vm, apply, scope, value);
+        *self = Arc::from(bytes);
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         vm.bx.heap.new_array_from_slice_u8(self).into()

@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The high-detail redraw instruction. */
+let prompt = Input{ type: @text default: "redraw at modern high detail while preserving silhouette, pose, palette, and identity" }
+/** The sprite or classic-game artwork to enhance. */
+let image = Input{ type: @image }
+let enhance = ImageEdit{
+    prompt: prompt.text()
+    image: image.image()
+    strength: 1.0
+    model: "flux2-dev"
+}
+/** Publish the high-detail redraw into the flow asset library. */
+let published = Publish{ value: enhance.out(@image) namespace: "flows" tags: ["flow", "sprite", "enhanced"] }
+
+Flow{
+    label: "Sprite enhance"
+    brief: "Re-renders supplied sprite artwork at high detail with the creator's FLUX.2 Dev preset."
+    prompt, image, enhance, published
+}

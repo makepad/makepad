@@ -924,6 +924,17 @@ fn parse_ragdoll(
 
 impl SkinnedModel {
     pub fn parse_glb(bytes: &[u8]) -> Result<SkinnedModel, String> {
+        Self::parse_glb_inner(bytes, false)
+    }
+
+    /// Admit newly generated content using the runtime's actual CPU parser,
+    /// but reject malformed influences instead of silently repairing them.
+    /// Legacy pack loading retains its existing permissive normalization.
+    pub fn parse_glb_validated(bytes: &[u8]) -> Result<SkinnedModel, String> {
+        Self::parse_glb_inner(bytes, true)
+    }
+
+    fn parse_glb_inner(bytes: &[u8], strict: bool) -> Result<SkinnedModel, String> {
         if bytes.len() < 12 || &bytes[0..4] != b"glTF" {
             return Err("not a GLB (magic mismatch)".into());
         }
@@ -988,11 +999,30 @@ impl SkinnedModel {
             if let Some(children) = n.get("children") {
                 for c in children.arr() {
                     if let Some(ci) = c.usize() {
+                        if strict && (ci >= nodes.len() || nodes[ci].parent.is_some()) {
+                            return Err("invalid or multiply parented skeleton node".into());
+                        }
                         if ci < nodes.len() {
                             nodes[ci].parent = Some(parent_index);
                         }
                     }
                 }
+            }
+        }
+        if strict {
+            for (i, node) in nodes.iter().enumerate() {
+                if ![node.rest.t.x, node.rest.t.y, node.rest.t.z, node.rest.r.x,
+                    node.rest.r.y, node.rest.r.z, node.rest.r.w, node.rest.s.x,
+                    node.rest.s.y, node.rest.s.z].iter().all(|n| n.is_finite()) {
+                    return Err(format!("node {i}: non-finite rest transform"));
+                }
+                let mut parent = node.parent;
+                for _ in 0..nodes.len() {
+                    let Some(p) = parent else { break; };
+                    if p == i { return Err("cyclic skeleton hierarchy".into()); }
+                    parent = nodes[p].parent;
+                }
+                if parent.is_some() { return Err("cyclic skeleton hierarchy".into()); }
             }
         }
 
@@ -1008,9 +1038,16 @@ impl SkinnedModel {
         if joint_nodes.is_empty() {
             return Err("skin has no joints".into());
         }
-        let inverse_bind = match skin.get("inverseBindMatrices").and_then(Val::usize) {
+        if strict && joint_nodes.iter().any(|&joint| joint >= nodes.len()) {
+            return Err("skin joint references a missing node".into());
+        }
+        let inverse_bind: Vec<Mat4f> = match skin.get("inverseBindMatrices").and_then(Val::usize) {
             Some(ibm_acc) => {
-                let (floats, _) = acc.read_f32(ibm_acc)?;
+                let (floats, lanes) = acc.read_f32(ibm_acc)?;
+                if strict && (lanes != 16 || floats.len() != joint_nodes.len() * 16
+                    || floats.iter().any(|n| !n.is_finite())) {
+                    return Err("invalid inverse bind matrices".into());
+                }
                 floats
                     .chunks_exact(16)
                     .map(|c| Mat4f {
@@ -1034,6 +1071,9 @@ impl SkinnedModel {
                 continue;
             };
             mesh_node = node_index;
+            if strict && n.get("skin").and_then(Val::usize) != Some(0) {
+                return Err("runtime supports only skin 0".into());
+            }
             let mesh = json
                 .get("meshes")
                 .and_then(|m| m.idx(mesh_index))
@@ -1041,6 +1081,7 @@ impl SkinnedModel {
             for prim in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]) {
                 let attrs = prim.get("attributes").ok_or("primitive without attributes")?;
                 let Some(joints_acc) = attrs.get("JOINTS_0").and_then(Val::usize) else {
+                    if strict { return Err("skinned primitive lacks JOINTS_0".into()); }
                     skipped_unskinned += 1;
                     continue;
                 };
@@ -1048,7 +1089,7 @@ impl SkinnedModel {
                     .get("POSITION")
                     .and_then(Val::usize)
                     .ok_or("primitive without POSITION")?;
-                let (pos, _) = acc.read_f32(pos_acc)?;
+                let (pos, pos_lanes) = acc.read_f32(pos_acc)?;
                 let normal = attrs
                     .get("NORMAL")
                     .and_then(Val::usize)
@@ -1061,7 +1102,33 @@ impl SkinnedModel {
                     .map(|a| acc.read_f32(a))
                     .transpose()?
                     .map(|(v, _)| v);
-                let (joints, _) = acc.read_f32(joints_acc)?;
+                let (joints, joint_lanes) = acc.read_f32(joints_acc)?;
+                if strict {
+                    let weight_acc = attrs.get("WEIGHTS_0").and_then(Val::usize)
+                        .ok_or("skinned primitive lacks WEIGHTS_0")?;
+                    let (weights, weight_lanes) = acc.read_f32(weight_acc)?;
+                    let count = pos.len() / 3;
+                    if pos_lanes != 3 || joint_lanes != 4 || weight_lanes != 4
+                        || joints.len() != count * 4 || weights.len() != count * 4 {
+                        return Err("inconsistent skin accessor shape/count".into());
+                    }
+                    if pos.iter().any(|n| !n.is_finite()) || normal.as_ref().is_some_and(|v| v.iter().any(|n| !n.is_finite()))
+                        || uv.as_ref().is_some_and(|v| v.iter().any(|n| !n.is_finite())) {
+                        return Err("non-finite skinned vertex attribute".into());
+                    }
+                    for (i, (js, ws)) in joints.chunks_exact(4).zip(weights.chunks_exact(4)).enumerate() {
+                        if js.iter().any(|j| !j.is_finite() || *j < 0.0 || j.fract() != 0.0 || *j >= joint_nodes.len() as f32 || *j > u16::MAX as f32) {
+                            return Err(format!("vertex {i}: joint index outside skin"));
+                        }
+                        // Permit normalized integer accessor quantization, not
+                        // missing/NaN/negative/zero-sum or arbitrary weights.
+                        let sum: f32 = ws.iter().sum();
+                        if ws.iter().any(|w| !w.is_finite() || !(0.0..=1.0).contains(w))
+                            || !sum.is_finite() || (sum - 1.0).abs() > 0.02 {
+                            return Err(format!("vertex {i}: skin weights must be finite, nonnegative and normalized"));
+                        }
+                    }
+                }
                 let weights = attrs
                     .get("WEIGHTS_0")
                     .and_then(Val::usize)
@@ -1111,6 +1178,10 @@ impl SkinnedModel {
                 }
                 if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
                     let (idx, _) = acc.read_f32(idx_acc)?;
+                    if strict && (idx.len() % 3 != 0 || idx.iter().any(|i| !i.is_finite() || *i < 0.0
+                        || i.fract() != 0.0 || *i >= count as f32)) {
+                        return Err("invalid skinned triangle indices".into());
+                    }
                     indices.extend(idx.iter().map(|v| base + *v as u32));
                 } else {
                     indices.extend((0..count as u32).map(|i| base + i));
@@ -1160,7 +1231,19 @@ impl SkinnedModel {
                     continue;
                 };
                 let (times, _) = acc.read_f32(input)?;
-                let (values, _) = acc.read_f32(output)?;
+                let (values, lanes) = acc.read_f32(output)?;
+                if strict {
+                    let expected_lanes = match path { ChannelPath::Rotation => 4, _ => 3 };
+                    let interpolation = s.get("interpolation").and_then(Val::str).unwrap_or("LINEAR");
+                    if node >= nodes.len() || times.is_empty() || lanes != expected_lanes
+                        || values.len() != times.len() * lanes
+                        || times.iter().any(|t| !t.is_finite() || *t < 0.0)
+                        || times.windows(2).any(|t| t[1] <= t[0])
+                        || values.iter().any(|v| !v.is_finite())
+                        || !matches!(interpolation, "LINEAR" | "STEP") {
+                        return Err(format!("clip {name}: invalid or unsupported animation channel"));
+                    }
+                }
                 if let Some(last) = times.last() {
                     duration = duration.max(*last);
                 }
@@ -1170,6 +1253,9 @@ impl SkinnedModel {
                     times,
                     values,
                 });
+            }
+            if strict && channels.is_empty() {
+                return Err(format!("clip {name}: no runtime-supported animation channels"));
             }
             clips.push(AnimClip {
                 name,

@@ -12,19 +12,23 @@
 //!   where transforms live now. Honest and designed: an outcome, never an
 //!   error string — the model reads it and says so.
 
-use crate::runner::{self, PublishTarget};
+use crate::runner::{CreateError, FleetTransport, GenerationTransport, PublishTarget};
+use crate::composite::{self, Publisher, Recipe};
 use makepad_asset_chat::dispatch::AssetServerTools;
 use makepad_asset_chat::session::{CancelFlag, ExecCtx, ToolExecutor};
 use makepad_asset_chat::tools::{ContentToolCall, ToolDef};
 use makepad_asset_chat::wire::ToolOutcome;
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::ApiEndpoints;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct CreatorTools {
     inner: Result<AssetServerTools, String>,
-    target: PublishTarget,
+    transport: Box<dyn GenerationTransport>,
+    publisher: Box<dyn Publisher>,
+    cancel_signal: Option<Arc<AtomicBool>>,
 }
 
 impl CreatorTools {
@@ -37,7 +41,9 @@ impl CreatorTools {
         CreatorTools {
             inner: AssetServerTools::connect(endpoints.clone(), token.clone(), namespace.clone())
                 .map_err(|e| e.to_string()),
-            target: PublishTarget { endpoints, token, namespace },
+            transport: Box::new(FleetTransport),
+            publisher: Box::new(PublishTarget { endpoints, token, namespace }),
+            cancel_signal: None,
         }
     }
 
@@ -45,52 +51,62 @@ impl CreatorTools {
         self.inner.as_ref().err().map(|s| s.as_str())
     }
 
-    fn content_generate(
-        &mut self,
-        kind: makepad_asset_chat::tools::ContentGenerateKind,
-        prompt: &str,
-        dim_height: Option<f64>,
-        progress: &mut dyn FnMut(u16, &str),
-        cancel: &CancelFlag,
-    ) -> ToolOutcome {
-        let kind_name = format!("{}.generate", kind.as_str());
-        let mut body = vec![("prompt", json::s(prompt.to_string()))];
-        if let Some(h) = dim_height {
-            body.push(("height", Value::F64(h)));
-        }
-        let body = json::obj(body);
-        let seed = prompt
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let flag = Arc::new(AtomicBool::new(false));
-        // Bridge the session's cancel flag: checked each progress beat.
-        let mut beat = |note: &str, permille: u16| {
-            if cancel.is_cancelled() {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// Inject only I/O; routing recipes, job ownership and result validation
+    /// remain the exact executor used in shipping sessions.
+    pub fn with_runtime(transport: Box<dyn GenerationTransport>, publisher: Box<dyn Publisher>) -> Self {
+        Self { inner: Err("no catalog attached to injected runtime".into()), transport, publisher, cancel_signal: None }
+    }
+
+    /// UI cancellation must reach a blocking job without waiting in its worker queue.
+    pub fn with_cancel_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+        self.cancel_signal = Some(signal);
+        self
+    }
+
+    fn generate(&self, recipe: Result<Recipe, CreateError>, progress: &mut dyn FnMut(u16, &str), cancel: &CancelFlag) -> ToolOutcome {
+        static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64
+            ^ NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+        let cancel = ToolCancel { session: cancel, signal: self.cancel_signal.as_deref() };
+        let result = recipe.and_then(|recipe| composite::run(&recipe, seed, self.transport.as_ref(),
+            self.publisher.as_ref(), &cancel, &mut |note, n| progress(n, note), Duration::from_millis(500)));
+        match result {
+            Ok(result) => {
+                let last = &result.stages.last().expect("nonempty recipe").output;
+                let optional = |value: &Option<String>| value.clone().map(json::s).unwrap_or(Value::Null);
+                let stages = result.stages.iter().map(|stage| json::obj(vec![
+                    ("stage", json::s(stage.domain.clone())), ("job_id", json::s(stage.job_id.clone())),
+                    ("model", json::s(stage.model.clone())), ("asset_id", optional(&stage.output.asset_id)),
+                    ("revision", optional(&stage.output.revision)), ("alias", optional(&stage.output.alias)),
+                    ("text", optional(&stage.output.text)),
+                ])).collect();
+                let character = result.character.map(|c| json::obj(vec![
+                    ("skinned", Value::Bool(c.skinned)), ("rigged", Value::Bool(c.skinned)),
+                    ("animated", Value::Bool(c.animated)), ("embedded_atlas", Value::Bool(c.embedded_atlas)),
+                    ("playable", Value::Bool(c.playable)),
+                    ("clips", Value::Arr(c.clips.into_iter().map(json::s).collect())),
+                ])).unwrap_or(Value::Null);
+                ToolOutcome::Ok { value: json::obj(vec![
+                    ("asset_id", optional(&last.asset_id)), ("revision", optional(&last.revision)),
+                    ("alias", optional(&last.alias)), ("stages", Value::Arr(stages)),
+                    ("character", character),
+                    ("dim_height", result.dim_height.map(Value::F64).unwrap_or(Value::Null)),
+                    ("placement", json::s("not placed; use the alias with world.spawn or world.set_player_model; dim_height is an intended size, not an applied mesh transform")),
+                ]) }
             }
-            progress(permille, note);
-        };
-        match runner::generate_and_publish(&kind_name, &body, seed, &self.target, &flag, &mut beat)
-        {
-            Ok(generated) => ToolOutcome::Ok {
-                value: json::obj(vec![
-                    ("kind", json::s(kind_name)),
-                    (
-                        "asset_id",
-                        generated.asset_id.map(json::s).unwrap_or(Value::Null),
-                    ),
-                    (
-                        "revision",
-                        generated.revision.map(json::s).unwrap_or(Value::Null),
-                    ),
-                    ("text", generated.text.map(json::s).unwrap_or(Value::Null)),
-                ]),
-            },
-            Err(error) if error == "cancelled" => {
-                ToolOutcome::Failed { message: "cancelled".to_string() }
-            }
-            Err(error) => ToolOutcome::Failed { message: error },
+            Err(CreateError::Unavailable(reason)) => ToolOutcome::Unavailable { reason },
+            Err(error) => ToolOutcome::Failed { message: makepad_asset_chat::wire::sanitize_public_error(&error.to_string()) },
         }
+    }
+}
+
+struct ToolCancel<'a> {
+    session: &'a CancelFlag,
+    signal: Option<&'a AtomicBool>,
+}
+impl crate::runner::Cancellation for ToolCancel<'_> {
+    fn cancelled(&self) -> bool {
+        self.session.is_cancelled() || self.signal.is_some_and(|s| s.load(Ordering::Relaxed))
     }
 }
 
@@ -99,10 +115,11 @@ const TRANSFORMS_MOVED: &str = "asset transforms run in the creator apps now (th
 
 impl ToolExecutor for CreatorTools {
     fn capability_doc(&mut self) -> String {
-        match &mut self.inner {
+        let catalog = match &mut self.inner {
             Ok(tools) => tools.capability_doc(),
             Err(error) => format!("the asset server is unreachable: {error}"),
-        }
+        };
+        format!("{catalog} Creator generation owns and waits for real pipeline jobs. Availability is checked against live local fleet capabilities at each stage; missing stages return Unavailable. Character: expanded brief → image → matte → mesh → rig → motion. Prop: image → mesh. Sound: audio. Each output is published and returned by alias/revision; nothing is placed automatically.")
     }
 
     fn tool_definitions(&mut self) -> Vec<ToolDef> {
@@ -126,10 +143,10 @@ impl ToolExecutor for CreatorTools {
         progress: &mut dyn FnMut(u16, &str),
         cancel: &CancelFlag,
     ) -> ToolOutcome {
+        if let Some(recipe) = Recipe::for_call(call) {
+            return self.generate(recipe, progress, cancel);
+        }
         match call {
-            ContentToolCall::ContentGenerate { kind, prompt, dim_height } => {
-                self.content_generate(*kind, prompt, *dim_height, progress, cancel)
-            }
             ContentToolCall::OperationCreate { .. }
             | ContentToolCall::OperationGet { .. }
             | ContentToolCall::OperationWait { .. }

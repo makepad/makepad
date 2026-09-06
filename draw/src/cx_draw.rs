@@ -86,6 +86,7 @@ impl<'a> CxDraw<'a> {
             FontFamilyDefinition {
                 font_ids: vec![],
                 expected_member_count: 0,
+                diagnostics: Default::default(),
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
@@ -106,9 +107,10 @@ impl<'a> CxDraw<'a> {
             if let Some(stack_item) = self.pass_stack.last_mut() {
                 stack_item.dpi_factor = dpi_factor;
             }
+            let uniforms_gen = self.cx.next_uniform_gen();
             let cxpass = &mut self.passes[pass_id];
             cxpass.dpi_factor = Some(dpi_factor);
-            cxpass.set_dpi_factor(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor, uniforms_gen);
         }
     }
 
@@ -116,10 +118,15 @@ impl<'a> CxDraw<'a> {
         !self.pass_stack.is_empty()
     }
 
+    /// Declare `pass` a dependency of the pass being drawn, on behalf of the
+    /// draw list being recorded: call it on every draw that consumes the
+    /// pass's texture, whether or not the pass is begun again. A list that is
+    /// recorded again without it orphans the pass, which then stops painting
+    /// (`Cx::pass_attachment_is_stale`).
     pub fn make_child_pass(&mut self, pass: &DrawPass) {
-        let pass_id = self.pass_stack.last().unwrap().pass_id;
-        let cxpass = &mut self.passes[pass.draw_pass_id()];
-        cxpass.parent = CxDrawPassParent::DrawPass(pass_id);
+        let parent = self.pass_stack.last().unwrap().pass_id;
+        let attached_by = self.draw_list_stack.last().cloned();
+        self.cx.attach_child_pass(pass.draw_pass_id(), parent, attached_by);
     }
 
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
@@ -193,6 +200,39 @@ impl<'a> CxDraw<'a> {
             )
             .map(|v| v.size)
             .unwrap_or(dvec2(0.0, 0.0))
+    }
+
+    /// Returns the owning window's inner size in layout points. Texture and
+    /// cache passes deliberately walk through their parent-pass chain instead
+    /// of exposing their render-target size as viewport units. A pass tree
+    /// without a window uses its root pass rectangle.
+    pub fn owning_window_or_root_pass_size(&self) -> Vec2d {
+        let Some(stack_item) = self.pass_stack.last() else {
+            return dvec2(f64::NAN, f64::NAN);
+        };
+        let mut pass_id = stack_item.pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id].parent {
+                CxDrawPassParent::Window(window_id) => {
+                    return self.windows[window_id].get_inner_size();
+                }
+                CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+                _ => {
+                    return self
+                        .get_pass_rect(pass_id, self.current_dpi_factor())
+                        .map(|rect| rect.size)
+                        .unwrap_or(dvec2(f64::NAN, f64::NAN));
+                }
+            }
+        }
+        dvec2(f64::NAN, f64::NAN)
+    }
+
+    /// The paint-order depth the current pass adds per draw call: what a
+    /// drawer that splits one call into several must take back off through
+    /// `draw_depth` for its later calls to keep the depth of the one call.
+    pub fn current_pass_zbias_step(&self) -> f32 {
+        self.cx.passes[self.pass_stack.last().unwrap().pass_id].zbias_step
     }
 
     pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {

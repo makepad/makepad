@@ -52,6 +52,21 @@ pub fn stem_color(stem: usize) -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
+const DECK_ACCENTS: [[f32; 4]; 2] = [
+    [1.0, 0.361, 0.224, 1.0],
+    [0.416, 0.659, 1.0, 1.0],
+];
+
+fn deck_accent(deck: DeckId) -> Vec4f {
+    let c = DECK_ACCENTS[deck.index()];
+    vec4(c[0], c[1], c[2], c[3])
+}
+
+fn set_loop_color_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, color: Vec4f) {
+    lane.draw_vars
+        .set_uniform(cx, live_id!(color_loop), &[color.x, color.y, color.z, 0.18]);
+}
+
 /// Push the stem palette into the wave-lane shader's four colour uniforms.
 fn set_stem_color_uniforms(lane: &mut DrawWaveLane, cx: &Cx2d) {
     for (id, stem) in [
@@ -75,6 +90,13 @@ fn set_loop_span_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, span: Option<(f64, 
         _ => (0.0, 0.0),
     };
     lane.draw_vars.set_uniform(cx, live_id!(loop_span), &[start, end, 0.0, 0.0]);
+}
+
+/// How hard this lane's end-of-track warning is showing. Pushed EVERY
+/// draw like the spans above: a lane that has stopped warning has to say
+/// so, or the last value sticks to whatever is drawn next.
+fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
+    lane.draw_vars.set_uniform(cx, live_id!(warn), &[warn.clamp(0.0, 1.0)]);
 }
 
 /// The drag preview band, same encoding and the same every-draw rule: the
@@ -253,6 +275,11 @@ pub fn stem_color_killed() -> Vec4f {
 }
 
 /// Zoom limits, seconds of audio across the full lane width.
+/// How long before the end of a record the lane starts warning, in
+/// seconds. Half a minute: long enough to find the next track and get it
+/// on a deck without hurrying, short enough that it is not lit through
+/// most of an outro.
+pub const WAVE_WARN_SECS: f64 = 30.0;
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
@@ -324,8 +351,6 @@ script_mod! {
                 + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
             let played = step(x0 + 2.0, p.x) * step(p.x, play_x) * inside_y * playing
             let filled = base.mix(vec4(1.0, 1.0, 1.0, 1.0), played * 0.18)
-            // A dark one-pixel edge around the white two-pixel hairline
-            // keeps it crisp over both pale hits and saturated waveforms.
             let distance = abs(p.x - play_x)
             let edge = (1.0 - smoothstep(1.5, 2.0, distance)) * inside_y * playing
             let line = (1.0 - smoothstep(0.75, 1.0, distance)) * inside_y * playing
@@ -372,7 +397,7 @@ script_mod! {
                 * mix(self.has_stems, 1.0, is_mix)
                 * step(0.001, self.span_cols)
             if wave_available < 0.5 {
-                // Analysis is still pending: retain the old flat state fill.
+                // Analysis or stems are still pending: retain the flat state fill.
                 if self.state < 1.5 {
                     sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
                 } else if self.state < 2.5 {
@@ -389,9 +414,9 @@ script_mod! {
                         1.0
                     )
                     if self.state < 3.5 {
-                    let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
-                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
+                        let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+                        sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
                     } else {
                         sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
                         sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
@@ -400,8 +425,8 @@ script_mod! {
                 return self.countdown(self.playing_progress(sdf.result))
             }
 
-            // The rounded pad remains quiet behind the waveform; state is
-            // carried by its outline and by the envelope itself.
+            // Keep the pad quiet behind its waveform; state remains visible
+            // in the outline, queued pulse and playing progress.
             if self.state < 1.5 {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
             } else if self.state < 2.5 {
@@ -442,8 +467,6 @@ script_mod! {
             let stem_level = (stems.x * c0 + stems.y * c1 + stems.z * c2 + stems.w * c3) / present
             let level = clamp(mix(tile.w * stem_level, tile.w, is_mix), 0.0, 1.0) * 0.80
 
-            // Symmetric envelope with a one-pixel feather and a four-pixel
-            // inset, so the wave never spills through the rounded corners.
             let active = step(2.5, self.state)
             let part_h = max(self.part.w - self.part.z, 0.001)
             let part_y = clamp((self.pos.y - self.part.z) / part_h, 0.0, 1.0)
@@ -525,13 +548,21 @@ script_mod! {
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
         // waveform stays readable through, not a fill that replaces it.
-        color_loop: uniform(#xff5c3924)
+        color_loop: uniform(#xff5c392e)
         // The loop's span as (start_col, end_col, _, _). A UNIFORM and not
         // two `#[live]` fields: those become per-instance VERTEX INPUTS,
         // and this lane already sits on the vs_5_0 limit of 32 — two more
         // attributes fail the shader compile outright (X4506). Nothing
         // here varies per instance anyway.
         loop_span: uniform(#x00000000)
+        // How hard the end-of-track warning is showing, 0..1. A UNIFORM
+        // for the same reason `loop_span` is one: this lane sits ON the
+        // vs_5_0 limit of 32 vertex inputs, and one more `#[live]` field
+        // is one more per-instance attribute and no waveform at all on
+        // Windows. It varies per LANE rather than per instance, and each
+        // lane is its own draw, so a uniform carries it honestly.
+        warn: uniform(0.0)
+        color_warn: uniform(#xff3b30)
         // A loop drag's would-be landing, same encoding as `loop_span`.
         // Drawn dimmer beside the ghost so the operator sees both where
         // the loop IS and where release will put it.
@@ -619,18 +650,25 @@ script_mod! {
             return vec4(c.x, c.y, c.z, c.w * a)
         }
 
-        // The running loop: a wash across the span, and a hard rule on each
-        // edge. The edges are the seam — where the sound actually jumps —
-        // so they are drawn as firmly as a bar ruling rather than fading
-        // out with the wash.
+        // The running loop: a translucent wash plus one-pixel bracket
+        // edges. The short top/bottom caps make IN and OUT read as a pair,
+        // not as two unrelated grid rules.
         loop_at: fn(column: float) -> float {
             if self.loop_span.y <= self.loop_span.x {
                 return 0.0
             }
             let inside = step(self.loop_span.x, column) * step(column, self.loop_span.y)
-            let de = min(abs(column - self.loop_span.x), abs(column - self.loop_span.y))
-            let edge = 1.0 - smoothstep(0.5, 1.8, de / max(self.cols_per_px, 0.0001))
-            return max(inside * self.color_loop.w, edge)
+            let scale = max(self.cols_per_px, 0.0001)
+            let from_in = (column - self.loop_span.x) / scale
+            let from_out = (self.loop_span.y - column) / scale
+            let edge_in = 1.0 - smoothstep(0.5, 1.0, abs(from_in))
+            let edge_out = 1.0 - smoothstep(0.5, 1.0, abs(from_out))
+            let y = min(self.pos.y, 1.0 - self.pos.y) * self.rect_size.y
+            let cap_y = 1.0 - smoothstep(0.5, 1.0, y)
+            let cap_in = step(0.0, from_in) * step(from_in, 6.0)
+            let cap_out = step(0.0, from_out) * step(from_out, 6.0)
+            let bracket = max(max(edge_in, edge_out), cap_y * max(cap_in, cap_out))
+            return max(inside * self.color_loop.w, bracket)
         }
 
         // A drag's would-be landing: the same band at reduced weight, so
@@ -733,15 +771,21 @@ script_mod! {
             // A whisper of the rulings survives on top, so the two decks
             // can be read against each other through a loud passage.
             let ruled = body.mix(vec4(g.x, g.y, g.z, 1.0), g.w * 0.30)
-            // The overview strip carries its own playhead; the zoomed lanes
-            // share one drawn over both, so they pass head_on = 0.
+            // The overview and a stationary loop lane carry an in-shader
+            // playhead; normally the zoomed lanes share the centre overlay.
             // The loop sits over the picture, under the playhead: you have
             // to be able to see the band through a loud passage.
             let la = max(self.loop_at(column), self.preview_at(column))
             let banded = ruled.mix(vec4(self.color_loop.x, self.color_loop.y, self.color_loop.z, 1.0), la)
+            // The end-of-track warning, UNDER the playhead so the head
+            // stays crisp, and capped well short of opaque: the last
+            // thirty seconds of a record are exactly when the picture
+            // most needs reading, so this has to be impossible to miss
+            // without painting over the thing being watched.
+            let warned = banded.mix(self.color_warn, self.warn * 0.38)
             let hd = abs(column - self.head_col) / max(self.cols_per_px, 0.0001)
             let ha = (1.0 - smoothstep(0.5, 1.8, hd)) * self.head_on
-            return banded.mix(self.color_head, ha)
+            return warned.mix(self.color_head, ha)
         }
     }
 
@@ -753,6 +797,42 @@ script_mod! {
         draw_text +: {
             color: #x8e9aa7
             text_style: theme.font_bold{font_size: 8}
+        }
+        draw_mark_top +: {
+            color: #xe5484d
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let split = h * 0.58
+                sdf.move_to(0.5, 0.5)
+                sdf.line_to(w - 0.5, 0.5)
+                sdf.line_to(w - 0.5, split)
+                sdf.line_to(w * 0.5, h - 0.5)
+                sdf.line_to(0.5, split)
+                sdf.close_path()
+                sdf.fill_keep(self.color)
+                sdf.stroke(#x00000066, 1.0)
+                return sdf.result
+            }
+        }
+        draw_mark_bottom +: {
+            color: #xf5c542
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let split = h * 0.42
+                sdf.move_to(w * 0.5, 0.5)
+                sdf.line_to(w - 0.5, split)
+                sdf.line_to(w - 0.5, h - 0.5)
+                sdf.line_to(0.5, h - 0.5)
+                sdf.line_to(0.5, split)
+                sdf.close_path()
+                sdf.fill_keep(self.color)
+                sdf.stroke(#x00000066, 1.0)
+                return sdf.result
+            }
         }
         draw_head +: {
             color: uniform(#xffffff)
@@ -972,6 +1052,15 @@ script_mod! {
         row_col10 := TrackText{width: 0}
         row_col11 := TrackText{width: 0}
         }
+        row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
+        row_time := TrackText{width: 52 draw_text.color: #x9fabb7}
+        // The processed marks: a green tick under STEM when the
+        // store holds this track's four stems, under KRK when it
+        // holds the word-aligned transcript.
+        row_stem := TrackText{width: 36 draw_text.color: #x35c05f}
+        row_krk := TrackText{width: 30 draw_text.color: #x35c05f}
+        row_license := TrackText{width: 128 draw_text.color: #x6f7b87}
+        row_tags := TrackText{width: Fill{max: 190.} draw_text.color: #x6f7b87}
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
         // ButtonIcon, not Button: an icon-only button carries no label and
@@ -1407,6 +1496,24 @@ script_mod! {
         }
     }
 
+    // The deck transports are the console's primary hand targets. They use
+    // the same chrome as the compact utility controls, but at a size that is
+    // comfortable to hit; two rows keep that size inside each 316pt deck.
+    let MusicTransportButton = MusicButton{
+        height: 38
+        padding: Inset{left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+        align: Align{x: 0.5, y: 0.5}
+        draw_bg +: {border_radius: 7.0}
+        draw_text +: {text_style: theme.font_bold{font_size: 11}}
+    }
+
+    let MusicTransportIconButton = MusicIconButton{
+        width: 40
+        height: 38
+        icon_walk: Walk{width: 16 height: Fit}
+        draw_bg +: {border_radius: 7.0}
+    }
+
     // An accordion chevron: bare, quiet, and the height of the heading it
     // sits beside. It says which way the block will go, and nothing else.
     let ChevronIcon = ButtonIcon{
@@ -1636,6 +1743,26 @@ script_mod! {
         draw_text.text_style: theme.font_bold{font_size: 7}
     }
 
+    let AttributionLink = LinkLabel{
+        height: Fit
+        margin: 0
+        padding: 0
+        draw_bg +: {
+            color: #x00000000
+            color_focus: #x00000000
+            color_hover: #x00000000
+            color_down: #x00000000
+            border_size: 0.0
+        }
+        draw_text +: {
+            color: #x6f7b87
+            color_focus: #x6f7b87
+            color_hover: #x9fabb7
+            color_down: #x5f6a76
+            text_style: theme.font_bold{font_size: 7}
+        }
+    }
+
     let KnobStack = View{
         width: 46
         height: Fit
@@ -1646,7 +1773,7 @@ script_mod! {
 
     // Four stems have to fit the same width three tone bands do.
     let StemStack = KnobStack{width: 44}
-    let StemKnob = MusicKnob{width: 40 height: 40}
+    let StemKnob = MusicKnob{width: 40 height: 40 default: 1.0}
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
@@ -1672,8 +1799,17 @@ script_mod! {
                 let track_x = (self.rect_size.x - track_w) * 0.5
                 sdf.box(track_x, top, track_w, h, 3.)
                 sdf.fill(self.track_color)
-                let fill_h = max(1., h * self.slide_pos)
-                sdf.box(track_x + 1.5, top + (h - fill_h) + 1.5, track_w - 3., max(1., fill_h - 3.), 2.)
+                // From the bottom, or out of the resting point when the
+                // fader asks for it: a pitch fader pulled down should
+                // show a bar hanging BELOW centre, not a shorter bar
+                // still growing from the floor.
+                let lo = min(self.origin_pos, self.slide_pos)
+                let hi = max(self.origin_pos, self.slide_pos)
+                let from = mix(0., lo, self.arc_origin)
+                let to = mix(self.slide_pos, hi, self.arc_origin)
+                let fill_h = max(1., h * (to - from))
+                let fill_bottom = top + h - h * from
+                sdf.box(track_x + 1.5, fill_bottom - fill_h + 1.5, track_w - 3., max(1., fill_h - 3.), 2.)
                 sdf.fill(self.fill_color)
                 let cap_h = 13.
                 let cap_y = top + (h - fill_h) - cap_h * 0.5
@@ -1691,6 +1827,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        default: 0.5
         scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
@@ -1724,15 +1861,23 @@ script_mod! {
         }
     }
 
-    // A channel meter: one uniform, painted as a segmented column.
+    // A channel meter: a segmented column, and above it a mark holding the
+    // highest recent peak. Both values are uniforms, so the level moves
+    // without re-emitting an instance.
     let DeckMeter = SolidView{
         width: 9
         height: Fill
         draw_bg +: {
             level: uniform(0.0)
+            hold: uniform(0.0)
             color: uniform(#x1d222a)
             color_lit: uniform(#xff5c39)
             color_hot: uniform(#xff5a4e)
+            // Its own colour, and a pale one deliberately: the mark has to
+            // read against the dark trough AND against the lit bar it sits
+            // on top of, and anything from the bar's own range disappears
+            // into the bar exactly when the level is high.
+            color_mark: uniform(#xffffffcc)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
@@ -1745,6 +1890,28 @@ script_mod! {
                 let h = max(1.0, self.rect_size.y * self.level)
                 sdf.box(1.5, self.rect_size.y - h, self.rect_size.x - 3.0, h, 2.0)
                 sdf.fill(vec4(c.x, c.y, c.z, c.w * on * seg))
+                // Held inside the column rather than centred on the level:
+                // at full scale a centred mark loses half its width off the
+                // top edge, which is the one reading it exists to report.
+                // Two whole pixels, on a whole pixel. At 1.5 it landed
+                // across two rows at half weight in each and came and went
+                // as the level moved it a fraction up or down -- the same
+                // reason the marks on the wave lane snap.
+                let mark_h = 2.0
+                let mark_y = floor(clamp(
+                    (1.0 - self.hold) * self.rect_size.y - mark_h * 0.5,
+                    0.0,
+                    self.rect_size.y - mark_h
+                ))
+                sdf.box(1.5, mark_y, self.rect_size.x - 3.0, mark_h, 0.5)
+                // Nothing held, no mark -- otherwise it parks on the floor
+                // and reads as a level that is not there.
+                sdf.fill(vec4(
+                    self.color_mark.x,
+                    self.color_mark.y,
+                    self.color_mark.z,
+                    self.color_mark.w * step(0.002, self.hold)
+                ))
                 return sdf.result
             }
         }
@@ -1824,6 +1991,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_a_title := MusicValue{width: Fill text: "empty"}
+                    deck_a_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_a_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_a_credit_license := AttributionLink{text: ""}
+                    }
                     deck_a_artist := MusicLabel{width: Fill text: ""}
                 }
                 View{
@@ -1925,6 +2106,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_b_title := MusicValue{width: Fill text: "empty"}
+                    deck_b_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_b_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_b_credit_license := AttributionLink{text: ""}
+                    }
                     deck_b_artist := MusicLabel{width: Fill text: ""}
                 }
                 deck_b_art := Image{width: 44 height: 44}
@@ -1950,11 +2145,17 @@ script_mod! {
             new_batch: true
             deck_a_well := DeckWell{
                 width: Fill
-                deck_a_overview := mod.widgets.VjWaveOverview{height: Fill}
+                deck_a_overview := mod.widgets.VjWaveOverview{
+                    height: Fill
+                    draw_load +: {color: #xff5c39}
+                }
             }
             deck_b_well := DeckWell{
                 width: Fill
-                deck_b_overview := mod.widgets.VjWaveOverview{height: Fill}
+                deck_b_overview := mod.widgets.VjWaveOverview{
+                    height: Fill
+                    draw_load +: {color: #x6aa8ff}
+                }
             }
         }
 
@@ -2108,7 +2309,7 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
-                                deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
+                                deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
                                 deck_a_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                             View{
@@ -2345,55 +2546,66 @@ script_mod! {
                             }
                         }
                     }
-                    // The deck's own transport, at the foot of its column. These
-                    // rows do not move when the strip beside them wraps: the
-                    // extra rows are paid for by the waveform lanes, not by this
-                    // column's knobs and karaoke.
+                    // The deck's own transport, at the foot of its column. Two
+                    // explicit wrapping rows keep every primary control large
+                    // without letting either line escape the fixed deck panel.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 3
-                        align: Align{x: 0.0, y: 0.5}
-                        deck_a_play := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                        flow: Down
+                        spacing: 5
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 0.0, y: 0.5}
+                            deck_a_play := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                            }
+                            deck_a_cue := MusicTransportButton{width: 52 text: "CUE"}
+                            // One beat either way -- the nudge a hand makes
+                            // when the drop lands a hair off -- and held, they
+                            // BEND the record rather than stepping it. A beat
+                            // is a measured one where the analysis found beats
+                            // and a second where it did not, so they always
+                            // step something.
+                            //
+                            // They point at the TRACK, not at the playhead: <
+                            // sends the track a beat FORWARD past the head, >
+                            // a beat back, which is the same convention as a
+                            // hand on the platter. NOT mirrored on deck B: the
+                            // sense is the same whichever deck it is.
+                            deck_a_beat_fwd := MusicTransportButton{width: 36 text: "<"}
+                            deck_a_beat_back := MusicTransportButton{width: 36 text: ">"}
                         }
-                        deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // One beat either way — the nudge a hand makes when the
-                        // drop lands a hair off — and a phrase with a modifier held:
-                        // shift takes four bars, control sixteen.
-                        // A beat is a measured one where the analysis found
-                        // beats, and a second where it did not, so these
-                        // always step something.
-                        //
-                        // The chevrons point at the TRACK, not at the playhead:
-                        // < sends the track a beat FORWARD past the head, > a
-                        // beat back. It is the same convention as a hand on the
-                        // platter — push the record the way the arrow points.
-                        //
-                        // NOT mirrored on deck B, for the reason the loop marks
-                        // are not: the sense is the same whichever deck it is.
-                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: ">"}
-                        deck_a_loop := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                        }
-                        // Minus and plus, not the chevrons they were: the pair
-                        // beside CUE now steps the PLAYHEAD by a beat, and two
-                        // sets of chevrons a few points apart, one moving the
-                        // track and one halving a loop, is one pair too many.
-                        // These change a LENGTH, which is what − and + say.
-                        deck_a_loop_halve := MusicButton{width: 22 height: 24 text: "-"}
-                        deck_a_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_a_loop_double := MusicButton{width: 22 height: 24 text: "+"}
-                        // The loop pair, in glyphs that read as the marks
-                        // they set: `[` in, `]` out. The loop icon left of the
-                        // stepper is RELOOP/EXIT; the sparkle past them opens the
-                        // scanner, which is also where marks go to be forgotten.
-                        deck_a_loop_in := MusicButton{width: 22 height: 24 text: "["}
-                        deck_a_loop_out := MusicButton{width: 22 height: 24 text: "]"}
-                        deck_a_loop_scan := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 0.0, y: 0.5}
+                            deck_a_loop := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                            }
+                            deck_a_loop_halve := MusicTransportButton{width: 36 text: "<"}
+                            deck_a_loop_len := VjBeatsDrop{
+                                width: 42 height: 38 loop_rows: true
+                                draw_bg +: {arrow: 0.0}
+                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
+                            }
+                            deck_a_loop_double := MusicTransportButton{width: 36 text: ">"}
+                            // The loop pair, in glyphs that read as the marks
+                            // they set: `[` in, `]` out. The loop icon left of the
+                            // stepper is RELOOP/EXIT; the sparkle past them opens the
+                            // scanner, which is also where marks go to be forgotten.
+                            deck_a_loop_in := MusicTransportButton{width: 36 text: "["}
+                            deck_a_loop_out := MusicTransportButton{width: 36 text: "]"}
+                            deck_a_loop_scan := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                            }
                         }
                     }
                 }
@@ -2897,44 +3109,57 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
-                                deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
+                                deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
                                 deck_b_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                         }
                     }
-                    // Deck B's transport, at the foot of ITS column, right-aligned
-                    // so the two decks mirror across the waveforms.
+                    // Deck B mirrors both transport rows across the waveforms.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 3
-                        align: Align{x: 1.0, y: 0.5}
-                        // Deck B's row runs right to left, so the pair mirrors:
-                        // the sparkle outermost, then out, then in.
-                        deck_b_loop_scan := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        flow: Down
+                        spacing: 5
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 1.0, y: 0.5}
+                            // NOT mirrored, exactly as the loop marks are not:
+                            // the chevrons read the same on both decks.
+                            deck_b_beat_fwd := MusicTransportButton{width: 36 text: "<"}
+                            deck_b_beat_back := MusicTransportButton{width: 36 text: ">"}
+                            deck_b_cue := MusicTransportButton{width: 52 text: "CUE"}
+                            deck_b_play := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                            }
                         }
-                        // NOT mirrored like the rest of the row: IN then OUT is the
-                        // temporal order of the gesture, and hands read it
-                        // left-to-right on any deck regardless of its side.
-                        deck_b_loop_in := MusicButton{width: 22 height: 24 text: "["}
-                        deck_b_loop_out := MusicButton{width: 22 height: 24 text: "]"}
-                        // − and +, matching deck A: these size a loop, and the
-                        // chevrons now belong to the beat nudge beside CUE.
-                        deck_b_loop_halve := MusicButton{width: 22 height: 24 text: "-"}
-                        deck_b_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_b_loop_double := MusicButton{width: 22 height: 24 text: "+"}
-                        deck_b_loop := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                        }
-                        // NOT mirrored, exactly as the loop marks above are
-                        // not: the chevrons read the same on both decks.
-                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: ">"}
-                        deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        deck_b_play := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 1.0, y: 0.5}
+                            // The sparkle stays outermost. IN then OUT keeps the
+                            // gesture's temporal order on either deck.
+                            deck_b_loop_scan := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                            }
+                            deck_b_loop_in := MusicTransportButton{width: 36 text: "["}
+                            deck_b_loop_out := MusicTransportButton{width: 36 text: "]"}
+                            deck_b_loop_halve := MusicTransportButton{width: 36 text: "<"}
+                            deck_b_loop_len := VjBeatsDrop{
+                                width: 42 height: 38 loop_rows: true
+                                draw_bg +: {arrow: 0.0}
+                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
+                            }
+                            deck_b_loop_double := MusicTransportButton{width: 36 text: ">"}
+                            deck_b_loop := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                            }
                         }
                     }
                 }
@@ -3627,6 +3852,18 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "Stem separation"}
+                        stem_separation := DropDown{
+                            labels: ["Off" "AI hub" "Local"]
+                            selected_item: 1
+                        }
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
                         auto_vocal := MusicButton{width: 110 height: 22 text: "VOCAL GUARD"}
                         auto_phrase := MusicButton{width: 110 height: 22 text: "PHRASE SNAP"}
                     }
@@ -3908,6 +4145,19 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0, y: 0.5}
+                        // The surgical answer, next to the blunt one. A
+                        // wrong tempo on one record is a reason to measure
+                        // that record again, not to throw away a library
+                        // that took a night to work out -- and until this
+                        // was here, CLEAR ALL DATA was the only way to ask.
+                        // No confirmation: what it forgets it immediately
+                        // sets about replacing, which is the opposite of
+                        // the button beside it.
+                        prep_rescan_picked := MusicButton{
+                            width: 150
+                            height: 22
+                            text: "RE-SCAN PICKED"
+                        }
                         prep_clear := MusicButton{
                             width: 130
                             height: 22
@@ -4719,10 +4969,23 @@ pub struct WaveLane {
     pub cols: usize,
     /// Source seconds under the shared playhead.
     pub position_secs: f64,
+    /// How long the record is, in source seconds. Only the warning uses
+    /// it; zero means "not known yet", which never warns.
+    pub duration_secs: f64,
     pub grid: Option<TrackGrid>,
     /// The running loop in source seconds — the tile timebase, so this
     /// converts to columns exactly the way the grid does.
     pub loop_span: Option<(f64, f64)>,
+    /// One-based loop slot shown at the overlay's top-left.
+    pub loop_slot: Option<u8>,
+    /// The operator's own marks, in source seconds — the tile timebase,
+    /// like `loop_span`. The cue, the saved slots with the colour each
+    /// is wearing, and the loops the finder offered. Named apart from
+    /// `loop_slot` above, which is a different thing: that one is which
+    /// pad the RUNNING loop came from.
+    pub cue_secs: f64,
+    pub saved_slots: Vec<(u16, f64, f64, u32)>,
+    pub found_loops: Vec<(f64, f64)>,
     /// Playback rate, so the grid rules where the music actually lands.
     pub rate: f64,
     pub playing: bool,
@@ -4741,13 +5004,56 @@ pub struct WaveLane {
 
 impl WaveLane {
     /// Where the playhead is now: the last sampled position, carried
-    /// forward at the deck's rate.
+    /// forward at the deck's rate, and wrapped through a running loop.
+    ///
+    /// Without the wrap the drawn head walks out past the loop's end and
+    /// is yanked back on the next host sample -- once every time round,
+    /// which at a one-beat loop is several times a second and reads as
+    /// the picture tearing rather than as a loop.
+    ///
+    /// The wrap is gated on the LAST SAMPLED position being inside the
+    /// span, never the predicted one. A head still on its way into a loop
+    /// has not been captured by it yet, and folding it there would
+    /// teleport it forward into a lap it has not run.
     pub fn position_at(&self, now: f64) -> f64 {
         if !self.playing || self.scratching {
             return self.position_secs;
         }
         let elapsed = (now - self.stamp).clamp(0.0, 0.5);
-        (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0)
+        let ahead = (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0);
+        match self.loop_span {
+            Some((start, end))
+                if end > start && self.position_secs >= start && self.position_secs < end =>
+            {
+                start + (ahead - start).rem_euclid(end - start)
+            }
+            _ => ahead,
+        }
+    }
+
+    /// How hard the end-of-track warning should show, 0..1.
+    ///
+    /// A ramp over the last [`WAVE_WARN_SECS`], times a one-per-second
+    /// pulse that never quite reaches nothing -- a warning that blinked
+    /// fully out would be invisible exactly half the time, and the point
+    /// is to be caught out of the corner of an eye while looking at the
+    /// other deck.
+    ///
+    /// Computed HERE, at draw time, from the same `now` the playhead
+    /// uses. Worked out by the host at pump cadence instead, the pulse
+    /// would judder against a scroll that is smooth.
+    pub fn warn_at(&self, now: f64) -> f32 {
+        if !self.playing || self.duration_secs <= 0.0 {
+            return 0.0;
+        }
+        let left = self.duration_secs - self.position_at(now);
+        if !(0.0..WAVE_WARN_SECS).contains(&left) {
+            return 0.0;
+        }
+        let ramp = (WAVE_WARN_SECS - left) / WAVE_WARN_SECS;
+        let phase = now.rem_euclid(1.0);
+        let pulse = 0.45 + 0.55 * (1.0 - (phase * 2.0 - 1.0).abs());
+        (ramp * pulse).clamp(0.0, 1.0) as f32
     }
 
     /// The tile column under the playhead.
@@ -4758,6 +5064,34 @@ impl WaveLane {
     /// The tile column under the playhead at `now`.
     pub fn head_column_at(&self, now: f64) -> f64 {
         self.position_at(now) * ZOOM_COLS_PER_SEC
+    }
+
+    /// The zoom for ONE lane, from the shared one.
+    ///
+    /// The tiles are in SOURCE columns, so a record running fast crosses
+    /// more of them per second than a slow one. At a shared zoom that puts
+    /// two tempo-matched decks on screen at different beat widths, sliding
+    /// past each other at different speeds -- which is precisely what two
+    /// decks side by side are being looked at to compare. Scaling each
+    /// lane by what its own platter is turning at cancels the source
+    /// timebase out: a beat is the same number of pixels on both, and they
+    /// scroll together.
+    fn lane_zoom(cols_per_px: f32, rate: f64) -> f32 {
+        // A stopped or reversed deck keeps a readable zoom rather than
+        // collapsing the lane to a single column.
+        (cols_per_px as f64 * rate.abs().max(0.01)) as f32
+    }
+
+    /// Where a mark at `secs` of SOURCE time lands on this lane, in
+    /// screen x: the tile column it sits on, measured from the column
+    /// under the middle of the lane, over this lane's own zoom.
+    ///
+    /// The whole-track strip answers the same question by a fraction of
+    /// the record's length. That is the other surface's space and cannot
+    /// be borrowed: this one scrolls, and what is under the middle
+    /// changes every frame.
+    pub fn mark_x(secs: f64, centre_col: f64, lane_cols: f64, middle_x: f64) -> f64 {
+        middle_x + (secs * ZOOM_COLS_PER_SEC - centre_col) / lane_cols.max(1e-4)
     }
 
     /// Beat period in tile columns, and a downbeat column, for the ruling.
@@ -4827,6 +5161,14 @@ pub struct VjWaveScroll {
     draw_lane: DrawWaveLane,
     #[live]
     draw_head: DrawQuad,
+    /// The mark chips. Two shapes and not four: a chip hanging from the
+    /// top edge and a chip standing on the bottom one. The colour is a
+    /// per-instance field, so one drawer serves the cue and every saved
+    /// slot's own hue without a uniform lingering between draws.
+    #[live]
+    draw_mark_top: DrawColor,
+    #[live]
+    draw_mark_bottom: DrawColor,
     #[live]
     draw_text: DrawText,
     #[rust]
@@ -4837,6 +5179,10 @@ pub struct VjWaveScroll {
     zoom_secs: f64,
     #[rust]
     lane_rects: [Rect; 2],
+    /// The viewport centre captured when a loop becomes active. The wave
+    /// stays put at the user's current zoom while its head crosses the band.
+    #[rust]
+    loop_centres: [Option<f64>; 2],
     /// Which lane a pointer is holding, and where/when it was last seen.
     #[rust]
     drag: Option<DragState>,
@@ -4980,7 +5326,17 @@ struct DragState {
 impl VjWaveScroll {
     pub fn set_lane(&mut self, cx: &mut Cx, deck: DeckId, lane: WaveLane) {
         let stamp = cx.seconds_since_app_start();
-        self.lanes[deck.index()] = WaveLane { stamp, ..lane };
+        let index = deck.index();
+        if self.lanes[index].loop_span != lane.loop_span {
+            self.loop_centres[index] = lane.loop_span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
+        self.lanes[index] = WaveLane { stamp, ..lane };
         self.area.redraw(cx);
     }
 
@@ -5019,17 +5375,63 @@ impl VjWaveScroll {
 
     /// The deck's running loop, for the band. Diffed: this comes off the
     /// status pump and hardly ever changes between ticks.
-    pub fn set_loop_span(&mut self, cx: &mut Cx, deck: DeckId, span: Option<(f64, f64)>) {
-        let lane = &mut self.lanes[deck.index()];
-        if lane.loop_span == span {
+    pub fn set_loop_span(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        slot: Option<u8>,
+    ) {
+        let index = deck.index();
+        let lane = &mut self.lanes[index];
+        if lane.loop_span == span && lane.loop_slot == slot {
             return;
         }
+        if lane.loop_span != span {
+            self.loop_centres[index] = span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
         lane.loop_span = span;
+        lane.loop_slot = slot;
         self.area.redraw(cx);
     }
 
     /// Push the deck's stem knobs into the lane: a layer shrinks as its
     /// knob comes down and vanishes when it is killed.
+    /// The marks for one deck. Named as the strip's are, so the two
+    /// surfaces read the same at the call site.
+    pub fn set_cue_marker(&mut self, cx: &mut Cx, deck: DeckId, secs: f64) {
+        let lane = &mut self.lanes[deck.index()];
+        if (lane.cue_secs - secs).abs() < 1e-9 {
+            return;
+        }
+        lane.cue_secs = secs;
+        self.area.redraw(cx);
+    }
+
+    pub fn set_loop_slots(&mut self, cx: &mut Cx, deck: DeckId, slots: &[(u16, f64, f64, u32)]) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.saved_slots == slots {
+            return;
+        }
+        lane.saved_slots = slots.to_vec();
+        self.area.redraw(cx);
+    }
+
+    pub fn set_found_loops(&mut self, cx: &mut Cx, deck: DeckId, spans: &[(f64, f64)]) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.found_loops == spans {
+            return;
+        }
+        lane.found_loops = spans.to_vec();
+        self.area.redraw(cx);
+    }
+
     pub fn set_stem_gain(&mut self, cx: &mut Cx, deck: DeckId, gains: [f32; 4]) {
         let lane = &mut self.lanes[deck.index()];
         if lane.stem_gain == gains {
@@ -5248,8 +5650,8 @@ impl Widget for VjWaveScroll {
             return DrawStep::done();
         }
         let now = cx.seconds_since_app_start();
-        // A playing deck redraws every frame: the waveform scrolls with the
-        // music rather than in twenty-hertz steps.
+        // A playing deck redraws every frame: the normal waveform scrolls,
+        // while a loop keeps the waveform still and advances only its head.
         if self.lanes.iter().any(|lane| lane.playing) {
             self.next_frame = cx.new_next_frame();
         }
@@ -5258,6 +5660,7 @@ impl Widget for VjWaveScroll {
         let gutter = 14.0f64;
         let lane_h = ((rect.size.y - gutter) * 0.5).max(8.0);
         let cols_per_px = (self.zoom_secs * ZOOM_COLS_PER_SEC / rect.size.x) as f32;
+        let mut moving_heads = [false; 2];
         for index in 0..2 {
             let y = if index == 0 {
                 rect.pos.y
@@ -5267,6 +5670,7 @@ impl Widget for VjWaveScroll {
             let lane_rect = Rect { pos: dvec2(rect.pos.x, y), size: dvec2(rect.size.x, lane_h) };
             self.lane_rects[index] = lane_rect;
             let lane = &self.lanes[index];
+            let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
             match lane.pyramid.as_ref() {
                 Some(pyramid) => {
                     self.draw_lane.draw_vars.set_texture(0, &pyramid.texture);
@@ -5275,7 +5679,7 @@ impl Widget for VjWaveScroll {
                     // Pick the pyramid levels this zoom needs and hand the
                     // shader their row offsets: the whole zoom is a uniform.
                     let (lo, lo_scale, hi, hi_scale, blend) =
-                        pyramid.levels_for(cols_per_px as f64);
+                        pyramid.levels_for(lane_cols as f64);
                     self.draw_lane.lo_row = lo.base_row as f32;
                     self.draw_lane.lo_cols = lo.cols.max(1) as f32;
                     self.draw_lane.lo_scale = lo_scale as f32;
@@ -5306,42 +5710,156 @@ impl Widget for VjWaveScroll {
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
             self.draw_lane.gain_other = lane.stem_gain[3];
-            // The shared playhead is one quad over both lanes.
-            self.draw_lane.head_on = 0.0;
             self.draw_lane.cols = lane.cols as f32;
             // Snap the scroll to whole device pixels. A sub-pixel offset
             // makes every column's sample point crawl between neighbours
             // frame to frame, which reads as a shimmer over the whole wave.
-            let raw_centre = lane.head_column_at(now);
-            let columns_per_pixel = cols_per_px as f64;
+            let head = lane.head_column_at(now);
+            let loop_columns = lane.loop_columns();
+            moving_heads[index] = loop_columns.is_some();
+            // A loop captures the viewport where it engaged. The waveform
+            // and user zoom stay untouched while the in-shader head moves
+            // through (and wraps inside) the highlighted source span.
+            let raw_centre = self.loop_centres[index].filter(|_| moving_heads[index]).unwrap_or(head);
+            let columns_per_pixel = lane_cols as f64;
             let centre = if columns_per_pixel > 0.0 {
                 (raw_centre / columns_per_pixel).round() * columns_per_pixel
             } else {
                 raw_centre
             };
             self.draw_lane.centre_col = centre as f32;
-            self.draw_lane.cols_per_px = cols_per_px;
-            set_loop_span_uniform(&mut self.draw_lane, cx, lane.loop_columns());
+            self.draw_lane.cols_per_px = lane_cols;
+            self.draw_lane.head_col = head as f32;
+            self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
+            set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
+            set_loop_span_uniform(&mut self.draw_lane, cx, loop_columns);
             set_preview_span_uniform(&mut self.draw_lane, cx, None);
             let (beat_cols, phase) = lane.grid_columns().unwrap_or((0.0, 0.0));
             self.draw_lane.beat_cols = beat_cols as f32;
             self.draw_lane.beat_phase = phase as f32;
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
+            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now));
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
+        // The operator's own marks, over the wave. The same shapes and
+        // colours the whole-track strip uses -- the two surfaces are one
+        // visual language -- but never its coordinate space: the strip
+        // maps a fraction of the whole record, this maps tile columns
+        // around the head. Found loops ride the bottom edge and everything
+        // else the top, which is what keeps the two rows from colliding.
+        //
+        // Drawn in the strip's own order, so a coincidence resolves the
+        // same way on both: the cue under the saved slots, because the
+        // numbered pad is the one that has to be read correctly to be
+        // played. All of it under the head, which is the only thing here
+        // that is happening now.
+        for index in 0..2 {
+            if !self.lanes[index].loaded {
+                continue;
+            }
+            let lane_cols =
+                WaveLane::lane_zoom(cols_per_px, self.lanes[index].rate).max(1e-4) as f64;
+            // The captured centre only while a loop is really running --
+            // the same filter the waveform itself takes. A span that never
+            // opened can leave a centre latched, and marks standing still
+            // against a scrolling wave are worse than no marks.
+            let centre = self.loop_centres[index]
+                .filter(|_| moving_heads[index])
+                .unwrap_or_else(|| self.lanes[index].head_column_at(now));
+            let lane_rect = self.lane_rects[index];
+            let (chip_w, chip_h) = (9.0f64, 11.0f64);
+            let middle_x = rect.pos.x + rect.size.x * 0.5;
+            let x_of = |secs: f64| WaveLane::mark_x(secs, centre, lane_cols, middle_x);
+            // Off the lane is SKIPPED, never clamped: a chip parked at the
+            // edge would claim a mark is there when it is seconds away.
+            let visible = |x: f64| {
+                x + chip_w * 0.5 >= lane_rect.pos.x
+                    && x - chip_w * 0.5 <= lane_rect.pos.x + lane_rect.size.x
+            };
+            // Snapped to whole pixels. The chip is nine wide with a
+            // one-pixel stroke: at a fractional x that stroke straddles
+            // two pixels and halves its weight in each, and since the
+            // centre moves every frame the blur crawls as the wave
+            // scrolls. The same reason the waveform snaps its own centre.
+            let top_at = |x: f64| Rect {
+                pos: dvec2((x - chip_w * 0.5).round(), lane_rect.pos.y),
+                size: dvec2(chip_w, chip_h),
+            };
+            let bottom_at = |x: f64| Rect {
+                pos: dvec2(
+                    (x - chip_w * 0.5).round(),
+                    lane_rect.pos.y + lane_rect.size.y - chip_h,
+                ),
+                size: dvec2(chip_w, chip_h),
+            };
+
+            for k in 0..self.lanes[index].found_loops.len() {
+                let (start, _) = self.lanes[index].found_loops[k];
+                let x = x_of(start);
+                if visible(x) {
+                    self.draw_mark_bottom.color = Vec4f::from_u32(0xf5c542ff);
+                    self.draw_mark_bottom.draw_abs(cx, bottom_at(x));
+                }
+            }
+            let cue_x = x_of(self.lanes[index].cue_secs);
+            if visible(cue_x) {
+                self.draw_mark_top.color = Vec4f::from_u32(0xe5484dff);
+                self.draw_mark_top.draw_abs(cx, top_at(cue_x));
+            }
+            for k in 0..self.lanes[index].saved_slots.len() {
+                let (_, start, _, colour) = self.lanes[index].saved_slots[k];
+                let x = x_of(start);
+                if visible(x) {
+                    self.draw_mark_top.color = Vec4f::from_u32(colour);
+                    self.draw_mark_top.draw_abs(cx, top_at(x));
+                }
+            }
+        }
+
+        // Slot number at the visible top-left of the active band. Text is
+        // direct-drawn over the same lane; the overlay remains one widget.
+        for index in 0..2 {
+            let lane = &self.lanes[index];
+            let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
+            let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
+            let Some((start, end)) = lane.loop_columns() else { continue };
+            let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
+            let start_x = rect.pos.x + rect.size.x * 0.5
+                + (start - centre) / lane_cols.max(1e-4) as f64;
+            let end_x = rect.pos.x + rect.size.x * 0.5
+                + (end - centre) / lane_cols.max(1e-4) as f64;
+            let lane_rect = self.lane_rects[index];
+            if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
+                continue;
+            }
+            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+            self.draw_text.text_style.font_size = 9.0;
+            self.draw_text.draw_abs(
+                cx,
+                dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
+                &slot.to_string(),
+            );
+        }
+
         // Bar numbers, ruled off whichever deck is leading the view.
+        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
+        let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
         if let Some((beat_cols, phase)) = lane.grid_columns() {
             let bar_cols = beat_cols * 4.0;
             if bar_cols > 1.0 {
-                let centre = lane.head_column_at(now);
-                let half_cols = self.zoom_secs * ZOOM_COLS_PER_SEC * 0.5;
+                let centre = self.loop_centres[ruler]
+                    .filter(|_| moving_heads[ruler])
+                    .unwrap_or_else(|| lane.head_column_at(now));
+                // The columns this lane actually shows, which is its own
+                // zoom across the width -- not the shared one.
+                let half_cols = rect.size.x * lane_cols as f64 * 0.5;
                 let first = ((centre - half_cols - phase) / bar_cols).floor();
                 let last = ((centre + half_cols - phase) / bar_cols).ceil();
                 // Thin the labels out when the bars crowd together.
-                let px_per_bar = bar_cols / cols_per_px.max(1e-4) as f64;
+                let px_per_bar = bar_cols / lane_cols.max(1e-4) as f64;
                 let stride = if px_per_bar < 28.0 {
                     (28.0 / px_per_bar).ceil() as i64
                 } else {
@@ -5353,7 +5871,7 @@ impl Widget for VjWaveScroll {
                     if bar >= 0 && bar % stride == 0 {
                         let col = phase + bar as f64 * bar_cols;
                         let x = rect.pos.x + rect.size.x * 0.5
-                            + (col - centre) / cols_per_px.max(1e-4) as f64;
+                            + (col - centre) / lane_cols.max(1e-4) as f64;
                         if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
                             self.draw_text.draw_abs(
                                 cx,
@@ -5386,14 +5904,31 @@ impl Widget for VjWaveScroll {
             );
         }
 
-        // The one shared playhead, straight through both lanes.
-        self.draw_head.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
-                size: dvec2(12.0, rect.size.y),
-            },
-        );
+        // Unlooped lanes keep the familiar fixed centre head. A looping
+        // lane draws its moving head in the waveform shader instead.
+        if !moving_heads[0] && !moving_heads[1] {
+            self.draw_head.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
+                    size: dvec2(12.0, rect.size.y),
+                },
+            );
+        } else {
+            for index in 0..2 {
+                if moving_heads[index] {
+                    continue;
+                }
+                let lane_rect = self.lane_rects[index];
+                self.draw_head.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * 0.5 - 6.0, lane_rect.pos.y),
+                        size: dvec2(12.0, lane_rect.size.y),
+                    },
+                );
+            }
+        }
         DrawStep::done()
     }
 }
@@ -5401,6 +5936,15 @@ impl Widget for VjWaveScroll {
 // ---------------------------------------------------------------------------
 // whole-track overview
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaveLoadView {
+    phase: f32,
+    progress: Option<f32>,
+    /// The deck is already playing what has arrived: the waveform stays
+    /// in view and the progress is a thin line under it, not a curtain.
+    playable: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverviewEvent {
@@ -5463,6 +6007,10 @@ pub struct VjWaveOverview {
     /// the strip stays the reference picture of the song.
     #[live]
     draw_lane: DrawWaveLane,
+    /// Direct-drawn over the same strip: no extra layout and no
+    /// platform-specific path. Each deck gives it its header accent.
+    #[live]
+    draw_load: DrawColor,
     #[rust]
     area: Area,
     #[rust]
@@ -5561,9 +6109,29 @@ pub struct VjWaveOverview {
     snap_beats: u32,
     #[rust]
     events: Vec<OverviewEvent>,
+    #[rust]
+    load: Option<WaveLoadView>,
+    #[rust]
+    load_frame: NextFrame,
 }
 
 impl VjWaveOverview {
+    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32, bool)>) {
+        let load = visual.map(|(phase, progress, indeterminate, playable)| WaveLoadView {
+            phase,
+            progress: (indeterminate < 0.5).then_some(progress),
+            playable,
+        });
+        if self.load == load {
+            return;
+        }
+        self.load = load;
+        self.area.redraw(cx);
+        if self.load.is_some_and(|load| load.progress.is_none()) {
+            self.load_frame = cx.new_next_frame();
+        }
+    }
+
     pub fn set_track(
         &mut self,
         cx: &mut Cx,
@@ -5777,6 +6345,12 @@ impl WidgetNode for VjWaveOverview {
 
 impl Widget for VjWaveOverview {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.load_frame.is_event(event).is_some()
+            && self.load.is_some_and(|load| load.progress.is_none())
+        {
+            self.area.redraw(cx);
+            self.load_frame = cx.new_next_frame();
+        }
         match event.hits(cx, self.area) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 // Marker strip first: a chip click is neither a seek nor a
@@ -6006,6 +6580,7 @@ impl Widget for VjWaveOverview {
         let columns = self
             .loop_span
             .map(|(start, end)| (start * ZOOM_COLS_PER_SEC, end * ZOOM_COLS_PER_SEC));
+        set_loop_color_uniform(&mut self.draw_lane, cx, self.draw_load.color);
         set_loop_span_uniform(&mut self.draw_lane, cx, columns);
         // During a drag the ghost above stays put and this is where release
         // will land — the pair is the whole point of the ghost model.
@@ -6024,6 +6599,57 @@ impl Widget for VjWaveOverview {
         self.draw_lane.head_col = (self.head * self.cols.max(1) as f64) as f32;
         self.draw_lane.head_on = if self.pyramid.is_some() { 1.0 } else { 0.0 };
         self.draw_lane.draw_abs(cx, rect);
+        if let Some(load) = self.load {
+            let accent = self.draw_load.color;
+            // A deck that is already playing keeps its picture: the bar is
+            // a thin line along the bottom edge, where the decoded region
+            // grows under the waveform drawing in above it. A deck still
+            // waiting gets the curtain and the bar across the middle.
+            let track = if load.playable {
+                Rect {
+                    pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - 3.0),
+                    size: dvec2(rect.size.x.max(1.0), 3.0),
+                }
+            } else {
+                self.draw_load.color = Vec4f::from_u32(0x090c10d9);
+                self.draw_load.draw_abs(cx, rect);
+                Rect {
+                    pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
+                    size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+                }
+            };
+            self.draw_load.color = Vec4f::from_u32(0x2a323cff);
+            self.draw_load.draw_abs(cx, track);
+            self.draw_load.color = match load.phase as u32 {
+                2 => Vec4f::from_u32(0xf5c542ff),
+                3 => Vec4f::from_u32(0x35c05fff),
+                4 => Vec4f::from_u32(0xe5484dff),
+                _ => accent,
+            };
+            let fill = match load.progress {
+                Some(progress) => Rect {
+                    pos: track.pos,
+                    size: dvec2(
+                        track.size.x * progress.clamp(0.0, 1.0) as f64,
+                        track.size.y,
+                    ),
+                },
+                None => {
+                    let t = (cx.seconds_since_app_start() * 0.8).rem_euclid(2.0);
+                    let sweep = if t < 1.0 { t } else { 2.0 - t };
+                    let width = (track.size.x * 0.22).clamp(28.0, 84.0).min(track.size.x);
+                    self.load_frame = cx.new_next_frame();
+                    Rect {
+                        pos: dvec2(track.pos.x + (track.size.x - width) * sweep, track.pos.y),
+                        size: dvec2(width, track.size.y),
+                    }
+                }
+            };
+            if fill.size.x > 0.0 {
+                self.draw_load.draw_abs(cx, fill);
+            }
+            self.draw_load.color = accent;
+        }
         // The marker chips ride the top edge, each over its loop's IN.
         // NO chip ever moves with the pointer: hover scales one up, a
         // press takes it back to normal (the pressed-down feel), and a
@@ -6214,6 +6840,7 @@ pub struct TrackRowEntry {
     /// which is not the same as a clash and must not be painted like one.
     pub key_fit: Option<f32>,
     pub duration: String,
+    pub license: String,
     pub tags: String,
     /// The store holds this track's four separated stems.
     pub stem: bool,
@@ -6240,6 +6867,7 @@ impl TrackRowEntry {
             key_order: NO_KEY_ORDER,
             key_fit: None,
             duration: String::new(),
+            license: String::new(),
             tags: String::new(),
             stem: false,
             krk: false,
@@ -6252,9 +6880,10 @@ impl TrackRowEntry {
 /// Below this list width the explorer drops its word headers: STEM and KRK
 /// read S and K, and their columns shrink to `MARK_COLUMN_NARROW`. Measured
 /// against the column set: badge, artist, bpm, key, time, the two marks,
-/// tags and the queue chip cost ~670 points before the title gets its floor
-/// of 180, so a list under ~900 is already spending pixels it does not have.
-pub const LIBRARY_NARROW_WIDTH: f64 = 900.0;
+/// licence, tags and the queue chip cost ~800 points before the title gets
+/// its floor of 180, so a list under ~1040 is already spending pixels it
+/// does not have.
+pub const LIBRARY_NARROW_WIDTH: f64 = 1040.0;
 
 // ---------------------------------------------------------------------------
 // the transport strip: three groups, an order that depends on the width
@@ -6397,7 +7026,7 @@ fn strip_walk(width: f64) -> Walk {
         margin: Inset::default(),
         width: Size::Fixed(width.max(0.0)),
         height: Size::fit(),
-        metrics: Metrics::default(),
+        ..Default::default()
     }
 }
 #[derive(Script, ScriptHook, Widget)]
@@ -6946,6 +7575,10 @@ pub fn column_size(column: Column, narrow: bool) -> Size {
         // title beside nothing.
         ColumnWidth::Fill { min, max } => Size::Fill {
             weight: if matches!(column, Column::Title) { 400.0 } else { 100.0 },
+            // A column neither grows from a basis nor gives ground: the
+            // weights above are the whole of how the row shares its width.
+            basis: FitBound::Abs(0.0),
+            shrink: 0.0,
             min: min.filter(|_| !narrow),
             max,
         },
@@ -7400,6 +8033,7 @@ mod tests {
 
     fn filled_row() -> TrackRowEntry {
         TrackRowEntry {
+            license: String::new(),
             key: TrackKey::Local(PathBuf::from("a.mp3")),
             title: "Title".into(),
             artist: "Artist".into(),
@@ -7755,6 +8389,16 @@ mod tests {
     }
 
     #[test]
+    fn the_loop_playhead_wraps_without_moving_the_waveform_timebase() {
+        let mut lane = lane(120.0, 3.9);
+        lane.playing = true;
+        lane.stamp = 10.0;
+        lane.loop_span = Some((2.0, 4.0));
+        assert!((lane.position_at(10.2) - 2.1).abs() < 1e-9);
+        assert_eq!(lane.loop_columns(), Some((200.0, 400.0)));
+    }
+
+    #[test]
     fn the_band_is_grabbable_along_its_length_and_not_outside_it() {
         let span = Some((10.0, 14.0));
         assert_eq!(band_grab(span, 10.0, 0.35), Some(0.0), "the in edge grabs at zero");
@@ -7918,6 +8562,68 @@ mod tests {
         );
     }
 
+    /// The reason the zoom is per lane: two decks matched by ear must
+    /// match on screen too, or the picture contradicts the room.
+    #[test]
+    fn two_synced_decks_draw_their_beats_the_same_width() {
+        // A at 120 played straight; B at 100 played 1.2x, which is 120 to
+        // the ear. B's beat spans 1.2x more SOURCE columns, so only a zoom
+        // scaled by the rate puts them on the same pixels.
+        let a = lane(120.0, 0.0);
+        let b = WaveLane { grid: Some(grid(100.0, 0.0, 0)), rate: 1.2, ..lane(100.0, 0.0) };
+        let shared = 4.0f32;
+        let width = |lane: &WaveLane| {
+            lane.grid_columns().unwrap().0 / WaveLane::lane_zoom(shared, lane.rate) as f64
+        };
+        // A ten-thousandth of a pixel: the zoom reaches the shader as an
+        // f32, so exact equality is not a claim the type can keep, and
+        // anything this small is well under a screen pixel.
+        assert!(
+            (width(&a) - width(&b)).abs() < 1e-4,
+            "a beat is {} px on A and {} px on B",
+            width(&a),
+            width(&b)
+        );
+        // And the same rule makes them scroll together: pixels per second
+        // of AUDIBLE time is the same on both lanes.
+        let scroll = |lane: &WaveLane| {
+            ZOOM_COLS_PER_SEC * lane.rate / WaveLane::lane_zoom(shared, lane.rate) as f64
+        };
+        assert!((scroll(&a) - scroll(&b)).abs() < 1e-4, "{} vs {}", scroll(&a), scroll(&b));
+        // And the control: on ONE shared zoom they do not match at all, so
+        // the agreement above belongs to the scaling and not to the fixture.
+        let unscaled = |lane: &WaveLane| lane.grid_columns().unwrap().0 / shared as f64;
+        assert!(
+            (unscaled(&a) - unscaled(&b)).abs() > 1.0,
+            "shared zoom would draw {} px against {} px",
+            unscaled(&a),
+            unscaled(&b)
+        );
+    }
+
+    /// A mark is drawn where the record says it is, in the lane's own
+    /// scrolling space rather than the strip's whole-track one.
+    #[test]
+    fn a_mark_lands_where_the_record_says_it_is() {
+        let centre = 12.0 * ZOOM_COLS_PER_SEC;
+        let middle = 500.0;
+        let cols = 4.0;
+        // The second the head is on sits under the middle of the lane.
+        assert!((WaveLane::mark_x(12.0, centre, cols, middle) - middle).abs() < 1e-9);
+        // One second later is one second's worth of columns to the right,
+        // at this lane's own zoom...
+        let ahead = WaveLane::mark_x(13.0, centre, cols, middle);
+        assert!((ahead - middle - ZOOM_COLS_PER_SEC / cols).abs() < 1e-9, "{ahead}");
+        // ...and one second earlier is the same distance the other way.
+        let behind = WaveLane::mark_x(11.0, centre, cols, middle);
+        assert!((middle - behind - ZOOM_COLS_PER_SEC / cols).abs() < 1e-9, "{behind}");
+        // A lane showing more seconds in the same pixels draws the same
+        // mark nearer the middle, which is what keeps a mark agreeing
+        // with the waveform under it.
+        let wider = WaveLane::mark_x(13.0, centre, cols * 2.0, middle);
+        assert!(wider < ahead && wider > middle, "{wider} against {ahead}");
+    }
+
     #[test]
     fn no_grid_means_no_ruling() {
         let mut lane = lane(120.0, 1.0);
@@ -7956,6 +8662,77 @@ mod tests {
         // And a very stale stamp cannot run the playhead away.
         lane.playing = true;
         assert!(lane.position_at(1_000.0) - 10.0 <= 0.55);
+    }
+
+    #[test]
+    fn a_playhead_inside_a_loop_wraps_instead_of_walking_out_of_it() {
+        let mut lane = lane(120.0, 10.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        // A SUB-BEAT loop, which is where this bites: the prediction only
+        // ever runs half a second ahead, so a loop longer than that could
+        // never have walked out of itself in the first place.
+        lane.loop_span = Some((10.0, 10.3));
+        // Inside the lap, nothing to do.
+        assert!((lane.position_at(100.1) - 10.1).abs() < 1e-9);
+        // Past the end: back round, not out the far side. Two-thirds of a
+        // second of prediction is one whole lap and change.
+        assert!((lane.position_at(100.5) - 10.2).abs() < 1e-9);
+        // However stale the stamp, the drawn head stays in the span.
+        let far = lane.position_at(1_000.0);
+        assert!((10.0..10.3).contains(&far), "{far} is inside the loop");
+
+        // A head that has NOT reached the loop yet is left alone: it is on
+        // its way in and the loop has not captured it.
+        lane.position_secs = 9.5;
+        assert!((lane.position_at(100.25) - 9.75).abs() < 1e-9);
+
+        // A degenerate span is not a division: it simply does not fold.
+        lane.position_secs = 10.0;
+        lane.loop_span = Some((10.0, 10.0));
+        assert!((lane.position_at(100.4) - 10.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_lane_warns_over_the_last_half_minute_and_never_blinks_fully_out() {
+        let mut lane = lane(120.0, 0.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        lane.duration_secs = 300.0;
+
+        // Nothing to say in the middle of a record.
+        lane.position_secs = 100.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        // Nor with no length known, nor stopped.
+        lane.position_secs = 290.0;
+        lane.duration_secs = 0.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        lane.duration_secs = 300.0;
+        lane.playing = false;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        lane.playing = true;
+
+        // Inside the window it shows, and it shows harder as the end
+        // comes -- sampled at the same point of the pulse both times, or
+        // the pulse rather than the ramp would be under test.
+        let far = lane.warn_at(100.0);
+        lane.position_secs = 299.0;
+        let near = lane.warn_at(100.0);
+        assert!(far > 0.0, "twenty seconds out is already warning");
+        assert!(near > far, "{near} at one second out beats {far} at ten");
+
+        // Armed, it pulses -- but never all the way to nothing, or it
+        // would be invisible half of every second.
+        let over_a_second: Vec<f32> =
+            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1)).collect();
+        let low = over_a_second.iter().cloned().fold(f32::MAX, f32::min);
+        let high = over_a_second.iter().cloned().fold(0.0f32, f32::max);
+        assert!(low > 0.0, "never fully out: {low}");
+        assert!(high > low * 1.5, "and visibly moving: {low} to {high}");
+
+        // Past the end there is nothing left to warn about.
+        lane.position_secs = 301.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
     }
 
     #[test]

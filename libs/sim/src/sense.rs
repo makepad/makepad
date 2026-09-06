@@ -13,7 +13,7 @@
 
 use makepad_math::*;
 
-use crate::entity::{BodyKind, Entity};
+use crate::entity::{BodyKind, Entity, Shape};
 use crate::queries::overlaps;
 use crate::world::GameWorld;
 
@@ -128,6 +128,56 @@ pub fn spot_clear(world: &GameWorld, self_id: u64, pos: Vec3f, half: Vec3f) -> b
         .any(|e| e.id != self_id && blocks_movement(e) && overlaps(pos, half, e.pos, e.half))
 }
 
+/// A stable dry place for a body to stand near `feet`, including an authored
+/// dock over water. Water's X/Z planning footprint does not erase an actual
+/// supporting floor. The complete foot rectangle must fit, the landing must
+/// be above every overlapping water sheet, and the body must have clearance.
+///
+/// Deliberately bounded to terrain and horizontal axis-aligned box decks:
+/// a rail, post, sensor, tilted hull or overhead bridge is not a landing.
+/// `up`/`down` bound vertical travel; callers cannot accidentally teleport a
+/// shore walker onto a bridge several metres overhead.
+pub fn dry_standing_height(
+    world: &GameWorld, exclude: [u64; 2], feet: Vec3f, half: Vec3f, up: f32, down: f32,
+) -> Option<f32> {
+    if [feet.x,feet.y,feet.z,half.x,half.y,half.z,up,down].iter().any(|v|!v.is_finite())
+        || half.x<=0.0 || half.y<=0.0 || half.z<=0.0 || up<0.0 || down<0.0 { return None; }
+    let corners = [
+        (feet.x-half.x, feet.z-half.z), (feet.x-half.x, feet.z+half.z),
+        (feet.x+half.x, feet.z-half.z), (feet.x+half.x, feet.z+half.z),
+        (feet.x, feet.z),
+    ];
+    let clear = |height: f32| {
+        if !height.is_finite() || height > feet.y+up || height < feet.y-down { return false; }
+        // Every overlapping volume, even a narrow strip between the foot
+        // probes. The wave crest envelope is conservative: a safe landing
+        // does not become submerged on the next animation tick.
+        if world.water.as_ref().is_some_and(|water| water.volumes.iter().any(|v|
+            feet.x+half.x>=v.min.x && feet.x-half.x<=v.max.x
+                && feet.z+half.z>=v.min.z && feet.z-half.z<=v.max.z
+                && v.level()+v.amp_sum()>height+0.02)) { return false; }
+        let center=vec3f(feet.x,height+half.y+0.025,feet.z);
+        !world.entities.iter().any(|e| !exclude.contains(&e.id) && blocks_movement(e)
+            && overlaps(center,half,e.pos,e.half))
+    };
+    let mut best=world.surface_height_at(feet.x,feet.z).filter(|height|
+        corners.iter().all(|&(x,z)| world.surface_height_at(x,z)
+            .is_some_and(|h| (h-height).abs() <= 0.18)) && clear(*height));
+    for e in &world.entities {
+        if exclude.contains(&e.id) || !blocks_movement(e) || e.shape != Shape::Box
+            || !matches!(e.kind,BodyKind::Static|BodyKind::Kinematic)
+            || e.yaw.abs()>1e-5
+            || (e.orient.rotate_vec3(&vec3f(0.0,1.0,0.0))-vec3f(0.0,1.0,0.0)).length_squared()>1e-8
+            || (e.orient.rotate_vec3(&vec3f(0.0,0.0,1.0))-vec3f(0.0,0.0,1.0)).length_squared()>1e-8
+        { continue; }
+        if corners.iter().any(|&(x,z)| (x-e.pos.x).abs()>e.half.x-0.01
+            || (z-e.pos.z).abs()>e.half.z-0.01) { continue; }
+        let height=e.pos.y+e.half.y;
+        if clear(height) && best.is_none_or(|h| height>h) { best=Some(height); }
+    }
+    best
+}
+
 /// Is there room to sidestep `offset` units perpendicular to `dir` and keep
 /// going? Checks the sidestep AND the step after it, because a gap you can
 /// stand in but not walk out of is not a way around.
@@ -153,4 +203,60 @@ pub fn side_clearance(
     }
     let onward = vec3f(step.x + dx * offset, step.y, step.z + dz * offset);
     spot_clear(world, self_id, onward, half)
+}
+
+#[cfg(test)]
+mod standing_tests {
+    use super::*;
+    use crate::water::{WaterState,WaterVolume};
+
+    #[test]
+    fn conservative_water_coverage_does_not_erase_dry_terrain_above_its_surface() {
+        let mut world=GameWorld::new();
+        world.terrain=Some(crate::terrain::Terrain {
+            cells:3,cell_size:4.0,origin:-4.0,heights:vec![0.5;9],
+            colors:vec![Vec4f::default();9],revision:1,
+        });
+        world.water=Some(Box::new(WaterState {volumes:vec![WaterVolume {
+            min:vec3f(-10.0,-5.0,-10.0),max:vec3f(10.0,0.0,10.0),
+            density:1.0,current:Vec3f::default(),waves:Vec::new(),
+            color:Vec4f::default(),entity:0,draw_sheet:false,
+        }],..Default::default()}));
+        let half=vec3f(0.4,0.9,0.4);
+        assert_eq!(dry_standing_height(&world,[0,0],vec3f(0.0,0.5,0.0),half,0.1,0.1),Some(0.5));
+        world.terrain.as_mut().unwrap().heights.fill(-0.5);
+        assert_eq!(dry_standing_height(&world,[0,0],vec3f(0.0,-0.5,0.0),half,0.1,0.1),None);
+    }
+
+    #[test]
+    fn dry_support_requires_a_real_whole_footprint_deck_at_foot_height() {
+        let mut world=GameWorld::new();
+        world.water=Some(Box::new(WaterState {volumes:vec![WaterVolume {
+            min:vec3f(-20.0,-4.0,-20.0),max:vec3f(20.0,0.0,20.0),
+            density:1.0,current:Vec3f::default(),waves:Vec::new(),
+            color:Vec4f::default(),entity:0,draw_sheet:false,
+        }],..Default::default()}));
+        let feet=vec3f(0.0,0.625,0.0);let half=vec3f(0.4,0.9,0.4);
+        let sample=|world:&GameWorld| dry_standing_height(world,[0,0],feet,half,0.1,0.2);
+        assert_eq!(sample(&world),None,"open water is not a floor");
+        world.push_entity(Entity {id:1,kind:BodyKind::Static,
+            pos:vec3f(0.0,0.45,0.0),half:vec3f(2.0,0.15,2.0),collide:true,
+            ..Default::default()});
+        assert!((sample(&world).unwrap()-0.6).abs()<1e-5);
+        world.entity_mut(1).unwrap().sensor=true;
+        assert_eq!(sample(&world),None,"a trigger is not a dock");
+        world.entity_mut(1).unwrap().sensor=false;
+        world.entity_mut(1).unwrap().half.x=0.2;
+        assert_eq!(sample(&world),None,"a narrow post cannot carry the whole foot box");
+        world.entity_mut(1).unwrap().half.x=2.0;
+        world.entity_mut(1).unwrap().pos.y=8.0;
+        assert_eq!(sample(&world),None,"do not jump onto an overhead bridge");
+        world.entity_mut(1).unwrap().pos.y=-1.0;
+        assert_eq!(sample(&world),None,"a submerged deck is not dry support");
+        world.entity_mut(1).unwrap().pos.y=0.45;
+        world.push_entity(Entity {id:2,kind:BodyKind::Static,
+            pos:vec3f(0.0,1.8,0.0),half:vec3f(1.0,0.2,1.0),collide:true,
+            ..Default::default()});
+        assert_eq!(sample(&world),None,"landing needs body/head clearance too");
+    }
 }

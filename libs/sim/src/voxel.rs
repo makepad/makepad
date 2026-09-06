@@ -485,15 +485,47 @@ impl VoxelField {
     /// (a mover standing on flat materialized ground), not open air — the
     /// terrain rules must keep applying there.
     pub fn is_carved_air(&self, p: Vec3f) -> bool {
+        if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+            return false;
+        }
         let s = self.world_site(p);
         let key = ChunkKey::of_site(s);
-        match self.chunks.get(&key) {
-            Some(c) => {
-                let b = key.base();
-                c.density[site_index(s[0] - b[0], s[1] - b[1], s[2] - b[2])] > 0
+        let Some(containing_chunk) = self.chunks.get(&key) else {
+            return false;
+        };
+        // Smooth floors lie between lattice sites. Rounding a feet+0.1 m
+        // probe down to the solid site below a 0.35..0.75 m cell can classify
+        // a walker IN a cave as buried, then snap it through the cave roof.
+        // Query the same interpolated signed-density field the surface nets
+        // mesh. Blocky fields retain their exact containing-cell semantics.
+        if self.chunk_mode(key) == VoxelMode::Smooth {
+            let frac = [p.x / self.cell - s[0] as f32,
+                p.y / self.cell - s[1] as f32, p.z / self.cell - s[2] as f32];
+            let mut density = 0.0;
+            for oz in 0..=1 {
+                for oy in 0..=1 {
+                    for ox in 0..=1 {
+                        let offset = [ox, oy, oz];
+                        let weight = (0..3).fold(1.0, |w, axis| {
+                            w * if offset[axis] == 0 { 1.0 - frac[axis] } else { frac[axis] }
+                        });
+                        if weight <= 0.0 { continue; }
+                        let at = [s[0] + ox, s[1] + oy, s[2] + oz];
+                        let sample_key = ChunkKey::of_site(at);
+                        let Some(chunk) = self.chunks.get(&sample_key) else {
+                            // No implicit heightfield here: an unmaterialized
+                            // site cannot prove an underground cavity exists.
+                            return false;
+                        };
+                        let b = sample_key.base();
+                        density += weight * chunk.density[site_index(at[0] - b[0], at[1] - b[1], at[2] - b[2])] as f32;
+                    }
+                }
             }
-            None => false,
+            return density > 0.0;
         }
+        let b = key.base();
+        containing_chunk.density[site_index(s[0] - b[0], s[1] - b[1], s[2] - b[2])] > 0
     }
 
     /// Is this world point inside materialized solid?
@@ -2153,6 +2185,30 @@ mod tests {
         let f = field_with_volume(VoxelMode::Smooth);
         assert_eq!(f.chunk_count(), 0);
         assert_eq!(f.meshes.len(), 0);
+    }
+
+    #[test]
+    fn smooth_air_probe_interpolates_above_the_floor_but_not_inside_solid() {
+        for cell in [0.35, 0.5, 0.75] {
+            let mut f = VoxelField::new(cell);
+            let mut log = Vec::new();
+            f.apply_op(VoxelOp::Tunnel {
+                from: vec3f(0.0, -4.2, 8.0), to: vec3f(0.0, -4.2, -8.0), r: 2.8,
+            }, None, true, true, &mut log);
+            let floor = f.floor_probe(0.0, 0.0, -4.2).unwrap();
+            assert!(f.is_carved_air(vec3f(0.0, floor + 0.1, 0.0)), "cell {cell}: valid air above floor {floor}");
+            assert!(!f.is_carved_air(vec3f(0.0, floor - 0.1, 0.0)), "cell {cell}: solid below floor {floor}");
+            assert!(!f.is_carved_air(vec3f(200.0, 1.0, 200.0)), "implicit outside space is not a cave");
+            assert!(!f.is_carved_air(vec3f(f32::NAN, 0.0, 0.0)));
+            assert!(!f.is_carved_air(vec3f(1.0e30, -1.0e30, 1.0e30)));
+        }
+        let mut blocky = field_with_volume(VoxelMode::Blocky);
+        dig(&mut blocky, vec3f(0.0, -2.0, 0.0), 2.0, DigMode::Carve);
+        for y in [-4.49, -4.01, -3.99, -3.51, -3.49] {
+            let p = vec3f(0.1, y, 0.1);
+            assert_eq!(blocky.is_carved_air(p), blocky.density_at(blocky.world_site(p), None) > 0,
+                "blocky cells must retain containing-site occupancy");
+        }
     }
 
     #[test]

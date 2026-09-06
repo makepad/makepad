@@ -17,6 +17,7 @@ pub use makepad_draw::makepad_zune_png;
 
 // Core modules (used internally first)
 pub mod animator;
+pub mod font_policy;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
@@ -35,6 +36,7 @@ pub mod scroll_bars;
 pub mod scroll_motion;
 pub mod view;
 pub mod view_ui;
+pub mod grid;
 
 pub mod animated_image_gif;
 pub mod badge;
@@ -66,6 +68,7 @@ pub mod keyboard_view;
 pub mod nav_control;
 pub mod tweaker;
 pub mod reflect;
+pub mod ai_slot;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
@@ -87,6 +90,7 @@ pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
 pub mod fab_controls;
+pub mod menu_bar;
 
 pub mod splitter;
 
@@ -205,6 +209,7 @@ pub use crate::{
     fold_header::*,
     gauss_view::*,
     glass_panel::*,
+    grid::*,
 
     icon::*,
 
@@ -215,6 +220,7 @@ pub use crate::{
     // view_ui - no public exports
     label::*,
     link_label::*,
+    menu_bar::*,
     modal::*,
     nav_control::*,
     page_flip::*,
@@ -260,8 +266,8 @@ pub use crate::{
         WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_async::{
-        set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt, ScriptAsyncCalls,
-        ScriptAsyncId, ScriptAsyncResult, SplashVmId, MAIN_SPLASH_VM_ID,
+        enter_isolate, leave_isolate, set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt,
+        IsolateEntry, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_match_event::WidgetMatchEvent,
     widget_tree::{set_ui_root, CxWidgetExt},
@@ -335,206 +341,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             }
         }
     });
-    #[cfg(target_arch = "wasm32")]
-    script_eval!(vm, {
-        use mod.text.*
-        use mod.res.*
-
-        mod.themes.dark = mod.themes.dark{
-            font_label: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-        }
-
-        mod.themes.light = mod.themes.light{
-            font_label: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-        }
-
-        mod.themes.skeleton = mod.themes.skeleton{
-            font_label: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_regular_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-            font_bold_italic_i18n: TextStyle{
-                font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
-                }
-                line_spacing: 1.2
-            }
-        }
-    });
+    crate::font_policy::install_theme_fonts(vm);
     script_eval!(vm, {
         mod.prelude.widgets_header = {
             ..mod.res,
@@ -573,6 +380,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    crate::grid::script_mod(vm);
     crate::rubber_view::script_mod(vm);
 
     crate::label::script_mod(vm);
@@ -606,6 +414,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
     crate::screen_cap::script_mod(vm);
+    // The AI slot before the window: its DSL names `AiChatSlot`.
+    crate::ai_slot::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);
@@ -622,6 +432,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::fab_controls::script_mod(vm);
+    crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);

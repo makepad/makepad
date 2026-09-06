@@ -44,9 +44,13 @@ use crate::os::linux::vulkan_naga::CxVulkanShaderBinary;
 impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -59,7 +63,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -151,14 +155,14 @@ impl DrawVars {
                 }
             }
 
-            if std::env::var_os("MAKEPAD_DUMP_GLSL_IR").is_some() {
-                crate::log!("---- Linux GLSL IR io list ----");
+            if crate::makepad_error_log::trace_enabled("shader.glsl_ir") {
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR io list ----");
                 for io in &output.io {
-                    crate::log!("io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
+                    crate::trace!("shader.glsl_ir", "io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
                 }
-                crate::log!("---- Linux GLSL IR functions ----");
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR functions ----");
                 for f in &output.functions {
-                    crate::log!("{} {{\n{}\n}}", f.call_sig, f.out);
+                    crate::trace!("shader.glsl_ir", "{} {{\n{}\n}}", f.call_sig, f.out);
                 }
             }
 
@@ -181,7 +185,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -253,6 +257,7 @@ impl DrawVars {
             };
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
@@ -263,7 +268,7 @@ impl DrawVars {
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
@@ -373,6 +378,7 @@ impl Cx {
             .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -382,6 +388,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -392,7 +404,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let gl = self.os.gl();
 
@@ -455,7 +476,7 @@ impl Cx {
                         .and_then(GlShaderState::as_ready)
                         .unwrap()
                 };
-                let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+                let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
                     draw_call.instance_dirty = false;
@@ -466,7 +487,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 draw_item
@@ -498,23 +519,40 @@ impl Cx {
                     continue;
                 };
 
-                if self.geometries.is_id_stale(geometry_id) {
-                    // The widget that uploaded this mesh is gone; its slot
-                    // belongs to someone else now.
+                if self.geometries.skip_stale(geometry_id) {
                     continue;
                 }
                 let geometry = &mut self.geometries[geometry_id];
+                if !crate::geometry::geometry_backend_supports_typed(
+                    geometry,
+                    "opengl",
+                    sh.mapping.geometry_is_compact(),
+                ) {
+                    continue;
+                }
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
                 if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
-                    geometry.os.vb.update_array_buffer(gl, &geometry.vertices);
+                    let Some(vertices) = geometry.vertices.as_f32() else {
+                        continue;
+                    };
+                    geometry.os.vb.update_array_buffer(gl, vertices);
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
-                    geometry.os.ib.update_index_buffer(gl, &geometry.indices);
+                    let Some(indices) = geometry.indices.as_u32() else {
+                        continue;
+                    };
+                    geometry.os.ib.update_index_buffer(gl, indices);
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
-                let indices = geometry.indices.len();
+                let indices = geometry.index_count;
 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
@@ -569,7 +607,10 @@ impl Cx {
                         for attr in &shgl.geometries {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -579,7 +620,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -588,7 +629,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -597,6 +638,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                             }
@@ -605,7 +647,10 @@ impl Cx {
                         for attr in &shgl.instances {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -615,7 +660,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -624,7 +669,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -633,6 +678,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                                 (gl.glVertexAttribDivisor)(loc, 1 as gl_sys::GLuint);
@@ -646,7 +692,8 @@ impl Cx {
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL VAO rebuilt shader={} vao={:?} geom_vb={:?} inst_vb={:?} geom_ib={:?}",
                             draw_call.draw_shader_id.index,
                             vao.vao,
@@ -794,7 +841,8 @@ impl Cx {
                         }
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL draw shader={} variant={} indices={} instances={} textures={}",
                             draw_call.draw_shader_id.index,
                             shader_variant,
@@ -853,8 +901,11 @@ impl Cx {
             return None;
         }
 
+        let ortho_uniforms_gen = self.next_uniform_gen();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let pass = &mut self.passes[draw_pass_id];
         if !pass.keep_camera_matrix {
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             if to_texture {
                 // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
                 // are stored bottom-up, so inverting the projection's Y
@@ -870,7 +921,7 @@ impl Cx {
                 m[13] = -m[13];
             }
         }
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
 
         pass.os
             .pass_uniforms
@@ -1487,11 +1538,12 @@ impl GlShader {
 
         #[cfg(target_os = "android")]
         let log_shader_builds = matches!(_os_type, OsType::Android(_))
-            && std::env::var_os("MAKEPAD_LOG_GL_SHADER_BUILDS").is_some();
+            && crate::makepad_error_log::trace_enabled("gl.shader_builds");
 
         #[cfg(target_os = "android")]
         if log_shader_builds {
-            crate::log!(
+            crate::trace!(
+                "gl.shader_builds",
                 "GL shader build start renderer={} vertex_hash={:016x} vertex_len={} fragment_hash={:016x} fragment_len={} vertex_preview={:?} fragment_preview={:?}",
                 get_gl_string(gl, gl_sys::RENDERER),
                 vertex_hash.0,
@@ -1510,7 +1562,8 @@ impl GlShader {
             let vertex_lengths = [vertex_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload vertex shader={} hash={:016x} len={}",
                     vs,
                     vertex_hash.0,
@@ -1520,7 +1573,8 @@ impl GlShader {
             (gl.glShaderSource)(vs, 1, vertex_ptrs.as_ptr(), vertex_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile vertex shader={} hash={:016x}",
                     vs,
                     vertex_hash.0
@@ -1534,7 +1588,8 @@ impl GlShader {
             let pixel_lengths = [pixel_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload fragment shader={} hash={:016x} len={}",
                     fs,
                     pixel_hash.0,
@@ -1544,7 +1599,8 @@ impl GlShader {
             (gl.glShaderSource)(fs, 1, pixel_ptrs.as_ptr(), pixel_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile fragment shader={} hash={:016x}",
                     fs,
                     pixel_hash.0
@@ -1844,23 +1900,35 @@ impl GlShader {
         let has_errors = info
             .lines()
             .any(|line| line.to_ascii_lowercase().contains("error"));
-        let dump_sources = std::env::var_os("MAKEPAD_LOG_GLSL_SOURCES").is_some();
+        let dump_sources = crate::makepad_error_log::trace_enabled("shader.glsl_sources");
 
-        if has_errors || dump_sources {
+        if has_errors {
             let kind = if compile { "compile" } else { "link" };
             crate::warning!(
                 "GLSL {} {} info:\n{}",
                 kind,
                 stage_name,
-                if has_errors {
-                    info
-                } else {
-                    "(no compiler errors)\n".to_string()
-                }
+                info
             );
-            if dump_sources && !source.is_empty() {
-                crate::warning!("GLSL {} {} source:\n{}", kind, stage_name, source);
-            }
+        }
+        if dump_sources && !has_errors {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} info:\n(no compiler errors)",
+                kind,
+                stage_name
+            );
+        }
+        if dump_sources && !source.is_empty() {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} source:\n{}",
+                kind,
+                stage_name,
+                source
+            );
         }
     }
 
@@ -1907,7 +1975,7 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
-        let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+        let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
             name0.push_str(&i.to_string());
@@ -1920,7 +1988,8 @@ impl GlShader {
             unsafe {
                 let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
                 if trace_draw {
-                    crate::log!(
+                    crate::trace!(
+                        "gl.draw",
                         "GL attrib program={} name={} loc={} size={} stride={} offset={} format={:?}",
                         program,
                         name0.trim_end_matches('\0'),
@@ -1928,7 +1997,7 @@ impl GlShader {
                         size,
                         stride,
                         (i * 4 * mem::size_of::<f32>()),
-                        DrawShaderAttrFormat::Float
+                        DrawShaderAttrFormat::F32x4
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1937,7 +2006,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
-                    attr_format: DrawShaderAttrFormat::Float,
+                    attr_format: DrawShaderAttrFormat::F32x4,
                 })
             }
         }
@@ -2396,6 +2465,12 @@ pub struct CxOsDrawCall {
     pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 impl CxOsDrawCall {

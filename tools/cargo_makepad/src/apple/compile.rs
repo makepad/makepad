@@ -1,4 +1,5 @@
 use crate::apple::{AppleOs, AppleTarget};
+use crate::font_assets::{is_font_path, remove_existing_fonts, FontAssetManifest, FontPackage};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
@@ -691,6 +692,7 @@ pub struct IosBuildResult {
     pub build_dir: PathBuf,
     pub plist: PlistValues,
     pub dst_bin: PathBuf,
+    pub font_manifest: FontAssetManifest,
 }
 
 pub fn build(
@@ -745,6 +747,16 @@ pub fn build(
     }
     shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
+    // Read the application contract directly from the freshly linked Mach-O before copying or
+    // signing can transform the binary.
+    let profile = get_profile_from_args(args);
+    let build_dir = target_dir.join(format!("{}/{profile}/", apple_target.toolchain()));
+    let src_bin = target_dir.join(format!(
+        "{}/{profile}/{binary_name}",
+        apple_target.toolchain()
+    ));
+    let font_manifest = FontAssetManifest::from_native_file(&src_bin)?;
+
     // alright lets make the .app file with manifest
     // Capitalize the first letter for the user-visible name (CFBundleDisplayName /
     // CFBundleName) so the iOS home-screen icon doesn't show a lowercased crate name,
@@ -764,8 +776,6 @@ pub fn build(
         executable: binary_name.clone(),
         version: "1.0.0".to_string(),
     };
-    let profile = get_profile_from_args(args);
-
     let app_dir = target_dir.join(format!(
         "makepad-apple-app/{}/{profile}/{build_crate}.app",
         apple_target.toolchain()
@@ -789,11 +799,6 @@ pub fn build(
         }
     }
 
-    let build_dir = target_dir.join(format!("{}/{profile}/", apple_target.toolchain()));
-    let src_bin = target_dir.join(format!(
-        "{}/{profile}/{binary_name}",
-        apple_target.toolchain()
-    ));
     let dst_bin = app_dir.join(binary_name.clone());
 
     cp(&src_bin, &dst_bin, false)?;
@@ -803,6 +808,7 @@ pub fn build(
         app_dir,
         plist,
         dst_bin,
+        font_manifest,
     })
 }
 
@@ -832,6 +838,7 @@ pub fn run_on_sim(
         build_crate,
         &result.build_dir,
         apple_target,
+        &result.font_manifest,
     )?;
     let app_dir = result.app_dir.into_os_string().into_string().unwrap();
 
@@ -1047,65 +1054,133 @@ pub fn copy_resources(
     build_crate: &str,
     build_dir: &Path,
     apple_target: AppleTarget,
+    font_manifest: &FontAssetManifest,
 ) -> Result<(), String> {
-    /*let mut assets_to_add: Vec<String> = Vec::new();*/
-    let add_assets_dir =
-        |crate_name: &str, source_dir: &Path, asset_subdir: &str| -> Result<(), String> {
-            if !source_dir.is_dir() {
-                return Ok(());
-            }
-            let crate_name = crate_name.replace('-', "_");
-            let dst_dir = app_dir.join(format!("makepad/{crate_name}/{asset_subdir}"));
-            mkdir(&dst_dir)?;
-            // resources/android is Android-only; ios/ still ships in Apple bundles
-            cp_all_skip_top(source_dir, &dst_dir, &["android"], false)?;
-            Ok(())
-        };
-    let add_font_assets_dir =
-        |crate_name: &str, source_dir: &Path, resource_dir: &Path| -> Result<(), String> {
-            if !source_dir.is_dir() {
-                return Ok(());
-            }
-            let crate_name = crate_name.replace('-', "_");
-            let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
-            let assets = ls(source_dir)?;
-            for path in &assets {
-                let ext = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.to_ascii_lowercase());
-                if !matches!(
-                    ext.as_deref(),
-                    Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
-                ) {
-                    continue;
-                }
-                // Skip files that already ship from the sibling `resources/` dir —
-                // otherwise the same TTF lands in the bundle twice. The widgets crate
-                // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
-                if resource_dir.join(path).is_file() {
-                    continue;
-                }
-                cp(&source_dir.join(path), &dst_dir.join(path), false)?;
-            }
-            Ok(())
-        };
+    remove_existing_fonts(&app_dir.join("makepad"))?;
+    let mut font_package = FontPackage::new(font_manifest);
 
     let build_crate_dir = get_crate_dir(build_crate)?;
-    add_assets_dir(build_crate, &build_crate_dir.join("resources"), "resources")?;
-    add_font_assets_dir(
+    add_apple_resources_dir(
+        app_dir,
+        build_crate,
+        &build_crate_dir.join("resources"),
+        &mut font_package,
+    )?;
+    add_apple_font_assets_dir(
+        app_dir,
         build_crate,
         &build_crate_dir.join("fonts"),
         &build_crate_dir.join("resources"),
+        &mut font_package,
     )?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
     for (name, dep_dir) in deps.iter() {
-        add_assets_dir(name, &dep_dir.join("resources"), "resources")?;
-        add_font_assets_dir(name, &dep_dir.join("fonts"), &dep_dir.join("resources"))?;
+        add_apple_resources_dir(
+            app_dir,
+            name,
+            &dep_dir.join("resources"),
+            &mut font_package,
+        )?;
+        add_apple_font_assets_dir(
+            app_dir,
+            name,
+            &dep_dir.join("fonts"),
+            &dep_dir.join("resources"),
+            &mut font_package,
+        )?;
     }
 
+    font_package.finish()?.print();
     Ok(())
+}
+
+fn add_apple_resources_dir(
+    app_dir: &Path,
+    crate_name: &str,
+    source_dir: &Path,
+    font_package: &mut FontPackage<'_>,
+) -> Result<(), String> {
+    let crate_name = crate_name.replace('-', "_");
+    font_package.copy_tree_filtered(
+        source_dir,
+        &app_dir.join(format!("makepad/{crate_name}/resources")),
+        &format!("{crate_name}/resources"),
+        |relative| relative.starts_with("android"),
+        |_| Ok(()),
+    )
+}
+
+fn add_apple_font_assets_dir(
+    app_dir: &Path,
+    crate_name: &str,
+    source_dir: &Path,
+    resource_dir: &Path,
+    font_package: &mut FontPackage<'_>,
+) -> Result<(), String> {
+    let crate_name = crate_name.replace('-', "_");
+    let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
+    font_package.copy_tree_filtered(
+        source_dir,
+        &dst_dir,
+        &format!("{crate_name}/fonts"),
+        |relative| {
+            let supported = relative
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "ttf" | "otf" | "ttc" | "woff" | "woff2"
+                    )
+                })
+                .unwrap_or(false);
+            !supported || (!is_font_path(relative) && resource_dir.join(relative).is_file())
+        },
+        |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
+mod font_asset_tests {
+    use super::add_apple_resources_dir;
+    use crate::font_assets::{FontAssetManifest, FontPackage};
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn apple_bundle_resources_use_the_manifest_allowlist() {
+        let manifest = FontAssetManifest::parse(
+            b"format=makepad.font-assets.v1\nset=Latin\nasset=demo_app/resources/latin.otf\n",
+        )
+        .unwrap();
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "cargo-makepad-apple-fonts-{}-{serial}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let app_dir = root.join("Demo.app");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("latin.otf"), b"latin").unwrap();
+        fs::write(source.join("international.otf"), b"international").unwrap();
+        fs::write(source.join("data.bin"), b"data").unwrap();
+
+        let mut package = FontPackage::new(&manifest);
+        add_apple_resources_dir(&app_dir, "demo-app", &source, &mut package).unwrap();
+        package.finish().unwrap();
+
+        let resources = app_dir.join("makepad/demo_app/resources");
+        assert!(resources.join("latin.otf").is_file());
+        assert!(!resources.join("international.otf").exists());
+        assert!(resources.join("data.bin").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 pub struct AppleArgs {
@@ -1179,6 +1254,7 @@ pub fn run_on_device(
         build_crate,
         &result.build_dir,
         apple_target,
+        &result.font_manifest,
     )?;
 
     let cert = parsed

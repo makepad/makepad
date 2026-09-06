@@ -158,7 +158,8 @@ impl AppleUnifiedVideoPlayer {
                     return true;
                 }
                 // Holding the old texture after seek is intentional — not a stall.
-                if player.is_post_seek_holding() {
+                if player.is_post_seek_holding() || !player.is_waiting_for_first_frame() {
+                    self.null_frame_count = 0;
                     return false;
                 }
                 self.null_frame_count += 1;
@@ -342,6 +343,13 @@ impl AppleUnifiedVideoPlayer {
         match &self.mode {
             ApplePlayerMode::Native(player) => player.current_position_ms(),
             ApplePlayerMode::Software(player) => player.current_position_ms(),
+        }
+    }
+
+    pub fn needs_poll(&self) -> bool {
+        match &self.mode {
+            ApplePlayerMode::Native(player) => player.needs_poll(),
+            ApplePlayerMode::Software(_) => true,
         }
     }
 

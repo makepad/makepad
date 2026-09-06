@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use makepad_live_id::LiveId;
 
 use crate::types::{HttpRequest, NetworkError, NetworkResponse, WsSend};
+use crate::ui_signal::SignalToUI;
 
 #[cfg(target_os = "android")]
 mod android;
@@ -17,6 +18,8 @@ pub use self::android::{
 #[cfg(any(target_os = "ios", target_os = "macos", target_os = "tvos"))]
 pub mod apple;
 #[cfg(target_os = "linux")]
+// Linux socket workers are native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod linux;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
@@ -56,6 +59,11 @@ impl EventSink {
         if let Some(wake_fn) = wake_fn {
             wake_fn();
         }
+        // Every completion that can unblock work on the UI thread raises the
+        // UI signal: a runtime the platform did not create (the asset client
+        // builds its own) has no wake fn, and on wasm nothing else runs the
+        // event loop until an unrelated timer fires.
+        SignalToUI::set_ui_signal();
         Ok(())
     }
 }

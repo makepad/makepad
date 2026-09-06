@@ -11,7 +11,6 @@ pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
 
 pub mod metal {
     pub use makepad_ai_llm::metal_compiled::*;
-    pub use makepad_ai_llm::metal_qmm::{affine_qmm_enabled, bench_steel_isolated, SteelBenchResult};
     pub use makepad_ai_metal::*;
 }
 
@@ -30,6 +29,7 @@ pub use crate::gpu::{
     gpu_act_f16_enabled, gpu_add, gpu_add_bf16, gpu_add_cols_broadcast, gpu_alias_snake_updown2x,
     gpu_attention_cross_fused_enabled,
     gpu_attention_gqa_decode_bf16, gpu_attention_gqa_decode_pair_bf16, gpu_attention_packed,
+    gpu_attention_packed_f32,
     gpu_attention_packed_bf16,
     gpu_attention_packed_causal, gpu_attention_packed_causal_bf16,
     gpu_attention_packed_causal_f16, gpu_attention_packed_causal_f32,
@@ -60,7 +60,8 @@ pub use crate::gpu::{
     gpu_linear_f32_resident, gpu_mul,
     gpu_layer_norm_mod_to_bf16buf, gpu_bf16buf_slab_to_f32, gpu_rms_norm_mul_from_bf16_slab,
     gpu_swiglu_gate_first_from_bf16, gpu_concat_f32rn_bf16buf,
-    gpu_linear_nt_cached, gpu_linear_nt_cached_bf16_bias_epilogue,
+    gpu_linear_nt_cached, gpu_linear_nt_cached_with_precision,
+    gpu_linear_nt_cached_f16_with_precision, gpu_linear_nt_cached_bf16_bias_epilogue,
     gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm,
     gpu_linear_nt_cached_bf16_mm_from_buf, gpu_linear_nt_cached_bf16_mm_from_buf_to_buf,
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
@@ -69,7 +70,7 @@ pub use crate::gpu::{
     gpu_stream_ring_release_slots, gpu_stream_ring_setup,
     gpu_linear_nt_cached_f16_f32acc,
     gpu_linear_nt_cached_f16,
-    gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear,
+    gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear, gpu_pool_trim,
     gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rms_norm_mul_bf16, gpu_rms_norm_qwen3,
     gpu_sparse_conv27,
     gpu_skintokens_michelangelo_fourier,
@@ -87,11 +88,11 @@ pub use crate::gpu::{
     gpu_splat_repo3d_tables, gpu_splat_rope_pairs_per_head,
     gpu_swiglu_gate_first, gpu_swiglu_value_gate, gpu_to_f16, gpu_upload, gpu_wavenet_gate,
     gpu_quant_linear_type_supported,
-    gpu_runtime_trim, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
+    gpu_release_cached, gpu_runtime_trim, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
     gpu_weight_cache_ensure_quant,
     gpu_weight_cache_evict_prefix, gpu_weight_cache_evict_prefix_if_loaded,
     gpu_weight_cache_protect_prefixes,
-    gpu_upsample_nearest2x, GpuBf16Buf, GpuLinearPart, GpuPerfStats, GpuStepGraph, GpuTensor,
+    gpu_upsample_nearest2x, GemmPrecision, GpuBf16Buf, GpuLinearPart, GpuPerfStats, GpuStepGraph, GpuTensor,
 };
 
 pub type GraphSession = MetalGraphSession;

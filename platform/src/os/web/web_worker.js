@@ -1,4 +1,52 @@
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const MAKEPAD_WASM_PANIC_PREFIX = "__MAKEPAD_WASM_PANIC__:";
+const makepad_worker_started_at = Date.now();
+let makepad_worker_index = null;
+
+function makepad_worker_console_text(parts) {
+    try {
+        return parts.map(value => {
+            if (typeof value === "string") {
+                return value;
+            }
+            if (value instanceof Error) {
+                return value.stack || `${value.name}: ${value.message}`;
+            }
+            try {
+                return typeof value === "object" ? JSON.stringify(value) : String(value);
+            } catch (_error) {
+                return "[unprintable]";
+            }
+        }).join(" ").replace(/\s*\r?\n\s*/g, " ").slice(0, 300);
+    } catch (_error) {
+        return "[unprintable]";
+    }
+}
+
+for (const level of ["log", "warn", "error"]) {
+    try {
+        const original = console[level];
+        if (typeof original !== "function") {
+            continue;
+        }
+        console[level] = function (...parts) {
+            try {
+                postMessage({
+                    type: "breadcrumb",
+                    level,
+                    text: makepad_worker_console_text(parts),
+                    ms: Date.now() - makepad_worker_started_at,
+                    worker_index: makepad_worker_index
+                });
+            } catch (_error) {
+            }
+            // The page forwards this breadcrumb once. Logging here as well makes
+            // browsers show both the worker line and its forwarded copy.
+            return undefined;
+        };
+    } catch (_error) {
+    }
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -19,6 +67,7 @@ function patch_split_table(primary_exports, secondary_exports) {
 
 onmessage = async function (e) {
     let thread_info = e.data;
+    makepad_worker_index = thread_info.request_id;
 
     async function instantiate_secondary(primary_wasm, env) {
         if (!thread_info.secondary_module) {
@@ -43,6 +92,7 @@ onmessage = async function (e) {
     let web_sockets = {}
     let network_web_sockets = {}
     let network_http_requests = new Map();
+    let worker_wait_word = new Int32Array(new SharedArrayBuffer(4));
 
     function id_to_key(lo, hi) {
         return `${lo}:${hi}`;
@@ -51,8 +101,36 @@ onmessage = async function (e) {
     let env = {
         memory: thread_info.memory,
 
+        js_wake_ui() {
+            postMessage({ kind: 'wake_ui' });
+        },
+
+        js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
+            postMessage({
+                kind: 'spawn_request',
+                request_id,
+                context_ptr,
+                stack_size,
+                name: u8_to_string(name_ptr, name_len)
+            });
+            return 1;
+        },
+
+        js_worker_wait(timeout_ms) {
+            Atomics.wait(worker_wait_word, 0, 0, timeout_ms);
+        },
+
         js_console_error: (str_ptr, str_len) => {
-            console.error(u8_to_string(str_ptr, str_len))
+            const raw = u8_to_string(str_ptr, str_len);
+            const is_panic = raw.startsWith(MAKEPAD_WASM_PANIC_PREFIX);
+            const text = is_panic ? raw.slice(MAKEPAD_WASM_PANIC_PREFIX.length) : raw;
+            console.error(text);
+            if (is_panic) {
+                try {
+                    postMessage({ type: 'panic', text });
+                } catch (_error) {
+                }
+            }
         },
 
         js_console_log: (str_ptr, str_len) => {
@@ -87,6 +165,10 @@ onmessage = async function (e) {
 
         js_time_now() {
             return Date.now() / 1000.0;
+        },
+
+        js_monotonic_now() {
+            return performance.now() / 1000.0;
         },
 
         js_open_web_socket: (id, url_ptr, url_len) => {
@@ -135,7 +217,9 @@ onmessage = async function (e) {
             headers_ptr,
             headers_len,
             body_ptr,
-            body_len
+            body_len,
+            max_body_lo,
+            max_body_hi
         ) {
             let url = u8_to_string(url_ptr, url_len);
             let method = u8_to_string(method_ptr, method_len);
@@ -143,6 +227,7 @@ onmessage = async function (e) {
             let body = body_len > 0 ? u8_to_array(body_ptr, body_len) : undefined;
             let controller = new AbortController();
             let request_key = id_to_key(request_id_lo, request_id_hi);
+            let max_body = max_body_lo + max_body_hi * 4294967296;
             network_http_requests.set(request_key, controller);
 
             let headers = new Headers();
@@ -171,16 +256,45 @@ onmessage = async function (e) {
                 headers,
                 body,
                 signal: controller.signal,
+                redirect: "manual",
             }).then(async response => {
-                console.log("[makepad][http][req]", method, url);
                 let response_headers = "";
                 response.headers.forEach((value, key) => {
                     response_headers += `${key}: ${value}\r\n`;
                 });
-                let response_body = new Uint8Array(await response.arrayBuffer());
+                const declared = response.headers.get("content-length");
+                if (method !== "HEAD" && declared !== null && Number(declared) > max_body) {
+                    controller.abort();
+                    throw "response body exceeds configured limit";
+                }
+                let chunks = [];
+                let response_body_len = 0;
+                if (response.body !== null) {
+                    const reader = response.body.getReader();
+                    for (;;) {
+                        const item = await reader.read();
+                        if (item.done) {
+                            break;
+                        }
+                        response_body_len += item.value.byteLength;
+                        if (response_body_len > max_body) {
+                            controller.abort();
+                            throw "response body exceeds configured limit";
+                        }
+                        chunks.push(item.value);
+                    }
+                }
+                let response_body = new Uint8Array(response_body_len);
+                let body_at = 0;
+                for (const chunk of chunks) {
+                    response_body.set(chunk, body_at);
+                    body_at += chunk.byteLength;
+                }
                 let headers_u8 = string_to_u8(response_headers);
                 let body_u8 = array_to_u8(response_body);
-                console.log("[makepad][http][res]", response.status, url, response_body.length);
+                if (response.status >= 400) {
+                    console.error("[makepad][http][fail]", response.status, url);
+                }
                 wasm.exports.wasm_network_http_response(
                     request_id_lo,
                     request_id_hi,
@@ -322,32 +436,39 @@ onmessage = async function (e) {
     }
 
     let wasm = null;
-    const doit = inner_wasm => {
+    let entry_started = false;
+    const doit = async inner_wasm => {
         wasm = inner_wasm;
-        return instantiate_secondary(wasm, env).then(() => {
-            if (!thread_info.wasm_bindgen) {
-                wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
-                wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
-            } else {
-                wasm.exports.__wbindgen_start();
-            }
-            if (thread_info.timer > 0) {
-                this.setInterval(() => {
-                    wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
-                }, thread_info.timer);
-            }
-            else {
-                wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
-                close();
-            }
-        });
+        await instantiate_secondary(wasm, env);
+        if (!thread_info.wasm_bindgen) {
+            wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
+            wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+        } else {
+            wasm.exports.__wbindgen_start();
+        }
+        postMessage({ kind: 'started', request_id: thread_info.request_id });
+        entry_started = true;
+        wasm.exports.wasm_thread_entrypoint(thread_info.request_id, thread_info.context_ptr);
+        postMessage({ kind: 'finished', request_id: thread_info.request_id });
     };
-    if (thread_info.wasm_bindgen) {
-        let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
-        await doit(inner_wasm);
-    } else {
-        WebAssembly.instantiate(thread_info.module, { env }).then(doit, error => {
-            console.error("Cannot instantiate wasm" + error);
-        })
+    try {
+        if (thread_info.wasm_bindgen) {
+            let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
+            await doit(inner_wasm);
+        } else {
+            const result = await WebAssembly.instantiate(thread_info.module, { env });
+            await doit(result.instance || result);
+        }
+    } catch (error) {
+        console.error("Makepad worker failed", error);
+        postMessage({
+            kind: entry_started ? 'trapped' : 'failed_to_start',
+            request_id: thread_info.request_id,
+            error: String(error),
+            message: error && error.message ? String(error.message) : String(error),
+            filename: error && error.fileName ? String(error.fileName) : "",
+            lineno: error && error.lineNumber ? error.lineNumber : 0,
+            stack: error && error.stack ? String(error.stack) : ""
+        });
     }
 }

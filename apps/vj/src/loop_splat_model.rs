@@ -47,9 +47,6 @@ pub fn splat_view_model(
     } else {
         0.0
     };
-    for (target, section) in model.col_start_secs.iter_mut().zip(&grid.sections) {
-        *target = section.start_secs;
-    }
     model.bar_phase = snapshot.map_or(0.0, |snapshot| snapshot.bar_phase);
 
     for (row_index, row) in SplatRow::ALL.into_iter().enumerate() {
@@ -221,14 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn columns_and_section_starts_are_copied() {
+    fn columns_bar_counts_and_duration_are_copied() {
         let mut grid = grid(3);
         grid.bars_per_col[..3].copy_from_slice(&[1, 2, 4]);
         let model = splat_view_model(DeckId::B, &grid, true, None, &coverage(0), 6.25);
         assert_eq!(model.deck, SplatDeck::B);
         assert_eq!(model.cols, 3);
         assert_eq!(&model.col_bars[..3], &[1, 2, 4]);
-        assert_eq!(&model.col_start_secs[..3], &[0.0, 2.0, 4.0]);
         assert_eq!(model.duration_secs, 6.25);
     }
 

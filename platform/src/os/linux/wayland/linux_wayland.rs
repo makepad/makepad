@@ -858,7 +858,7 @@ impl WaylandCx {
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::StartDragging(items) => {
-                    state.start_internal_drag(items);
+                    cx.drag_drop.start_internal_drag(items);
                 }
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Wayland");
@@ -1162,7 +1162,8 @@ impl WaylandCx {
         cx.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             let now = state.time_now();
-            cx.passes[*draw_pass_id].set_time(now as f32);
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.passes[*draw_pass_id].set_time(now as f32, uniforms_gen);
             let parent = cx.passes[*draw_pass_id].parent.clone();
             match parent {
                 CxDrawPassParent::Xr => {}
@@ -1183,8 +1184,9 @@ impl WaylandCx {
                             continue;
                         }
                         window.resize_buffers();
-                        if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
-                            crate::log!(
+                        if crate::makepad_error_log::trace_enabled("wayland") {
+                            crate::trace!(
+                                "wayland",
                                 "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
                                 window.window_id,
                                 window.window_geom.inner_size.x,

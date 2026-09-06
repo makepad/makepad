@@ -33,14 +33,20 @@
 use crate::decks::DeckId;
 use crate::wave_analysis::TrackGrid;
 use makepad_ai_stems::{CacheHeader, StemCache, Stem};
+use makepad_widgets::makepad_platform::thread::{CancellationToken, ThreadOptions, ThreadSpawner};
+use makepad_widgets::Cx;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
-/// How long the worker waits on the deck inbox before looking at the
-/// background one. Mirrors the separator's own split.
+/// How long a background job just pulled off the queue waits out a recent
+/// burst of deck traffic before it is allowed to start. Only paid when a
+/// deck job landed within this window — an otherwise-idle worker starts
+/// background work at once, with no periodic wake-up either way (the
+/// worker blocks on the shared inbox's `recv()` while nothing is pending).
+/// Mirrors the separator's own split.
 const DECK_INBOX_WAIT_MS: u64 = 100;
 use std::sync::Arc;
 
@@ -953,25 +959,33 @@ pub fn time_words(lines: &mut [LyricLine], envelope: &VocalEnvelope) -> usize {
 /// now that the alignment lane landed; per-line confidence still downgrades
 /// doubtful lines to the sweep, so a hop never claims precision the data
 /// lacks. `VJ_KARAOKE_WORD_HOPS=0` forces the old line-sweep-only start.
-static WORD_HOPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-static WORD_HOPS_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+// 0 = uninitialized, 1 = off, 2 = on. Atomic initialization avoids the
+// blocking OnceLock path when the UI toggle races the lyrics worker on wasm.
+static WORD_HOPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn word_hops_enabled() -> bool {
-    WORD_HOPS_ENV.get_or_init(|| {
-        if let Ok(value) = std::env::var("VJ_KARAOKE_WORD_HOPS") {
-            let on = matches!(value.trim(), "1" | "on" | "true" | "yes");
-            WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
-        }
-    });
-    WORD_HOPS.load(std::sync::atomic::Ordering::Relaxed)
+    let ordering = std::sync::atomic::Ordering::Acquire;
+    let mut state = WORD_HOPS.load(ordering);
+    if state == 0 {
+        let on = std::env::var("VJ_KARAOKE_WORD_HOPS")
+            .map(|value| matches!(value.trim(), "1" | "on" | "true" | "yes"))
+            .unwrap_or(true);
+        let desired = if on { 2 } else { 1 };
+        let _ = WORD_HOPS.compare_exchange(
+            0,
+            desired,
+            std::sync::atomic::Ordering::AcqRel,
+            ordering,
+        );
+        state = WORD_HOPS.load(ordering);
+    }
+    state == 2
 }
 
 /// The UI checkbox's write half: flips hop mode live; the caller rebuilds
 /// the karaoke schedules so already-loaded decks re-time immediately.
 pub fn set_word_hops(on: bool) {
-    // Make sure a late env read cannot overwrite an explicit UI choice.
-    WORD_HOPS_ENV.get_or_init(|| ());
-    WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
+    WORD_HOPS.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Release);
 }
 
 /// The same, told explicitly whether to hop — the form tests and the audit
@@ -1346,10 +1360,14 @@ pub enum LyricsMsg {
 /// One transcription thread. The whisper model is expensive to load and
 /// thread-affine (Metal), so it is created here and never leaves.
 pub struct LyricsPool {
-    tx: Sender<LyricsJob>,
-    /// The BACKGROUND inbox, kept apart so a queued track's transcript can
-    /// never sit in front of the deck the operator just cued.
-    prefetch_tx: Sender<LyricsJob>,
+    tx: DeckSender,
+    /// The BACKGROUND lane. A distinct handle onto the SAME channel as
+    /// `tx` (see [`QueueJob`]) so a queued track's transcript can never
+    /// sit in front of the deck the operator just cued, while the worker
+    /// still has only one inbox to block on.
+    prefetch_tx: BackgroundSender,
+    jobs: Option<Receiver<QueueJob>>,
+    out: Sender<LyricsMsg>,
     rx: Receiver<LyricsMsg>,
 }
 
@@ -1359,27 +1377,112 @@ impl Default for LyricsPool {
     }
 }
 
+/// One job on the worker's single inbox, tagged by lane. Mirrors
+/// `stems::QueueJob` — see there for why one channel replaced two.
+enum QueueJob {
+    Deck(LyricsJob),
+    Background(LyricsJob),
+}
+
+#[derive(Clone)]
+struct DeckSender(Sender<QueueJob>);
+
+impl DeckSender {
+    fn send(&self, job: LyricsJob) -> Result<(), ()> {
+        self.0.send(QueueJob::Deck(job)).map_err(|_| ())
+    }
+}
+
+#[derive(Clone)]
+struct BackgroundSender(Sender<QueueJob>);
+
+impl BackgroundSender {
+    fn send(&self, job: LyricsJob) -> Result<(), ()> {
+        self.0.send(QueueJob::Background(job)).map_err(|_| ())
+    }
+}
+
 impl LyricsPool {
     pub fn new() -> LyricsPool {
-        let (tx, jobs) = channel::<LyricsJob>();
-        let (prefetch_tx, prefetch_jobs) = channel::<LyricsJob>();
+        let (raw_tx, jobs) = channel::<QueueJob>();
+        let tx = DeckSender(raw_tx.clone());
+        let prefetch_tx = BackgroundSender(raw_tx);
         let (out, rx) = channel::<LyricsMsg>();
-        let _ = std::thread::Builder::new()
-            .name("vj-lyrics".into())
-            .spawn(move || {
+        LyricsPool {
+            tx,
+            prefetch_tx,
+            jobs: Some(jobs),
+            out,
+            rx,
+        }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let out = self.out.clone();
+        let options = ThreadOptions { name: Some("vj-lyrics".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 let mut backend: Option<Transcriber> = None;
                 let mut backend_failed = false;
-                loop {
-                    // A deck's words come first; the background inbox is
-                    // read only once this one has gone quiet.
-                    let job = match jobs.recv_timeout(Duration::from_millis(DECK_INBOX_WAIT_MS)) {
-                        Ok(job) => job,
-                        Err(RecvTimeoutError::Timeout) => match prefetch_jobs.try_recv() {
-                            Ok(job) => job,
-                            Err(TryRecvError::Empty) => continue,
-                            Err(TryRecvError::Disconnected) => break,
-                        },
-                        Err(RecvTimeoutError::Disconnected) => break,
+                // Background jobs pulled off the shared inbox but not yet
+                // run — FIFO, so a burst of queued tracks bakes in the
+                // order it arrived.
+                let mut pending_bg: VecDeque<LyricsJob> = VecDeque::new();
+                // When the last deck job was taken. `None` (or stale)
+                // means the worker has no reason to think more deck
+                // traffic is imminent, so a queued background job starts
+                // at once with no settle wait.
+                let mut last_deck_at: Option<crate::clock::Instant> = None;
+                'work: loop {
+                    // A deck's words come first, always. With nothing
+                    // queued locally the worker blocks on the one shared
+                    // channel — zero idle wake-ups. Once a background job
+                    // is sitting in `pending_bg`, it only starts after a
+                    // recent burst of deck traffic (if any) has had one
+                    // settle window (`DECK_INBOX_WAIT_MS`) to finish
+                    // arriving.
+                    let job = if pending_bg.is_empty() {
+                        match jobs.recv() {
+                            Ok(QueueJob::Deck(job)) => {
+                                last_deck_at = Some(crate::clock::Instant::now());
+                                job
+                            }
+                            Ok(QueueJob::Background(job)) => {
+                                pending_bg.push_back(job);
+                                continue;
+                            }
+                            // The inbox is gone: both senders were dropped,
+                            // which means the pool was dropped.
+                            Err(_) => break,
+                        }
+                    } else {
+                        if last_deck_at
+                            .is_some_and(|at| at.elapsed() < Duration::from_millis(DECK_INBOX_WAIT_MS))
+                        {
+                            let quiet = CancellationToken::new();
+                            let _ = quiet.wait_until(
+                                Cx::monotonic_now() + DECK_INBOX_WAIT_MS as f64 / 1_000.0,
+                            );
+                        }
+                        // One check, deck first: a job that landed during
+                        // (or before) the settle wait pre-empts the
+                        // background one about to run; a background
+                        // arrival just joins the queue behind whatever was
+                        // already pending, so order is kept either way.
+                        match jobs.try_recv() {
+                            Ok(QueueJob::Deck(job)) => {
+                                last_deck_at = Some(crate::clock::Instant::now());
+                                job
+                            }
+                            Ok(QueueJob::Background(job)) => {
+                                pending_bg.push_back(job);
+                                pending_bg.pop_front().expect("just pushed")
+                            }
+                            Err(TryRecvError::Empty) => {
+                                pending_bg.pop_front().expect("pending_bg checked non-empty above")
+                            }
+                            Err(TryRecvError::Disconnected) => break 'work,
+                        }
                     };
                     let prefetching = job.gen == crate::stems::PREFETCH_GEN;
                     let digest = job.digest.clone();
@@ -1395,8 +1498,10 @@ impl LyricsPool {
                         let _ = out.send(LyricsMsg::PrefetchDone { digest });
                     }
                 }
-            });
-        LyricsPool { tx, prefetch_tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj lyrics worker unavailable: {error}"),
+        }
     }
 
     /// Bake a queued track's transcript while nothing is asking. Carries
@@ -1405,7 +1510,6 @@ impl LyricsPool {
     pub fn submit_prefetch(&self, job: LyricsJob) {
         let _ = self.prefetch_tx.send(job);
     }
-
     pub fn submit(&self, job: LyricsJob) {
         let _ = self.tx.send(job);
     }
@@ -1480,7 +1584,7 @@ fn run_job(
     }
 
     // The vocals stem, read straight out of the separation cache.
-    let started = std::time::Instant::now();
+    let started = crate::clock::Instant::now();
     status(&out.clone(), &job, "lyrics: reading vocals…");
     let (mono, rate) = match read_vocals_mono(&job) {
         Ok(pair) => pair,
@@ -2730,7 +2834,7 @@ mod tests {
         let mut cache = StemCache::open(crate::stems::cache_dir(), &digest, header.clone())
             .expect("stem cache");
         if !cache.is_complete() {
-            let started = std::time::Instant::now();
+            let started = crate::clock::Instant::now();
             let mut model =
                 StemsModel::load(&crate::stems::checkpoint_path()).expect("checkpoint");
             let buffer = {
@@ -2770,7 +2874,7 @@ mod tests {
             duration_secs: duration,
             bake: true,
         };
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         let (mono, rate) = read_vocals_mono(&job).expect("vocals");
         let read_secs = started.elapsed().as_secs_f64();
         let envelope = VocalEnvelope::build(&mono, rate);
@@ -2936,7 +3040,7 @@ mod tests {
                     continue;
                 }
                 let window = samples[from..to].to_vec();
-                let started = std::time::Instant::now();
+                let started = crate::clock::Instant::now();
                 let pieces = backend.transcribe(&window, "en").expect("pass 2");
                 eprintln!(
                     "    pass2 [{:.2}..{:.2}] {:.2}s wall -> {} piece(s): {}",

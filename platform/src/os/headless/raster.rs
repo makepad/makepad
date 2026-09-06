@@ -849,10 +849,18 @@ impl Cx {
 
                     // Set up pass uniforms
                     if !self.passes[*draw_pass_id].keep_camera_matrix {
-                        self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_ortho_matrix(
+                            dvec2(0.0, 0.0),
+                            size,
+                            uniforms_gen,
+                        );
                     }
-                    self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
-                    self.passes[*draw_pass_id].set_time(time as f32);
+                    let dpi_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id]
+                        .set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+                    let time_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
                     let mut fb = window_framebuffers
                         .remove(&window_id.id())
@@ -1102,10 +1110,17 @@ impl Cx {
         };
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
-            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
-        self.passes[draw_pass_id].set_time(time as f32);
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+        let time_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
         // Taking the framebuffer out of the store lets the raster below sample
         // every *other* offscreen target while writing into this one.
@@ -1219,6 +1234,7 @@ impl Cx {
         let sploded = self.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -1231,6 +1247,12 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -1241,18 +1263,38 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.headless_render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    child_zbias,
-                    zbias_step,
-                    options,
-                    fb,
-                    pass_raster,
-                    texture_cache,
-                    render_targets,
-                    profile.as_deref_mut(),
-                );
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.headless_render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        &mut held,
+                        0.0,
+                        options,
+                        fb,
+                        pass_raster,
+                        texture_cache,
+                        render_targets,
+                        profile.as_deref_mut(),
+                    );
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.headless_render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        child_zbias,
+                        zbias_step,
+                        options,
+                        fb,
+                        pass_raster,
+                        texture_cache,
+                        render_targets,
+                        profile.as_deref_mut(),
+                    );
+                }
                 continue;
             }
 
@@ -1261,7 +1303,7 @@ impl Cx {
                 if let CxDrawKind::DrawCall(dc) =
                     &mut self.draw_lists[draw_list_id].draw_items[draw_item_id].kind
                 {
-                    dc.resolve_zbias(current_zbias, sploded);
+                    dc.resolve_zbias(current_zbias, sploded, uniforms_gen);
                 }
             }
             *zbias += zbias_step;
@@ -1436,18 +1478,26 @@ impl Cx {
                 Some(id) => id,
                 None => continue,
             };
-            if self.geometries.is_id_stale(geometry_id) {
+            if self.geometries.skip_stale(geometry_id) {
                 // The widget that uploaded this mesh is gone; its slot
                 // belongs to someone else now.
                 continue;
             }
-            let geom = &self.geometries[geometry_id];
-            let vertices = &geom.vertices;
-            let indices = &geom.indices;
-
-            if indices.is_empty() || vertices.is_empty() {
+            if !crate::geometry::geometry_layout_matches_shader(
+                &mut self.geometries[geometry_id],
+                &sh.mapping.geometries,
+            ) {
                 continue;
             }
+            let geom = &self.geometries[geometry_id];
+            if geom.indices.is_empty() || geom.vertices.is_empty() {
+                continue;
+            }
+            let geom_stride = if geom.vertex_stride != 0 {
+                geom.vertex_stride
+            } else {
+                sh.mapping.geometry_stride_bytes()
+            };
 
             let instances_data = match &draw_item.instances {
                 Some(data) => data.as_slice(),
@@ -1476,15 +1526,21 @@ impl Cx {
             let geom_slots = sh.mapping.geometries.total_slots;
             let varying_slots = sh.mapping.varying_total_slots;
 
-            let vertex_count = if geom_slots > 0 {
-                vertices.len() / geom_slots
+            let vertex_count = if geom.vertices.is_f32() {
+                if geom_slots > 0 {
+                    geom.vertices.as_f32().map(|v| v.len() / geom_slots).unwrap_or(0)
+                } else {
+                    0
+                }
+            } else if geom_stride > 0 {
+                geom.vertices.byte_len() / geom_stride
             } else {
                 0
             };
             if vertex_count == 0 {
                 continue;
             }
-            let tri_count = indices.len() / 3;
+            let tri_count = geom.indices.len() / 3;
             if tri_count == 0 {
                 continue;
             }
@@ -1504,9 +1560,24 @@ impl Cx {
                 let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
                 let inst_base = inst_idx * vertex_count;
 
+                let mut decoded_geom = vec![0.0f32; geom_slots.max(1)];
                 for vert_idx in 0..vertex_count {
-                    let geom_offset = vert_idx * geom_slots;
-                    let geom_slice = &vertices[geom_offset..geom_offset + geom_slots];
+                    let geom_slice: &[f32] = if let Some(f32s) = geom.vertices.as_f32() {
+                        let geom_offset = vert_idx * geom_slots;
+                        &f32s[geom_offset..geom_offset + geom_slots]
+                    } else {
+                        let bytes = geom.vertices.as_bytes();
+                        let start = vert_idx * geom_stride;
+                        let end = (start + geom_stride).min(bytes.len());
+                        if start < bytes.len() {
+                            decoded_geom.fill(0.0);
+                            sh.mapping.geometries.decode_vertex_f32(
+                                &bytes[start..end],
+                                &mut decoded_geom,
+                            );
+                        }
+                        &decoded_geom
+                    };
                     let shaded_idx = inst_base + vert_idx;
                     let vary_offset = shaded_idx * varying_slots;
                     let varying_out = &mut shaded_varyings
@@ -1562,9 +1633,25 @@ impl Cx {
             for inst_idx in 0..instance_count {
                 let inst_base = (inst_idx * vertex_count) as u32;
                 for tri_idx in 0..tri_count {
-                    let i0 = indices[tri_idx * 3];
-                    let i1 = indices[tri_idx * 3 + 1];
-                    let i2 = indices[tri_idx * 3 + 2];
+                    let (i0, i1, i2) = match geom.index_width {
+                        4 => {
+                            let Some(idx) = geom.indices.as_u32() else {
+                                continue;
+                            };
+                            (idx[tri_idx * 3], idx[tri_idx * 3 + 1], idx[tri_idx * 3 + 2])
+                        }
+                        2 => {
+                            let Some(idx) = geom.indices.as_u16() else {
+                                continue;
+                            };
+                            (
+                                idx[tri_idx * 3] as u32,
+                                idx[tri_idx * 3 + 1] as u32,
+                                idx[tri_idx * 3 + 2] as u32,
+                            )
+                        }
+                        _ => continue,
+                    };
                     if i0 as usize >= vertex_count
                         || i1 as usize >= vertex_count
                         || i2 as usize >= vertex_count

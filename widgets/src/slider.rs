@@ -132,11 +132,18 @@ script_mod! {
                         .mix(self.border_color_disabled, self.disabled)
                 )
 
-                // Amount
+                // Amount. From the stop, or from the default's position
+                // when the slider asks for it -- a bipolar control wants
+                // its bar to grow out of the middle in whichever
+                // direction it was moved, not to fill from one end.
+                let lo = min(self.origin_pos, self.slide_pos)
+                let hi = max(self.origin_pos, self.slide_pos)
+                let from = mix(0.0, lo, self.arc_origin)
+                let to = mix(self.slide_pos, hi, self.arc_origin)
                 sdf.rect(
-                    0
+                    from * self.rect_size.x
                     self.offset_y
-                    self.slide_pos * self.rect_size.x
+                    max(1.0, (to - from) * self.rect_size.x)
                     slider_height
                 )
                 sdf.fill(
@@ -423,8 +430,6 @@ script_mod! {
 
             /** handle width in pixels 4..60 step 1 */
             handle_size: uniform(20.)
-            /** draw the value line from the track centre instead of the left 0..1 step 1 */
-            bipolar: uniform(0.0)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -609,11 +614,15 @@ script_mod! {
                         .mix(border_color_2_disabled, self.disabled)
                 )
 
-                // Value line
+                // Value line. From the stop, or from where the DEFAULT
+                // sits when the slider asks for it -- which is not the
+                // same as the middle of the track: a knob whose unity is
+                // at a quarter of its travel grows from the quarter.
                 let track_length = self.rect_size.x - offset_sides * 4.
                 let val_x = self.slide_pos * track_length + offset_sides * 2.
+                let origin_x = self.origin_pos * track_length + offset_sides * 2.
                 let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
-                let move_x = mix(offset_sides, self.rect_size.x * 0.5, self.bipolar)
+                let move_x = mix(offset_sides, origin_x, self.arc_origin)
 
                 sdf.move_to(move_x, offset_top)
                 sdf.line_to(val_x, offset_top)
@@ -1115,6 +1124,13 @@ script_mod! {
                 let start = gap_size * 0.5
                 let outer_end = start + val_length
                 let val_end = start + val_length * self.slide_pos
+                // Where the arc BEGINS. Off the stop by default; out of
+                // the default's own angle when the slider asks, so a cut
+                // and a boost point opposite ways round the rim and the
+                // knob reads at a glance without its number.
+                let origin_end = start + val_length * self.origin_pos
+                let val_start = mix(start, min(origin_end, val_end), self.arc_origin)
+                let val_stop = mix(val_end, max(origin_end, val_end), self.arc_origin)
 
                 let label_offset_px = /** label reserve below knob 0..40 step 1 */ 20.
                 let label_offset_uv = self.rect_size.y
@@ -1271,8 +1287,8 @@ script_mod! {
                     center_px.x
                     center_px.y
                     radius_px
-                    start
-                    val_end
+                    val_start
+                    val_stop
                     inner_width
                 )
 
@@ -1680,6 +1696,10 @@ pub enum SliderAction {
     TextSlide(f64),
     Slide(f64),
     EndSlide(f64),
+    /// The label was tapped and the control went back to its DSL
+    /// `default:`. Carried by `slided` and `end_slide` alike, so a host
+    /// that already listens for either needs no wiring for it.
+    Reset(f64),
     LabelHoverIn(Rect),
     LabelHoverOut,
     #[default]
@@ -1888,9 +1908,15 @@ impl Widget for Slider {
                 // abs,
                 // rect,
                 device,
+                tap_count,
                 ..
             }) if device.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
+                if tap_count == 2 {
+                    self.reset_to_default(cx);
+                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
                     return ();
                 }
                 // cx.set_key_focus(self.slider.area());
@@ -1922,6 +1948,26 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
+                // A TAP on the label puts the control back to its DSL
+                // default.
+                //
+                // The label was the one part of a slider that did
+                // nothing at all: a drag here is RELATIVE, so a press
+                // that lands on the text and does not move changes
+                // nothing, and there was no other gesture on it. Yet the
+                // default is exactly the value that is hard to get back
+                // to by hand and exactly the one wanted back -- an EQ's
+                // crossover corners, a width at unity, any bipolar
+                // control at rest.
+                //
+                // `was_tap` and not a bare `is_over`, so a drag that
+                // happened to BEGIN on the label ends as the drag it
+                // was. And reset before the EndSlide below, so that
+                // carries the new value rather than the old one.
+                if fe.was_tap() && self.label_area.rect(cx).contains(fe.abs_start) {
+                    self.reset_to_default(cx);
+                    cx.widget_action(uid, SliderAction::Reset(self.to_external()));
+                }
                 cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
                 cx.set_cursor(MouseCursor::Grab);
             }
@@ -2005,7 +2051,9 @@ impl SliderRef {
     pub fn slided(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
-                SliderAction::TextSlide(v) | SliderAction::Slide(v) => return Some(v),
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) | SliderAction::Reset(v) => {
+                    return Some(v)
+                }
                 _ => (),
             }
         }
@@ -2026,7 +2074,9 @@ impl SliderRef {
     pub fn end_slide(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
-                SliderAction::EndSlide(v) | SliderAction::TextSlide(v) => return Some(v),
+                SliderAction::EndSlide(v)
+                | SliderAction::TextSlide(v)
+                | SliderAction::Reset(v) => return Some(v),
                 _ => (),
             }
         }

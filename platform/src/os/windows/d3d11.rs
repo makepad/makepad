@@ -132,6 +132,7 @@ impl Cx {
         }
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -141,6 +142,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -151,7 +158,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(pass_id, sub_list_id, &mut held, 0.0, d3d11_cx);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -164,7 +180,7 @@ impl Cx {
                 // order. It must advance for every draw call in the tree, ahead of the early-outs
                 // below, or the sequence would depend on which draw calls happen to be dirty this
                 // frame rather than on the draw tree alone.
-                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded);
+                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 // A cached draw call (one whose draw list was not redrawn this frame) has
@@ -253,25 +269,42 @@ impl Cx {
                     continue;
                 };
 
-                if self.geometries.is_id_stale(geometry_id) {
-                    // The widget that uploaded this mesh is gone; its slot
-                    // belongs to someone else now.
+                if self.geometries.skip_stale(geometry_id) {
                     continue;
                 }
                 let geometry = &mut self.geometries[geometry_id];
 
+                if !crate::geometry::geometry_backend_supports_typed(
+                    geometry,
+                    "d3d11",
+                    sh.mapping.geometry_is_compact(),
+                ) {
+                    continue;
+                }
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
                 if geometry.dirty_indices {
+                    let Some(indices) = geometry.indices.as_u32() else {
+                        continue;
+                    };
                     geometry
                         .os
                         .geom_ibuf
-                        .update_with_u32_index_data(d3d11_cx, &geometry.indices);
+                        .update_with_u32_index_data(d3d11_cx, indices);
                     geometry.dirty_indices = false;
                 }
                 if geometry.dirty_vertices {
+                    let Some(vertices) = geometry.vertices.as_f32() else {
+                        continue;
+                    };
                     geometry
                         .os
                         .geom_vbuf
-                        .update_with_f32_vertex_data(d3d11_cx, &geometry.vertices);
+                        .update_with_f32_vertex_data(d3d11_cx, vertices);
                     geometry.dirty_vertices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -472,7 +505,7 @@ impl Cx {
                 //}
                 unsafe {
                     d3d11_cx.context.DrawIndexedInstanced(
-                        geometry.indices.len() as u32,
+                        geometry.index_count as u32,
                         instances as u32,
                         0,
                         0,
@@ -493,21 +526,31 @@ impl Cx {
         self.textures[_texture.texture_id()].os.shared_handle
     }
 
+    /// `target_alloc` is the allocated size of `first_target` when it is a
+    /// texture the caller chose (the WM's shared textures are power-of-two
+    /// allocations larger than the pass); the depth buffer must match it.
     pub fn setup_pass_render_targets(
         &mut self,
         pass_id: DrawPassId,
         first_target: &Option<ID3D11RenderTargetView>,
+        target_alloc: Option<(usize, usize)>,
         d3d11_cx: &D3d11Cx,
     ) {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
 
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         if !self.passes[pass_id].keep_camera_matrix {
-            self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
         self.passes[pass_id].paint_dirty = false;
 
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        let uniforms_gen = self.next_uniform_gen();
+        self.passes[pass_id].set_dpi_factor(dpi_factor, uniforms_gen);
 
         let viewport = D3D11_VIEWPORT {
             Width: (pass_rect.size.x * dpi_factor) as f32,
@@ -574,8 +617,12 @@ impl Cx {
         // attach/clear depth buffers, if any
         if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
-            let size = pass_rect.size * dpi_factor;
-            cxtexture.update_depth_stencil(d3d11_cx, size.x as usize, size.y as usize);
+            // D3D11 binds a depth view only when its size equals the colour
+            // view's; with a mismatch OMSetRenderTargets binds nothing and every
+            // draw of the pass is dropped (the clear above still lands).
+            let (width, height) =
+                crate::draw_pass::depth_attachment_size(target_alloc, pass_rect.size, dpi_factor);
+            cxtexture.update_depth_stencil(d3d11_cx, width, height);
             let depth_stencil_view = cxtexture.os.depth_stencil_view.clone().unwrap();
             let is_initial = cxtexture.take_initial();
 
@@ -697,7 +744,12 @@ impl Cx {
         // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
         let mut presented = false;
         crate::gpu_texture::with_media_d3d11_lock(|| {
-            self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
+            self.setup_pass_render_targets(
+                pass_id,
+                &d3d11_window.render_target_view,
+                None,
+                d3d11_cx,
+            );
 
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
@@ -720,11 +772,22 @@ impl Cx {
         // compositor kept it. Assuming it spent when it was not only costs one
         // paced wait; assuming it held when it was spent would remove the pacing
         // for this window entirely, so err on the side of waiting again.
-        try_with_win32_app(|app| app.spend_beat_credit(window_id));
+        try_with_win32_app(|app| {
+            app.spend_beat_credit(window_id);
+            if presented {
+                let now = app.time_now();
+                app.frame_trace.present(now);
+            }
+        });
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
-            d3d11_window.win32_window.show();
+            // MAKEPAD_HIDE_WINDOWS: an agent-driven instance renders and answers
+            // the bridge but never appears on the desktop (the macOS backend
+            // honours the same switch).
+            if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+                d3d11_window.win32_window.show();
+            }
             d3d11_window.first_draw = false;
         }
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
@@ -741,10 +804,12 @@ impl Cx {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
         if let Some(texture_id) = texture_id {
-            let render_target_view = self.textures[texture_id].os.render_target_view.clone();
-            self.setup_pass_render_targets(pass_id, &render_target_view, d3d11_cx);
+            let cxtexture = &self.textures[texture_id];
+            let render_target_view = cxtexture.os.render_target_view.clone();
+            let target_alloc = cxtexture.alloc.as_ref().map(|alloc| (alloc.width, alloc.height));
+            self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx);
         } else {
-            self.setup_pass_render_targets(pass_id, &None, d3d11_cx);
+            self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx);
         }
 
         let mut zbias = 0.0;
@@ -1923,6 +1988,7 @@ impl D3d11Window {
                 // as not-presented and let the occlusion probe back us off, the same
                 // way the macOS backend handles `occlusionState`.
                 self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                try_with_win32_app(|app| app.frame_trace.present_occluded());
                 return false;
             }
             if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
@@ -2249,6 +2315,12 @@ pub struct CxOsDrawCall {
     pub draw_call_uniforms: D3d11Buffer,
     pub user_uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Default, Clone)]
@@ -3146,10 +3218,14 @@ impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         // Compile an HLSL shader
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             // Cache 1: Check if this exact object has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -3163,7 +3239,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -3256,7 +3332,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -3300,6 +3376,7 @@ impl DrawVars {
 
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
 
             // Allocate CxDrawShader with os_shader_id set to None
             let index = cx.draw_shaders.shaders.len();
@@ -3315,7 +3392,7 @@ impl DrawVars {
             // Add to all caches
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
@@ -3658,27 +3735,37 @@ impl CxOsDrawShader {
 
         fn slots_to_dxgi_format(slots: usize, attr_format: DrawShaderAttrFormat) -> DXGI_FORMAT {
             match attr_format {
-                DrawShaderAttrFormat::Float => match slots {
+                DrawShaderAttrFormat::F32x1
+                | DrawShaderAttrFormat::F32x2
+                | DrawShaderAttrFormat::F32x3
+                | DrawShaderAttrFormat::F32x4 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_FLOAT,
                     2 => DXGI_FORMAT_R32G32_FLOAT,
                     3 => DXGI_FORMAT_R32G32B32_FLOAT,
-                    4 => DXGI_FORMAT_R32G32B32A32_FLOAT,
-                    _ => panic!("slots_to_dxgi_format unsupported float slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_FLOAT,
                 },
-                DrawShaderAttrFormat::UInt => match slots {
+                DrawShaderAttrFormat::U32x1 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_UINT,
                     2 => DXGI_FORMAT_R32G32_UINT,
                     3 => DXGI_FORMAT_R32G32B32_UINT,
-                    4 => DXGI_FORMAT_R32G32B32A32_UINT,
-                    _ => panic!("slots_to_dxgi_format unsupported uint slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_UINT,
                 },
-                DrawShaderAttrFormat::SInt => match slots {
+                DrawShaderAttrFormat::I32x1 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_SINT,
                     2 => DXGI_FORMAT_R32G32_SINT,
                     3 => DXGI_FORMAT_R32G32B32_SINT,
-                    4 => DXGI_FORMAT_R32G32B32A32_SINT,
-                    _ => panic!("slots_to_dxgi_format unsupported sint slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_SINT,
                 },
+                // Compact formats: DXGI enum values (this windows crate subset
+                // does not re-export every DXGI_FORMAT_* alias).
+                DrawShaderAttrFormat::F16x2 => DXGI_FORMAT(34),            // R16G16_FLOAT
+                DrawShaderAttrFormat::F16x4 => DXGI_FORMAT(10),            // R16G16B16A16_FLOAT
+                DrawShaderAttrFormat::U16x2 => DXGI_FORMAT(36),            // R16G16_UINT
+                DrawShaderAttrFormat::I16x2 => DXGI_FORMAT(38),            // R16G16_SINT
+                DrawShaderAttrFormat::U16x2Norm => DXGI_FORMAT(35),        // R16G16_UNORM
+                DrawShaderAttrFormat::I16x2Norm => DXGI_FORMAT(37),        // R16G16_SNORM
+                DrawShaderAttrFormat::U8x4Norm => DXGI_FORMAT_R8G8B8A8_UNORM,
+                DrawShaderAttrFormat::I8x4Norm => DXGI_FORMAT(31),         // R8G8B8A8_SNORM,
             }
         }
         fn slot_chunks(slots: usize) -> Vec<usize> {
@@ -3804,7 +3891,7 @@ impl CxOsDrawShader {
                     SemanticIndex: semantic_chunk_index as u32,
                     Format: slots_to_dxgi_format(chunk_slots, geom.attr_format),
                     InputSlot: 0,
-                    AlignedByteOffset: ((geom.offset + slot_offset) * 4) as u32,
+                    AlignedByteOffset: (geom.byte_offset + slot_offset * 4) as u32,
                     InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
                     InstanceDataStepRate: 0,
                 });
@@ -3834,7 +3921,7 @@ impl CxOsDrawShader {
                     SemanticIndex: semantic_chunk_index as u32,
                     Format: slots_to_dxgi_format(chunk_slots, inst.attr_format),
                     InputSlot: 1,
-                    AlignedByteOffset: ((inst.offset + slot_offset) * 4) as u32,
+                    AlignedByteOffset: (inst.byte_offset + slot_offset * 4) as u32,
                     InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                     InstanceDataStepRate: 1,
                 });
@@ -3887,10 +3974,10 @@ impl CxOsDrawShader {
             for item in &layout_debug {
                 crate::error!("  {}", item);
             }
-            if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                crate::error!("HLSL source\n{}", split_source(hlsl));
+            if crate::makepad_error_log::trace_enabled("shader.hlsl") {
+                crate::trace!("shader.hlsl", "HLSL source\n{}", split_source(hlsl));
             } else {
-                crate::error!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
+                crate::error!("Set MAKEPAD_TRACE=shader.hlsl to dump full HLSL source.");
             }
             d3d11_cx.note_error("ID3D11Device::CreateInputLayout", &err);
             return None;

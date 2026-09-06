@@ -18,6 +18,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::http::{self, HttpLimits, Request, Response};
 use crate::json::{self, Value};
 use crate::wire;
+pub use crate::location::ApiEndpoints;
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DeviceTier, FileRole, GameAlias, GameId, GameRevisionId, ImportManifest,
@@ -35,12 +36,6 @@ const MAX_REFUSAL_BODY_BYTES: u64 = 16 * 1024;
 pub const MAX_SEARCH_LIMIT: u32 = 100;
 /// Listing page cap.
 pub const MAX_LIST_LIMIT: u64 = 500;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApiEndpoints {
-    pub control: SocketAddr,
-    pub data: SocketAddr,
-}
 
 /// One item of an ordered batch pull. `max_bytes` is the caller's own cap —
 /// a thumbnail batch says "nothing over 512 KB here", and the server refuses
@@ -133,6 +128,9 @@ pub struct CatalogQuery {
     pub creator: Option<String>,
     /// Only assets currently referenced by an alias head.
     pub live_only: bool,
+    /// Browse mode ordering: newest indexed assets first. Text searches keep
+    /// their score ordering regardless of this flag.
+    pub newest: bool,
     /// 1..=[`MAX_SEARCH_LIMIT`].
     pub page_size: u32,
     /// Ask the server to count the labels of this result set and return the
@@ -151,7 +149,7 @@ impl CatalogQuery {
         Self { text: text.into(), page_size, ..Self::default() }
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    pub(crate) fn validate(&self) -> ClientResult<()> {
         if self.page_size == 0 || self.page_size > MAX_SEARCH_LIMIT {
             return Err(ClientError::InvalidInput { what: "search page_size" });
         }
@@ -198,6 +196,9 @@ impl CatalogQuery {
         }
         if self.live_only {
             pairs.push(("live", Value::Bool(true)));
+        }
+        if self.newest {
+            pairs.push(("newest", Value::Bool(true)));
         }
         pairs.push(("limit", Value::Int(self.page_size as i64)));
         if self.facets > 0 {
@@ -267,6 +268,12 @@ pub struct AnnotationUpload {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -292,7 +299,18 @@ impl AnnotationUpload {
         if self.title.is_empty() || self.title.len() > wire::MAX_TITLE_BYTES {
             return Err(ClientError::InvalidInput { what: "annotation title" });
         }
-        for text in [&self.title, &self.description, &self.prompt, &self.provenance] {
+        for text in [
+            &self.title,
+            &self.description,
+            &self.artist,
+            &self.artist_url,
+            &self.album,
+            &self.source_url,
+            &self.license,
+            &self.license_url,
+            &self.prompt,
+            &self.provenance,
+        ] {
             if text.chars().any(char::is_control) {
                 return Err(ClientError::InvalidInput { what: "annotation control chars" });
             }
@@ -1629,6 +1647,12 @@ impl Api {
                 ("categories", labels(&ann.categories)),
                 ("tags", labels(&ann.tags)),
                 ("creator", json::s(ann.creator.clone())),
+                ("artist", json::s(ann.artist.clone())),
+                ("artist_url", json::s(ann.artist_url.clone())),
+                ("album", json::s(ann.album.clone())),
+                ("source_url", json::s(ann.source_url.clone())),
+                ("license", json::s(ann.license.clone())),
+                ("license_url", json::s(ann.license_url.clone())),
                 ("generator", json::s(ann.generator.clone())),
                 ("backend", json::s(ann.backend.clone())),
                 ("model", json::s(ann.model.clone())),
@@ -2138,6 +2162,12 @@ impl Api {
             ("categories", labels(&ann.categories)),
             ("tags", labels(&ann.tags)),
             ("creator", json::s(ann.creator.clone())),
+            ("artist", json::s(ann.artist.clone())),
+            ("artist_url", json::s(ann.artist_url.clone())),
+            ("album", json::s(ann.album.clone())),
+            ("source_url", json::s(ann.source_url.clone())),
+            ("license", json::s(ann.license.clone())),
+            ("license_url", json::s(ann.license_url.clone())),
             ("generator", json::s(ann.generator.clone())),
             ("backend", json::s(ann.backend.clone())),
             ("model", json::s(ann.model.clone())),
@@ -2979,7 +3009,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.source_collections_page(None, 501) {
             Err(ClientError::InvalidInput { what }) => assert_eq!(what, "source page limit"),
             other => panic!("501 must refuse locally, got {other:?}"),
@@ -2993,7 +3023,7 @@ mod tests {
             other => panic!("bad cursor must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }
@@ -3025,7 +3055,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.resolve_variant_set(&VariantSetId::from_bytes([1; 32]), &too_big) {
             Err(ClientError::InvalidInput { what }) => {
                 assert_eq!(what, "profile max_variant_bytes")
@@ -3033,7 +3063,7 @@ mod tests {
             other => panic!("must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }

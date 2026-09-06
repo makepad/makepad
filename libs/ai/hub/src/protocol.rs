@@ -18,6 +18,10 @@ pub struct HealthJson {
     pub gpu: Option<String>,
     pub vram_free_mb: Option<u64>,
     pub vram_total_mb: Option<u64>,
+    /// Maximum VRAM this service can make free after retiring all of its
+    /// residents. Missing on older services; schedulers then fall back to
+    /// `vram_total_mb` for the permanent card-size compatibility check.
+    pub vram_usable_mb: Option<u64>,
     /// Model ids currently in the "loaded" state.
     pub models_loaded: Vec<String>,
     /// Jobs queued or running right now. `None` on services predating the
@@ -36,16 +40,19 @@ pub struct HealthJson {
     /// Unix ms when this service process started (restart observability for
     /// supervisors and coordinators).
     pub started_ms: Option<u64>,
-    /// Sorted domain names this build + machine can actually serve right now:
+    /// Sorted domain names provisioned by this build + machine:
     /// only domains with at least one model that is registry-available AND
-    /// backend-compiled AND machine-provisioned. The honest capability
-    /// snapshot — never lists a domain that would 503 at generate time.
+    /// backend-compiled AND machine-provisioned. Temporary machine-use
+    /// admission is reported separately in `activity`.
     pub capabilities: Option<Vec<String>>,
     /// VRAM admission safety reserve in MB (see the server residency policy);
     /// a heavy model loads only when fresh free VRAM >= estimate + reserve.
     pub vram_reserve_mb: Option<u64>,
     /// Max queued jobs before POST /generate refuses with 409 "queue full".
     pub queue_limit: Option<u64>,
+    /// Largest accepted JSON body for job submission. Missing on services
+    /// predating per-endpoint upload limits.
+    pub max_job_body_bytes: Option<u64>,
     /// Partition this process belongs to (`--fleet` / `MAKEPAD_ASSET_AI_FLEET`).
     /// Missing on services predating the field; clients treat that as `default`.
     pub fleet: Option<String>,
@@ -61,6 +68,27 @@ pub struct HealthJson {
     /// needs no flag day. Present only when an LLM is actually resident;
     /// a box that has not loaded one has no lanes to describe.
     pub lanes: Option<LanesJson>,
+    /// Machine-use admission policy. Missing on older services; model and
+    /// hardware capability remain separate from this temporary gate.
+    pub activity: Option<ActivityJson>,
+}
+
+/// Versioned, privacy-preserving machine activity snapshot. No session names,
+/// process names, input values, or foreground window details go on the wire.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct ActivityJson {
+    pub version: u32,
+    pub enabled: bool,
+    /// `idle`, `busy`, `unknown`, `disabled`, or `unsupported`.
+    pub state: String,
+    pub reason: String,
+    pub idle_seconds: Option<u64>,
+    pub foreign_gpu_percent: Option<f64>,
+    pub admission_open: bool,
+    pub idle_threshold_seconds: u64,
+    pub quiet_seconds: u64,
+    pub gpu_threshold_percent: f64,
+    pub sample_age_ms: u64,
 }
 
 /// What a box advertises about its concurrent decode capacity.
@@ -113,6 +141,7 @@ pub const MODEL_STATE_DOWNLOADING: &str = "downloading";
 pub const MODEL_STATE_READY: &str = "ready";
 pub const MODEL_STATE_LOADED: &str = "loaded";
 pub const MODEL_STATE_ERROR: &str = "error";
+pub const MODEL_STATE_TOO_SMALL: &str = "too_small";
 
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ModelInfoJson {
@@ -120,12 +149,14 @@ pub struct ModelInfoJson {
     pub domain: String,
     pub backend: String,
     /// False for placeholder entries (flux1-dev, trellis-2) and for models
-    /// whose backend is not compiled into this build.
+    /// whose backend is not compiled into this build. A temporary machine-use
+    /// pause is false with a `local-use:` unavailable reason for legacy clients.
     pub available: bool,
     pub gated: bool,
     pub vram_gb: Option<f64>,
     pub note: Option<String>,
-    /// One of the MODEL_STATE_* constants.
+    /// One of the MODEL_STATE_* constants, including `too_small` when this
+    /// node's measured usable-VRAM ceiling cannot satisfy admission.
     pub state: String,
     /// Download progress in bytes while state == "downloading".
     pub progress_done: Option<u64>,
@@ -139,7 +170,7 @@ pub struct ModelInfoJson {
     pub revision: Option<String>,
     /// Present exactly when `available == false`: the explicit reason —
     /// backend not compiled into this build, python stack not provisioned on
-    /// this machine, or disabled in the registry — so schedulers and UIs
+    /// this machine, disabled in the registry, or a temporary local-use pause — so schedulers and UIs
     /// report *why* instead of guessing.
     pub unavailable_reason: Option<String>,
     /// Weight-license identity. Optional so older `/models` payloads still
@@ -390,9 +421,13 @@ pub struct GenerateRequestJson {
     pub queue_policy: Option<String>,
 
     // -- binary input (cross-stage chaining: image->mesh, image->video i2v,
-    //    image->world; also STT/captioning later) --
+    //    image->world; also audio analysis such as stems) --
     /// Base64 input payload, typically a PNG from an earlier pipeline stage
     /// (fetched from another box's /artifact and relayed by the client).
+    /// Stems (`bs-roformer-4stem`): a 44.1 kHz stereo PCM WAV. The result is
+    /// one [`STEMS_ARTIFACT_CONTENT_TYPE`] artifact containing four planar
+    /// stereo f32 stems in model order (drums, bass, other, vocals).
+    ///
     /// Music (`minimax-music3*`): an optional REFERENCE CLIP — any audio
     /// file the service decodes (WAV, MP3, FLAC, Ogg Vorbis; sniffed from
     /// the bytes), <= 50 MB, 2..60 s after decode (longer keeps its loudest
@@ -503,6 +538,9 @@ pub struct GenerateRequestJson {
     /// even if `domain` was omitted, so today's FleetQwen text-fallback
     /// body is enough to take the chat path.
     pub chat_messages: Option<Vec<ChatMessageJson>>,
+    /// Conversational reasoning control. Absent preserves the model/node
+    /// default; `false` asks Qwen to answer without a generated think phase.
+    pub thinking: Option<bool>,
 
     // -- speech domain (kokoro + indextts backends) --
     /// Text to speak. (`prompt` is accepted as a fallback when empty.)
@@ -622,6 +660,125 @@ pub struct NamedInputJson {
 pub struct GenerateResponseJson {
     pub job_id: Option<String>,
     pub error: Option<String>,
+    /// Whether the accepted chat job's generation prompt ends inside an open
+    /// think block. Absent on older services and on non-chat jobs.
+    pub think_open: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Stems artifact wire
+// ---------------------------------------------------------------------------
+
+/// Binary artifact returned by the stems domain. This is deliberately a
+/// transport format, not the VJ cache format: the client writes the received
+/// f32 samples through `StemCache`, preserving that cache's span-local gain
+/// quantization and completeness rules.
+pub const STEMS_ARTIFACT_CONTENT_TYPE: &str = "application/vnd.makepad.stems-f32";
+const STEMS_ARTIFACT_MAGIC: &[u8; 4] = b"MPST";
+const STEMS_ARTIFACT_VERSION: u16 = 1;
+const STEMS_ARTIFACT_CHANNELS: usize = 8;
+const STEMS_ARTIFACT_HEADER: usize = 20;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StemsArtifact {
+    pub sample_rate: u32,
+    pub frames: usize,
+    /// Stem-major planar channels: drums L/R, bass L/R, other L/R, vocals L/R.
+    pub channels: [Vec<f32>; STEMS_ARTIFACT_CHANNELS],
+}
+
+/// Encode a checked stems result. The exact-length check keeps a malformed
+/// backend result from becoming a wire artifact another process could trust.
+pub fn encode_stems_artifact(value: &StemsArtifact) -> Result<Vec<u8>, String> {
+    if value.sample_rate == 0 || value.frames == 0 {
+        return Err("stems artifact needs a non-zero rate and frame count".to_string());
+    }
+    if value.channels.iter().any(|channel| channel.len() != value.frames) {
+        return Err("stems artifact channel length mismatch".to_string());
+    }
+    let payload = value
+        .frames
+        .checked_mul(STEMS_ARTIFACT_CHANNELS)
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    let mut out = Vec::with_capacity(
+        STEMS_ARTIFACT_HEADER
+            .checked_add(payload)
+            .ok_or_else(|| "stems artifact size overflow".to_string())?,
+    );
+    out.extend_from_slice(STEMS_ARTIFACT_MAGIC);
+    out.extend_from_slice(&STEMS_ARTIFACT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(4u16).to_le_bytes());
+    out.extend_from_slice(&value.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(value.frames as u64).to_le_bytes());
+    for channel in &value.channels {
+        for sample in channel {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
+/// Decode the exact, bounded artifact shape. Length is validated before any
+/// sample allocation, so hostile frame counts cannot drive an allocation.
+pub fn decode_stems_artifact(bytes: &[u8]) -> Result<StemsArtifact, String> {
+    if bytes.len() < STEMS_ARTIFACT_HEADER || &bytes[..4] != STEMS_ARTIFACT_MAGIC {
+        return Err("not a Makepad stems artifact".to_string());
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let stems = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if version != STEMS_ARTIFACT_VERSION || stems != 4 {
+        return Err(format!("unsupported stems artifact version/count {version}/{stems}"));
+    }
+    let sample_rate = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let frames_u64 = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+    let frames = usize::try_from(frames_u64)
+        .map_err(|_| "stems artifact frame count does not fit this machine".to_string())?;
+    if sample_rate == 0 || frames == 0 {
+        return Err("stems artifact needs a non-zero rate and frame count".to_string());
+    }
+    let payload = frames
+        .checked_mul(STEMS_ARTIFACT_CHANNELS)
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    let expected = STEMS_ARTIFACT_HEADER
+        .checked_add(payload)
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "stems artifact length mismatch: got {}, expected {expected}",
+            bytes.len()
+        ));
+    }
+    let mut at = STEMS_ARTIFACT_HEADER;
+    let channels = std::array::from_fn(|_| {
+        let mut channel = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            channel.push(f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()));
+            at += 4;
+        }
+        channel
+    });
+    Ok(StemsArtifact { sample_rate, frames, channels })
+}
+
+#[cfg(test)]
+mod stems_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn stems_artifact_round_trip_and_length_refusal() {
+        let artifact = StemsArtifact {
+            sample_rate: 44_100,
+            frames: 3,
+            channels: std::array::from_fn(|channel| {
+                (0..3).map(|frame| channel as f32 + frame as f32 / 10.0).collect()
+            }),
+        };
+        let bytes = encode_stems_artifact(&artifact).unwrap();
+        assert_eq!(decode_stems_artifact(&bytes).unwrap(), artifact);
+        assert!(decode_stems_artifact(&bytes[..bytes.len() - 1]).is_err());
+    }
 }
 
 // ---------------------------------------------------------------------------

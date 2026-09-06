@@ -10,6 +10,8 @@ mod check;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
+mod font_assets;
+#[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_manager;
@@ -72,13 +74,28 @@ fn show_help() {
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!(
+        "       --production                              Release profile, strip, Brotli, optional Binaryen -Oz"
+    );
+    println!(
+        "       --lto                                     With --production, opt into the small profile (fat LTO)"
+    );
+    println!(
         "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
     );
     println!(
         "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
     );
     println!(
-        "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
+        "       --wasm-opt                                Run Binaryen wasm-opt -Oz when a compatible version is on PATH"
+    );
+    println!(
+        "       --no-location-detail                      Omit panic file/line/column detail (nightly production diagnostic tradeoff)"
+    );
+    println!(
+        "       --size-report                             Print exact wasm section and split-artifact sizes"
+    );
+    println!(
+        "       --keep-names                              Keep <app>.names.wasm beside the packaged wasm"
     );
     println!(
         "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"

@@ -14,6 +14,11 @@
 //! not libm-replacement-grade. sin/cos accuracy degrades (deterministically)
 //! for |x| beyond ~2^24; keep angles reduced.
 
+// These are fdlibm split constants and polynomial coefficients. Their exact
+// spellings are part of the deterministic kernel, not approximations to swap
+// for Rust's single constants.
+#![allow(clippy::approx_constant)]
+
 // ---------------------------------------------------------------- sin / cos
 
 const INVPIO2: f64 = 6.36619772367581382433e-01;

@@ -7,7 +7,7 @@
 //! Usage:
 //!   makepad-map-bake <in.mbtiles> <out.mbtiles> [--bridge-dz <dz.mbtiles>]
 //!       [--brotli-quality N] [--limit N] [--recompress] [--fingerprint]
-//!       [--threshold-ms N] [--buckets a,b,c] [--zooms a,b,c]
+//!       [--threshold-ms N] [--buckets a,b,c] [--zooms a,b,c] [--full]
 
 use makepad_map_build::faces::{bake_faces, default_face_bake_options, fingerprint};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ fn run() -> Result<(), String> {
         return Err(format!(
             "usage: {} <in.mbtiles> <out.mbtiles> [--bridge-dz dz.mbtiles] \
              [--brotli-quality N] [--limit N] [--recompress] [--fingerprint] \
-             [--threshold-ms N] [--buckets a,b,c] [--zooms a,b,c]",
+             [--threshold-ms N] [--buckets a,b,c] [--zooms a,b,c] [--full]",
             args[0]
         ));
     }
@@ -44,6 +44,10 @@ fn run() -> Result<(), String> {
             }
             "--recompress" => {
                 options.recompress = true;
+                i += 1;
+            }
+            "--full" => {
+                options.full = true;
                 i += 1;
             }
             "--brotli-quality" => {
@@ -81,10 +85,11 @@ fn run() -> Result<(), String> {
     }
     let stats = bake_faces(&options)?;
     println!(
-        "done: {} tiles, {} baked, {} copied, {:.2} GiB file",
+        "done: {} tiles, {} baked, {} copied, {} skipped, {:.2} GiB file",
         stats.total,
         stats.baked,
         stats.copied,
+        stats.skipped.len(),
         stats.file_bytes as f64 / 1_073_741_824.0
     );
     Ok(())

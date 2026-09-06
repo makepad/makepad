@@ -1,5 +1,5 @@
 //! The transcript on screen: one virtual list of bubbles, tool chips and
-//! the think indicator, reading [`crate::transcript::CHAT`] during draw.
+//! the think indicator, drawing a lock-free UI-local transcript snapshot.
 //!
 //! One widget, two apps. Styling is data: a host that wants another palette
 //! re-declares `mod.widgets.AssetChatList` in its own `script_mod` (after
@@ -261,9 +261,7 @@ pub struct AssetChatList {
 
 impl Widget for AssetChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let Ok(data) = CHAT.read() else {
-            return DrawStep::done();
-        };
+        let data = CHAT.snapshot();
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             let portal = item.as_portal_list();
             let Some(mut list) = portal.borrow_mut() else {

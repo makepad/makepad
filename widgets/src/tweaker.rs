@@ -1,7 +1,7 @@
 //! The TWEAKER — the design-feedback overlay every `--remote` app grows.
 //!
 //! Hardcoded into `Window` (like the caption bar: zero app wiring), inert
-//! unless the remote bridge is live, zero cost while off. Turned on (F12 or
+//! unless the remote bridge is live, zero cost while off. Turned on (Shift+F10 or
 //! `GET /tweak?on=1`), a person points at the UI and live-edits it while the
 //! AI watches the same session through the bridge:
 //!
@@ -594,7 +594,7 @@ pub struct TweakStroke {
 /// name its undo sink's type; the fields stay this module's own.
 #[derive(Default)]
 pub(crate) struct TweakSession {
-    /// Guards against N windows toggling N times on one F12 event.
+    /// Guards against N windows toggling N times on one Shift+F10 event.
     toggle_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
@@ -683,6 +683,11 @@ pub(crate) struct TweakSession {
     /// held the edit; the release must reach it too or its buttons never
     /// complete a click.
     hold_up: bool,
+    /// The widget under the pointer at the last pick (the deepest hit, not
+    /// where the pin climbed to): click-to-climb continues only from the
+    /// same widget — a press on a different widget inside the pinned
+    /// container picks that widget.
+    climb_origin: u64,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
     /// The panel band and the note card, in window coordinates, as of the
@@ -717,10 +722,6 @@ pub(crate) struct TweakSession {
     /// release further than [`CLIMB_SLOP`] from it was an orbit, and an
     /// orbit selects nothing.
     press_pick: Option<Vec2d>,
-    /// Where the last pick clicked. A second click within [`CLIMB_SLOP`] of
-    /// it is the same click repeated, which is what climbs; anywhere else is
-    /// a new pick.
-    climb_anchor: Option<Vec2d>,
     /// Names the person asked for on the identity row. Reported in
     /// `/tweak/state` for the AI to carry out in the source — the running app
     /// cannot rename its own widgets without lying about them — and kept in
@@ -839,7 +840,7 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             s.down_consumed = false;
             s.live_stroke = None;
             drop(s);
-            // F12 closes the whole design surface: the exploded view goes
+            // Shift+F10 closes the whole design surface: the exploded view goes
             // with the panel (deferred toggle — performed pre-dispatch at
             // the next event), the marks and the flat band with it, so
             // the app is never left tilted without its panel.
@@ -1307,7 +1308,7 @@ fn ancestor_pick(
 
 /// Called by `Window::handle_event` in place of ordinary dispatch. Returns
 /// `true` when the event was swallowed (the window must NOT hand it to its
-/// view children). Off: one atomic load (plus an F12 check on key events).
+/// view children). Off: one atomic load (plus a shortcut check on key events).
 /// Commit a pick: climb if this is a repeat click on the same spot, pin what
 /// was resolved, and take the caret off the panel.
 ///
@@ -1321,52 +1322,47 @@ fn commit_pick(
     window_id: usize,
     pick: Option<TweakPick>,
 ) {
-            // CLICK-TO-CLIMB: clicking the SAME SPOT again walks the pin
-            // UP one ancestor per click — the only way a container fully
-            // covered by its children (the pane that draws the rounded
-            // background) can ever be reached. At the top the climb wraps
-            // back to the deepest pick.
-            //
-            // "Same spot" is the whole rule, and it used to be missing:
-            // the climb fired for any click whose deepest widget was a
-            // DESCENDANT of the pin, so once a container was selected,
-            // clicking one of its children walked upward instead of
-            // selecting the child. The hover outline said one thing and
-            // the click did another, which is what made picking feel
-            // broken. A click anywhere new now always selects what is
-            // under it; only a repeat click climbs.
-            let same_spot = session()
-                .lock()
-                .unwrap()
-                .climb_anchor
-                .is_some_and(|anchor| {
-                    (anchor.x - abs.x).abs() <= CLIMB_SLOP
-                        && (anchor.y - abs.y).abs() <= CLIMB_SLOP
-                });
-            let pick = {
-                let pinned = session().lock().unwrap().pinned.clone();
+            let deep_uid = pick.as_ref().map_or(0, |p| p.uid);
+            // CLICK-TO-CLIMB: clicking the SAME widget again walks the
+            // pin UP one ancestor per click — the only way a container
+            // fully covered by its children (the pane that draws the
+            // rounded background) can ever be reached. At the top the
+            // climb wraps back to the deepest pick. The climb continues
+            // only while the presses land on the widget it started from:
+            // a press on a different widget inside the pinned container
+            // picks that widget. (Every press inside the container used
+            // to climb — a click on a sibling button after re-clicking
+            // one landed on a bare View, and its draw_bg well was empty.)
+            let (pick, climbed) = {
+                let (pinned, origin) = {
+                    let s = session().lock().unwrap();
+                    (s.pinned.clone(), s.climb_origin)
+                };
                 match (pick, pinned) {
                     (Some(deep), Some(pin))
-                        if same_spot
-                            && pin.window_id == window_id
+                        if pin.window_id == window_id
                             && pin.rect.contains(abs)
                             && (deep.uid == pin.uid
-                                || is_ancestor_of(cx, pin.uid, deep.uid)) =>
+                                || (origin == deep.uid
+                                    && is_ancestor_of(cx, pin.uid, deep.uid))) =>
                     {
-                        Some(
-                            ancestor_pick(cx, &pin, abs, window_id)
-                                .unwrap_or(deep),
+                        (
+                            Some(
+                                ancestor_pick(cx, &pin, abs, window_id)
+                                    .unwrap_or(deep),
+                            ),
+                            true,
                         )
                     }
-                    (deep, _) => deep,
+                    (deep, _) => (deep, false),
                 }
             };
-            session().lock().unwrap().climb_anchor = Some(abs);
             let mut s = session().lock().unwrap();
+            s.climb_origin = deep_uid;
             match &pick {
                 Some(pick) => {
                     log!(
-                        "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}",
+                        "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}{}",
                         pick.path,
                         pick.ty,
                         pick.rect.pos.x,
@@ -1376,7 +1372,8 @@ fn commit_pick(
                         match &pick.band {
                             Some(band) => format!(" band {band}"),
                             None => String::new(),
-                        }
+                        },
+                        if climbed { " (climb)" } else { "" }
                     );
                     s.pinned = Some(pick.clone());
                 }
@@ -1418,16 +1415,16 @@ pub fn window_intercept(
     window_view: &mut View,
     window_id: WindowId,
 ) -> bool {
-    // F12 toggles the mode, bridge or no bridge: the design surface is
+    // Shift+F10 toggles the mode, bridge or no bridge: the design surface is
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
     // there, and the panel still is.
     //
-    // SHIFT+F12 is not ours: that is the screen recorder
+    // Ctrl+F10 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.key_code == KeyCode::F12 && !key_event.modifiers.shift {
+        if key_event.is_tweaker_toggle() {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
@@ -2959,10 +2956,10 @@ impl MaterialMirror {
         }
         many.instances.extend_from_slice(&inst);
         let area = cx.end_many_instances(many);
-        if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
+        if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
             if let Area::Instance(ia) = area {
                 if let Some(dc) = cx.draw_lists[ia.draw_list_id].draw_items[ia.draw_item_id].draw_call() {
-                    log!("TWEAK trace swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
+                    trace!("tweak", "swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
                 }
             }
         }
@@ -2987,9 +2984,10 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
     if stride == 0 || inst.instance_offset + stride > buf.len() {
         return None;
     }
-    if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
-        log!(
-            "TWEAK trace swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
+    if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
+        trace!(
+            "tweak",
+            "swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
             widget.widget_uid().0,
             draw_call.draw_shader_id,
             stride,
@@ -3191,6 +3189,7 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             }
         }
         PulseSlot::Uni { list, item, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             let items = &mut cx.draw_lists[list].draw_items;
             if item >= items.len() {
                 return;
@@ -3198,15 +3197,16 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             if let Some(call) = items[item].kind.draw_call_mut() {
                 if let Some(dst) = call.dyn_uniforms.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    call.uniforms_dirty = true;
+                    call.mark_uniforms_dirty(uniforms_gen);
                 }
             }
         }
         PulseSlot::Scope { shader, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             if let Some(sh) = cx.draw_shaders.shaders.get_mut(shader) {
                 if let Some(dst) = sh.mapping.scope_uniforms_buf.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    sh.mapping.scope_uniforms_gen = sh.mapping.scope_uniforms_gen.wrapping_add(1);
+                    sh.mapping.scope_uniforms_gen = uniforms_gen;
                 }
             }
         }
@@ -5583,7 +5583,8 @@ impl Widget for TweakMaterialSwatch {
                         ],
                     };
                     let id = list.id();
-                    cx.draw_lists[id].draw_list_uniforms.view_transform = m;
+                    let uniforms_gen = cx.next_uniform_gen();
+                    cx.draw_lists[id].set_uniform_view_transform(&m, uniforms_gen);
                     // The scroll viewport's clip, seen through the
                     // magnifier: (screen - t) / k.
                     let clip = self.clip.map(|c| {
@@ -6249,7 +6250,7 @@ pub struct Tweaker {
     /// renderer; until then this is the mode flag + visual state).
     #[rust]
     sploded_armed: bool,
-    /// Which side-panel tab is active (persists across F12).
+    /// Which side-panel tab is active (persists across Shift+F10).
     #[rust]
     panel_tab: PanelTab,
     /// The shader tab's draw layer (clicking a material thumbnail switches
@@ -8923,7 +8924,17 @@ impl Tweaker {
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
                 // One line: the label ellipsises at its own width (max_lines
                 // 1); the whole doc rides on hover as a tooltip.
-                let doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                let mut doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                // A layer with no live draw call (a View with show_bg off,
+                // reached by the click-to-climb) has nothing to mirror: say
+                // so where the well would otherwise sit empty and silent.
+                {
+                    let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                    let primary = self.materials.first().is_some_and(|m| *m == layer);
+                    if !widget.is_empty() && layer_shader_id(cx, &widget, &layer, primary).is_none() {
+                        doc_line = format!("{layer} is not drawn: no live draw call to mirror (show_bg off?)");
+                    }
+                }
                 col.child(live_id!(shader_doc)).set_text(cx, &doc_line);
                 // Flowing text: the source comment's hard breaks are not
                 // paragraph breaks.
@@ -10837,7 +10848,7 @@ impl Tweaker {
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
-                    // up (input belongs to the mode): exit with Esc or F10.
+                    // up (input belongs to the mode): exit with Escape or this button.
                     cx.sploded_toggle();
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
@@ -12851,7 +12862,7 @@ impl Widget for Tweaker {
             // Tear the surface down for real: both overlay lists are
             // RETAINED by the window's overlay (a stored sub-list keeps its
             // slot and its last items), so skipping them here left the
-            // panel, the outlines and the note card painted after F12.
+            // panel, the outlines and the note card painted after Shift+F10.
             // Begin and end them empty so nothing of the mode remains.
             // The design surface is going away, so the app must go back to
             // life size and its own centre with it.

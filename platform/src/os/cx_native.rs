@@ -6,7 +6,7 @@ use {
         path::{Path, PathBuf},
         rc::Rc,
         sync::OnceLock,
-        time::SystemTime,
+        time::{Instant, SystemTime},
     },
 };
 
@@ -62,6 +62,20 @@ pub fn read_file_cwd_or_exe_relative(path: impl AsRef<Path>) -> Option<Vec<u8>> 
 // lets start a websocket thread
 
 impl Cx {
+    pub(crate) fn start_native_storage_request(
+        &mut self,
+        request: crate::storage::StorageRequest,
+    ) {
+        let sender = self.storage_state.sender();
+        match self.task_pool().submit(crate::thread::Lane::Heavy, move || {
+            let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
+            let _ = sender.send(response);
+        }) {
+            Ok(task) => task.detach(),
+            Err(error) => crate::error!("storage request refused by the task pool: {error}"),
+        }
+    }
+
     pub fn native_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
             if let Some(buffer) = read_file_cwd_or_exe_relative(path) {
@@ -78,5 +92,10 @@ impl Cx {
             return elapsed.as_secs_f64();
         }
         return 0.0;
+    }
+
+    pub fn monotonic_now() -> f64 {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
     }
 }

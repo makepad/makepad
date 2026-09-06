@@ -423,7 +423,7 @@ impl ContentPlaceholder {
                     walk.height = Size::Fixed(lines_height(self.lines, self.line_height, self.line_gap));
                 }
                 if fit_w {
-                    walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                    walk.width = Size::fill();
                 }
             }
             PlaceholderShape::Circle => {
@@ -444,7 +444,7 @@ impl ContentPlaceholder {
                     walk.height = Size::Fixed(self.line_height);
                 }
                 if fit_w {
-                    walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                    walk.width = Size::fill();
                 }
             }
         }

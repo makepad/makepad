@@ -1,5 +1,5 @@
 //! Encode a directory of `frame_%06d.png` files into an H.264 mp4 via the
-//! platform hardware encoder (`makepad-video` / VideoToolbox on macOS).
+//! platform hardware encoder (`makepad-platform-video` / VideoToolbox on macOS).
 //!
 //! ```text
 //! frames_to_mp4 <dir> <out.mp4> [--fps 24] [--start N] [--end M] [--bitrate BPS] [--crf N]

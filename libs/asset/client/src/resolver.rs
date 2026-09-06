@@ -7,13 +7,15 @@
 //! `AssetRevisionRef` pairs (digests all the way down), bounded by the
 //! content contract's dependency budgets.
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::client::AssetClient;
+use crate::cache_store::BlobContent;
 use crate::error::{ClientError, ClientResult};
 use makepad_asset_data::{
-    limits, AssetFile, AssetManifest, AssetRevisionRef, BlobId, DeviceTier, FileRole, MediaType,
-    ThumbnailMedia,
+    limits, AssetFile, AssetManifest, BlobId, DeviceTier, FileRole, MediaType, ThumbnailMedia,
 };
-use std::path::PathBuf;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+use makepad_asset_data::AssetRevisionRef;
 
 /// How the device tier column is matched. Always explicit and deterministic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,8 +36,9 @@ pub struct ResolvedFile {
     pub media: MediaType,
     pub blob: BlobId,
     pub byte_len: u64,
-    /// Verified local path inside the cache (single-owner contract).
-    pub path: PathBuf,
+    /// Verified local content. Native dynamic-server clients normally return
+    /// a cache path; static/portable clients return immutable bytes.
+    pub content: BlobContent,
 }
 
 /// The manifest's mandatory thumbnail, verified and materialized.
@@ -46,7 +49,7 @@ pub struct ResolvedThumbnail {
     pub width: u32,
     pub height: u32,
     pub byte_len: u64,
-    pub path: PathBuf,
+    pub content: BlobContent,
 }
 
 /// Bounds for a dependency-closure walk. Defaults mirror the content
@@ -102,6 +105,7 @@ pub fn select_file<'m>(
     best.map(|(f, _)| f).ok_or(ClientError::NotFound { what: "matching asset file" })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl AssetClient {
     /// Select per the policy and materialize the file: cache-first fetch,
     /// digest verification, verified local path.
@@ -122,7 +126,7 @@ impl AssetClient {
             media: file.media,
             blob: file.blob,
             byte_len: file.byte_len,
-            path,
+            content: BlobContent::VerifiedPath(path),
         })
     }
 
@@ -164,7 +168,7 @@ impl AssetClient {
             width: t.width,
             height: t.height,
             byte_len: t.byte_len,
-            path,
+            content: BlobContent::VerifiedPath(path),
         }))
     }
 

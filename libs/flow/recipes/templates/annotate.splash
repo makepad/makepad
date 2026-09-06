@@ -1,0 +1,30 @@
+use mod.flow.*
+
+/** The question whose answer should become searchable caption and tags. */
+let prompt = Input{ type: @text  default: "Return JSON with caption as one concrete searchable sentence and tags as an array of short lowercase visual tags."  at: vec2(40, 80) }
+
+/** The asset image or turntable sheet. */
+let image = Input{ type: @image  at: vec2(40, 240) }
+
+let vision = Vision{
+    prompt: prompt.text()
+    image: image.image()
+    max_tokens: 200
+    at: vec2(360, 160)
+}
+
+let caption_tags = Fn{
+    in: { text: vision.text() }
+    out: [@json]
+    run: |i| { {json: i.text.parse_json()} }
+    at: vec2(680, 160)
+}
+
+/** The parsed caption and tags. */
+let annotation = Output{ type: @json  value: caption_tags.json()  at: vec2(1000, 160) }
+
+Flow{
+    label: "Annotate asset"
+    brief: "Describes an image with vision and parses its compact caption-and-tags record."
+    prompt, image, vision, caption_tags, annotation
+}

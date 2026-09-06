@@ -4,7 +4,7 @@ use {
         cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
         event::Event,
-        event::{WindowGeom, WindowGeomChangeEvent},
+        event::{WindowGeom},
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
@@ -60,7 +60,8 @@ impl Cx {
         self.repaint_id += 1;
         let time_now = time.time_now();
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time_now as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time_now as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -250,19 +251,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {

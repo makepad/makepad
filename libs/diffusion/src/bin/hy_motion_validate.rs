@@ -144,10 +144,6 @@ fn run() -> Result<(), String> {
         return Err(format!("unsupported stage {stage:?}; expected refiner|full"));
     }
 
-    // The oracle is pure f32. Attention's optional f16 GEMM inputs are an
-    // optimization to validate only after the f32 stage is green.
-    std::env::set_var("FLUX_ATTN_F16", "0");
-
     let started = Instant::now();
     let mut checkpoint = HyMotionCheckpoint::open(&checkpoint_path)
         .map_err(|error| error.to_string())?;
@@ -217,7 +213,7 @@ fn validate_refiner(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), 
         let context_mean = mean_rows(&projected_host, text_tokens, HY_MOTION_HIDDEN)
             .map_err(|error| error.to_string())?;
         let refined = weights
-            .text_refiner(&projected, &context_mean, 0.0)
+            .text_refiner(&projected, &context_mean, 0.0, false)
             .map_err(|error| error.to_string())?;
         projected_pair.extend(projected_host);
         refined_pair.extend(gpu_download(&refined).map_err(|error| error.to_string())?);
@@ -332,7 +328,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
         let context_mean = mean_rows(&context_host, TEXT_TOKENS, HY_MOTION_HIDDEN)
             .map_err(|error| error.to_string())?;
         let mut text = weights
-            .text_refiner(&context_projected, &context_mean, 0.0)
+            .text_refiner(&context_projected, &context_mean, 0.0, false)
             .map_err(|error| error.to_string())?;
         actual
             .get_mut("trim0.text_refiner")
@@ -365,6 +361,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
                     &adapter,
                     &rope_cos,
                     &rope_sin,
+                    false,
                 )
                 .map_err(|error| error.to_string())?;
             if layer == 0 || layer + 1 == HY_MOTION_DOUBLE_LAYERS {
@@ -398,6 +395,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
                     &adapter,
                     &rope_cos,
                     &rope_sin,
+                    false,
                 )
                 .map_err(|error| error.to_string())?;
             if layer == 0 {
@@ -448,6 +446,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
                 0.0,
                 MOTION_TOKENS,
                 TEXT_TOKENS,
+                false,
             )
             .map_err(|error| error.to_string())?;
         pair.extend(
@@ -459,6 +458,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
                     0.0,
                     MOTION_TOKENS,
                     TEXT_TOKENS,
+                    false,
                 )
                 .map_err(|error| error.to_string())?,
         );
@@ -482,7 +482,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
         checksum
     );
 
-    let prepared_shape = HyMotionDeviceWeights::prepare_shape(MOTION_TOKENS, TEXT_TOKENS)
+    let prepared_shape = HyMotionDeviceWeights::prepare_shape(MOTION_TOKENS, TEXT_TOKENS, false)
         .map_err(|error| error.to_string())?;
     let prepared_null = weights
         .prepare_branch(&null_context_trimmed, &null_vector, TEXT_TOKENS)
@@ -529,6 +529,7 @@ fn validate_full(weights: &HyMotionDeviceWeights, dump: &Path) -> Result<(), Str
             &conditional_context_trimmed,
             &conditional_vector,
             MOTION_TOKENS,
+            false,
         )
         .map_err(|error| error.to_string())?;
     let trajectory_started = Instant::now();

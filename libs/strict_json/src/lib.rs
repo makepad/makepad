@@ -155,8 +155,15 @@ fn escape_into(out: &mut String, s: &str) {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
+    parse_depth(bytes, MAX_DEPTH)
+}
+
+/// `parse` with an explicit nesting cap, for bodies whose schema is known to
+/// nest deeper than the default (a flow graph, for instance). Every other
+/// rule is unchanged.
+pub fn parse_depth(bytes: &[u8], max_depth: u32) -> Result<Value, &'static str> {
     let text = std::str::from_utf8(bytes).map_err(|_| "invalid utf-8")?;
-    let mut p = P { b: text.as_bytes(), i: 0 };
+    let mut p = P { b: text.as_bytes(), i: 0, max_depth };
     p.skip_ws();
     let v = p.value(0)?;
     p.skip_ws();
@@ -169,6 +176,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
 struct P<'a> {
     b: &'a [u8],
     i: usize,
+    max_depth: u32,
 }
 
 impl<'a> P<'a> {
@@ -208,7 +216,7 @@ impl<'a> P<'a> {
     }
 
     fn value(&mut self, depth: u32) -> Result<Value, &'static str> {
-        if depth > MAX_DEPTH {
+        if depth > self.max_depth {
             return Err("nesting too deep");
         }
         match self.peek().ok_or("unexpected end")? {

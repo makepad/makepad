@@ -267,7 +267,9 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(direct_app.timers.time_now() as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id]
+                .set_time(direct_app.timers.time_now() as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(_window_id) => {
@@ -393,6 +395,9 @@ impl Cx {
                         },
                     ));
                 }
+                CxOsOp::StartDragging(items) => {
+                    self.drag_drop.start_internal_drag(items);
+                }
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Linux direct");
                     self.call_event_handler(&Event::DragEnd);
@@ -414,13 +419,6 @@ impl CxOsApi for Cx {
             self.package_root = Some(item.to_string());
         }
         self.native_load_dependencies();
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {

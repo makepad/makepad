@@ -73,18 +73,26 @@ jobs:
           -p makepad-audio-sidechannels
           -p makepad-platform
 
-      # The widgets, minus three that already fail on upstream and have
+      # The widgets, minus six that already fail on upstream and have
       # nothing to do with this tab. Naming them rather than dropping the
-      # whole crate keeps the other hundred-odd honest: a gate that is red
-      # from its first run is a gate nobody reads, and a crate left out
-      # entirely is a hundred tests nobody runs. Delete a line here the day
-      # its test passes again.
+      # whole crate keeps the other three hundred honest: a gate that is
+      # red from its first run is a gate nobody reads, and a crate left out
+      # entirely is three hundred tests nobody runs. Delete a line here the
+      # day its test passes again.
+      #
+      # The last three arrived with the upstream merge, in code taken
+      # verbatim: grid.rs, menu_bar.rs and widget_tree.rs are byte for byte
+      # the upstream parent's, and all three test names are absent from the
+      # branch this tab was on before it.
       - name: The widgets it draws with
         run: >
           cargo nextest run --release -p makepad-widgets -E
           'not (test(=animated_image_gif::tests::test_animated_image_gif_struct_has_inner_image_field)
           + test(=widget_tree::tests::test_observe_and_find_single_node)
-          + test(=widget_tree::tests::test_property_patch_no_structural_rebuild))'
+          + test(=widget_tree::tests::test_property_patch_no_structural_rebuild)
+          + test(=grid::tests::yielding_child_resumes_in_the_same_cell_and_nested_grid_draws)
+          + test(=grid::tests::oversized_child_is_not_cell_clipped_and_only_obeys_the_grid_clip)
+          + test(=menu_bar::tests::text_editor_focus_has_shortcut_precedence))'
 
       # Warnings only, and deliberately: this workspace has plenty that
       # predate the gate, and failing on them would mean either a flag day

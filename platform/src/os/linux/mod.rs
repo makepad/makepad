@@ -76,6 +76,31 @@ pub mod v4l2_sys;
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;
 
+#[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
+pub(crate) fn wake_ui_event_loop() {
+    select_timer::wake_ui_event_loop();
+}
+
+#[cfg(linux_direct)]
+pub(crate) fn wake_ui_event_loop() {
+    // The direct backend never blocks its main loop; setting SignalToUI is
+    // sufficient and is observed on the next loop turn.
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn wake_ui_event_loop() {
+    android::android_jni::send_from_java_message(
+        android::android_jni::FromJavaMessage::RenderLoop,
+    );
+}
+
+#[cfg(target_env = "ohos")]
+pub(crate) fn wake_ui_event_loop() {
+    open_harmony::oh_callbacks::send_from_ohos_message(
+        open_harmony::oh_callbacks::FromOhosMessage::VSync,
+    );
+}
+
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_audio;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]

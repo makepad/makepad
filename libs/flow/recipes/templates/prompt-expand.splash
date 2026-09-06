@@ -1,0 +1,17 @@
+use mod.flow.*
+
+/** The short idea to expand. */
+let prompt = Input{ type: @text default: "a lighthouse at dusk" }
+let expand = Llm{
+    system: "Rewrite the prompt as one vivid, concrete production brief. Preserve the subject and return only the brief."
+    prompt: prompt.text()
+    max_tokens: 512
+}
+/** Publish the expanded brief into the flow asset library. */
+let published = Publish{ value: expand.text() namespace: "flows" tags: ["flow", "prompt"] }
+
+Flow{
+    label: "Expand prompt"
+    brief: "Turns a short idea into a reusable production brief."
+    prompt, expand, published
+}

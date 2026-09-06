@@ -51,7 +51,8 @@ pub fn scene_state(
                 -yaw.cos() * pitch.cos(),
             )
             .normalize();
-            let boom = camera_boom_limit(world, pivot, forward * -1.0, world.cam_boom);
+            // The filmed body is never its own obstruction.
+            let boom = camera_boom_limit(world, pivot, forward * -1.0, world.cam_boom, world.cam_third);
             let mut camera_pos = pivot - forward * boom;
             camera_pos = camera_pos + camera_shake_offset(world, in_test);
             let view = Mat4f::look_at(camera_pos, pivot, vec3f(0.0, 1.0, 0.0));
@@ -173,7 +174,9 @@ pub fn vehicle_cockpit_scene_state(
 
 pub fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
     let camera_inv = scene.view.invert();
-    let pass_uniforms = &mut cx.passes[pass.draw_pass_id()].pass_uniforms;
+    let uniforms_gen = cx.next_uniform_gen();
+    let cxpass = &mut cx.passes[pass.draw_pass_id()];
+    let pass_uniforms = &mut cxpass.pass_uniforms;
     pass_uniforms.camera_projection = scene.projection;
     pass_uniforms.camera_projection_r = scene.projection;
     pass_uniforms.camera_view = scene.view;
@@ -184,6 +187,7 @@ pub fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
     pass_uniforms.depth_view_r = scene.view;
     pass_uniforms.camera_inv = camera_inv;
     pass_uniforms.camera_inv_r = camera_inv;
+    cxpass.mark_pass_uniforms_dirty(uniforms_gen);
 }
 
 #[cfg(test)]

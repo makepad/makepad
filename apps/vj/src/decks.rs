@@ -1416,6 +1416,13 @@ pub struct DeckState {
     pub moog_ladder_ceiling: f32,
     /// The policy every effect that has not been pinned follows.
     pub level_default: crate::music_dsp::LevelMode,
+    /// Whether the compressor is on. Same channel-strip treatment as
+    /// the ladder beside it.
+    pub compressor_on: bool,
+    /// Where it starts working, in decibels below full scale.
+    pub compressor_threshold_db: f32,
+    /// How hard it works above that.
+    pub compressor_ratio: f32,
     /// Where this deck's three EQ bands are split, in Hz.
     pub eq_low_hz: f32,
     pub eq_high_hz: f32,
@@ -1561,6 +1568,9 @@ impl Default for DeckState {
             moog_ladder_level_mode: crate::music_dsp::LevelMode::Follow,
             moog_ladder_ceiling: 1.0,
             level_default: crate::music_dsp::LevelMode::Off,
+            compressor_on: false,
+            compressor_threshold_db: crate::music_dsp::COMPRESSOR_THRESHOLD_DEFAULT_DB,
+            compressor_ratio: crate::music_dsp::COMPRESSOR_RATIO_DEFAULT,
             eq_low_hz: crate::music_dsp::EQ_LOW_HZ,
             eq_high_hz: crate::music_dsp::EQ_HIGH_HZ,
             stereo_width_on: false,
@@ -1968,6 +1978,9 @@ pub enum DeckCmd {
     SetMoogLadderLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
     SetMoogLadderCeiling { deck: DeckId, ceiling: f32 },
     SetLevelDefault { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetCompressor { deck: DeckId, on: bool },
+    SetCompressorThreshold { deck: DeckId, db: f32 },
+    SetCompressorRatio { deck: DeckId, ratio: f32 },
     SetCrossovers { deck: DeckId, low_hz: f32, high_hz: f32 },
     SetStereoWidth { deck: DeckId, on: bool },
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
@@ -2041,8 +2054,12 @@ pub struct DeckEngine {
     /// What a fresh load puts back to nothing. Off by default; see
     /// `LoadReset`.
     pub load_reset: LoadReset,
-    /// QUANT's unit in beats, 0 = off. One global value: snapping is a
-    /// property of how the operator is working, not of a deck.
+    /// QUANT's unit in beats, 0 = off, one per deck -- a deck being
+    /// beat-matched by hand wants no snapping while the one beside it
+    /// still does. Zero is what withholds sync's phase landing
+    /// (`phase_landing_allowed`), so this is not only a loop and jump
+    /// unit: it is the operator's standing answer to "may the engine
+    /// move my playhead".
     snap_beats: [u32; 2],
     /// Tracks queued for the next free deck, in play order.
     queue: Vec<TrackItem>,
@@ -2481,6 +2498,9 @@ impl DeckEngine {
             DeckCmd::SetMoogLadderLevelMode { deck, mode: state.moog_ladder_level_mode },
             DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling },
             DeckCmd::SetLevelDefault { deck, mode: state.level_default },
+            DeckCmd::SetCompressor { deck, on: state.compressor_on },
+            DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db },
+            DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio },
             DeckCmd::SetCrossovers {
                 deck,
                 low_hz: state.eq_low_hz,
@@ -5264,15 +5284,49 @@ impl DeckEngine {
 
     // ---- tone + stems -------------------------------------------------------
 
+    /// The compressor's on/off switch.
+    pub fn toggle_compressor(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_on = !state.compressor_on;
+        vec![DeckCmd::SetCompressor { deck, on: state.compressor_on }]
+    }
+
+    /// Set it to an explicit side, for a MIX-linked broadcast.
+    pub fn set_compressor(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).compressor_on = on;
+        vec![DeckCmd::SetCompressor { deck, on }]
+    }
+
+    /// Where it starts working, in decibels below full scale.
+    pub fn set_compressor_threshold(&mut self, deck: DeckId, db: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_threshold_db = db.clamp(
+            crate::music_dsp::COMPRESSOR_THRESHOLD_MIN_DB,
+            crate::music_dsp::COMPRESSOR_THRESHOLD_MAX_DB,
+        );
+        vec![DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db }]
+    }
+
+    /// How hard it works above that.
+    pub fn set_compressor_ratio(&mut self, deck: DeckId, ratio: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_ratio = ratio.clamp(
+            crate::music_dsp::COMPRESSOR_RATIO_MIN,
+            crate::music_dsp::COMPRESSOR_RATIO_MAX,
+        );
+        vec![DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio }]
+    }
+
     /// Where this deck's bands are split. Clamped the same way the
     /// engine clamps, so the stored value and the audible one agree, and
     /// the gap between the corners is the engine's to keep.
     pub fn set_crossovers(&mut self, deck: DeckId, low_hz: f32, high_hz: f32) -> Vec<DeckCmd> {
+        let Some((low, high)) = crate::music_dsp::eq_crossovers_for(low_hz, high_hz) else {
+            return Vec::new();
+        };
         let state = self.deck_mut(deck);
-        state.eq_low_hz = low_hz
-            .clamp(crate::music_dsp::EQ_LOW_HZ_MIN, crate::music_dsp::EQ_LOW_HZ_MAX);
-        state.eq_high_hz = high_hz
-            .clamp(crate::music_dsp::EQ_HIGH_HZ_MIN, crate::music_dsp::EQ_HIGH_HZ_MAX);
+        state.eq_low_hz = low;
+        state.eq_high_hz = high;
         vec![DeckCmd::SetCrossovers {
             deck,
             low_hz: state.eq_low_hz,
@@ -6857,6 +6911,38 @@ mod tests {
             cells: [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS],
             bars_per_col: [1; SPLAT_COLS],
         })
+    }
+
+    /// The corners an operator SEES are the corners the engine RUNS.
+    /// They go through one rule, so a push that moves the untouched one
+    /// moves it in the stored state too -- a readout that disagreed with
+    /// the audio would be worse than no readout.
+    #[test]
+    fn the_stored_crossovers_are_the_ones_the_engine_keeps() {
+        let mut e = DeckEngine::new();
+        // Pushed together: the state has to show the gap the engine keeps.
+        let cmds = e.set_crossovers(DeckId::A, 800.0, 1_000.0);
+        let state = e.deck(DeckId::A);
+        assert!(
+            state.eq_high_hz / state.eq_low_hz >= 2.0 - 1e-3,
+            "stored {} and {} are too close",
+            state.eq_low_hz,
+            state.eq_high_hz
+        );
+        // And the command carries exactly what was stored.
+        assert_eq!(
+            cmds,
+            vec![DeckCmd::SetCrossovers {
+                deck: DeckId::A,
+                low_hz: state.eq_low_hz,
+                high_hz: state.eq_high_hz,
+            }]
+        );
+        // A value that means nothing moves neither corner.
+        let before = (state.eq_low_hz, state.eq_high_hz);
+        assert!(e.set_crossovers(DeckId::A, f32::NAN, 2_000.0).is_empty());
+        let state = e.deck(DeckId::A);
+        assert_eq!((state.eq_low_hz, state.eq_high_hz), before);
     }
 
     #[test]

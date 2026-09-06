@@ -17,6 +17,7 @@ use crate::h3::{
     H3_KEYFRAME_NOISE_AUG, H3_TEXT_TAG, H3_VIDEO_PATCH_DIM, H3_VIDEO_SHIFT, H3_VIDEO_TAG,
 };
 use crate::h3_audio_vae::H3AudioVae;
+use crate::backend::GemmPrecision;
 use crate::h3_text::{
     h3_text_encode_progress, h3_text_encoder_evict, H3TextEncoderPrepared, H3VisionImage,
     H3VisionSpan,
@@ -257,7 +258,8 @@ pub struct H3GenerateParams {
     /// Optional reference NOISED condition rows (num_condition_rows x 96,
     /// fl2va): bypasses VAE-encode + noising for oracle-parity runs.
     pub condition_rows_override: Option<Vec<f32>>,
-    pub act16: bool,
+    /// Explicit CUDA GEMM/activation policy for this DiT invocation.
+    pub precision: GemmPrecision,
     /// Decode the denoised audio latents through the audio VAE (CPU f32).
     /// Off = silent clip (`audio_planar: None`).
     pub decode_audio: bool,
@@ -986,7 +988,7 @@ pub fn h3_generate_with_control(
             &all_video_rows,
             &audio_rows,
             &text_embeds,
-            params.act16,
+            params.precision,
             &[],
         )?;
         let elapsed = start.elapsed().as_secs_f64();

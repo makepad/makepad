@@ -657,6 +657,8 @@ pub(crate) const ST_CEILING_DOOR: i16 = 20;
 pub(crate) const ST_FLOOR_DOOR: i16 = 21;
 /// `ST_15..17`: elevators. Authored at one end of their travel.
 pub(crate) const ST_LIFT_TAGS: &[i16] = &[15, 16, 17];
+pub(crate) const ST_ELEVATOR_DOWN: i16 = 18;
+pub(crate) const ST_ELEVATOR_UP: i16 = 19;
 /// `ST_1_ABOVE_WATER` / `ST_2_UNDERWATER`: the two halves of a BUILD water
 /// pair. The first sector's floor is the SURFACE you drop through; the
 /// second's is the bottom you stand on.
@@ -700,6 +702,9 @@ pub(crate) struct BuildMover {
     /// True for a ceiling door (the ceiling rises); false for a floor door
     /// or lift (the floor drops).
     pub ceiling: bool,
+    /// A rigid cab: its ceiling and blocking interior walls travel with
+    /// the floor, unlike a floor-only 16/17 platform.
+    pub cab: bool,
     pub kind: MoverKind,
 }
 
@@ -1028,10 +1033,28 @@ fn sector_centre(map: &BuildMap, sector: &Sector) -> [f32; 2] {
 ///
 /// The open height is the neighbouring sector the effect reveals: the
 /// HIGHEST neighbouring ceiling for a ceiling door, the LOWEST neighbouring
-/// floor for a floor door or lift.
+/// floor for a floor door/platform. Cab elevators use BUILD's nearest
+/// neighboring floor search, which includes their blocked shaft walls.
 pub(crate) fn build_movers(map: &BuildMap) -> Vec<BuildMover> {
     let mut out = Vec::new();
     for (si, sector) in map.sectors.iter().enumerate() {
+        if matches!(sector.lotag, ST_ELEVATOR_DOWN | ST_ELEVATOR_UP) {
+            // BUILD first searches the nearest floor above, then below.
+            // Blocking shaft walls still contribute neighboring heights.
+            let next = next_sector_neighbor_z(map, si, sector.floorz, -1)
+                .or_else(|| next_sector_neighbor_z(map, si, sector.floorz, 1));
+            if let Some(next) = next {
+                out.push(BuildMover {
+                    sector: si,
+                    closed_z: sector.floorz,
+                    open_z: map.sectors[next].floorz,
+                    ceiling: false,
+                    cab: true,
+                    kind: MoverKind::Lift,
+                });
+            }
+            continue;
+        }
         let ceiling = sector.lotag == ST_CEILING_DOOR;
         let floor = sector.lotag == ST_FLOOR_DOOR || ST_LIFT_TAGS.contains(&sector.lotag);
         if !ceiling && !floor {
@@ -1072,10 +1095,27 @@ pub(crate) fn build_movers(map: &BuildMap) -> Vec<BuildMover> {
             closed_z,
             open_z,
             ceiling,
+            cab: false,
             kind: if ceiling { MoverKind::Door } else { MoverKind::Lift },
         });
     }
     out
+}
+
+/// BUILD nextsectorneighborz: nearest strictly higher/lower neighboring
+/// plane in BUILD's downward-positive Z coordinates, including blocked walls.
+fn next_sector_neighbor_z(
+    map: &BuildMap, sector: usize, reference: i32, direction: i32,
+) -> Option<usize> {
+    let s = map.sectors.get(sector)?;
+    (s.wallptr as usize..s.wallptr as usize + s.wallnum as usize)
+        .filter_map(|w| map.walls.get(w))
+        .filter(|w| w.nextsector >= 0)
+        .filter_map(|w| map.sectors.get(w.nextsector as usize)
+            .map(|s| (w.nextsector as usize, s.floorz)))
+        .filter(|(_, z)| if direction < 0 { *z < reference } else { *z > reference })
+        .min_by_key(|(_, z)| (*z as i64 - reference as i64).abs())
+        .map(|(i, _)| i)
 }
 
 /// Bake every CEILING door at its open position, so the level a walker gets
@@ -1203,12 +1243,18 @@ pub(crate) fn parse_map_v7(bytes: &[u8]) -> Result<BuildMap, String> {
 
 /// Everything one BUILD map becomes: the GLB, and the facts about it that
 /// only the exporter knows — where the contract nodes ended up.
-pub(crate) struct BuildWorld {
+pub struct BuildWorld {
     pub glb: Vec<u8>,
     pub spawn: Option<[f32; 5]>,
     pub sprites: BTreeSet<u16>,
     pub doors: Vec<crate::world_nav::NavDoor>,
     pub lifts: Vec<crate::world_nav::NavDoor>,
+}
+
+/// Convert one MAP entirely in memory. No extraction, store mutation or
+/// publication; useful to validate the exact imported runtime contract.
+pub fn convert_map_bytes(bytes: &[u8], art: &ArtBank) -> Result<BuildWorld, String> {
+    map_to_world(&parse_map_v7(bytes)?, art)
 }
 
 /// The GLB alone — what the mesh tests want.
@@ -1258,7 +1304,11 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
                 None => SinkTarget::Level,
             },
         };
-        emit_sector_planes(&mut sink, map, si, art, &fallback, floor_target);
+        let ceiling_target=match mover_of_sector.get(&si) {
+            Some(&mi) if movers[mi].cab=>SinkTarget::Mover(mi),
+            _=>SinkTarget::Level,
+        };
+        emit_sector_planes(&mut sink, map, si, art, &fallback, floor_target,ceiling_target);
         emit_sector_walls(&mut sink, map, si, art, &fallback, &movers, &mover_of_sector);
     }
     emit_sprites(&mut sink, map, art, &fallback);
@@ -1479,6 +1529,35 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
                     open_y,
                 );
                 node.parts = node_parts;
+                if m.cab {
+                    use makepad_asset_client::json::Value;
+                    node.extras.push(("source_sector".into(),Value::F64(m.sector as f64)));
+                    // A physical landing aperture, NOT a teleport or a
+                    // promise that the static tour graph can route here.
+                    let sector=&src.sectors[m.sector];
+                    for wi in sector.wallptr as usize..(sector.wallptr as usize+sector.wallnum as usize) {
+                        let w=&src.walls[wi];
+                        if w.cstat&1!=0 || w.nextsector<0 {continue;}
+                        let Some(other)=src.sectors.get(w.nextsector as usize) else {continue;};
+                        let Some(b)=src.walls.get(w.point2 as usize) else {continue;};
+                        let x=(w.x as f32+b.x as f32)*0.5;
+                        let z=(w.y as f32+b.y as f32)*0.5;
+                        let travel = open_y - closed_y;
+                        let floor=(slope_z(sector,src,x,z,false)+travel)
+                            .max(slope_z(other,src,x,z,false));
+                        let cab_ceil=slope_z(sector,src,x,z,true)+travel;
+                        let ceiling=cab_ceil.min(slope_z(other,src,x,z,true));
+                        if ceiling<=floor {continue;}
+                        for (key,value) in [("portal_x",x*SCALE),("portal_z",z*SCALE),
+                            ("portal_floor",floor),("portal_ceiling",ceiling),
+                            ("portal_sector",w.nextsector as f32)] {
+                            node.extras.push((key.into(),Value::F64(value as f64)));
+                        }
+                        node.extras.push(("portal_state".into(),Value::Str(
+                            if open_y>closed_y {"up"} else {"down"}.into())));
+                        break;
+                    }
+                }
                 extra.push(node);
                 lift_meta.push(crate::world_nav::NavDoor::vertical(
                     name, pos, closed_y, open_y,
@@ -1810,6 +1889,7 @@ fn emit_sector_planes(
     art: &ArtBank,
     fallback: &TileRgba,
     floor_target: SinkTarget,
+    ceiling_target: SinkTarget,
 ) {
     let sec = &map.sectors[si];
     let mut loops = sector_loops(map, sec);
@@ -1856,7 +1936,7 @@ fn emit_sector_planes(
         });
     }
     if !paper && sec.ceilingstat & 1 == 0 {
-        emit_plane(
+        sink.into_target(ceiling_target,|sink|emit_plane(
             sink,
             &outer,
             &holes,
@@ -1864,7 +1944,7 @@ fn emit_sector_planes(
             si,
             true,
             tile_ref(art, fallback, sec.ceilingpicnum),
-        );
+        ));
     }
 }
 
@@ -2134,6 +2214,37 @@ fn emit_sector_walls(
         let a = world_xy(w);
         let b = world_xy(&map.walls[p2]);
         let next = w.nextsector;
+        if let Some(&mi)=mover_of_sector.get(&si).filter(|&&mi|movers[mi].cab) {
+            let m=movers[mi];
+            let floor0=slope_z(sec,map,a[0],a[1],false);
+            let floor1=slope_z(sec,map,b[0],b[1],false);
+            let ceil0=slope_z(sec,map,a[0],a[1],true);
+            let ceil1=slope_z(sec,map,b[0],b[1],true);
+            if next<0 || w.cstat&1!=0 {
+                // Never carry the long height-difference band to a static
+                // neighbor as part of the cab; only its own interior wall.
+                sink.into_target(SinkTarget::Mover(mi),|sink|emit_wall_face(sink,w,a,b,
+                    floor0,floor1,ceil0,ceil1,w.picnum,tile_ref(art,fallback,w.picnum)));
+            } else if let Some(n)=map.sectors.get(next as usize) {
+                // The open cab front faces a stationary shaft wall above
+                // and below the landing. It stays sealed upstairs, but its
+                // actual landing opening is not baked shut by the neighbor.
+                let delta=(m.closed_z as f32-m.open_z as f32)*SCALE_Z;
+                let lo0=floor0.min(floor0+delta);let lo1=floor1.min(floor1+delta);
+                let hi0=ceil0.max(ceil0+delta);let hi1=ceil1.max(ceil1+delta);
+                let nf0=slope_z(n,map,a[0],a[1],false);let nf1=slope_z(n,map,b[0],b[1],false);
+                let nc0=slope_z(n,map,a[0],a[1],true);let nc1=slope_z(n,map,b[0],b[1],true);
+                if nf0>lo0+0.01 || nf1>lo1+0.01 {emit_wall_face(sink,w,a,b,lo0,lo1,nf0.min(hi0),nf1.min(hi1),w.picnum,tile_ref(art,fallback,w.picnum));}
+                if nc0<hi0-0.01 || nc1<hi1-0.01 {emit_wall_face(sink,w,a,b,nc0.max(lo0),nc1.max(lo1),hi0,hi1,w.picnum,tile_ref(art,fallback,w.picnum));}
+            }
+            continue;
+        }
+        if next>=0 && w.cstat&1==0 && mover_of_sector.get(&(next as usize)).is_some_and(|mi|movers[*mi].cab)
+            && map.walls.get(w.nextwall as usize).is_some_and(|other|other.cstat&1==0) {
+            // The cab side emitted this stationary shaft/landing boundary
+            // once. A second neighbor-height band would reseal its opening.
+            continue;
+        }
         if next < 0 {
             let zf0 = slope_z(sec, map, a[0], a[1], false);
             let zf1 = slope_z(sec, map, b[0], b[1], false);
@@ -5999,6 +6110,65 @@ enda
             walls,
             sprites: Vec::new(),
         }
+    }
+
+    fn e1l2_cab_map()->BuildMap {
+        let mut walls=square_walls(0,[(0,0),(1024,0),(1024,1024),(0,1024)],[1,-1,-1,-1],[6,-1,-1,-1]);
+        walls.extend(square_walls(4,[(0,-1024),(1024,-1024),(1024,0),(0,0)],[2,2,0,2],[-1,-1,0,9]));
+        walls.extend(square_walls(8,[(-1024,-1024),(0,-1024),(0,0),(-1024,0)],[-1,1,-1,-1],[-1,7,-1,-1]));
+        for i in [4,5,7] {walls[i].cstat=97;}
+        BuildMap {start:[512,-512,-67584],start_ang:0,start_sec:1,
+            sectors:vec![plain_sector(0,8192,-8192,0),plain_sector(4,-57344,-73728,ST_ELEVATOR_DOWN),plain_sector(8,2048,-14336,0)],
+            walls,sprites:Vec::new()}
+    }
+
+    #[test]
+    fn st18_cab_uses_nearest_shaft_floor_and_moves_ceiling_and_walls() {
+        use makepad_render::{StaticModel,level::{LevelCollision,UpAxis},model::MODEL_VERTEX_FLOATS};
+        let map=e1l2_cab_map();let movers=build_movers(&map);
+        assert_eq!(movers.len(),1);let m=movers[0];
+        assert!(m.cab && m.kind==MoverKind::Lift && !m.ceiling);
+        assert_eq!((m.sector,m.closed_z,m.open_z),(1,-57344,2048));
+        let world=map_to_world(&map,&one_tile_art()).unwrap();
+        let model=StaticModel::parse_glb(&world.glb).unwrap();
+        let cab=model.anim_parts.iter().find(|p|p.name=="lift_1").unwrap();
+        assert_eq!(cab.states,["up","down"]);assert_eq!(cab.default,0);
+        assert!((cab.max.y-cab.min.y-16384.0*SCALE_Z).abs()<1e-4,"cab has a neighbor-height band attached");
+        assert!((cab.transform_at(cab.duration()).v[13]+59392.0*SCALE_Z).abs()<1e-4);
+        let fixed=LevelCollision::from_packed(&model.vertices,MODEL_VERTEX_FLOATS,&model.indices,UpAxis::Y).unwrap();
+        let x=512.0*SCALE;
+        let to=|y,z| {let mut p=cab.min;p.x=x;p.y=y;p.z=z;p};
+        assert!(!fixed.segment_blocked(to(-2048.0*SCALE_Z+0.7,-0.15),to(-2048.0*SCALE_Z+0.7,0.15)),"landing aperture is baked shut");
+        assert!(fixed.segment_blocked(to(57344.0*SCALE_Z+0.7,-0.15),to(57344.0*SCALE_Z+0.7,0.15)),"shaft front must remain closed upstairs");
+        assert_eq!(world.lifts.len(),1);
+    }
+
+    #[test]
+    fn st19_cab_rises_and_declares_down_then_up() {
+        let mut map=e1l2_cab_map();map.sectors[1].lotag=ST_ELEVATOR_UP;
+        map.sectors[1].floorz=8192;map.sectors[1].ceilingz=-8192;
+        map.sectors[2].floorz=-29696;map.sectors[2].ceilingz=-46080;
+        let movers=build_movers(&map);assert_eq!(movers.len(),1);
+        assert_eq!(movers[0].open_z,-29696);
+        let world=map_to_world(&map,&one_tile_art()).unwrap();
+        let model=makepad_render::StaticModel::parse_glb(&world.glb).unwrap();
+        let cab=&model.anim_parts[0];assert_eq!(cab.states,["down","up"]);
+        assert_eq!(cab.default,0);assert!(cab.transform_at(cab.duration()).v[13]>0.0);
+    }
+
+    #[test]
+    fn actual_e1l2_start_is_a_whole_st18_cab_not_a_floor_platform() {
+        let Some(grp)=Path::new(env!("CARGO_MANIFEST_DIR")).ancestors()
+            .map(|p|p.join("local/packs/duke3d/DUKE3D.GRP")).find(|p|p.is_file()) else {return;};
+        let files=parse_grp(&std::fs::read(grp).unwrap()).unwrap();
+        let bytes=&files.iter().find(|(name,_)|name.eq_ignore_ascii_case("E1L2.MAP")).unwrap().1;
+        let map=parse_map_v7(bytes).unwrap();assert_eq!(map.start_sec,203);
+        let s=&map.sectors[203];assert_eq!((s.lotag,s.ceilingz,s.floorz),(18,-73728,-57344));
+        let movers=build_movers(&map);
+        let cab=movers.iter().find(|m|m.sector==203).unwrap();
+        assert!(cab.cab);assert_eq!(cab.open_z,2048);
+        let second=movers.iter().find(|m|m.sector==53).unwrap();
+        assert!(second.cab);assert_eq!(second.open_z,-29696);
     }
 
     #[test]

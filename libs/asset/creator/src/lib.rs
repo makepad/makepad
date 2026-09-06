@@ -27,6 +27,8 @@
 //!   never a scheduler in the database.
 
 pub mod engine;
+pub mod character;
+pub mod composite;
 pub mod pipeline;
 pub mod runner;
 pub mod tools;

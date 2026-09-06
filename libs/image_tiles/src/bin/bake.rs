@@ -11,6 +11,8 @@
 //! made to be called from (and customised by) your own tools.
 
 use makepad_image_tiles::bake::{bake, parse_manifest, BakeOptions};
+use makepad_widgets::makepad_platform::thread::Lane;
+use makepad_widgets::Cx;
 use std::path::PathBuf;
 
 fn usage() -> ! {
@@ -45,7 +47,21 @@ fn main() {
     };
     let sources = parse_manifest(&text);
     println!("library: {} — {} source(s) in the manifest", root.display(), sources.len());
-    match bake(&root, &sources, &options, &mut |line| println!("{line}")) {
+    let cx = Cx::new(Box::new(|_, _| {}));
+    let pool = cx.task_pool();
+    let bake_pool = pool.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let task = pool
+        .submit(Lane::Heavy, move || {
+            let result = bake(&root, &sources, &options, &mut |line| println!("{line}"), &bake_pool);
+            let _ = result_tx.send(result);
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("bake: could not queue work: {error}");
+            std::process::exit(1);
+        });
+    task.detach();
+    match result_rx.recv().unwrap_or_else(|_| Err("bake worker stopped without a result".into())) {
         Ok(summary) => {
             if summary.failed > 0 {
                 std::process::exit(3);

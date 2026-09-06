@@ -14,12 +14,15 @@
 //! - `/models` entries for chat models carry `"domain": "chat"` and the
 //!   existing `available` / `unavailable_reason` fields.
 //! - `POST /generate` accepts `{"model", "domain": "chat", "chat_system",
-//!   "chat_messages": [{"role", "text"}...], "max_tokens"}`. `prompt` is
+//!   "chat_messages": [{"role", "text"}...], "max_tokens"?, "thinking"?}`. `prompt` is
 //!   also set (last user text) for forward compatibility.
 //! - `GET /job/<id>` gains `"partial_text"`: the assistant text so far, a
 //!   monotonically growing prefix of the final text. The final text is the
 //!   terminal `partial_text` — no separate artifact fetch is required for
 //!   chat.
+//! - The `/generate` response optionally carries `"think_open"`, saying
+//!   whether the node's generation prefill opened a think block. Older nodes
+//!   omit it, in which case the client retains its model-id inference.
 //!
 //! Until a fleet node implements this, `availability()` honestly reports
 //! `Unavailable` with the per-node reasons — which is exactly what the UI
@@ -41,26 +44,130 @@ use std::time::{Duration, Instant};
 pub trait FleetTransport {
     fn get_json(&mut self, url: &str) -> Result<Value, String>;
     fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, String>;
+
+    /// Legacy transports remain source compatible. An untyped error cannot
+    /// establish admission safety, so it is never grounds for POST replay.
+    fn get_json_detailed(&mut self, url: &str) -> Result<Value, FleetError> {
+        self.get_json(url).map_err(FleetError::Other)
+    }
+    fn post_json_detailed(&mut self, url: &str, body: &Value) -> Result<Value, FleetError> {
+        self.post_json(url, body).map_err(FleetError::Other)
+    }
+    /// Admission scheduling clock; scripted transports can advance fake time.
+    fn now(&self) -> Instant { Instant::now() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FleetError {
+    /// DNS/connect failed before any request could be sent.
+    Connection(String),
+    /// A complete rejection. `no_job` requires an absent/null job id and an
+    /// explicit JSON error, or the typed low-level empty 503 refusal.
+    Http { status: u16, reason: String, no_job: bool },
+    Other(String),
+}
+
+impl std::fmt::Display for FleetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http { status, reason, .. } => write!(f, "http {status}: {reason}"),
+            Self::Connection(s) | Self::Other(s) => f.write_str(s),
+        }
+    }
 }
 
 pub struct HttpFleetTransport;
 
-impl FleetTransport for HttpFleetTransport {
-    fn get_json(&mut self, url: &str) -> Result<Value, String> {
-        let (status, v) = fleet_http::request_json("GET", url, None, None)?;
-        if status != 200 {
-            return Err(format!("GET {url}: http {status}"));
-        }
-        Ok(v)
+impl HttpFleetTransport {
+    fn request(method: &str, url: &str, body: Option<&Value>) -> Result<Value, FleetError> {
+        let secret = std::env::var("MAKEPAD_AI_HUB_SECRET").ok();
+        let (status, value) = fleet_http::request_json_detailed(method, url, body, secret.as_deref().map(str::trim))
+            .map_err(Self::request_error)?;
+        Self::response(status, value, body, secret.as_deref())
     }
 
-    fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, String> {
-        let (status, v) = fleet_http::request_json("POST", url, Some(body), None)?;
-        if !(200..300).contains(&status) {
-            return Err(format!("POST {url}: http {status}"));
+    fn request_error(error: fleet_http::RequestError) -> FleetError {
+        match error {
+            fleet_http::RequestError::Connection(s) => FleetError::Connection(s),
+            e @ fleet_http::RequestError::Empty503 => FleetError::Http {
+                status: 503, reason: e.to_string(), no_job: true,
+            },
+            fleet_http::RequestError::Other(s) => FleetError::Other(s),
         }
-        Ok(v)
     }
+
+    fn response(status: u16, value: Value, body: Option<&Value>, secret: Option<&str>) -> Result<Value, FleetError> {
+        if (200..300).contains(&status) { return Ok(value); }
+        let error = value.get("error").and_then(|e| {
+            e.as_str().or_else(|| e.get("message").and_then(Value::as_str))
+        }).filter(|s| !s.trim().is_empty());
+        let no_job = matches!(value.get("job_id"), None | Some(Value::Null)) && error.is_some();
+        let mut reason = error.unwrap_or("server rejected request without a reason").to_string();
+        // Only the error field is shown, never the response/request object or
+        // headers. Redact echoed credentials and request text before bounding.
+        for text in secret.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
+            reason = reason.replace(text, "[redacted]");
+        }
+        if let Some(body) = body {
+            for key in ["prompt", "chat_system"] {
+                if let Some(text) = body.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    reason = reason.replace(text, "[request text]");
+                }
+            }
+            if let Some(messages) = body.get("chat_messages").and_then(Value::as_arr) {
+                for message in messages {
+                    if let Some(text) = message.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        reason = reason.replace(text, "[request text]");
+                    }
+                }
+            }
+        }
+        let reason = reason.lines().map(|line| {
+            if line.to_ascii_lowercase().contains("authorization:") {
+                "[redacted header]"
+            } else { line }
+        }).collect::<Vec<_>>().join(" ");
+        Err(FleetError::Http { status, reason: bounded_reason(&reason), no_job })
+    }
+}
+
+impl FleetTransport for HttpFleetTransport {
+    fn get_json(&mut self, url: &str) -> Result<Value, String> {
+        self.get_json_detailed(url).map_err(|e| e.to_string())
+    }
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, String> {
+        self.post_json_detailed(url, body).map_err(|e| e.to_string())
+    }
+    fn get_json_detailed(&mut self, url: &str) -> Result<Value, FleetError> {
+        Self::request("GET", url, None)
+    }
+    fn post_json_detailed(&mut self, url: &str, body: &Value) -> Result<Value, FleetError> {
+        Self::request("POST", url, Some(body))
+    }
+}
+
+fn bounded_reason(reason: &str) -> String {
+    let mut out: String = reason.chars().take(384).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if reason.chars().count() > 384 { out.push('…'); }
+    out
+}
+
+// Eight admission rounds, including rounds with no eligible node. At most
+// one POST per round; backoff is cooperative and capped, never a sleep here.
+const MAX_ADMISSION_ATTEMPTS: u8 = 8;
+const ADMISSION_BUDGET: Duration = Duration::from_secs(90);
+
+struct PendingSubmission {
+    base: String,
+    model: String,
+    body: Value,
+    inferred_open_think: bool,
+    attempts: u8,
+    retry_at: Instant,
+    deadline: Instant,
+    reasons: Vec<String>,
+    note: Option<String>,
+    interrupted_bases: Vec<String>,
 }
 
 /// Model ids preferred in order when several chat models are available.
@@ -71,6 +178,7 @@ const PICK_TTL: Duration = Duration::from_secs(60);
 const DEAD_TTL: Duration = Duration::from_secs(30);
 
 struct ActiveJob {
+    submission: PendingSubmission,
     base: String,
     job: String,
     delivered: usize,
@@ -208,9 +316,10 @@ impl FleetPickCache {
         (probed == base).then_some(*lanes)
     }
 
-    /// Take the stale pick for the scan's last-resort fallback.
-    fn take_stale(&self) -> Option<(String, String, bool)> {
-        let pick = self.lock().pick.take()?;
+    /// Inspect the stale pick for the scan's last-resort fallback. A caller
+    /// looking for another model must not remove the shared last-good pick.
+    fn stale(&self) -> Option<(String, String, bool)> {
+        let pick = self.lock().pick.clone()?;
         Some((pick.base, pick.model, pick.text_fallback))
     }
 }
@@ -219,8 +328,19 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     transport: T,
     /// Node base URLs from LAN discovery, e.g. `http://10.0.0.169:8123`.
     bases: Vec<String>,
-    max_tokens: u32,
+    /// Exact fleet model requested by the caller. `None` keeps the normal
+    /// provider preference order.
+    preferred_model: Option<String>,
+    /// `None` leaves the field off the wire so the serving node chooses its
+    /// own default. A positive value is forwarded without alteration.
+    max_tokens: Option<u32>,
+    /// `None` preserves the serving model's default thinking mode.
+    thinking: Option<bool>,
+    /// Every logical turn gets a fresh sample; admission attempts reuse it.
+    sample_seed: u64,
     active: Option<ActiveJob>,
+    pending: Option<PendingSubmission>,
+    cancel_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Private by default; the broker hands EVERY session's provider the
     /// same one so the fleet is probed once, not once per session.
     picks: std::sync::Arc<FleetPickCache>,
@@ -274,18 +394,52 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         FleetQwenChatProvider {
             transport,
             bases,
+            preferred_model: None,
             // NOT a policy number: the client requests the maximum and the
             // serving lane clamps to its physics (context minus prompt).
             // Every policy cap tried here got observed cutting a real
             // level-building turn mid-source (2048, then 3072 on 2026-08-27,
             // dog-shop interior). Boxes serving an older build clamp this to
             // their fixed ceiling, which is merely what they did before.
-            max_tokens: u32::MAX,
+            max_tokens: Some(u32::MAX),
+            thinking: None,
+            sample_seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                ^ std::process::id() as u64,
             active: None,
+            pending: None,
+            cancel_signal: None,
             picks,
             conversation: Self::conversation_id(),
             wire: Vec::new(),
         }
+    }
+
+    /// Require this exact advertised fleet model id when supplied.
+    pub fn with_preferred_model(mut self, model: Option<String>) -> Self {
+        self.preferred_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens.filter(|tokens| *tokens > 0);
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
+    }
+
+    pub(crate) fn with_cancel_signal(mut self, signal: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel_signal = Some(signal);
+        self
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel_signal.as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     fn mark_dead(&mut self, base: &str) {
@@ -302,7 +456,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// scan stops at the first usable node (last-good first).
     fn probe(&mut self) -> Result<(String, String, bool), String> {
         if let Some(pick) = self.picks.fresh() {
-            return Ok(pick);
+            if self.bases.contains(&pick.0)
+                && crate::fleet::role_allows(&pick.0, "chat")
+                && self.preferred_model.as_deref().is_none_or(|wanted| wanted == pick.1) {
+                return Ok(pick);
+            }
         }
         if self.bases.is_empty() {
             return Err(format!(
@@ -327,32 +485,28 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // home queues the turn behind whatever those lanes are doing —
         // measured tonight as one runaway think-loop starving every other
         // conversation on the box.
-        let mut full_home: Option<(String, String, bool)> = None;
-        let mut laneless: Option<(String, String, bool)> = None;
+        let mut preferred = PickLadder::default();
+        let mut fallback = PickLadder::default();
         for base in order {
             if self.picks.is_dead(&base) {
                 reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
             }
-            match self.probe_one(&base, &mut reasons) {
-                Some((model, text_fallback, HomeTier::FreeLane)) => {
-                    self.picks.remember(base.clone(), model.clone(), text_fallback);
-                    return Ok((base, model, text_fallback));
-                }
-                Some((model, text_fallback, HomeTier::FullLanes)) => {
-                    if full_home.is_none() {
-                        full_home = Some((base, model, text_fallback));
+            if let Some(hit) = self.probe_one(&base, &mut reasons, self.preferred_model.clone().as_deref()) {
+                if let Some((model, text_fallback)) = hit.preferred {
+                    let pick = (base.clone(), model, text_fallback);
+                    if hit.tier == HomeTier::FreeLane {
+                        self.picks.remember(pick.0.clone(), pick.1.clone(), pick.2);
+                        return Ok(pick);
                     }
+                    preferred.offer(pick, hit.tier);
                 }
-                Some((model, text_fallback, HomeTier::NoLanes)) => {
-                    if laneless.is_none() {
-                        laneless = Some((base, model, text_fallback));
-                    }
+                if let Some((model, text_fallback)) = hit.fallback {
+                    fallback.offer((base, model, text_fallback), hit.tier);
                 }
-                None => {}
             }
         }
-        if let Some((base, model, text_fallback)) = full_home.or(laneless) {
+        if let Some((base, model, text_fallback)) = preferred.best().or_else(|| self.preferred_model.is_none().then(|| fallback.best()).flatten()) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
@@ -363,7 +517,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // POST decide (it has its own connect handling). Without this the
         // FINAL round of a long successful turn died at the re-probe and
         // the user saw an error after their level had already built.
-        if let Some((base, model, text_fallback)) = self.picks.take_stale() {
+        if let Some((base, model, text_fallback)) = self.picks.stale().filter(|(base, model, _)| {
+            self.bases.contains(base) && crate::fleet::role_allows(base, "chat")
+                && self.preferred_model.as_deref().is_none_or(|wanted| wanted == model)
+                && self.picks.is_dead(base)
+        }) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
@@ -377,21 +535,30 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// One immediate retry on idempotent GETs: the LAN path to a busy GPU
     /// box drops the odd connect, and a single lost packet must not mark
     /// the node dead for [`DEAD_TTL`].
-    fn get_json_retry(&mut self, url: &str) -> Result<Value, String> {
-        match self.transport.get_json(url) {
+    fn get_json_retry(&mut self, url: &str) -> Result<Value, FleetError> {
+        match self.transport.get_json_detailed(url) {
             Ok(v) => Ok(v),
-            Err(_) => self.transport.get_json(url),
+            Err(e @ FleetError::Http { status, .. }) if !matches!(status, 429 | 503) => Err(e),
+            Err(_) => self.transport.get_json_detailed(url),
         }
     }
 
     /// The third element of a hit places this box on the scan's ladder
     /// (see `probe`).
-    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<(String, bool, HomeTier)> {
+    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>, wanted: Option<&str>) -> Option<NodePicks> {
+        if self.cancelled() { return None; }
+        if !crate::fleet::role_allows(base, "chat") {
+            reasons.push(format!("{base}: role excludes chat"));
+            return None;
+        }
         let health = match self.get_json_retry(&format!("{base}/health")) {
-            Ok(v) => v,
+            Ok(v) => {
+                self.picks.lock().dead_until.retain(|(b, _)| b != base);
+                v
+            }
             Err(e) => {
-                self.mark_dead(base);
-                reasons.push(format!("{base}: unreachable ({e})"));
+                if matches!(e, FleetError::Connection(_)) { self.mark_dead(base); }
+                reasons.push(format!("{base}: probe failed ({e})"));
                 return None;
             }
         };
@@ -413,8 +580,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         let models = match self.get_json_retry(&format!("{base}/models")) {
             Ok(v) => v,
             Err(e) => {
-                self.mark_dead(base);
-                reasons.push(format!("{base}: models unreachable ({e})"));
+                if matches!(e, FleetError::Connection(_)) { self.mark_dead(base); }
+                reasons.push(format!("{base}: models probe failed ({e})"));
                 return None;
             }
         };
@@ -425,6 +592,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if !has_chat {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
+        let mut preferred_chat: Option<String> = None;
+        let mut preferred_text: Option<String> = None;
         let mut chat_id: Option<String> = None;
         let mut text_id: Option<String> = None;
         for row in rows {
@@ -432,13 +601,33 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             let Some(id) = row.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            if !matches!(domain, "chat" | "text") { continue; }
+            if !crate::fleet::role_allows(base, domain) || (domain == "chat" && !has_chat) {
+                reasons.push(format!("{base}: {id} is excluded by role or capability"));
+                continue;
+            }
             if row.get("available").and_then(Value::as_bool) != Some(true) {
                 let why = row
                     .get("unavailable_reason")
                     .and_then(Value::as_str)
                     .unwrap_or("unavailable");
-                reasons.push(format!("{base}: {id} {why}"));
+                reasons.push(format!("{base}: {id} {}", bounded_reason(why)));
                 continue;
+            }
+            if let Some(state) = row.get("state").and_then(Value::as_str) {
+                if !matches!(state, "loaded" | "ready") {
+                    reasons.push(format!("{base}: {id} not ready ({})", bounded_reason(state)));
+                    continue;
+                }
+            }
+            if let Some(wanted) = wanted {
+                if id == wanted {
+                    if domain == "chat" {
+                        preferred_chat = Some(id.to_string());
+                    } else if domain == "text" {
+                        preferred_text = Some(id.to_string());
+                    }
+                }
             }
             if domain == "chat" {
                 if better_pick(chat_id.as_deref(), id, row) {
@@ -450,13 +639,188 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 }
             }
         }
-        if let Some(model) = chat_id {
-            return Some((model, false, tier));
+        if let Some(wanted) = wanted {
+            if preferred_chat.is_none() && preferred_text.is_none() {
+                reasons.push(format!("{base}: {wanted} is not eligible"));
+            }
         }
-        if let Some(model) = text_id {
-            return Some((model, true, tier));
+        let preferred = preferred_chat
+            .map(|model| (model, false))
+            .or_else(|| preferred_text.map(|model| (model, true)));
+        let fallback = chat_id
+            .map(|model| (model, false))
+            .or_else(|| text_id.map(|model| (model, true)));
+        (preferred.is_some() || fallback.is_some()).then_some(NodePicks {
+            preferred,
+            fallback,
+            tier,
+        })
+    }
+
+    fn admission_error(&self, pending: &PendingSubmission) -> String {
+        format!("{} admission failed after {} rounds: {}", pending.model,
+            pending.attempts, pending.reasons.join("; "))
+    }
+
+    fn wait_submission(&mut self, mut pending: PendingSubmission, reason: String) -> Result<(), String> {
+        let reason = bounded_reason(&reason);
+        if !pending.reasons.contains(&reason) { pending.reasons.push(reason.clone()); }
+        let now = self.transport.now();
+        if pending.attempts >= MAX_ADMISSION_ATTEMPTS || now >= pending.deadline {
+            return Err(self.admission_error(&pending));
         }
-        None
+        let backoff_ms = (500u64 << pending.attempts.saturating_sub(1)).min(8_000);
+        // Stable per-turn jitter separates concurrent queues without changing
+        // the request's sample seed or creating another source of identity.
+        let jitter_ms = pending.body.get("seed").and_then(Value::as_u64).unwrap_or(0) % 251;
+        pending.retry_at = now + Duration::from_millis(backoff_ms + jitter_ms);
+        pending.note = Some(format!("waiting for {} admission (round {}/{}; retry in {:.1}s): {}",
+            pending.model, pending.attempts, MAX_ADMISSION_ATTEMPTS,
+            (backoff_ms + jitter_ms) as f64 / 1000.0, reason));
+        self.pending = Some(pending);
+        Ok(())
+    }
+
+    fn submit(&mut self, mut pending: PendingSubmission) -> Result<(), String> {
+        // The proxy's atomic also covers cancellation during a slow probe,
+        // and Drop of the consumer while this worker is between requests.
+        if self.cancelled() {
+            self.cancel();
+            return Ok(());
+        }
+        if self.transport.now() >= pending.deadline {
+            return Err(self.admission_error(&pending));
+        }
+        pending.attempts += 1;
+        let url = format!("{}/generate", pending.base);
+        let resp = match self.transport.post_json_detailed(&url, &pending.body) {
+            Ok(value) => value,
+            Err(error) => {
+                let retry = matches!(error, FleetError::Connection(_)
+                    | FleetError::Http { status: 409 | 429 | 503, no_job: true, .. });
+                if matches!(error, FleetError::Connection(_)) { self.mark_dead(&pending.base); }
+                let reason = format!("{}: {error}", pending.base);
+                if retry { return self.wait_submission(pending, reason); }
+                return Err(reason);
+            }
+        };
+        let job = resp.get("job_id").and_then(Value::as_str).filter(|s| !s.is_empty())
+            .ok_or_else(|| "generate response missing job_id (submission outcome unknown)".to_string())?
+            .to_string();
+        let open_think = resp.get("think_open").and_then(Value::as_bool)
+            .unwrap_or(pending.inferred_open_think);
+        self.active = Some(ActiveJob {
+            base: pending.base.clone(), submission: pending, job, delivered: 0, finished: false,
+            last_note: String::new(), gen_tokens: 0, think_tokens: None,
+            think_opened: false, open_think, visible_tokens: None,
+            prefix_ingested: None, poll_fails: 0,
+        });
+        if self.cancelled() { self.cancel(); }
+        Ok(())
+    }
+
+    fn poll_submission(&mut self) -> Vec<ProviderEvent> {
+        let mut pending = self.pending.take().expect("pending submission");
+        if let Some(note) = pending.note.take() {
+            self.pending = Some(pending);
+            return vec![ProviderEvent::Status { note, permille: 0 }];
+        }
+        let now = self.transport.now();
+        if now >= pending.deadline {
+            self.wire.clear();
+            return vec![ProviderEvent::Error(self.admission_error(&pending))];
+        }
+        if now < pending.retry_at {
+            self.pending = Some(pending);
+            return Vec::new();
+        }
+        // Revalidate the SAME model; no cached/stale pick may override a
+        // current refusal or send this logical turn to a different model.
+        // Alternatives go first, with the usual free/full/laneless ranking.
+        let mut order = self.bases.clone();
+        order.retain(|b| b != &pending.base);
+        order.push(pending.base.clone());
+        order.retain(|base| !pending.interrupted_bases.contains(base));
+        let mut ladder = PickLadder::default();
+        let mut reasons = Vec::new();
+        for base in order {
+            if self.transport.now() >= pending.deadline {
+                self.wire.clear();
+                return vec![ProviderEvent::Error(self.admission_error(&pending))];
+            }
+            if self.cancelled() {
+                self.cancel();
+                return Vec::new();
+            }
+            if let Some(hit) = self.probe_one(&base, &mut reasons, Some(&pending.model)) {
+                if let Some((model, text_fallback)) = hit.preferred {
+                    let domain = if text_fallback { "text" } else { "chat" };
+                    if pending.body.get("domain").and_then(Value::as_str) == Some(domain) {
+                        ladder.offer((base, model, text_fallback), hit.tier);
+                        if hit.tier == HomeTier::FreeLane { break; }
+                    } else {
+                        reasons.push(format!("{base}: {} has incompatible domain {domain}", pending.model));
+                    }
+                } else {
+                    reasons.push(format!("{base}: {} is not eligible", pending.model));
+                }
+            }
+        }
+        if self.cancelled() {
+            self.cancel();
+            return Vec::new();
+        }
+        let result = if let Some((base, model, text_fallback)) = ladder.best() {
+            self.picks.remember(base.clone(), model, text_fallback);
+            pending.base = base;
+            self.submit(pending)
+        } else {
+            pending.attempts += 1;
+            if reasons.is_empty() { reasons.push(format!("no eligible node for {}", pending.model)); }
+            self.wait_submission(pending, reasons.join("; "))
+        };
+        match result {
+            Err(error) => {
+                self.wire.clear();
+                vec![ProviderEvent::Error(error)]
+            }
+            Ok(()) => {
+                // Deliver each waiting note once, as soon as the refusal is
+                // known. Accepted jobs are polled on the next worker tick.
+                self.pending.as_mut().and_then(|p| p.note.take())
+                    .map(|note| vec![ProviderEvent::Status { note, permille: 0 }])
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+}
+
+struct NodePicks {
+    preferred: Option<(String, bool)>,
+    fallback: Option<(String, bool)>,
+    tier: HomeTier,
+}
+
+#[derive(Default)]
+struct PickLadder {
+    free: Option<(String, String, bool)>,
+    full: Option<(String, String, bool)>,
+    laneless: Option<(String, String, bool)>,
+}
+
+impl PickLadder {
+    fn offer(&mut self, pick: (String, String, bool), tier: HomeTier) {
+        match tier {
+            HomeTier::FreeLane if self.free.is_none() => self.free = Some(pick),
+            HomeTier::FullLanes if self.full.is_none() => self.full = Some(pick),
+            HomeTier::NoLanes if self.laneless.is_none() => self.laneless = Some(pick),
+            _ => {}
+        }
+    }
+
+    fn best(self) -> Option<(String, String, bool)> {
+        self.free.or(self.full).or(self.laneless)
     }
 }
 
@@ -515,12 +879,15 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
     }
 
     fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
-        if self.active.is_some() {
+        if self.active.is_some() || self.pending.is_some() {
             return Err("a turn is already in flight".to_string());
         }
         tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
-        let open_think = crate::protocol::model_uses_open_think(&model);
+        // Older nodes do not advertise the prefill shape, so retain the
+        // historical model/request inference only as a compatibility fallback.
+        let inferred_open_think = self.thinking != Some(false)
+            && crate::protocol::model_uses_open_think(&model);
         // The WIRE transcript is append-only, mirroring the lane's KV: turns
         // already sent are reused byte-for-byte (raw assistant replies
         // included — the node's own tokens), and only the tail the session
@@ -594,66 +961,43 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             last_user
         };
         let domain = if text_fallback { "text" } else { "chat" };
-        let body = json::obj(vec![
-            ("model", json::s(model)),
+        let seed = self.sample_seed & i64::MAX as u64;
+        self.sample_seed = self.sample_seed.wrapping_add(1);
+        let mut fields = vec![
+            ("model", json::s(model.clone())),
             ("domain", json::s(domain)),
+            ("seed", Value::Int(seed as i64)),
             ("prompt", json::s(prompt)),
             ("chat_system", json::s(input.system.clone())),
             ("chat_session", json::s(self.conversation.clone())),
             ("chat_messages", Value::Arr(messages)),
-            ("max_tokens", Value::Int(self.max_tokens as i64)),
-        ]);
-        // Connect-refused/timeout means the TCP session never opened, so no
-        // job exists server-side — the ONE retriable POST failure class on
-        // this flaky LAN (anything after connect could have created the job
-        // and must not be replayed). The box's dead windows are BURSTY
-        // (several seconds of no-connect between fast answers), so the
-        // backoff rides out ~18 s before giving up on the turn.
-        let url = format!("{base}/generate");
-        let resp = {
-            let mut last: Option<String> = None;
-            let mut ok = None;
-            for wait_ms in [0u64, 500, 1500, 3000, 5000, 8000] {
-                if wait_ms > 0 {
-                    std::thread::sleep(Duration::from_millis(wait_ms));
-                }
-                match self.transport.post_json(&url, &body) {
-                    Ok(v) => {
-                        ok = Some(v);
-                        break;
-                    }
-                    Err(e) if e.contains("connect ") => last = Some(e),
-                    Err(e) => return Err(e),
-                }
-            }
-            match ok {
-                Some(v) => v,
-                None => return Err(last.unwrap_or_else(|| "generate: no attempt ran".into())),
-            }
+        ];
+        if let Some(max_tokens) = self.max_tokens {
+            fields.push(("max_tokens", Value::Int(max_tokens as i64)));
+        }
+        if let Some(thinking) = self.thinking {
+            fields.push(("thinking", Value::Bool(thinking)));
+        }
+        let body = json::obj(fields);
+        let now = self.transport.now();
+        let pending = PendingSubmission {
+            base, model, body, inferred_open_think,
+            attempts: 0, retry_at: now, deadline: now + ADMISSION_BUDGET,
+            reasons: Vec::new(), note: None, interrupted_bases: Vec::new(),
         };
-        let job = resp
-            .get("job_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "generate response missing job_id".to_string())?
-            .to_string();
-        self.active = Some(ActiveJob {
-            base,
-            job,
-            delivered: 0,
-            finished: false,
-            last_note: String::new(),
-            gen_tokens: 0,
-            think_tokens: None,
-            think_opened: false,
-            open_think,
-            visible_tokens: None,
-            prefix_ingested: None,
-            poll_fails: 0,
-        });
-        Ok(())
+        let result = self.submit(pending);
+        if result.is_err() { self.wire.clear(); }
+        result
     }
 
     fn poll(&mut self) -> Vec<ProviderEvent> {
+        if self.cancelled() {
+            self.cancel();
+            return Vec::new();
+        }
+        if self.pending.is_some() {
+            return self.poll_submission();
+        }
         let Some(active) = &mut self.active else {
             return Vec::new();
         };
@@ -662,14 +1006,15 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             return Vec::new();
         }
         let url = format!("{}/job/{}", active.base, active.job);
-        let status = match self.transport.get_json(&url) {
+        let status = match self.transport.get_json_detailed(&url) {
             Ok(v) => {
                 active.poll_fails = 0;
                 v
             }
             Err(e) => {
                 active.poll_fails += 1;
-                if active.poll_fails < MAX_POLL_FAILS {
+                let terminal = matches!(e, FleetError::Http { status, .. } if !matches!(status, 429 | 503));
+                if !terminal && active.poll_fails < MAX_POLL_FAILS {
                     // Transient: the job is still running on the node.
                     return Vec::new();
                 }
@@ -677,6 +1022,32 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 return vec![ProviderEvent::Error(format!("fleet job poll failed: {e}"))];
             }
         };
+        // A terminal local-use interruption proves the old job stopped. Keep
+        // its request intact and pick another worker; neither a lost poll nor
+        // an ordinary/user cancellation is proof that replay is appropriate.
+        if status.get("state").and_then(Value::as_str) == Some("cancelled") {
+            let reason = status.get("error").and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty()).unwrap_or("fleet job cancelled");
+            let active = self.active.take().unwrap();
+            if reason.starts_with("local-use:") && active.delivered == 0 {
+                let mut pending = active.submission;
+                pending.interrupted_bases.push(active.base.clone());
+                if pending.interrupted_bases.len() < 3 {
+                    // Loading/generation time does not consume the admission
+                    // wait budget, but total attempts and failed nodes remain
+                    // bounded across the entire logical turn.
+                    pending.deadline = self.transport.now() + ADMISSION_BUDGET;
+                    let note = format!("{} interrupted: {}; choosing another worker",
+                        active.base, bounded_reason(reason));
+                    return match self.wait_submission(pending, note) {
+                        Ok(()) => self.poll_submission(),
+                        Err(error) => { self.wire.clear(); vec![ProviderEvent::Error(error)] }
+                    };
+                }
+            }
+            self.wire.clear();
+            return vec![ProviderEvent::Error(format!("{}: {}", active.base, bounded_reason(reason)))];
+        }
         let mut events = Vec::new();
         if let Some((note, permille)) = job_status_note(&status) {
             if note != active.last_note {
@@ -756,7 +1127,8 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let partial = status.get("partial_text").and_then(Value::as_str).unwrap_or("");
         if !active.think_opened
             && active.delivered == 0
-            && (active.open_think || active.think_tokens.is_some_and(|n| n > 0))
+            && active.open_think
+            && !partial.is_empty()
             && !partial.starts_with("<think>")
         {
             // First tokens of a reasoning turn, template-opened: give the
@@ -822,6 +1194,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
     }
 
     fn cancel(&mut self) {
+        self.pending = None;
+        // The next history can replace the unsubmitted user/tool tail.
+        // Rebuild it cold instead of reusing that tail by role alone.
+        self.wire.clear();
         if let Some(active) = self.active.take() {
             let url = format!("{}/job/{}/cancel", active.base, active.job);
             let _ = self.transport.post_json(&url, &Value::Obj(Vec::new()));
@@ -1037,6 +1413,8 @@ mod wire_transcript_tests {
     struct Scripted {
         generates: Rc<RefCell<Vec<Value>>>,
         replies: Rc<RefCell<VecDeque<String>>>,
+        polls: Rc<RefCell<VecDeque<Value>>>,
+        think_open: Rc<RefCell<Option<bool>>>,
     }
 
     impl FleetTransport for Scripted {
@@ -1044,7 +1422,11 @@ mod wire_transcript_tests {
             assert!(url.ends_with("/generate"), "{url}");
             self.generates.borrow_mut().push(body.clone());
             let n = self.generates.borrow().len();
-            Ok(json::obj(vec![("job_id", json::s(format!("j{n}")))]))
+            let mut fields = vec![("job_id", json::s(format!("j{n}")))];
+            if let Some(think_open) = *self.think_open.borrow() {
+                fields.push(("think_open", Value::Bool(think_open)));
+            }
+            Ok(json::obj(fields))
         }
         fn get_json(&mut self, url: &str) -> Result<Value, String> {
             if url.ends_with("/health") {
@@ -1056,13 +1438,24 @@ mod wire_transcript_tests {
             if url.ends_with("/models") {
                 return Ok(json::obj(vec![(
                     "models",
-                    Value::Arr(vec![json::obj(vec![
-                        ("id", json::s("qwen3.8-27b")),
-                        ("domain", json::s("chat")),
-                        ("available", Value::Bool(true)),
-                        ("state", json::s("loaded")),
-                    ])]),
+                    Value::Arr(vec![
+                        json::obj(vec![
+                            ("id", json::s("qwen3.8-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                        json::obj(vec![
+                            ("id", json::s("qwen3.6-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                    ]),
                 )]));
+            }
+            if let Some(status) = self.polls.borrow_mut().pop_front() {
+                return Ok(status);
             }
             // A job poll: pop the scripted raw reply.
             let raw = self
@@ -1111,6 +1504,170 @@ mod wire_transcript_tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn an_exact_preferred_model_overrides_the_default_rank() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen3.6-27b".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Available { model, .. } if model == "qwen3.6-27b"
+        ));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        assert_eq!(
+            transport.generates.borrow()[0].get("model").and_then(Value::as_str),
+            Some("qwen3.6-27b")
+        );
+    }
+
+    #[test]
+    fn a_missing_preferred_model_is_unavailable() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport, vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen-does-not-exist".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn authoritative_closed_think_keeps_tagless_short_answers() {
+        for answer in ["x", "7", "✅"] {
+            let transport = Scripted::default();
+            *transport.think_open.borrow_mut() = Some(false);
+            transport.replies.borrow_mut().push_back(answer.to_string());
+            let mut provider = FleetQwenChatProvider::new(
+                transport,
+                vec!["http://n1:1".into()],
+            );
+            provider
+                .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+                .unwrap();
+            let events = provider.poll();
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Delta(text) if text == answer)
+            ));
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Done { text } if text == answer)
+            ));
+        }
+    }
+
+    #[test]
+    fn tagless_visible_text_streams_incrementally_when_think_is_closed() {
+        let transport = Scripted::default();
+        *transport.think_open.borrow_mut() = Some(false);
+        transport.polls.borrow_mut().extend([
+            json::obj(vec![
+                ("state", json::s("running")),
+                ("partial_text", json::s("✅")),
+                (
+                    "serving",
+                    json::obj(vec![("think_tokens", Value::Int(1))]),
+                ),
+            ]),
+            json::obj(vec![
+                ("state", json::s("done")),
+                ("partial_text", json::s("✅7")),
+            ]),
+        ]);
+        let mut provider = FleetQwenChatProvider::new(
+            transport,
+            vec!["http://n1:1".into()],
+        );
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let first = provider.poll();
+        assert!(first
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Delta(text) if text == "✅")));
+        assert!(first
+            .iter()
+            .all(|event| !matches!(event, ProviderEvent::Delta(text) if text.contains("<think>"))));
+        let second = provider.poll();
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Delta(text) if text == "7")
+        ));
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Done { text } if text == "✅7")
+        ));
+    }
+
+    #[test]
+    fn generation_options_are_additive_and_token_caps_are_exact() {
+        let omitted = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            omitted.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(None)
+        .with_thinking(Some(false));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &omitted.generates.borrow()[0];
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body.get("thinking").and_then(Value::as_bool), Some(false));
+
+        let capped = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            capped.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(Some(73));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &capped.generates.borrow()[0];
+        assert_eq!(body.get("max_tokens").and_then(Value::as_u64), Some(73));
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn a_new_map_conversation_sends_its_first_turn_tools_and_current_manifest() {
+        let transport = Scripted::default();
+        transport.replies.borrow_mut().extend([
+            "\n</think>\n\nold response".into(),
+            "\n</think>\n\nfirst response".into(),
+            "\n</think>\n\nsecond response".into(),
+        ]);
+        let tools = "sandbox tools: world.get_source, world.get_plan, world.place, world.add_addon";
+        let mut old = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        let mut input = TurnInput::new(tools, vec![user("old map instruction")]);
+        input.dynamic_context = "WORLD MANIFEST: map A; revision 1".into();
+        old.begin_turn(&input).unwrap();
+        drain_done(&mut old);
+        drop(old);
+
+        let mut current = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        let mut input = TurnInput::new(tools, vec![user("please add tons of houses")]);
+        input.dynamic_context = "WORLD MANIFEST: map B; revision 42".into();
+        current.begin_turn(&input).unwrap();
+        drain_done(&mut current);
+        let generated = transport.generates.borrow();
+        assert_eq!(generated.len(), 2);
+        assert_ne!(generated[0].get("chat_session"), generated[1].get("chat_session"));
+        assert_eq!(generated[1].get("chat_system").and_then(Value::as_str), Some(tools));
+        assert_eq!(wire_messages(&generated[1]), vec![("user".into(),
+            "WORLD MANIFEST: map B; revision 42\n\nplease add tons of houses".into())]);
+        drop(generated);
+
+        input.messages.push(assistant("first response"));
+        input.messages.push(user("add another house"));
+        input.dynamic_context = "WORLD MANIFEST: map B; revision 43".into();
+        current.begin_turn(&input).unwrap();
+        drain_done(&mut current);
+        let generated = transport.generates.borrow();
+        let messages = wire_messages(&generated[2]);
+        assert!(messages.last().unwrap().1.starts_with(&input.dynamic_context));
+        assert!(!messages.iter().any(|(_, text)| text.contains("map A")));
+        assert_eq!(generated[1].get("chat_session"), generated[2].get("chat_session"));
     }
 
     /// The wire mirror echoes the RAW reply and carries a stable
@@ -1174,3 +1731,7 @@ mod wire_transcript_tests {
         assert_eq!(wire_messages(&g3).len(), 1, "mirror rebuilt from the new history");
     }
 }
+
+#[cfg(test)]
+#[path = "qwen_admission_tests.rs"]
+mod admission_tests;

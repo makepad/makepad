@@ -164,6 +164,139 @@ impl ClipLatch {
     }
 }
 
+
+/// How a level READS, as against what it measures.
+///
+/// A meter fed the raw peak of the newest buffer is unreadable: it is
+/// twenty different numbers a second and the eye takes an average of the
+/// flicker rather than the loudest thing that happened. So the bar goes up
+/// the instant a peak arrives -- missing a transient is the one thing a
+/// peak meter may not do -- and comes down slowly, at the rate a meter is
+/// conventionally read by. Above it rides a mark holding the highest recent
+/// peak, for the operator who looked away.
+///
+/// This lives on the UI thread and nowhere near the mixer. The audio thread
+/// must not learn how fast a screen refreshes, and how a number LOOKS is
+/// not a decision about the mix. It is also why this is a plain type with a
+/// `dt` argument rather than anything that reads a clock: it can then be
+/// held to its own arithmetic in a test.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MeterBallistics {
+    level: f32,
+    hold: f32,
+    /// Seconds the hold mark has stood where it is.
+    held_for: f32,
+    /// The bar and mark last handed to the shader, and whether any ever were.
+    pushed: Option<(f32, f32)>,
+}
+
+/// Twenty decibels in about 1.7 seconds, which is the fall a peak meter is
+/// read by. As a time constant that is 1.7 / ln(10).
+const RELEASE_SECS: f32 = 0.74;
+/// How long the mark stands before it starts to follow the bar down. Long
+/// enough to look up at, short enough that it is still about now.
+const HOLD_SECS: f32 = 0.5;
+/// A one-pole never arrives, so under this the meter is simply out. Without
+/// it a settled meter would ask to be redrawn for the rest of the session,
+/// each time by an amount no screen can show.
+const SILENCE: f32 = 0.001;
+/// Below this much of the column, a move cannot be seen: a meter is at most
+/// a couple of hundred device pixels tall, so this is a fraction of one.
+const DEADBAND: f32 = 1.0 / 256.0;
+
+impl MeterBallistics {
+    /// One tick. `peak` is the highest sample since the last tick, `dt` the
+    /// seconds since it.
+    pub fn tick(&mut self, peak: f32, dt: f32) {
+        // A tick can be enormous: this rides a 20 Hz timer that Windows
+        // services at the bottom of the message queue, and returning from a
+        // page that was not pumping hands over one gap of whatever length.
+        // Clamped here rather than at the call site, because the guard
+        // belongs to the arithmetic it protects.
+        let dt = if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
+        let peak = if peak.is_finite() { peak.max(0.0) } else { 0.0 };
+        // 1 - e^(-dt/tau): the share of the remaining distance to cover in
+        // this tick. Being a function of dt is the whole point -- the tick
+        // is not evenly spaced, and a per-tick constant would make the fall
+        // speed a function of how busy the machine is.
+        let fall = 1.0 - (-dt / RELEASE_SECS).exp();
+
+        if peak >= self.level {
+            self.level = peak;
+        } else {
+            self.level += (peak - self.level) * fall;
+            if self.level < SILENCE {
+                self.level = 0.0;
+            }
+        }
+
+        if self.level >= self.hold {
+            self.hold = self.level;
+            self.held_for = 0.0;
+        } else {
+            self.held_for += dt;
+            if self.held_for >= HOLD_SECS {
+                // It follows the bar down rather than dropping to meet it:
+                // a mark that jumps reads as a new event, which is the one
+                // thing it is not.
+                self.hold += (self.level - self.hold) * fall;
+                if self.hold < SILENCE {
+                    self.hold = 0.0;
+                }
+            }
+        }
+    }
+
+    /// The level as it was measured, ballistics and all: a share of full
+    /// scale. This is the one to PRINT. The taper below is for drawing.
+    pub fn amplitude(&self) -> f32 {
+        self.level.clamp(0.0, 1.0)
+    }
+
+    /// The bar, on the scale it is drawn on.
+    ///
+    /// The square root is the display taper the meter has always used: it
+    /// gives the quiet half of the range room, where a linear amplitude
+    /// column spends most of its height on the top few decibels.
+    pub fn level(&self) -> f32 {
+        self.level.clamp(0.0, 1.0).sqrt()
+    }
+
+    /// The hold mark, on the same scale.
+    pub fn hold(&self) -> f32 {
+        self.hold.clamp(0.0, 1.0).sqrt()
+    }
+
+    /// The bar to draw, or `None` when nothing has moved enough to see.
+    ///
+    /// This is the whole reason the meter is cheap: pushing a uniform marks
+    /// the pass for repaint, so a meter that reports every tick repaints the
+    /// window twenty times a second forever, including with nothing
+    /// playing. It reports the DISPLAY value, because that is where being
+    /// visible is decided -- a threshold on the raw amplitude is blind at
+    /// the bottom of a square-root scale and twitchy at the top.
+    pub fn take_push(&mut self) -> Option<(f32, f32)> {
+        let now = (self.level(), self.hold());
+        // Both, because the mark moves on its own: while the bar sits still
+        // at the end of a phrase the mark is still coming down over it, and
+        // a deadband that watched only the bar would freeze it there.
+        let moved = match self.pushed {
+            None => true,
+            Some((level, hold)) => {
+                (now.0 - level).abs() >= DEADBAND || (now.1 - hold).abs() >= DEADBAND
+            }
+        };
+        // The last step to nothing always goes. A meter left standing a
+        // deadband above zero is a meter saying something is playing.
+        let landed = self.pushed.is_some_and(|(level, hold)| level > 0.0 || hold > 0.0)
+            && now == (0.0, 0.0);
+        (moved || landed).then(|| {
+            self.pushed = Some(now);
+            now
+        })
+    }
+}
+
 /// The one line, in the order a glance wants it: what the render cost, then
 /// anything that has actually gone wrong, then the master level.
 pub fn summary_line(health: &AudioHealth, master: f32, clipped: bool) -> String {
@@ -460,6 +593,129 @@ mod tests {
         assert_eq!(pane_text(&lines, "", 3), "line 7\nline 8\nline 9");
         assert_eq!(pane_text(&lines, "line 1", 3), "line 1", "filter, then tail");
         assert_eq!(pane_text(&[], "", 3), "");
+    }
+
+    /// A meter that shows the newest buffer and nothing else is a flicker.
+    /// The bar must take a transient the instant it lands and let it go at
+    /// the rate the eye reads a meter by.
+    #[test]
+    fn the_bar_takes_a_peak_at_once_and_lets_it_go_by_the_convention() {
+        let mut m = MeterBallistics::default();
+        m.tick(1.0, 0.05);
+        assert_eq!(m.level(), 1.0, "a peak has to be there the tick it arrives");
+        // Twenty decibels is a factor of ten in amplitude, and the display
+        // is the square root of that: sqrt(0.1) = 0.316.
+        for _ in 0..34 {
+            m.tick(0.0, 0.05);
+        }
+        assert!(
+            (m.level() - 0.316).abs() < 0.01,
+            "1.7s should be 20 dB down, which reads {:.3}, got {:.3}",
+            0.316,
+            m.level()
+        );
+        // And a peak on the way down is taken immediately too, or the meter
+        // under-reads exactly when the music gets loud again.
+        m.tick(0.81, 0.05);
+        assert_eq!(m.level(), 0.9, "0.81 amplitude reads 0.9");
+    }
+
+    /// The reason the fall is a time constant and not a per-tick figure.
+    /// This tick is a 20 Hz timer serviced at the bottom of the message
+    /// queue: it arrives late, it coalesces, and it stops entirely while
+    /// another page is up. A per-tick constant would make how fast the
+    /// meter falls a function of how busy the machine is.
+    #[test]
+    fn the_fall_does_not_depend_on_how_often_the_meter_is_ticked() {
+        let mut often = MeterBallistics::default();
+        let mut seldom = MeterBallistics::default();
+        often.tick(1.0, 0.01);
+        seldom.tick(1.0, 0.01);
+        for _ in 0..100 {
+            often.tick(0.0, 0.01);
+        }
+        for _ in 0..4 {
+            seldom.tick(0.0, 0.25);
+        }
+        assert!(
+            (often.level() - seldom.level()).abs() < 1e-3,
+            "one second is one second: {:.4} against {:.4}",
+            often.level(),
+            seldom.level()
+        );
+        // A gap longer than any real one cannot dump the meter to zero in a
+        // single step -- returning to the page would look like a cut.
+        let mut returned = MeterBallistics::default();
+        returned.tick(1.0, 0.05);
+        returned.tick(0.0, 30.0);
+        assert!(returned.level() > 0.0, "a huge gap is clamped, not obeyed");
+        assert!(returned.level() < 1.0, "but it is still a fall");
+    }
+
+    /// The mark is for the glance that was somewhere else.
+    #[test]
+    fn the_mark_stands_a_moment_and_then_rides_the_bar_down() {
+        let mut m = MeterBallistics::default();
+        m.tick(1.0, 0.05);
+        assert_eq!(m.hold(), 1.0);
+        for _ in 0..8 {
+            m.tick(0.0, 0.05);
+        }
+        assert_eq!(m.hold(), 1.0, "still standing at 0.45s");
+        assert!(m.level() < 0.9, "while the bar has gone: {:.3}", m.level());
+        for _ in 0..20 {
+            m.tick(0.0, 0.05);
+        }
+        assert!(m.hold() < 1.0, "and after half a second it follows");
+        assert!(m.hold() >= m.level(), "never below the bar it marks");
+        // A louder peak reclaims it at once and restarts the standing.
+        m.tick(1.0, 0.05);
+        assert_eq!(m.hold(), 1.0);
+    }
+
+    /// Pushing a uniform marks the pass for repaint, so a meter that reports
+    /// every tick repaints the window twenty times a second forever.
+    #[test]
+    fn a_settled_meter_stops_asking_to_be_drawn() {
+        let mut m = MeterBallistics::default();
+        m.tick(1.0, 0.05);
+        assert!(m.take_push().is_some(), "a fresh meter always reports");
+        // Ten seconds of nothing: long enough for the bar AND the mark,
+        // which stands half a second before it even starts down.
+        let mut last = None;
+        for _ in 0..200 {
+            m.tick(0.0, 0.05);
+            if let Some(push) = m.take_push() {
+                last = Some(push);
+            }
+        }
+        assert_eq!(last, Some((0.0, 0.0)), "the last thing it says is: out");
+        for _ in 0..40 {
+            m.tick(0.0, 0.05);
+            assert_eq!(m.take_push(), None, "and then it says nothing at all");
+        }
+        // A move too small to see is not worth a repaint; one that can be
+        // seen is.
+        m.tick(0.000_01, 0.05);
+        assert_eq!(m.take_push(), None, "below the deadband");
+        m.tick(0.25, 0.05);
+        assert_eq!(m.take_push(), Some((0.5, 0.5)), "and above it");
+    }
+
+    /// The mixer hands over a peak, not a level, and a peak can be anything
+    /// a broken effect produced.
+    #[test]
+    fn nothing_a_meter_is_handed_can_wedge_it() {
+        let mut m = MeterBallistics::default();
+        m.tick(f32::NAN, 0.05);
+        m.tick(f32::INFINITY, 0.05);
+        m.tick(-1.0, 0.05);
+        assert_eq!(m.level(), 0.0, "none of that is a level");
+        m.tick(1.0, f32::NAN);
+        assert_eq!(m.level(), 1.0, "and a broken dt still takes the peak");
+        let before = m.level();
+        m.tick(0.0, f32::NAN);
+        assert_eq!(m.level(), before, "it simply does not advance time");
     }
 
     #[test]

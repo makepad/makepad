@@ -350,4 +350,22 @@ mod tests {
             .expect("emoji glyph should rasterize");
         assert_eq!(rasterized.atlas_kind, AtlasKind::Color);
     }
+
+    #[test]
+    fn jetbrains_ui_symbol_fallback_has_permissive_license_and_required_cmap() {
+        let chars = ['⌘', '⇧', '⌥', '⌃', '⏎', '←', '→', '↑', '↓', '•', '…'];
+        let font = make_font(bundled_font_path("jetbrains_mono_variable.ttf"));
+        font.with_ttf_parser_face(|face| {
+            let license = face
+                .names()
+                .into_iter()
+                .find(|record| record.name_id == 13)
+                .and_then(|record| record.to_string())
+                .expect("UI fallback must carry its license in the font name table");
+            assert!(license.contains("SIL Open Font License, Version 1.1"));
+            for ch in chars {
+                assert!(face.glyph_index(ch).is_some(), "UI fallback is missing {ch:?}");
+            }
+        });
+    }
 }

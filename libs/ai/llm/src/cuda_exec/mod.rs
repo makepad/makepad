@@ -83,6 +83,22 @@ pub struct CudaDeviceFeatures {
     pub compiled_arch: &'static str,
 }
 
+/// Per-session CUDA graph choices used by model-specific parity arms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CudaGraphOptions {
+    pub use_f16_gemm: bool,
+    pub tiled_roformer: bool,
+}
+
+impl Default for CudaGraphOptions {
+    fn default() -> Self {
+        Self {
+            use_f16_gemm: true,
+            tiled_roformer: true,
+        }
+    }
+}
+
 /// The CUDA execution backend handle (device + stream + cublas identity).
 pub struct CudaExecRuntime {
     imp: imp::Runtime,
@@ -244,6 +260,22 @@ impl CudaExecRuntime {
         self.create_raw_graph_session_with_progress(ctx, graph, pinned, &mut |_, _| {})
     }
 
+    pub fn create_raw_graph_session_with_options(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[crate::TensorId],
+        options: CudaGraphOptions,
+    ) -> Result<CudaRawGraphSession> {
+        self.create_raw_graph_session_with_progress_and_options(
+            ctx,
+            graph,
+            pinned,
+            options,
+            &mut |_, _| {},
+        )
+    }
+
     pub fn create_raw_graph_session_with_progress(
         &self,
         ctx: &Context,
@@ -251,8 +283,27 @@ impl CudaExecRuntime {
         pinned: &[crate::TensorId],
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<CudaRawGraphSession> {
+        self.create_raw_graph_session_with_progress_and_options(
+            ctx,
+            graph,
+            pinned,
+            CudaGraphOptions::default(),
+            progress,
+        )
+    }
+
+    pub fn create_raw_graph_session_with_progress_and_options(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[crate::TensorId],
+        options: CudaGraphOptions,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<CudaRawGraphSession> {
         Ok(CudaRawGraphSession {
-            imp: self.imp.create_raw_session(ctx, graph, pinned, progress)?,
+            imp: self
+                .imp
+                .create_raw_session(ctx, graph, pinned, options, progress)?,
         })
     }
 
@@ -282,7 +333,7 @@ impl CompiledHybridDecodeCuda {
         input: LogitsProbeInput<'_>,
         layout: &HybridDecodeBatchLayout,
     ) -> Result<HybridDecodeRun> {
-        self.imp.execute(input, layout, true)
+        self.imp.execute(input, layout, true, false)
     }
 
     pub fn execute_logits_only_with_layout(
@@ -290,13 +341,22 @@ impl CompiledHybridDecodeCuda {
         input: LogitsProbeInput<'_>,
         layout: &HybridDecodeBatchLayout,
     ) -> Result<HybridDecodeRun> {
-        self.imp.execute(input, layout, false)
+        self.imp.execute(input, layout, false, false)
+    }
+
+    pub fn execute_logits_only_with_layout_options(
+        &mut self,
+        input: LogitsProbeInput<'_>,
+        layout: &HybridDecodeBatchLayout,
+        skip_logits_readback: bool,
+    ) -> Result<HybridDecodeRun> {
+        self.imp
+            .execute(input, layout, false, skip_logits_readback)
     }
 }
 
-/// llama-bench.cpp:2026 host-vs-GPU split (MAKEPAD_LLAMA_HOST_SPLIT=1).
 #[cfg(makepad_llama_cuda_kernels)]
-pub use imp::{host_split_reset, host_split_snapshot, HostSplit};
+pub use imp::{host_split_reset, host_split_set_enabled, host_split_snapshot, HostSplit};
 
 /// The widest activation batch the quantized mat-vec route serves, and with it
 /// the boundary between Q8_1-quantized activations and the bf16 GEMM slab.
@@ -334,6 +394,9 @@ impl HostSplit {
 
 #[cfg(not(makepad_llama_cuda_kernels))]
 pub fn host_split_reset() {}
+
+#[cfg(not(makepad_llama_cuda_kernels))]
+pub fn host_split_set_enabled(_enabled: bool) {}
 
 #[cfg(not(makepad_llama_cuda_kernels))]
 pub fn host_split_snapshot() -> HostSplit {

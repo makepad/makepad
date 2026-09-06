@@ -1,0 +1,21 @@
+use mod.flow.*
+
+/** What to render while preserving the supplied image's depth structure. */
+let prompt = Input{ type: @text default: "a weathered stone guardian in warm evening light" }
+/** The source image whose depth should control the result. */
+let image = Input{ type: @image }
+let depth = Depth{ image: image.image() model: "da3-metric-large" }
+let control = Control{
+    prompt: prompt.text()
+    control: depth.out(@image)
+    steps: 30
+    model: "flux1-depth-dev"
+}
+/** Publish the depth-guided picture into the flow asset library. */
+let published = Publish{ value: control.image() namespace: "flows" tags: ["flow", "control", "depth"] }
+
+Flow{
+    label: "Depth-guided image"
+    brief: "Extracts metric depth from a supplied image and uses it to constrain a new render."
+    prompt, image, depth, control, published
+}

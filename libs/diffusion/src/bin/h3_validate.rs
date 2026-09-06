@@ -9,6 +9,7 @@
 //! Usage:
 //!   h3-validate --dump <dir> --models <MiniMax-H3 dir> [--stage layout|te|fl2va|dit|all]
 
+use makepad_diffusion::backend::GemmPrecision;
 use makepad_diffusion::h3::{
     h3_build_packed_layout, h3_build_row_timesteps_cond, h3_patchify_video_latents,
     h3_rope_tables, h3_scale_noise, H3ShardedWeights, H3_KEYFRAME_NOISE_AUG, H3_ROT_HALF,
@@ -21,7 +22,6 @@ use std::path::{Path, PathBuf};
 // --- minimal .npy reader ---------------------------------------------------
 
 struct Npy {
-    shape: Vec<usize>,
     descr: String,
     data: Vec<u8>,
 }
@@ -57,12 +57,11 @@ fn load_npy(path: &Path) -> Result<Npy, String> {
         .and_then(|rest| rest.split('(').nth(1))
         .and_then(|rest| rest.split(')').next())
         .ok_or_else(|| format!("{}: no shape", path.display()))?;
-    let shape: Vec<usize> = shape_text
+    let _shape: Vec<usize> = shape_text
         .split(',')
         .filter_map(|part| part.trim().parse::<usize>().ok())
         .collect();
     Ok(Npy {
-        shape,
         descr,
         data: bytes[header_start + header_len..].to_vec(),
     })
@@ -172,13 +171,12 @@ fn main() {
 }
 
 fn opts_loop() -> usize {
-    // --loop N is parsed generically into OPTS; read from env fallback too.
+    // --loop N is parsed generically from argv.
     std::env::args()
         .collect::<Vec<_>>()
         .windows(2)
         .find(|pair| pair[0] == "--loop")
         .and_then(|pair| pair[1].parse().ok())
-        .or_else(|| std::env::var("H3_LOOP").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(0)
 }
 
@@ -351,7 +349,10 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
         println!("[dit.timestep_indices] equal={idx_ok}");
 
         let rope = h3_rope_tables(&layout.position_ids);
-        let act16 = std::env::var("H3_ACT_F16").map(|v| v != "0").unwrap_or(false);
+        let precision = GemmPrecision {
+            f16_accumulate: false,
+            f16_activations: false,
+        };
         let start = std::time::Instant::now();
         let out = h3_dit_forward(
             &weights,
@@ -362,11 +363,14 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
             &video_rows,
             &audio_rows,
             &text_embeds,
-            act16,
+            precision,
             &[0, 9, 49],
         )
         .map_err(|err| err.to_string())?;
-        println!("dit forward: {:.2}s (act16={act16})", start.elapsed().as_secs_f64());
+        println!(
+            "dit forward: {:.2}s (precision={precision:?})",
+            start.elapsed().as_secs_f64()
+        );
 
         compare(
             "dit.video_velocity",
@@ -407,7 +411,7 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
                     &video_rows,
                     &audio_rows,
                     &text_embeds,
-                    act16,
+                    precision,
                     &[],
                 )
                 .map_err(|err| err.to_string())?;
@@ -416,7 +420,7 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
             let mean = times.iter().sum::<f64>() / times.len() as f64;
             let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
             println!(
-                "[dit.loop] n={loop_count} mean={mean:.3}s/fwd min={min:.3}s/fwd (act16={act16}, oracle 2.033 s/fwd @640x352x124)"
+                "[dit.loop] n={loop_count} mean={mean:.3}s/fwd min={min:.3}s/fwd (precision={precision:?}, oracle 2.033 s/fwd @640x352x124)"
             );
         }
 

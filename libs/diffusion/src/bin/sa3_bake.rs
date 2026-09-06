@@ -203,9 +203,6 @@ fn parse_opts(args: &[String]) -> BakeOpts {
 }
 
 fn default_weights() -> PathBuf {
-    if let Ok(dir) = std::env::var("MAKEPAD_SA3_WEIGHTS") {
-        return PathBuf::from(dir);
-    }
     // dev checkout weights, then the asset-ai cache
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dev = repo.join("local/sa3_ref/weights/stable-audio-3-small-sfx");

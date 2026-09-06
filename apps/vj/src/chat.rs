@@ -34,11 +34,18 @@ pub struct ChatBridge {
 impl ChatBridge {
     /// The store session is up: open the chat on its broker. The session
     /// itself is created lazily, on the first turn.
-    pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>, cache: PathBuf) {
+    pub fn connect(
+        &mut self,
+        endpoints: ApiEndpoints,
+        token: Option<String>,
+        cache: PathBuf,
+        spawner: makepad_widgets::makepad_platform::thread::ThreadSpawner,
+    ) {
         ChatData::set_status("Asset server connected · opening Qwen on the first message");
         self.feed = Some(ChatFeed::start(
             FeedConfig::new(endpoints, token, cache, "gen", "vj"),
             Box::new(NoClientTools),
+            spawner,
         ));
     }
 

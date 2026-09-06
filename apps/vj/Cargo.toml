@@ -16,8 +16,8 @@ edition = "2021"
 default-run = "makepad-vj"
 
 [dependencies]
-makepad-app-asset-server = { path = "../asset-server" }
 makepad-widgets = { path = "../../widgets" }
+makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-score-view = { path = "../../libs/score_view" }
 makepad-piano-model = { path = "../../libs/piano_model" }
 makepad-drumkit = { path = "../../libs/drumkit" }
@@ -68,7 +68,6 @@ makepad-webp = { path = "../../libs/webp" }
 # loopback, when no external store is reachable. Same crate asset-ui and the
 # sandbox embed — the VJ stays a THIN CLIENT over it either way, talking
 # HTTP to 127.0.0.1 exactly as it talks to a remote store.
-makepad-asset-store = { path = "../../libs/asset/store" }
 # Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
 # pictures for audio, and the dimension probes for stills.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
@@ -93,3 +92,13 @@ makepad-mp4-index = { path = "../../libs/mp4_index" }
 # CUDA kernels it needs are already pulled in by the beat, stem and note
 # models, so this is not a new toolchain requirement.
 advisor = ["dep:makepad-ai-llm"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-app-asset-server = { path = "../asset-server" }
+makepad-asset-store = { path = "../../libs/asset/store" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+makepad-asset-store = { path = "../../libs/asset/store", default-features = false, features = ["embedded"] }
+
+[dev-dependencies]
+makepad-audio-encode = { path = "../../libs/audio_encode" }

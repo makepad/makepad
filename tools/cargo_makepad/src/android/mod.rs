@@ -17,9 +17,7 @@ pub enum AndroidVariant {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AndroidConfig {
-    pub small_fonts: bool,
-}
+pub struct AndroidConfig;
 
 /// All values needed to render an `AndroidManifest.xml`. Constructed by
 /// `compile::resolve_manifest_args` from CLI flags + Cargo.toml metadata +
@@ -472,7 +470,7 @@ Common options:\n\
                                                   else 26 (Android 8.0). Bump for apps that need\n\
                                                   guaranteed availability of API > 26 native APIs\n\
                                                   (e.g. AMidi -> 29, AFontMatcher -> 29).\n\
-  --small-fonts\n\
+  --small-fonts                            deprecated no-op; app manifest selects fonts\n\
   --no-icon\n\
   --sdk-path=<path>\n\
   --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
@@ -693,7 +691,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
     let mut no_icon = false;
-    let mut config = AndroidConfig::default();
+    let config = AndroidConfig::default();
     let mut keystore: Option<String> = None;
     let mut keystore_pass: Option<String> = None;
     let mut keystore_key_alias: Option<String> = None;
@@ -723,7 +721,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         } else if let Some(opt) = v.strip_prefix("--variant=") {
             variant = AndroidVariant::from_str(opt)?;
         } else if v.trim() == "--small-fonts" {
-            config.small_fonts = true;
+            eprintln!(
+                "warning: --small-fonts is ignored; the application's makepad.font-assets.v1 manifest selects fonts"
+            );
         } else if v.trim() == "--no-icon" {
             no_icon = true;
         } else if v.trim() == "--keep-sdk-sources" {

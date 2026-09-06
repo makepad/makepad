@@ -591,6 +591,11 @@ const WSOLA_COARSE_STRIDE: usize = 8;
 const WSOLA_FINE_RADIUS: usize = WSOLA_COARSE_STRIDE - 1;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
+/// The ratio at which the stretcher ENGAGES; it disengages back at
+/// [`STRETCH_BYPASS_EPSILON`]. The gap is hysteresis: a sync servo trimming
+/// the rate around unity would otherwise switch the stretcher in and out
+/// many times a second, and every switch re-seats the playhead.
+pub const STRETCH_ENGAGE_EPSILON: f64 = 1e-3;
 /// Widest stretch the grain search can still track. A caller that splits a
 /// tempo between the stretcher and a resampler must clamp to the SAME pair
 /// and recover the resampler from the result, or the two disagree about the
@@ -1012,6 +1017,21 @@ impl Biquad {
         Biquad::from_raw(b0, -(1.0 + cos_w0), b0, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha)
     }
 
+    /// A peaking bell: `gain` above one lifts a hump at `cutoff`, below
+    /// one digs a notch, and exactly one is a straight wire.
+    pub fn peaking(cutoff: f32, sample_rate: f32, q: f32, gain: f32) -> Biquad {
+        let (cos_w0, alpha, _) = Biquad::shared(cutoff, sample_rate, q);
+        let a = gain.max(1e-4).sqrt();
+        Biquad::from_raw(
+            1.0 + alpha * a,
+            -2.0 * cos_w0,
+            1.0 - alpha * a,
+            1.0 + alpha / a,
+            -2.0 * cos_w0,
+            1.0 - alpha / a,
+        )
+    }
+
     pub fn allpass(cutoff: f32, sample_rate: f32, q: f32) -> Biquad {
         let (cos_w0, alpha, _) = Biquad::shared(cutoff, sample_rate, q);
         Biquad::from_raw(
@@ -1061,6 +1081,23 @@ pub const EQ_HIGH_HZ_MAX: f32 = 8_000.0;
 /// has something in it. Crossed or touching corners do not make a
 /// three-band EQ with an empty middle, they make an unstable one.
 const EQ_CROSSOVER_MIN_OCTAVES: f32 = 1.0;
+
+/// The pair of corners a request actually lands on: each inside its own
+/// range, and the two at least [`EQ_CROSSOVER_MIN_OCTAVES`] apart.
+///
+/// Public because the control side has to store exactly what the engine
+/// will run. Two clamps that agree today and drift tomorrow is how a
+/// readout starts lying about what is being heard.
+pub fn eq_crossovers_for(low_hz: f32, high_hz: f32) -> Option<(f32, f32)> {
+    let low = knob(low_hz, EQ_LOW_HZ_MIN, EQ_LOW_HZ_MAX)?;
+    let high = knob(high_hz, EQ_HIGH_HZ_MIN, EQ_HIGH_HZ_MAX)?;
+    let gap = 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES);
+    let high = (high.max(low * gap)).min(EQ_HIGH_HZ_MAX);
+    // If the ceiling stopped the push, the lower one gives way instead:
+    // the gap is the invariant, not either corner.
+    let low = low.min(high / gap);
+    Some((low, high))
+}
 /// How much of the remaining distance a crossover closes each block
 /// while it travels.
 ///
@@ -1072,6 +1109,11 @@ const EQ_CROSSOVER_MIN_OCTAVES: f32 = 1.0;
 /// enough to be inaudible -- the same answer the sweep's own corner
 /// takes, for the same reason.
 const EQ_CROSSOVER_GLIDE: f32 = 0.12;
+/// How broad a boost bell is. Under one octave wide at the half-way
+/// point: wide enough to read as "more bass" rather than as a resonance,
+/// narrow enough that lifting the low band does not drag the mids up
+/// with it.
+const EQ_BELL_Q: f32 = 0.9;
 /// Close enough to be there. An exponential walk never quite arrives, so
 /// the last sliver is taken in one step -- a hundredth of an octave,
 /// which is under a percent of the corner and far below what a whole
@@ -1120,6 +1162,14 @@ pub fn filter_corner_hz(position: f32) -> Option<(bool, f32)> {
 /// same speed.
 const BLEND_ENGAGE_SECS: f32 = 0.08;
 
+/// Where each band's bell sits, given the corners in force. The outer
+/// two have no centre of their own -- a band that runs to DC or to
+/// Nyquist has no middle -- so they take their corner shifted an octave
+/// into the band, which is where a shelf-like lift wants to sit.
+fn bell_centres(low_hz: f32, high_hz: f32) -> [f32; 3] {
+    [low_hz * 0.5, (low_hz * high_hz).sqrt(), high_hz * 2.0]
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct EqChannelState {
     /// Split at EQ_HIGH_HZ: low-pass pair then high-pass pair.
@@ -1130,6 +1180,8 @@ struct EqChannelState {
     band_hp: [BiquadState; 2],
     /// Phase compensation for the high branch.
     band_ap: BiquadState,
+    /// One bell per band, for the boost half of the knob's travel.
+    bells: [BiquadState; 3],
     /// Sweepable filter, 4th order.
     sweep: [BiquadState; 2],
     /// The same filter at its PREVIOUS setting, kept running while a
@@ -1151,6 +1203,13 @@ struct EqCoeffs {
     band_ap: Biquad,
     sweep: [Biquad; 2],
     sweep_on: bool,
+    /// One bell per band, for the BOOST half of the knob's travel. Below
+    /// unity the isolator does the work; above it these do, so a lift is
+    /// a hump inside the band rather than the whole crossover slice
+    /// turned up. `bells_on` says whether any is doing anything at all,
+    /// so the ordinary case costs one compare and no filtering.
+    bells: [Biquad; 3],
+    bells_on: bool,
     /// What the sweep was, for the frames it takes to hand over.
     sweep_prev: [Biquad; 2],
     sweep_prev_on: bool,
@@ -1172,6 +1231,8 @@ impl EqCoeffs {
             band_lp: Biquad::lowpass(low_hz, sample_rate, LR4_Q),
             band_hp: Biquad::highpass(low_hz, sample_rate, LR4_Q),
             band_ap: Biquad::allpass(low_hz, sample_rate, LR4_Q),
+            bells: [Biquad::default(); 3],
+            bells_on: false,
             sweep: [Biquad::default(); 2],
             sweep_on: false,
             sweep_prev: [Biquad::default(); 2],
@@ -1239,23 +1300,48 @@ impl DeckEq {
     /// pushes the other along rather than leaving the mid band with
     /// nothing in it.
     pub fn set_crossovers(&mut self, low_hz: f32, high_hz: f32) {
-        let Some(low) = knob(low_hz, EQ_LOW_HZ_MIN, EQ_LOW_HZ_MAX) else {
+        let Some((low, high)) = eq_crossovers_for(low_hz, high_hz) else {
             return;
         };
-        let Some(high) = knob(high_hz, EQ_HIGH_HZ_MIN, EQ_HIGH_HZ_MAX) else {
-            return;
-        };
-        let floor = low * 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES);
-        let high = high.max(floor).min(EQ_HIGH_HZ_MAX);
-        // If the ceiling above stopped the push, give way with the lower
-        // one instead: the gap is the invariant, not either corner.
-        let low = low.min(high / 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES));
         self.low_hz = low;
         self.high_hz = high;
     }
 
     pub fn crossovers(&self) -> (f32, f32) {
         (self.low_hz, self.high_hz)
+    }
+
+    /// Rebuild the boost bells from the gains in force.
+    ///
+    /// THE LAW. Below unity a band knob is an isolator: it scales its own
+    /// crossover slice, and zero is a true kill because the slice simply
+    /// stops being summed. That is what a DJ EQ is for and it is not
+    /// changing.
+    ///
+    /// Above unity, scaling the slice is the wrong instrument. A
+    /// crossover band is a brick with corners; turning the whole thing up
+    /// lifts everything in it equally and stacks phase at both seams,
+    /// which reads as honk rather than as more. So the boost half comes
+    /// off the isolator entirely -- the slice stays at unity -- and a
+    /// gentle bell in the middle of the band does the lifting instead.
+    ///
+    /// Nothing is crossfaded between the two because nothing needs to
+    /// be: at exactly unity the isolator is a wire and the bell is a
+    /// wire, so the two halves already meet.
+    fn build_bells(&mut self) {
+        let centres = bell_centres(self.low_built, self.high_built);
+        let mut any = false;
+        for band in 0..3 {
+            // The autopilot's blend multiplies the operator's knob, the
+            // same way it does for the cut half.
+            let boost = (self.gain[band].target() * self.blend[band].target()).max(1.0);
+            if boost > 1.0 + EQ_KILL_EPSILON {
+                any = true;
+            }
+            self.coeffs.bells[band] =
+                Biquad::peaking(centres[band], self.sample_rate, EQ_BELL_Q, boost);
+        }
+        self.coeffs.bells_on = any;
     }
 
     /// Walk the built corners toward the asked-for ones, in octaves --
@@ -1449,6 +1535,7 @@ impl DeckEq {
     /// hear a cutoff quantized to one buffer.
     pub fn prepare_block(&mut self) {
         self.glide_crossovers();
+        self.build_bells();
         let position = self.effective_filter();
         let engaged = !self.at_unity();
         self.wet.slew(if engaged { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
@@ -1581,7 +1668,23 @@ impl DeckEq {
             // three bands stay phase-coherent and sum flat at unity.
             let high = self.coeffs.band_ap.process(&mut state.band_ap, high_branch);
 
-            let banded = low * gains[0] + mid * gains[1] + high * gains[2];
+            // The isolator half: at or below unity the band is scaled,
+            // above it the slice is left alone and the bell does the
+            // lifting.
+            let banded = low * gains[0].min(1.0)
+                + mid * gains[1].min(1.0)
+                + high * gains[2].min(1.0);
+            let banded = match self.coeffs.bells_on {
+                false => banded,
+                true => {
+                    let mut lifted = banded;
+                    for band in 0..3 {
+                        lifted = self.coeffs.bells[band]
+                            .process(&mut state.bells[band], lifted);
+                    }
+                    lifted
+                }
+            };
             let mut wet_sample = banded;
             if self.coeffs.sweep_on {
                 for index in 0..2 {
@@ -4061,6 +4164,199 @@ impl SlotLevel {
     }
 }
 
+pub(crate) const COMPRESSOR_THRESHOLD_MIN_DB: f32 = -40.0;
+pub(crate) const COMPRESSOR_THRESHOLD_MAX_DB: f32 = 0.0;
+pub(crate) const COMPRESSOR_THRESHOLD_DEFAULT_DB: f32 = -18.0;
+pub(crate) const COMPRESSOR_RATIO_MIN: f32 = 1.0;
+pub(crate) const COMPRESSOR_RATIO_MAX: f32 = 20.0;
+pub(crate) const COMPRESSOR_RATIO_DEFAULT: f32 = 4.0;
+/// How wide the bend around the threshold is, in decibels. A knee this
+/// size is the difference between a compressor that grabs and one that
+/// leans: material sitting near the threshold is eased into gain
+/// reduction rather than switched into it.
+const COMPRESSOR_KNEE_DB: f32 = 6.0;
+/// How fast it takes hold, and how slowly it lets go. Fast enough to
+/// catch a kick's front, slow enough that the release does not chew
+/// through the bar behind it.
+const COMPRESSOR_ATTACK_SECS: f32 = 0.005;
+const COMPRESSOR_RELEASE_SECS: f32 = 0.15;
+
+/// One deck's compressor: a soft-knee peak compressor with automatic
+/// makeup.
+///
+/// The makeup is derived rather than knobbed. What a compressor gives
+/// back is fixed by what it takes away -- the gain reduction at full
+/// scale is exactly what the threshold and ratio say it is -- so a
+/// makeup knob is a second control for the one number the first two
+/// already decided, and getting it wrong is how a compressor becomes a
+/// volume control by accident. This one lifts by the reduction the
+/// loudest possible input would see, so pushing the ratio up makes the
+/// quiet parts louder rather than making everything quieter.
+///
+/// Filter memory only -- two envelope followers, a few floats -- so it
+/// takes the `reset` treatment the EQ and the phaser do rather than a
+/// silence mark.
+pub struct Compressor {
+    wet: ParamRamp,
+    threshold_db: ParamRamp,
+    ratio: ParamRamp,
+    /// The envelope it is riding, in decibels, and the gain reduction in
+    /// force.
+    env_db: f32,
+    gain_db: f32,
+    /// A cheap linear peak follower kept running even while bypassed, so
+    /// that engaging starts the detector where the music actually IS.
+    ///
+    /// Without it the detector starts at silence, the reduction is zero
+    /// for the length of the attack, and the makeup -- which is a fixed
+    /// number the moment the threshold and ratio are known -- arrives
+    /// alone. At a ratio of eight that is twenty-one decibels of boost
+    /// landing before anything holds it back, which is not a click, it
+    /// is a bang.
+    idle_peak: f32,
+    /// The attack and release coefficients, and the rate they were
+    /// worked out for. Cached because they cost an `exp` each and
+    /// nothing about them changes from frame to frame.
+    attack_coeff: f32,
+    release_coeff: f32,
+    coeff_rate: f32,
+}
+
+/// Linear amplitude as decibels, floored so silence is a number.
+#[inline]
+fn amp_to_db(amp: f32) -> f32 {
+    20.0 * amp.max(1e-6).log10()
+}
+
+/// The soft-knee curve: how many decibels of OUTPUT a given input level
+/// earns, for a threshold, a ratio and the knee width above.
+#[inline]
+fn knee_curve(input_db: f32, threshold_db: f32, ratio: f32) -> f32 {
+    let over = input_db - threshold_db;
+    let half = COMPRESSOR_KNEE_DB * 0.5;
+    if over <= -half {
+        // Below the knee: untouched.
+        input_db
+    } else if over >= half {
+        // Above it: the full ratio.
+        threshold_db + over / ratio
+    } else {
+        // Inside it: a quadratic that meets both sides with the same
+        // slope, so the curve has no corner to hear.
+        let t = over + half;
+        input_db + (1.0 / ratio - 1.0) * t * t / (2.0 * COMPRESSOR_KNEE_DB)
+    }
+}
+
+impl Compressor {
+    pub fn new() -> Compressor {
+        Compressor {
+            wet: ParamRamp::at(0.0),
+            threshold_db: ParamRamp::at(COMPRESSOR_THRESHOLD_DEFAULT_DB),
+            ratio: ParamRamp::at(COMPRESSOR_RATIO_DEFAULT),
+            env_db: -120.0,
+            gain_db: 0.0,
+            idle_peak: 0.0,
+            attack_coeff: 1.0,
+            release_coeff: 1.0,
+            coeff_rate: 0.0,
+        }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            if wet > 0.0 && self.wet.target() == 0.0 {
+                // Start the detector where the music is, not at silence.
+                self.env_db = amp_to_db(self.idle_peak);
+            }
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// Where it starts working, in decibels below full scale.
+    pub fn set_threshold_db(&mut self, db: f32) {
+        if let Some(db) = knob(db, COMPRESSOR_THRESHOLD_MIN_DB, COMPRESSOR_THRESHOLD_MAX_DB) {
+            self.threshold_db.slew(db, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How hard it works above that.
+    pub fn set_ratio(&mut self, ratio: f32) {
+        if let Some(ratio) = knob(ratio, COMPRESSOR_RATIO_MIN, COMPRESSOR_RATIO_MAX) {
+            self.ratio.slew(ratio, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Drop the envelope, so one record's peaks do not ride the start of
+    /// the next.
+    pub fn reset(&mut self) {
+        self.env_db = -120.0;
+        self.gain_db = 0.0;
+        self.idle_peak = 0.0;
+    }
+
+    /// The gain reduction in force, in decibels, for a meter.
+    pub fn reduction_db(&self) -> f32 {
+        self.gain_db
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        if (self.coeff_rate - device_rate).abs() > 0.5 {
+            self.coeff_rate = device_rate;
+            let rate = device_rate.max(1.0);
+            self.attack_coeff = 1.0 - (-1.0 / (COMPRESSOR_ATTACK_SECS * rate)).exp();
+            self.release_coeff = 1.0 - (-1.0 / (COMPRESSOR_RELEASE_SECS * rate)).exp();
+        }
+        // Both channels are detected together, or a loud left would duck
+        // only itself and walk the image about.
+        let peak = frame[0].abs().max(frame[1].abs());
+        // Kept warm even while bypassed, and cheaply -- no logarithm on a
+        // path that is not doing anything.
+        let idle_coeff = match peak > self.idle_peak {
+            true => self.attack_coeff,
+            false => self.release_coeff,
+        };
+        self.idle_peak += (peak - self.idle_peak) * idle_coeff;
+
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // Two envelope followers and no line: off is exactly the
+            // input, with no tail that could still be ringing.
+            return frame;
+        }
+        let threshold_db = self.threshold_db.tick(device_rate);
+        let ratio = self.ratio.tick(device_rate).max(1.0);
+
+        let peak_db = amp_to_db(peak);
+        // Attack and release on the DETECTOR, both one-poles. Rising
+        // takes the attack, falling the release.
+        let coeff = match peak_db > self.env_db {
+            true => self.attack_coeff,
+            false => self.release_coeff,
+        };
+        self.env_db += (peak_db - self.env_db) * coeff;
+
+        self.gain_db = knee_curve(self.env_db, threshold_db, ratio) - self.env_db;
+        // The makeup: what full scale itself would lose. Derived, not
+        // knobbed -- see the note on the struct.
+        let makeup_db = -(knee_curve(0.0, threshold_db, ratio));
+        let gain = 10f32.powf((self.gain_db + makeup_db) / 20.0);
+
+        let squeezed = [frame[0] * gain, frame[1] * gain];
+        [
+            frame[0] + (squeezed[0] - frame[0]) * wet,
+            frame[1] + (squeezed[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // the master limiter
 // ---------------------------------------------------------------------------
@@ -4070,6 +4366,17 @@ impl SlotLevel {
 /// enough that the delay it costs the whole output is well under
 /// anything an operator would feel as latency.
 pub const LIMITER_LOOKAHEAD_SECS: f32 = 0.003;
+
+/// The look-ahead in frames at a given rate: the delay a bus running a
+/// [`Limiter`] pays. One function, used by the limiter to size its window
+/// and by anything lining the output up against what went into it, so
+/// the two cannot disagree.
+pub fn limiter_latency_frames(sample_rate: f32) -> usize {
+    if !(sample_rate > 0.0) {
+        return 1;
+    }
+    ((LIMITER_LOOKAHEAD_SECS * sample_rate).round() as usize).clamp(1, LIMITER_MAX_FRAMES - 1)
+}
 /// How long it takes to give the gain back once the loud passage has
 /// gone. Slow enough not to pump on a kick, quick enough that one stab
 /// does not duck the next bar.
@@ -4125,6 +4432,11 @@ pub struct Limiter {
     len: usize,
     /// The rate `len` was worked out for.
     rate: f32,
+    /// Where the output is held, as a multiplier of full scale. Full scale
+    /// itself by default, because the first thing this replaced was a
+    /// clamp at exactly that; a bus that wants margin for inter-sample
+    /// peaks sets it lower.
+    ceiling: f32,
     /// The gain in force, one being none at all.
     gain: f32,
     /// Where the attack ramp is heading, where it set off from, and how
@@ -4161,6 +4473,7 @@ impl Limiter {
             write: 0,
             len: 1,
             rate: 0.0,
+            ceiling: LIMITER_CEILING,
             gain: 1.0,
             target: 1.0,
             from: 1.0,
@@ -4181,8 +4494,26 @@ impl Limiter {
             return;
         }
         self.rate = sample_rate;
-        self.len = ((LIMITER_LOOKAHEAD_SECS * sample_rate).round() as usize)
-            .clamp(1, LIMITER_MAX_FRAMES - 1);
+        self.len = limiter_latency_frames(sample_rate);
+    }
+
+    /// Where to hold the output, as a multiplier of full scale. Refused
+    /// above full scale -- a limiter that lets more than that through is
+    /// not one -- and below a hundredth, where it would be a mute.
+    pub fn set_ceiling(&mut self, ceiling: f32) {
+        if ceiling.is_finite() {
+            self.ceiling = ceiling.clamp(0.01, LIMITER_CEILING);
+        }
+    }
+
+    pub fn ceiling(&self) -> f32 {
+        self.ceiling
+    }
+
+    /// The gain in force right now, for a meter that wants the block's
+    /// worst without clearing it.
+    pub fn gain(&self) -> f32 {
+        self.gain
     }
 
     /// Forget what the line was carrying, so one set's peaks cannot duck
@@ -4222,8 +4553,8 @@ impl Limiter {
         // Both channels take one gain: ducking them apart would walk the
         // stereo image around under a loud passage.
         let peak = frame[0].abs().max(frame[1].abs());
-        if peak > LIMITER_CEILING {
-            let needed = LIMITER_CEILING / peak;
+        if peak > self.ceiling {
+            let needed = self.ceiling / peak;
             if needed < self.target {
                 // Arrive before the sample that asked for it does.
                 self.from = self.gain;
@@ -6999,6 +7330,297 @@ mod tests {
             prev = Some(out);
         }
         assert!(worst < 0.02, "a crossover move stepped by {worst}");
+    }
+
+    /// Unity is a wire. Three bells sit in the path whenever any band is
+    /// lifted, so the thing that has to be true first is that at rest
+    /// they do nothing at all.
+    #[test]
+    fn the_bells_are_a_wire_at_unity() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        // Engaged through the filter, so the chain is in the path, but
+        // every band knob at unity.
+        eq.set_filter(0.3);
+        let mut plain = DeckEq::new(rate);
+        plain.set_sample_rate(rate);
+        plain.set_filter(0.3);
+        let mut phase = 0.0f32;
+        for n in 0..8_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+                plain.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.5;
+            let with = eq.process([x, x], rate)[0];
+            let without = plain.process([x, x], rate)[0];
+            assert_eq!(with, without, "the bells coloured a chain at unity");
+        }
+    }
+
+    /// A cut is still a kill. The isolator half is what a DJ EQ is for
+    /// and the boost law must not have touched it.
+    #[test]
+    fn a_killed_band_is_still_silent() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        for band in 0..3 {
+            eq.set_band(band, 0.0);
+        }
+        let mut phase = 0.0f32;
+        // Once a BLOCK, the way the callback does it. Called every frame,
+        // `prepare_block` re-slews `wet` every frame, and a ramp whose
+        // step is recomputed from the distance still to go never arrives
+        // -- so the chain sits a hair below fully wet and leaks dry.
+        for n in 0..SETTLE_FRAMES {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            eq.process([phase.sin() * 0.5, phase.sin() * 0.5], rate);
+        }
+        let mut worst = 0.0f32;
+        for n in 0..8_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.5;
+            worst = worst.max(eq.process([x, x], rate)[0].abs());
+        }
+        // Sixty decibels down, this file's own definition of silence.
+        // What is left is the engage ramp's asymptote: `prepare_block`
+        // re-slews `wet` every block, so it approaches fully-wet without
+        // arriving, and a hair of dry rides along for ever.
+        assert!(worst < 1e-3, "all three bands killed still passed {worst}");
+    }
+
+    /// A boost is a bell and not a brick: lifting the LOW band lifts a
+    /// low tone much more than a high one. Scaling the crossover slice
+    /// would lift everything inside it by the same amount and nothing
+    /// outside, which is the shape this law exists to avoid.
+    #[test]
+    fn a_boost_lifts_its_own_band_and_mostly_leaves_the_others() {
+        let rate = 48_000.0f32;
+        let level = |hz: f32, boost: f32| -> f64 {
+            let mut eq = DeckEq::new(rate);
+            eq.set_sample_rate(rate);
+            eq.set_band(0, boost);
+            let mut phase = 0.0f32;
+            for n in 0..12_000usize {
+                if n % 512 == 0 {
+                    eq.prepare_block();
+                }
+                phase += 2.0 * PI * hz / rate;
+                eq.process([phase.sin() * 0.4, phase.sin() * 0.4], rate);
+            }
+            let mut sum = 0.0f64;
+            for n in 0..12_000usize {
+                if n % 512 == 0 {
+                    eq.prepare_block();
+                }
+                phase += 2.0 * PI * hz / rate;
+                let out = eq.process([phase.sin() * 0.4, phase.sin() * 0.4], rate)[0];
+                sum += (out as f64) * (out as f64);
+            }
+            sum.sqrt()
+        };
+        // 125 Hz is the low band's bell centre at the default corners.
+        let low_lift = level(125.0, 2.0) / level(125.0, 1.0);
+        let high_lift = level(6_000.0, 2.0) / level(6_000.0, 1.0);
+        assert!(low_lift > 1.4, "the low band was not lifted: {low_lift}");
+        // The point of a bell: the far band barely moves. Scaling the
+        // crossover slice instead would leave it at exactly 1.0 but lift
+        // everything INSIDE the low band equally, corners and all --
+        // which is the shape this law exists to avoid, and is what the
+        // centre-versus-edge comparison below actually catches.
+        assert!(
+            high_lift < 1.1,
+            "the lift reached the highs: low {low_lift}, high {high_lift}"
+        );
+        // And it is a hump, not a brick: the band's own centre is lifted
+        // appreciably more than its edge.
+        let edge_lift = level(EQ_LOW_HZ, 2.0) / level(EQ_LOW_HZ, 1.0);
+        assert!(
+            edge_lift < low_lift * 0.9,
+            "the boost was flat across the band: centre {low_lift}, edge {edge_lift}"
+        );
+    }
+
+    /// Crossing unity is where the two halves meet, and it must not
+    /// step: the isolator stops scaling exactly where the bell starts
+    /// lifting, and at the crossing both are a wire.
+    #[test]
+    fn crossing_unity_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..40_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            // Walk the knob from a deep cut, through unity, to a boost.
+            if n % 400 == 0 {
+                let t = n as f32 / 40_000.0;
+                eq.set_band(0, t * 2.0);
+            }
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = eq.process([x, x], rate)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "crossing unity stepped by {worst}");
+    }
+
+    /// Off is exactly the input.
+    #[test]
+    fn a_compressor_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(comp.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The knee has no corner in it. A soft knee that does not actually
+    /// meet the two straight sections is just a hard knee with extra
+    /// arithmetic, so walk across it and check the curve stays smooth.
+    #[test]
+    fn the_compressor_knee_is_smooth_across_the_threshold() {
+        let threshold = -18.0f32;
+        let ratio = 4.0f32;
+        let mut last: Option<(f32, f32)> = None;
+        let mut worst = 0.0f32;
+        for step in 0..2_000 {
+            let input = -40.0 + step as f32 * 0.02;
+            let out = knee_curve(input, threshold, ratio);
+            if let Some((prev_in, prev_out)) = last {
+                let slope = (out - prev_out) / (input - prev_in);
+                // Below the knee the slope is 1, above it 1/ratio, and
+                // nowhere may it leave that band.
+                assert!(
+                    slope <= 1.0 + 1e-3 && slope >= 1.0 / ratio - 1e-3,
+                    "slope {slope} at {input} dB is outside the curve"
+                );
+                worst = worst.max((out - prev_out).abs());
+            }
+            last = Some((input, out));
+        }
+        // Far below and far above, the two straight sections.
+        assert!((knee_curve(-40.0, threshold, ratio) - -40.0).abs() < 1e-4);
+        let far = knee_curve(0.0, threshold, ratio);
+        assert!((far - (threshold + 18.0 / ratio)).abs() < 1e-4, "{far}");
+    }
+
+    /// It squashes the loud and leaves the quiet, which is the whole
+    /// job: a signal under the threshold comes out where it went in, one
+    /// well over it comes out closer to the threshold than it started.
+    #[test]
+    fn a_compressor_narrows_the_gap_between_loud_and_quiet() {
+        let rate = 48_000.0f32;
+        let level = |amp: f32| -> f64 {
+            let mut comp = Compressor::new();
+            comp.set_wet(1.0);
+            comp.set_threshold_db(-18.0);
+            comp.set_ratio(8.0);
+            let mut phase = 0.0f32;
+            for _ in 0..(rate as usize / 2) {
+                phase += 2.0 * PI * 220.0 / rate;
+                comp.process([phase.sin() * amp, phase.sin() * amp], rate);
+            }
+            let mut sum = 0.0f64;
+            for _ in 0..(rate as usize / 4) {
+                phase += 2.0 * PI * 220.0 / rate;
+                let out = comp.process([phase.sin() * amp, phase.sin() * amp], rate)[0];
+                sum += (out as f64) * (out as f64);
+            }
+            sum.sqrt()
+        };
+        let quiet_in = 0.02f32;
+        let loud_in = 0.8f32;
+        let ratio_in = (loud_in / quiet_in) as f64;
+        let ratio_out = level(loud_in) / level(quiet_in);
+        assert!(
+            ratio_out < ratio_in * 0.6,
+            "the gap barely moved: {ratio_in} in, {ratio_out} out"
+        );
+    }
+
+    /// Both channels duck together, or a loud left would walk the image.
+    #[test]
+    fn a_compressor_keeps_the_stereo_image_still() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        comp.set_wet(1.0);
+        comp.set_threshold_db(-24.0);
+        comp.set_ratio(8.0);
+        let mut phase = 0.0f32;
+        for n in 0..24_000usize {
+            phase += 2.0 * PI * 220.0 / rate;
+            let l = phase.sin() * 0.8;
+            let r = phase.sin() * 0.2;
+            let out = comp.process([l, r], rate);
+            if n > 4_000 && out[1].abs() > 1e-6 {
+                let ratio = out[0] / out[1];
+                assert!((ratio - 4.0).abs() < 1e-3, "the image moved: {ratio}");
+            }
+        }
+    }
+
+    /// Engaging and releasing it is a ramp, not a switch.
+    #[test]
+    fn engaging_the_compressor_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        comp.set_threshold_db(-24.0);
+        comp.set_ratio(8.0);
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..40_000usize {
+            if n == 8_000 {
+                comp.set_wet(1.0);
+            }
+            if n == 24_000 {
+                comp.set_wet(0.0);
+            }
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = comp.process([x, x], rate)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "engaging the compressor stepped by {worst}");
+    }
+
+    /// Its setters clamp to their documented ranges.
+    #[test]
+    fn compressor_setters_clamp_to_their_documented_ranges() {
+        let mut comp = Compressor::new();
+        comp.set_threshold_db(20.0);
+        assert_eq!(comp.threshold_db.target(), COMPRESSOR_THRESHOLD_MAX_DB);
+        comp.set_threshold_db(-200.0);
+        assert_eq!(comp.threshold_db.target(), COMPRESSOR_THRESHOLD_MIN_DB);
+        comp.set_ratio(100.0);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MAX);
+        comp.set_ratio(0.0);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MIN);
+        comp.set_ratio(f32::NAN);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MIN, "a bad value moves nothing");
     }
 
     /// The ladder is the whole set an operator can pick from: free

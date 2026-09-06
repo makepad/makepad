@@ -86,6 +86,17 @@ pub struct CatalogSubscriber {
 }
 
 impl CatalogSubscriber {
+    /// Static snapshots are immutable, so their subscriber is deliberately
+    /// silent and owns no worker thread.
+    pub fn null() -> Self {
+        let (_tx, rx) = sync_channel(1);
+        Self {
+            rx,
+            stopping: Arc::new(AtomicBool::new(true)),
+            join: None,
+        }
+    }
+
     pub fn start(client: &AssetClient, config: CatalogSubscriberConfig) -> ClientResult<Self> {
         config.validate()?;
         let (api, server_id) = client.subscription_parts();

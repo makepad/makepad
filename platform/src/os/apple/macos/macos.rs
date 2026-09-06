@@ -1,3 +1,4 @@
+use crate::frame_trace::TickSource;
 use {
     crate::{
         cx::{Cx, OsType},
@@ -755,10 +756,9 @@ impl Cx {
                                             crate::startup_trace_flush("cumulative at first present");
                                         }
                                     }
-                                    // RIG (MAKEPAD_PRESENT_TRACE=1): actual
-                                    // GLASS times — the CPU trace's blind
+                                    // Actual GLASS times — the CPU trace's blind
                                     // spot where dropped/slipped frames live.
-                                    if std::env::var_os("MAKEPAD_PRESENT_TRACE").is_some() {
+                                    if crate::makepad_error_log::trace_enabled("present") {
                                         let t: f64 = unsafe { msg_send![drawable_, presentedTime] };
                                         static LAST: std::sync::atomic::AtomicU64 =
                                             std::sync::atomic::AtomicU64::new(0);
@@ -767,7 +767,7 @@ impl Cx {
                                             std::sync::atomic::Ordering::AcqRel,
                                         ));
                                         if prev > 0.0 && t > prev {
-                                            eprintln!("presenttrace {:.2}ms", (t - prev) * 1000.0);
+                                            crate::trace!("present", "glass gap {:.2}ms", (t - prev) * 1000.0);
                                         }
                                     }
                                     if is_metal_link_drawable {
@@ -785,7 +785,8 @@ impl Cx {
                                 })
                             ]
                         };
-                        self.passes[*draw_pass_id].set_time(time_now);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                         let presented = if link_drawable.is_some() {
                             // This drawable came from a CAMetalDisplayLink update,
                             // which already schedules it for the update's target
@@ -834,11 +835,13 @@ impl Cx {
                 // between them, and neither matched NextFrame).
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
                 CxDrawPassParent::None => {
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
@@ -961,10 +964,10 @@ impl Cx {
                     self.redraw_all();
                 }
                 if te.timer_id == 0 || te.timer_id == POINTER_CAPTURE_TIMER_ID {
-                    // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
+                    // Catch paint-clock stalls in the
                     // act — was the gap a LATE FIRE (runloop starved / OS
                     // deferred the NSTimer) or a SLOW CALLBACK (our work)?
-                    let trace_t0 = if std::env::var_os("MAKEPAD_TIMER_TRACE").is_some() {
+                    let trace_t0 = if crate::makepad_error_log::trace_enabled("timer") {
                         thread_local! {
                             static LAST_FIRE: std::cell::Cell<Option<std::time::Instant>> =
                                 const { std::cell::Cell::new(None) };
@@ -974,7 +977,7 @@ impl Cx {
                             if let Some(prev) = last.replace(Some(now)) {
                                 let gap_ms = prev.elapsed().as_secs_f64() * 1000.0;
                                 if gap_ms > 20.0 {
-                                    eprintln!("[timer-trace] fire-to-fire gap {:.1}ms", gap_ms);
+                                    crate::trace!("timer", "fire-to-fire gap {:.1}ms", gap_ms);
                                 }
                             }
                         });
@@ -1024,7 +1027,7 @@ impl Cx {
                         || self.need_redrawing()
                         || !self.new_next_frames.is_empty()
                         || self.demo_time_repaint
-                        || !self.os.video_players.is_empty()
+                        || self.os.video_players.values().any(|player| player.needs_poll())
                     {
                         needs_timer = true;
                     }
@@ -1088,8 +1091,9 @@ impl Cx {
                     if let Some(t0) = trace_t0 {
                         let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
                         if took_ms > 10.0 {
-                            eprintln!(
-                                "[timer-trace] slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
+                            crate::trace!(
+                                "timer",
+                                "slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
                                 took_ms,
                                 live_edit_ms.unwrap_or(0.0),
                                 net_ms.unwrap_or(0.0),
@@ -1246,7 +1250,7 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 // Poll video players for new frames and preparation status
-                let has_video_players = !self.os.video_players.is_empty();
+                let has_video_players = self.os.video_players.values().any(|player| player.needs_poll());
                 if has_video_players {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
@@ -1334,11 +1338,17 @@ impl Cx {
                 // ticking at the frame period. Unscoped beats (NSTimer,
                 // hidden windows) keep wall-now. Windows already does this
                 // (`paint_tick(flip_time)`), transport design-v2 §3 / §8 step 0.
-                let time_now = self
-                    .os
-                    .link_flip_time
-                    .unwrap_or_else(|| with_macos_app(|app| app.time_now()));
+                let link_flip_time = self.os.link_flip_time;
+                let time_now = with_macos_app(|app| {
+                    let wake = app.time_now();
+                    match link_flip_time {
+                        Some(flip) => app.frame_trace.tick(TickSource::Link, wake, Some(flip)),
+                        None => app.frame_trace.tick(TickSource::Timer, wake, None),
+                    }
+                    link_flip_time.unwrap_or(wake)
+                });
                 if has_next_frames {
+                    with_macos_app(|app| app.frame_trace.next_frame(time_now));
                     self.call_next_frame_event(time_now);
                 }
                 let needs_redrawing = self.need_redrawing();
@@ -1347,6 +1357,10 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 let has_dirty_passes = self.any_passes_dirty();
+                with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.maybe_print(now);
+                });
                 // Start timer if we have work
                 if has_next_frames
                     || needs_redrawing
@@ -2352,13 +2366,6 @@ impl CxOsApi for Cx {
 
     fn update_pointer_capture_pacing(&mut self) {
         self.update_macos_pointer_capture_pacing();
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn start_stdin_service(&mut self) {

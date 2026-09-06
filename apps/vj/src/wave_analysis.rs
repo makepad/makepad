@@ -2239,10 +2239,14 @@ const TEMPO_LADDER: [(f64, f64, f64); 5] = [
 ///
 /// The pivot is the beat nearest the record's centre, so the pull is
 /// anchored where the least-squares fit is most trustworthy and no end
-/// pays more than the other. Applied ONCE, at analysis time: it is not
-/// idempotent, because moving to a nearer rung can bring a coarser one
-/// inside the budget, so there is exactly one call site and a cached grid
-/// is never pulled again.
+/// pays more than the other.
+///
+/// Applied ONCE per grid, at analysis time. It is NOT idempotent --
+/// moving to a nearer rung can bring a coarser one inside the budget --
+/// so the rule every caller keeps is that its argument is a grid fresh
+/// off `estimate_grid` and never one that has already been pulled. A
+/// cached grid is not re-snapped when it is read back; a repair
+/// re-measures from the envelopes first and snaps that.
 fn snap_tempo(grid: TrackGrid, span_secs: f64) -> TrackGrid {
     if !grid.has_grid() || !span_secs.is_finite() || span_secs <= 0.0 {
         return grid;
@@ -3402,8 +3406,10 @@ pub const LOCAL_AUDIO_EXTENSIONS: [&str; 9] =
     ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "aiff", "mp4"];
 
 /// Decode a local audio file. WAV, MP3 and Ogg Vorbis parse in-process
-/// (`makepad-audio-decode`); everything else goes through the platform media
-/// decoder that already backs the video lane.
+/// (`makepad-audio-decode`); everything else goes to `decode_audio_clip`,
+/// which looks at the file own first bytes before handing it to the
+/// platform decoder. That is how a `.flac` reaches the FLAC decoder this
+/// repo already has: there is no `MediaType` that names one.
 pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
     let extension = path
         .extension()
