@@ -8,7 +8,6 @@ use std::os::raw::c_int;
 pub type cef_dictionary_value_t = c_void;
 pub type cef_preference_registrar_t = c_void;
 pub type cef_preferences_type_t = c_int;
-pub type cef_request_context_t = c_void;
 pub type cef_request_context_handler_t = c_void;
 pub type cef_render_process_handler_t = c_void;
 pub type cef_resource_bundle_handler_t = c_void;
@@ -19,6 +18,46 @@ pub type cef_string_list_t = *mut c_void;
 pub type cef_string_map_t = *mut c_void;
 pub type cef_accessibility_handler_t = c_void;
 pub type cef_color_t = u32;
+pub const CEF_COLOR_VARIANT_LIGHT: c_int = 1;
+pub const CEF_COLOR_VARIANT_DARK: c_int = 2;
+
+// CEF API 13800: the request context inherits the preference manager.
+// Keep every preceding callback slot even when the wrapper does not use it.
+#[repr(C)]
+pub struct cef_preference_manager_t {
+    pub base: cef_base_ref_counted_t,
+    pub has_preference: cef_unused_callback_t,
+    pub get_preference: cef_unused_callback_t,
+    pub get_all_preferences: cef_unused_callback_t,
+    pub can_set_preference: cef_unused_callback_t,
+    pub set_preference: cef_unused_callback_t,
+    pub add_preference_observer: cef_unused_callback_t,
+}
+
+#[repr(C)]
+pub struct cef_request_context_t {
+    pub base: cef_preference_manager_t,
+    pub is_same: cef_unused_callback_t,
+    pub is_sharing_with: cef_unused_callback_t,
+    pub is_global: cef_unused_callback_t,
+    pub get_handler: cef_unused_callback_t,
+    pub get_cache_path: cef_unused_callback_t,
+    pub get_cookie_manager: cef_unused_callback_t,
+    pub register_scheme_handler_factory: cef_unused_callback_t,
+    pub clear_scheme_handler_factories: cef_unused_callback_t,
+    pub clear_certificate_exceptions: cef_unused_callback_t,
+    pub clear_http_auth_credentials: cef_unused_callback_t,
+    pub close_all_connections: cef_unused_callback_t,
+    pub resolve_host: cef_unused_callback_t,
+    pub get_media_router: cef_unused_callback_t,
+    pub get_website_setting: cef_unused_callback_t,
+    pub set_website_setting: cef_unused_callback_t,
+    pub get_content_setting: cef_unused_callback_t,
+    pub set_content_setting: cef_unused_callback_t,
+    pub set_chrome_color_scheme: Option<unsafe extern "system" fn(
+        self_: *mut cef_request_context_t, variant: c_int, user_color: cef_color_t,
+    )>,
+}
 pub type cef_drag_data_t = c_void;
 pub type cef_drag_operations_mask_t = c_int;
 pub type cef_event_flags_t = u32;
@@ -1012,7 +1051,9 @@ pub struct cef_browser_host_t {
     pub get_opener_identifier: cef_unused_callback_t,
     pub has_view: cef_unused_callback_t,
     pub get_client: cef_unused_callback_t,
-    pub get_request_context: cef_unused_callback_t,
+    pub get_request_context: Option<unsafe extern "system" fn(
+        self_: *mut cef_browser_host_t,
+    ) -> *mut cef_request_context_t>,
     pub can_zoom: cef_unused_callback_t,
     pub zoom: cef_unused_callback_t,
     pub get_default_zoom_level: cef_unused_callback_t,
@@ -1037,7 +1078,9 @@ pub struct cef_browser_host_t {
     pub show_dev_tools: cef_unused_callback_t,
     pub close_dev_tools: cef_unused_callback_t,
     pub has_dev_tools: cef_unused_callback_t,
-    pub send_dev_tools_message: cef_unused_callback_t,
+    pub send_dev_tools_message: Option<unsafe extern "system" fn(
+        self_: *mut cef_browser_host_t, message: *const c_void, message_size: usize,
+    ) -> c_int>,
     pub execute_dev_tools_method: cef_unused_callback_t,
     pub add_dev_tools_message_observer: cef_unused_callback_t,
     pub get_navigation_entries: cef_unused_callback_t,
