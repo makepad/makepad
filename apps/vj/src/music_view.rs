@@ -1861,15 +1861,23 @@ script_mod! {
         }
     }
 
-    // A channel meter: one uniform, painted as a segmented column.
+    // A channel meter: a segmented column, and above it a mark holding the
+    // highest recent peak. Both values are uniforms, so the level moves
+    // without re-emitting an instance.
     let DeckMeter = SolidView{
         width: 9
         height: Fill
         draw_bg +: {
             level: uniform(0.0)
+            hold: uniform(0.0)
             color: uniform(#x1d222a)
             color_lit: uniform(#xff5c39)
             color_hot: uniform(#xff5a4e)
+            // Its own colour, and a pale one deliberately: the mark has to
+            // read against the dark trough AND against the lit bar it sits
+            // on top of, and anything from the bar's own range disappears
+            // into the bar exactly when the level is high.
+            color_mark: uniform(#xffffffcc)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
@@ -1882,6 +1890,28 @@ script_mod! {
                 let h = max(1.0, self.rect_size.y * self.level)
                 sdf.box(1.5, self.rect_size.y - h, self.rect_size.x - 3.0, h, 2.0)
                 sdf.fill(vec4(c.x, c.y, c.z, c.w * on * seg))
+                // Held inside the column rather than centred on the level:
+                // at full scale a centred mark loses half its width off the
+                // top edge, which is the one reading it exists to report.
+                // Two whole pixels, on a whole pixel. At 1.5 it landed
+                // across two rows at half weight in each and came and went
+                // as the level moved it a fraction up or down -- the same
+                // reason the marks on the wave lane snap.
+                let mark_h = 2.0
+                let mark_y = floor(clamp(
+                    (1.0 - self.hold) * self.rect_size.y - mark_h * 0.5,
+                    0.0,
+                    self.rect_size.y - mark_h
+                ))
+                sdf.box(1.5, mark_y, self.rect_size.x - 3.0, mark_h, 0.5)
+                // Nothing held, no mark -- otherwise it parks on the floor
+                // and reads as a level that is not there.
+                sdf.fill(vec4(
+                    self.color_mark.x,
+                    self.color_mark.y,
+                    self.color_mark.z,
+                    self.color_mark.w * step(0.002, self.hold)
+                ))
                 return sdf.result
             }
         }

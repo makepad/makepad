@@ -4076,10 +4076,11 @@ impl Mixer {
     /// Pre-fader peak levels for the two deck VU meters. `meters()` reports
     /// what reaches the master; these report what the channel is doing,
     /// which is what an operator sets gain against.
+    /// Reading takes them, for the reason `meters` gives.
     pub fn deck_levels(&self) -> [f32; 2] {
         [
-            f32::from_bits(self.shared.deck_meters[0].load(Ordering::Relaxed)),
-            f32::from_bits(self.shared.deck_meters[1].load(Ordering::Relaxed)),
+            f32::from_bits(self.shared.deck_meters[0].swap(0, Ordering::Relaxed)),
+            f32::from_bits(self.shared.deck_meters[1].swap(0, Ordering::Relaxed)),
         ]
     }
 
@@ -4118,11 +4119,18 @@ impl Mixer {
         self.ui.with(|ui| std::mem::take(&mut ui.ended_voices))
     }
 
-    /// Current peak meters: `[master, video, deck_a, deck_b, sfx]`.
+    /// The highest peak on each bus since this was last called:
+    /// `[master, video, deck_a, deck_b, sfx]`.
+    ///
+    /// Reading TAKES them. That is what makes the answer mean "since you
+    /// last looked" rather than "in whichever buffer happened to be last",
+    /// and it is why a second caller sees zeros: whoever reads first has
+    /// the peaks. One place drives the meters (`App::pump`); anything else
+    /// reading this is sampling, and will steal.
     pub fn meters(&self) -> [f32; 5] {
         let mut out = [0.0f32; 5];
         for (i, m) in self.shared.meters.iter().enumerate() {
-            out[i] = f32::from_bits(m.load(Ordering::Relaxed));
+            out[i] = f32::from_bits(m.swap(0, Ordering::Relaxed));
         }
         out
     }
@@ -6185,11 +6193,23 @@ impl MixEngine {
             }
         }
 
+        // The HIGHEST peak since the meter was last read, not the newest
+        // one. Buffers land around a hundred times a second and the UI reads
+        // twenty, so a plain store threw four peaks in five away unseen --
+        // which is the whole quantity a peak meter exists to show. The
+        // transient that a meter should catch is exactly the one that lands
+        // between two glances.
+        //
+        // `fetch_max` on the bit pattern is a real max because these are
+        // peaks: non-negative, and non-negative floats sort in the same
+        // order as their bit patterns. `audible` is what makes that true --
+        // an infinity here would out-max everything for the rest of the
+        // session, where under a store it lasted one buffer.
         for (i, p) in peaks.iter().enumerate() {
-            shared.meters[i].store(p.to_bits(), Ordering::Relaxed);
+            shared.meters[i].fetch_max(audible(*p).to_bits(), Ordering::Relaxed);
         }
         for (i, p) in deck_peaks.iter().enumerate() {
-            shared.deck_meters[i].store(p.to_bits(), Ordering::Relaxed);
+            shared.deck_meters[i].fetch_max(audible(*p).to_bits(), Ordering::Relaxed);
         }
         if peaks[METER_MASTER] > f32::EPSILON
             && shared
@@ -6724,6 +6744,64 @@ mod tests {
             "killing the high band left {:.1} dB of 10 kHz",
             decibels(killed / open)
         );
+    }
+
+    /// A peak meter exists to catch the loudest thing that happened. Buffers
+    /// land around a hundred times a second and the meter is read twenty
+    /// times, so most of them are never looked at -- and a meter that shows
+    /// only whichever buffer happened to be last shows the transient exactly
+    /// when it lands in the fifth buffer, which is one glance in five.
+    #[test]
+    fn the_loudest_thing_since_the_last_look_is_what_a_meter_reports() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, tone_pcm(1_000.0, 48_000, 1.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        flush_bus(&mixer, 48_000.0);
+        let _ = mixer.meters();
+
+        // The loud stretch, and then quiet -- several buffers of it, so a
+        // meter reading only the newest one would have forgotten.
+        render(&mixer, 48_000.0, 512);
+        mixer.set_deck_gain(DeckId::A, 0.0);
+        flush_bus(&mixer, 48_000.0);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+
+        let loud = mixer.meters()[METER_MASTER];
+        assert!(loud > 0.1, "the loud buffers must still be reported: {loud}");
+        // And taking it is what empties it: the next look is about the next
+        // stretch of time, not the same peak again.
+        let after = mixer.meters()[METER_MASTER];
+        assert!(after < loud, "a peak read twice is a peak that never falls: {after}");
+    }
+
+    /// The running maximum is taken on the BIT PATTERN, which is only a
+    /// real maximum while the values are non-negative numbers. A sign or a
+    /// non-number slipping through would not merely misread once -- it
+    /// would win every comparison until the meter was next read.
+    #[test]
+    fn a_meter_reads_inside_its_own_scale_however_hard_it_is_driven() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        // Every sample hard against both ends of the scale.
+        let frames = vec![[i16::MAX, i16::MIN]; 48_000 / 5];
+        mixer.install_deck(
+            DeckId::A,
+            Arc::new(TrackPcm { frames, sample_rate: 48_000 }),
+        );
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let peak = mixer.meters()[METER_MASTER];
+        assert!(peak.is_finite(), "a meter reading has to be a number: {peak}");
+        assert!(peak > 0.5, "and it has to have noticed: {peak}");
+        assert!(peak <= 1.0, "and stay inside the scale it is drawn on: {peak}");
     }
 
     #[test]

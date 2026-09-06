@@ -7812,6 +7812,17 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// How the three meters READ: master, deck A, deck B. Ticked once per
+    /// poll from the peaks the mixer has been collecting, and read by
+    /// whatever is drawing at whatever rate it draws at.
+    #[rust]
+    meter_ballistics: [crate::console::MeterBallistics; 3],
+    /// When they were last ticked. The poll is a 20 Hz timer that Windows
+    /// services late and coalesces, and it stops entirely while another
+    /// window is up, so the meters are given the time that actually passed
+    /// rather than the time that was asked for.
+    #[rust]
+    meters_ticked_at: Option<Instant>,
     /// When each beat chevron went down, per deck and per direction, so a
     /// tap can be told from a hold on release.
     #[rust]
@@ -15560,9 +15571,24 @@ p2 {}
         // The strip's one line, every pump: this is the only place these
         // numbers reach the operator. Everything above them goes to the log,
         // which nobody in a booth is reading.
+        // Taking the peaks is what empties them, so this is the one place
+        // that does it -- including on pages where no meter is drawn. Left
+        // undrained they would keep the loudest thing that ever happened,
+        // and coming back to the deck page would show a level from minutes
+        // ago as if it were now.
         let meters = self.mixer.meters();
-        let master = meters[crate::mixer::METER_MASTER];
-        self.console_clip.saw(master);
+        let decks = self.mixer.deck_levels();
+        let now = Instant::now();
+        let dt = self.meters_ticked_at.map_or(0.0, |then| (now - then).as_secs_f32());
+        self.meters_ticked_at = Some(now);
+        self.meter_ballistics[0].tick(meters[crate::mixer::METER_MASTER], dt);
+        self.meter_ballistics[1].tick(decks[0], dt);
+        self.meter_ballistics[2].tick(decks[1], dt);
+        // The printed figure is a share of full scale, so it gets the
+        // level as measured -- the square-root taper below is for a column
+        // of pixels, and would read half again too loud as a number.
+        let master = self.meter_ballistics[0].amplitude();
+        self.console_clip.saw(meters[crate::mixer::METER_MASTER]);
         let line = crate::console::summary_line(&health, master, self.console_clip.lit());
         self.set_status_label(cx, ids!(console_line), &line);
         // The opened pane is the same numbers with the room to lay them out.
@@ -24382,7 +24408,6 @@ p2 {}
         if self.console_page != live_id!(music_page) {
             return;
         }
-        let levels = self.mixer.deck_levels();
         for deck in [DeckId::A, DeckId::B] {
             let index = deck.index();
             // One mixer lock per deck per frame: the audio callback
@@ -24694,9 +24719,25 @@ p2 {}
                 self.paint_stem_knob(cx, deck, stem, knob, ids.stem_labels[stem], live);
             }
 
-            // The channel meter, with a little ballistic decay so it reads.
-            let level = levels[index].clamp(0.0, 1.0).sqrt();
-            refs.vu.set_uniform(cx, live_id!(level), &[level]);
+            // The channel meter. The ballistics are the pump's -- they have
+            // to be, because they must go on falling while this page is not
+            // being drawn -- so all that is left here is handing over a
+            // value when there is a new one worth drawing.
+            //
+            // And the redraw is not optional. `set_uniform` writes the
+            // widget's own copy and marks NOTHING dirty, so on its own it
+            // reaches the screen only when something else happens to redraw
+            // this view. That is what the meter has been living on: it
+            // moved because the labels beside it were changing. A meter
+            // that is only correct while its neighbours are busy is not a
+            // meter, and the deadband is what keeps saying so cheap --
+            // between pumps, and once the level has settled, there is
+            // nothing to say and nothing is redrawn.
+            if let Some((level, hold)) = self.meter_ballistics[1 + index].take_push() {
+                refs.vu.set_uniform(cx, live_id!(level), &[level]);
+                refs.vu.set_uniform(cx, live_id!(hold), &[hold]);
+                refs.vu.redraw(cx);
+            }
 
             // Waveforms.
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
