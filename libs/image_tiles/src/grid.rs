@@ -414,6 +414,14 @@ pub struct TileGrid {
     user_moved: bool,
     #[rust]
     resize_settle_at: Option<f64>,
+    #[rust]
+    resize_anchor: Option<PictureAnchor>,
+    /// A host presentation holds its subject steady until the person pans,
+    /// zooms or requests a different picture. `true` crops to cover a tile.
+    #[rust]
+    presentation_item: Option<(ItemId, bool)>,
+    #[rust]
+    presentation_pending: bool,
 
     // ── uniform-only glide bookkeeping ──
     #[rust]
@@ -442,6 +450,32 @@ pub struct TileGrid {
     page_failed: HashMap<PageKey, f64>,
     #[rust]
     full_failed: HashMap<ItemId, f64>,
+}
+
+/// A viewport's centre expressed inside a picture, plus its zoom relative
+/// to fitting that picture. Packing coordinates can change on a resize.
+#[derive(Clone, Copy, Debug)]
+struct PictureAnchor {
+    item: ItemId,
+    uv: Vec2d,
+    zoom: f64,
+}
+
+fn picture_fit(view: Vec2d, size: Vec2f) -> f64 {
+    (view.x / size.x.max(0.01) as f64).min(view.y / size.y.max(0.01) as f64).max(0.01)
+}
+
+impl PictureAnchor {
+    fn capture(item: ItemId, pos: Vec2f, size: Vec2f, view: Vec2d, centre: Vec2d, scale: f64) -> Self {
+        Self { item,
+            uv: dvec2((centre.x-pos.x as f64)/size.x.max(0.01) as f64, (centre.y-pos.y as f64)/size.y.max(0.01) as f64),
+            zoom: scale / picture_fit(view, size),
+        }
+    }
+    fn camera(self, pos: Vec2f, size: Vec2f, view: Vec2d) -> (Vec2d, f64) {
+        (dvec2(pos.x as f64+self.uv.x*size.x as f64, pos.y as f64+self.uv.y*size.y as f64),
+         (self.zoom*picture_fit(view,size)).clamp(0.01,6000.0))
+    }
 }
 
 impl TileGrid {
@@ -536,6 +570,9 @@ impl TileGrid {
         if query == self.query {
             return;
         }
+        self.presentation_item=None;
+        self.presentation_pending=false;
+        self.resize_anchor=None;
         self.query = query.to_string();
         let words: Vec<(String, String)> = self.items.iter().map(|i| (i.title.to_string(), i.link.to_string())).collect();
         self.visible = order_for(&words, &self.query);
@@ -596,6 +633,8 @@ impl TileGrid {
     /// Glide the camera onto one picture so it fills most of the view.
     /// False when the id is not on the grid.
     pub fn show_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        self.presentation_item = None;
+        self.presentation_pending = false;
         self.frame_item(cx, item, false)
     }
 
@@ -603,6 +642,61 @@ impl TileGrid {
     /// Uses the resident wall camera and its existing resolution/LOD path.
     pub fn cover_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
         self.frame_item(cx, item, true)
+    }
+
+    /// Apply a host face on the first draw at its actual size. The host's
+    /// compositor already animates the surface; this camera must not glide.
+    pub fn present_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) {
+        self.presentation_item = Some((item, cover));
+        self.presentation_pending = true;
+        self.resize_anchor = None;
+        self.resize_settle_at = None;
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    pub fn centred_item(&self) -> Option<(ItemId, String)> {
+        let i = self.centre_index()?;
+        Some((self.items[i].id, self.items[i].title.to_string()))
+    }
+
+    fn centre_index(&self) -> Option<usize> {
+        self.visible.iter().copied().min_by(|&a,&b| {
+            let distance = |i: usize| {
+                let item = &self.items[i];
+                let x = self.cam_pos.x.clamp(item.pos.x as f64, (item.pos.x+item.size.x) as f64);
+                let y = self.cam_pos.y.clamp(item.pos.y as f64, (item.pos.y+item.size.y) as f64);
+                (self.cam_pos-dvec2(x,y)).length()
+            };
+            distance(a).total_cmp(&distance(b))
+        })
+    }
+
+    fn capture_resize_anchor(&self) -> Option<PictureAnchor> {
+        if !self.user_moved || !self.cam_usable() {return None;}
+        let item = &self.items[self.centre_index()?];
+        Some(PictureAnchor::capture(item.id,item.pos,item.size,self.view_rect.size,self.cam_pos,self.cam_scale))
+    }
+
+    fn restore_resize_anchor(&mut self) {
+        let Some(anchor) = self.resize_anchor else {return;};
+        let Some(item) = self.items.iter().find(|i|i.id==anchor.item) else {return;};
+        let (pos,scale) = anchor.camera(item.to_pos,item.to_size,self.view_rect.size);
+        self.cam_pos=pos; self.cam_pos_t=pos;
+        self.cam_scale=scale; self.cam_scale_t=scale;
+        self.zoom_anchor=None;
+    }
+
+    fn settle_presentation(&mut self, cx: &mut Cx) {
+        if let Some((item,cover))=self.presentation_item {
+            self.frame_item(cx,item,cover);
+            self.cam_pos=self.cam_pos_t;
+            self.cam_scale=self.cam_scale_t;
+            self.snap();
+            self.presentation_pending=false;
+            self.resize_settle_at=None;
+        }
     }
 
     fn frame_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) -> bool {
@@ -1050,7 +1144,10 @@ impl Widget for TileGrid {
                 if now >= at {
                     self.resize_settle_at = None;
                     self.relayout();
-                    if !self.user_moved {
+                    if self.resize_anchor.is_some() {
+                        self.restore_resize_anchor();
+                        self.resize_anchor=None;
+                    } else if !self.user_moved {
                         self.fit_camera();
                     }
                     self.area.redraw(cx);
@@ -1095,6 +1192,9 @@ impl Widget for TileGrid {
         }
         match event.hits(cx, self.area) {
             Hit::FingerScroll(fs) => {
+                self.presentation_item=None;
+                self.presentation_pending=false;
+                self.resize_anchor=None;
                 self.user_moved = true;
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.2 && self.cam_usable() {
                     self.zoom_anchor = None;
@@ -1115,6 +1215,9 @@ impl Widget for TileGrid {
                     let moved = moved || delta.length() > 3.0;
                     self.drag = Some((start, cam, moved));
                     if moved && self.cam_usable() {
+                        self.presentation_item=None;
+                        self.presentation_pending=false;
+                        self.resize_anchor=None;
                         self.user_moved = true;
                         self.zoom_anchor = None;
                         self.cam_pos_t = Vec2d { x: cam.x - delta.x / self.cam_scale_t, y: cam.y - delta.y / self.cam_scale_t };
@@ -1155,6 +1258,9 @@ impl Widget for TileGrid {
         let resized = !first
             && rect.size.x >= 1.0
             && (rect.size.x - self.view_rect.size.x).abs() + (rect.size.y - self.view_rect.size.y).abs() > 0.5;
+        if resized && self.resize_anchor.is_none() && self.presentation_item.is_none() {
+            self.resize_anchor=self.capture_resize_anchor();
+        }
         self.view_rect = rect;
         if resized {
             self.resize_settle_at = Some(self.time() + RESIZE_SETTLE_SECS);
@@ -1168,6 +1274,12 @@ impl Widget for TileGrid {
                 self.cam_pos = self.cam_pos_t;
                 self.cam_scale = self.cam_scale_t;
             }
+        }
+        if self.presentation_pending || (resized && self.presentation_item.is_some()) {
+            self.relayout();
+            self.settle_presentation(cx);
+        } else if resized {
+            self.restore_resize_anchor();
         }
         self.frame += 1;
         if !self.cam_usable() || self.items.is_empty() {
@@ -1432,6 +1544,25 @@ impl TileGridRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_preserves_the_picture_offset_and_relative_zoom_after_repacking() {
+        let portrait=dvec2(390.0,740.0);
+        let landscape=dvec2(1200.0,650.0);
+        let size=vec2f(2.0,3.0);
+        let old_pos=vec2f(12.0,50.0);
+        let old_centre=dvec2(12.5,52.1);
+        let anchor=PictureAnchor::capture(7,old_pos,size,portrait,old_centre,300.0);
+        let moved=vec2f(-25.0,7.0);
+        let (centre,scale)=anchor.camera(moved,size,landscape);
+        assert!((centre.x+24.5).abs()<1e-6);
+        assert!((centre.y-9.1).abs()<1e-6);
+        assert!((scale/picture_fit(landscape,size)-300.0/picture_fit(portrait,size)).abs()<1e-6);
+        let back=PictureAnchor::capture(7,moved,size,landscape,centre,scale);
+        let (centre,scale)=back.camera(old_pos,size,portrait);
+        assert!((centre-old_centre).length()<1e-6);
+        assert!((scale-300.0).abs()<1e-6);
+    }
 
     fn wall() -> Vec<(String, String)> {
         vec![

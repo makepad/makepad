@@ -25,7 +25,7 @@ use makepad_image_tiles::{Library, TileGrid, TileGridAction};
 use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 use makepad_widgets::*;
 use std::path::Path;
-use tile::{presentation, Presentation, Selected, REFOCUS_DELAY};
+use tile::{presentation, Presentation, Selected};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -147,10 +147,6 @@ pub struct PhotosView {
     /// or a style reload (which re-applies the DSL over them).
     #[rust]
     applied: Option<Presentation>,
-    /// A pending return of the camera to the selected picture, armed when
-    /// the viewport or the face changed and the wall re-cuts itself.
-    #[rust]
-    refocus: Option<Timer>,
     #[rust]
     last_size: Vec2d,
     /// The collection to open (`None` = the default); set before the first
@@ -211,7 +207,7 @@ impl PhotosView {
         self.mode = mode;
         if mode == HostedViewMode::Tile {self.select_tile_picture(cx);}
         self.applied = None;
-        self.arm_refocus(cx);
+        self.present_subject(cx);
         self.view.redraw(cx);
     }
 
@@ -220,20 +216,17 @@ impl PhotosView {
         self.selected.as_ref()
     }
 
-    fn arm_refocus(&mut self, cx: &mut Cx) {
-        if self.selected.is_none() {
-            return;
+    fn present_subject(&mut self, cx: &mut Cx) {
+        let Some(item)=self.selected.as_ref().map(|s|s.item) else {return;};
+        if let Some(mut grid)=self.view.widget(cx,ids!(grid)).borrow_mut::<TileGrid>() {
+            grid.present_item(cx,item,self.mode==HostedViewMode::Tile);
         }
-        if let Some(old) = self.refocus.take() {
-            cx.stop_timer(old);
-        }
-        self.refocus = Some(cx.start_timeout(REFOCUS_DELAY));
     }
 
     fn select_tile_picture(&mut self, cx: &mut Cx) {
         let preferred = self.selected.as_ref().map(|s| s.item);
         self.selected = self.view.widget(cx, ids!(grid)).borrow::<TileGrid>()
-            .and_then(|grid| grid.visible_item(preferred))
+            .and_then(|grid| grid.centred_item().or_else(||grid.visible_item(preferred)))
             .map(|(item, title)| Selected {item, title});
         self.applied = None;
     }
@@ -286,7 +279,7 @@ impl PhotosView {
         }
         if self.mode == HostedViewMode::Tile {
             self.select_tile_picture(cx);
-            self.arm_refocus(cx);
+            self.present_subject(cx);
         }
     }
 
@@ -514,16 +507,6 @@ impl Widget for PhotosView {
                 self.set_mode(cx, mode);
             }
         }
-        if self.refocus.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
-            self.refocus = None;
-            if let Some(item) = self.selected.as_ref().map(|s| s.item) {
-                if self.mode == HostedViewMode::Tile {
-                    if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<TileGrid>() {
-                        grid.cover_item(cx, item);
-                    }
-                } else {self.show(cx, item);}
-            }
-        }
         if matches!(event,Event::BackPressed{..}) && !self.query(cx).is_empty() && event.back_pressed() {
             self.set_query(cx, "");
             return;
@@ -579,7 +562,7 @@ impl Widget for PhotosView {
                         }
                         if self.mode == HostedViewMode::Tile {
                             self.select_tile_picture(cx);
-                            self.arm_refocus(cx);
+                            self.present_subject(cx);
                         }
                     }
                     TileGridAction::Opened { error: Some(e), .. } => {
@@ -610,13 +593,10 @@ impl Widget for PhotosView {
         if self.applied.is_none() {
             self.apply_presentation(cx);
         }
-        // A new viewport (the host's tile size, a rotation) re-cuts the
-        // wall: the camera returns to the pick once that has settled.
+        // The grid owns resize anchoring around the current viewport. A
+        // resize must not jump back to the last picture that was clicked.
         let size = cx.turtle().rect().size;
         if size.x >= 1.0 && (size.x - self.last_size.x).abs() + (size.y - self.last_size.y).abs() > 0.5 {
-            if self.last_size.x >= 1.0 {
-                self.arm_refocus(cx);
-            }
             let short = size.y < 150.0;
             self.view.widget(cx, ids!(empty_body)).set_visible(cx, !short);
             let icon_size = if short {28.0} else {40.0};
