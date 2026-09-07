@@ -70,6 +70,41 @@ script_mod! {
                 GCell{GLabel{text: "8"}}
             }
 
+            GNote{text: "auto-fill against auto-fit: the same request, except auto-fill KEEPS the columns it cannot fill and auto-fit collapses them, so the cells share the width"}
+            View{width: Fill height: Fit flow: Down spacing: theme.space_1
+                Grid{
+                    width: Fill height: Fit
+                    column_gap: 8. row_gap: 8.
+                    columns: ["repeat(auto-fill, minmax(150px, 1fr))"]
+                    implicit_row_size: 34.
+                    GCell{GLabel{text: "auto-fill"}}
+                    GCell{GLabel{text: "two"}}
+                }
+                Grid{
+                    width: Fill height: Fit
+                    column_gap: 8. row_gap: 8.
+                    columns: ["repeat(auto-fit, minmax(150px, 1fr))"]
+                    implicit_row_size: 34.
+                    GCell{GLabel{text: "auto-fit"}}
+                    GCell{GLabel{text: "two"}}
+                }
+            }
+
+            GNote{text: "Down the columns instead: auto_flow decides which way an unplaced cell walks"}
+            Grid{
+                width: Fill height: 84.
+                column_gap: 8. row_gap: 8.
+                columns: ["repeat(4, minmax(60px, 1fr))"]
+                rows: ["1fr", "1fr"]
+                auto_flow: AutoFlow.Column
+                GCell{GLabel{text: "1"}}
+                GCell{GLabel{text: "2"}}
+                GCell{GLabel{text: "3"}}
+                GCell{GLabel{text: "4"}}
+                GCell{GLabel{text: "5"}}
+                GCell{GLabel{text: "6"}}
+            }
+
             GNote{text: "Named areas: the shape is drawn in the areas list and each child says which name it wants"}
             Grid{
                 width: Fill height: 150.
@@ -89,6 +124,7 @@ script_mod! {
                 columns: ["repeat(4, minmax(60px, 1fr))"]
                 rows: ["1fr", "1fr"]
                 GAccent{cell: CellPlacement{col: 3 row: 1} GLabel{text: "col 3, row 1"}}
+                GCell{cell: CellPlacement{col: 4 row: 1 row_span: 2} GLabel{text: "two rows"}}
                 GCell{cell: CellPlacement{col_span: 2} GLabel{text: "spans two"}}
                 GCell{GLabel{text: "auto"}}
                 GCell{GLabel{text: "auto"}}
