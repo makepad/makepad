@@ -235,7 +235,11 @@ script_mod! {
         margin: 0.0
         padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
         draw_bg +: {
-            border_radius: uniform(0.0)
+            // Not zero: sdf.box has no interior term, so at radius zero the
+            // distance inside the field is zero everywhere, the fill covers
+            // nothing and the border stroke floods the whole face with its own
+            // colour. It has to clear half the border width to stay a border.
+            border_radius: uniform(1.0)
             border_size: uniform(1.0)
             color: mod.mpf.bg
             color_hover: uniform(mod.mpf.bg)

@@ -143,7 +143,10 @@ script_mod! {
                 margin: 0
                 padding: Inset{left: 4 right: 4 top: 4 bottom: 3}
                 draw_bg +: {
-                    border_radius: 0.0
+                    // Not zero: at radius zero sdf.box gives the fill no
+                    // coverage and the border stroke paints the whole editor
+                    // blue. Must clear half the border width.
+                    border_radius: 1.5
                     border_size: 2.0
                     border_color: #x4fa3ff
                     border_color_hover: #x4fa3ff
