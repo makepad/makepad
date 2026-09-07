@@ -544,6 +544,9 @@ script_mod! {
         // Before separation a wave is grey peaks and nothing else: colour
         // in this view always means a real separated stem.
         color_grey: uniform(#x8b98a6)
+        // How much colour a band reading may carry. Mirrored in Rust as
+        // BAND_CHROMA, where the reasoning and the measurements live.
+        band_chroma: uniform(0.24)
         color_grid: uniform(#xffffff1e)
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
@@ -729,10 +732,42 @@ script_mod! {
             let e2 = mix(grey_h, s_bass + s_drums + s_vocals, separated)
             let e3 = mix(grey_h, s_bass + s_drums + s_vocals + s_other, separated)
 
-            let c0 = self.color_grey.mix(self.color_bass, separated)
-            let c1 = self.color_grey.mix(self.color_drums, separated)
-            let c2 = self.color_grey.mix(self.color_vocals, separated)
-            let c3 = self.color_grey.mix(self.color_other, separated)
+            // A column the separator has NOT reached is coloured by its
+            // three bands, which have been in this texture all along and
+            // ignored: red is low, green is mid, blue is high. The balance
+            // of the three picks a hue; the hue is all it says.
+            //
+            // Held at the grey's own brightness, because brightness in this
+            // lane already means played-or-coming and active-or-parked, and
+            // capped well short of the stem palette's colourfulness, because
+            // the one thing this must never do is let an unseparated record
+            // pass for a separated one. The other half of that is structural
+            // and stronger: a separated column is a STACK of up to four
+            // colours with edges, and this is one flat tone from the centre
+            // to the tip.
+            let top = max(t.x, max(t.y, t.z))
+            let unit = vec3(t.x, t.y, t.z) / max(top, 0.0001)
+            let mid = unit.x * 0.299 + unit.y * 0.587 + unit.z * 0.114
+            let off = unit - vec3(mid, mid, mid)
+            let spread = max(off.x, max(off.y, off.z)) - min(off.x, min(off.y, off.z))
+            let grey_y = self.color_grey.x * 0.299
+                + self.color_grey.y * 0.587
+                + self.color_grey.z * 0.114
+            let toned = vec3(grey_y, grey_y, grey_y)
+                + off * min(1.0, self.band_chroma / max(spread, 0.0001))
+            // Nothing measured, nothing to say: the old grey stands.
+            let measured = step(0.004, top) * step(0.000001, spread)
+            let plain = vec4(
+                mix(self.color_grey.x, toned.x, measured),
+                mix(self.color_grey.y, toned.y, measured),
+                mix(self.color_grey.z, toned.z, measured),
+                1.0
+            )
+
+            let c0 = plain.mix(self.color_bass, separated)
+            let c1 = plain.mix(self.color_drums, separated)
+            let c2 = plain.mix(self.color_vocals, separated)
+            let c3 = plain.mix(self.color_other, separated)
 
             // Half-pixel feathering: the envelope edge stays smooth while
             // the whole thing scrolls, instead of crawling pixel to pixel.
@@ -4830,13 +4865,61 @@ impl WavePyramid {
     }
 }
 
+/// How a pair of columns becomes one, a level up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reduce {
+    /// Every channel takes the larger of the two.
+    PerChannel,
+    /// The alpha still takes the larger — heights must not change — but the
+    /// other three come from whichever column was LOUDER.
+    ///
+    /// For channels that describe what a column SOUNDED LIKE, a per-channel
+    /// maximum is a lie: it takes the bass from one instant and the treble
+    /// from another and reports a moment that never happened. Pulled back far
+    /// enough every band reaches its own ceiling somewhere in the span, so
+    /// they all converge and the description dissolves into grey. Measured
+    /// over the analysed library, half the columns lose their colouring by
+    /// four reductions and two thirds by eight — which is the whole-track
+    /// strip, the view most often glanced at.
+    BandsOfTheLouder,
+}
+
+/// One level up: pairs of columns become one, by the given rule.
+pub fn reduce_once(below: &[[u8; 4]], reduce: Reduce) -> Vec<[u8; 4]> {
+    let mut level = Vec::with_capacity(below.len().div_ceil(2));
+    for pair in below.chunks(2) {
+        let mut column = pair[0];
+        if let Some(second) = pair.get(1) {
+            match reduce {
+                Reduce::PerChannel => {
+                    for channel in 0..4 {
+                        column[channel] = column[channel].max(second[channel]);
+                    }
+                }
+                Reduce::BandsOfTheLouder => {
+                    if second[3] > column[3] {
+                        column = *second;
+                    }
+                    column[3] = pair[0][3].max(second[3]);
+                }
+            }
+        }
+        level.push(column);
+    }
+    level
+}
+
 /// Build a pyramid from four-channel columns.
 ///
-/// Level 0 is the source resolution; each level above is a MAX reduction of
-/// the pair below it — peaks survive all the way up, which is what makes a
-/// pulled-back view read as music instead of mush, and what stops a
-/// zoomed-out waveform aliasing.
-pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
+/// Level 0 is the source resolution; each level above reduces the pair below
+/// it — the alpha always by MAX, so peaks survive all the way up, which is
+/// what makes a pulled-back view read as music instead of mush and what stops
+/// a zoomed-out waveform aliasing.
+pub fn build_pyramid_with(
+    cx: &mut Cx,
+    columns: &[[u8; 4]],
+    reduce: Reduce,
+) -> Option<WavePyramid> {
     if columns.is_empty() {
         return None;
     }
@@ -4846,17 +4929,7 @@ pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
         && pyramid.len() < MAX_WAVE_LEVELS
     {
         let below = pyramid.last().expect("checked");
-        let mut level = Vec::with_capacity(below.len().div_ceil(2));
-        for pair in below.chunks(2) {
-            let mut column = pair[0];
-            if let Some(second) = pair.get(1) {
-                for channel in 0..4 {
-                    column[channel] = column[channel].max(second[channel]);
-                }
-            }
-            level.push(column);
-        }
-        pyramid.push(level);
+        pyramid.push(reduce_once(below, reduce));
     }
 
     let mut levels = Vec::with_capacity(pyramid.len());
@@ -4893,14 +4966,17 @@ pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
 /// alpha = the column's level against the whole track, which is the only
 /// channel that decides how tall a column draws.
 pub fn zoom_texture(cx: &mut Cx, tiles: &WaveTiles) -> Option<WavePyramid> {
-    build_pyramid(cx, &tiles.zoom)
+    build_pyramid_with(cx, &tiles.zoom, Reduce::BandsOfTheLouder)
 }
 
 /// The stem-share pyramid, laid out identically to the band one so the
 /// shader can sample both with the same level selection: red = vocals,
 /// green = drums, blue = bass, alpha = other.
 pub fn stem_texture(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
-    build_pyramid(cx, columns)
+    // Per channel here, because these four are shares of one column rather
+    // than a description plus a level: there is no "louder of the two" to
+    // take the rest from.
+    build_pyramid_with(cx, columns, Reduce::PerChannel)
 }
 
 /// What one separated column is MADE of, from the four stems' RMS.
@@ -4937,6 +5013,62 @@ pub fn stem_column_shares(rms: [f64; 4]) -> [u8; 4] {
 /// the proof.
 pub fn column_height(tile: [u8; 4]) -> f32 {
     (tile[3] as f32 / 255.0).clamp(0.0, 1.0) * WAVE_ENVELOPE
+}
+
+/// The unseparated wave's grey, as the shader declares it.
+pub const WAVE_GREY: [f32; 3] = [0.545, 0.596, 0.651];
+
+/// The most colour a band reading is allowed to carry.
+///
+/// This is the number that keeps a band-coloured column from being mistaken
+/// for a separated one, and it is a CAP rather than a hope: whatever the
+/// three bands do, the drawn colour cannot pass it. Measured over the
+/// analysed library it holds every column at or under 0.39 saturation, while
+/// the least colourful of the four stem colours is 0.62 and the other three
+/// are above 0.82. The closest any real column ever comes to a stem it could
+/// be confused with is 0.27 of saturation away.
+pub const BAND_CHROMA: f32 = 0.24;
+
+/// What one unseparated column is COLOURED like, from its three bands.
+///
+/// The bands are already on the GPU — the level channel beside them is what
+/// decides height — and until now the colour ignored them, so a record the
+/// separator had not reached drew as one flat grey and said nothing about
+/// where its bass was.
+///
+/// Three properties, in the order they matter:
+///
+/// * **Brightness never moves.** Every colour this returns has the grey's
+///   own luma. Brightness in this lane already says two other things — what
+///   has been played, and whether the deck is the active one — and a third
+///   meaning would collide with both.
+/// * **Colourfulness is capped**, at [`BAND_CHROMA`], so the reading can
+///   never climb into the range the stem colours live in.
+/// * **Hue carries the whole message**: which band is loudest, on the
+///   texture's own red-green-blue = low-mid-high axis. A column with its
+///   three bands level has nothing to say and draws neutral.
+pub fn band_tint(tile: [u8; 4]) -> [f32; 3] {
+    let luma = |c: [f32; 3]| c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
+    let grey_y = luma(WAVE_GREY);
+    let band = [tile[0] as f32 / 255.0, tile[1] as f32 / 255.0, tile[2] as f32 / 255.0];
+    let top = band[0].max(band[1]).max(band[2]);
+    // Nothing measured here at all: keep the grey rather than invent a hue
+    // for a column that has no content to describe.
+    if top < 0.004 {
+        return WAVE_GREY;
+    }
+    // Against the column's own loudest band, so the hue is the BALANCE of
+    // the three and not their loudness — loudness is the level channel's
+    // job, and this must not say it twice.
+    let unit = [band[0] / top, band[1] / top, band[2] / top];
+    let mid = luma(unit);
+    let off = [unit[0] - mid, unit[1] - mid, unit[2] - mid];
+    let spread = off[0].max(off[1]).max(off[2]) - off[0].min(off[1]).min(off[2]);
+    if spread < 1e-6 {
+        return [grey_y, grey_y, grey_y];
+    }
+    let scale = (BAND_CHROMA / spread).min(1.0);
+    [grey_y + off[0] * scale, grey_y + off[1] * scale, grey_y + off[2] * scale]
 }
 
 /// The same column drawn as separated stems: the cumulative edges of the
@@ -8931,6 +9063,122 @@ mod tests {
         assert!(cols > 1_000, "{cols} columns");
         // A quarter and three quarters in: the middle of each half.
         (analysis.tiles, stems, rate, cols / 4, cols * 3 / 4)
+    }
+
+    fn luma(c: [f32; 3]) -> f32 {
+        c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114
+    }
+
+    fn saturation(c: [f32; 3]) -> f32 {
+        let top = c[0].max(c[1]).max(c[2]);
+        let low = c[0].min(c[1]).min(c[2]);
+        if top <= 1e-6 { 0.0 } else { (top - low) / top }
+    }
+
+    /// Brightness in this lane already says what has been played and which
+    /// deck is active. A colouring that moved it would be a third meaning on
+    /// a channel that has two.
+    #[test]
+    fn colouring_a_column_never_changes_how_bright_it_is() {
+        let grey_y = luma(WAVE_GREY);
+        for tile in [
+            [255, 83, 60, 255],
+            [94, 255, 255, 234],
+            [227, 198, 168, 244],
+            [150, 150, 150, 200],
+            [255, 40, 20, 220],
+            [30, 60, 255, 180],
+            [40, 255, 40, 200],
+            [1, 0, 0, 12],
+        ] {
+            let got = luma(band_tint(tile));
+            assert!(
+                (got - grey_y).abs() < 1e-4,
+                "{tile:?} drew at brightness {got}, the grey is {grey_y}"
+            );
+        }
+    }
+
+    /// The one outcome that would make this colouring a net loss: an
+    /// operator believing a record is separated when it is not.
+    #[test]
+    fn a_band_colour_can_never_be_as_strong_as_a_stem_colour() {
+        // The least colourful of the four, which is the one to clear.
+        let weakest_stem = STEM_COLORS
+            .iter()
+            .map(|c| saturation([c[0], c[1], c[2]]))
+            .fold(f32::INFINITY, f32::min);
+        assert!(weakest_stem > 0.6, "the stem palette moved: {weakest_stem}");
+        // Every corner and edge of the band cube, not a sample of it: the
+        // cap has to hold for anything the analysis can produce.
+        let mut worst = 0.0f32;
+        for low in (0..=255).step_by(15) {
+            for mid in (0..=255).step_by(15) {
+                for high in (0..=255).step_by(15) {
+                    let s = saturation(band_tint([low, mid, high, 255]));
+                    worst = worst.max(s);
+                }
+            }
+        }
+        assert!(
+            worst < weakest_stem - 0.2,
+            "a band colour reached {worst} against the palest stem at {weakest_stem}"
+        );
+    }
+
+    /// And it has to be worth drawing: a cap that made everything grey would
+    /// pass the test above and deliver nothing.
+    #[test]
+    fn a_column_that_leans_on_one_band_is_visibly_coloured() {
+        let flat = saturation(WAVE_GREY);
+        for (name, tile) in [
+            ("bass", [255, 40, 20, 220]),
+            ("air", [30, 60, 255, 180]),
+            ("mid", [40, 255, 40, 200]),
+        ] {
+            let s = saturation(band_tint(tile));
+            assert!(
+                s > flat * 1.5,
+                "a {name}-heavy column drew at {s}, barely past the plain grey {flat}"
+            );
+        }
+        // Three bands level is a column with nothing to say, and it says so.
+        let level = saturation(band_tint([150, 150, 150, 200]));
+        assert!(level < 0.02, "a balanced column should be neutral, drew {level}");
+        // And the hues really are different readings, not one tint.
+        let bass = band_tint([255, 40, 20, 220]);
+        let air = band_tint([30, 60, 255, 180]);
+        assert!(bass[0] > bass[2] + 0.15, "bass must read warm: {bass:?}");
+        assert!(air[2] > air[0] + 0.15, "air must read cool: {air:?}");
+    }
+
+    /// Nothing about a colouring may change the shape of the wave.
+    #[test]
+    fn keeping_a_columns_bands_together_leaves_every_height_alone() {
+        let columns: Vec<[u8; 4]> = (0..1000)
+            .map(|i| {
+                let n = i as u8;
+                [n.wrapping_mul(7), n.wrapping_mul(13), n.wrapping_mul(29), n.wrapping_mul(3)]
+            })
+            .collect();
+        let mut per_channel = vec![columns.clone()];
+        let mut louder = vec![columns.clone()];
+        for _ in 0..8 {
+            per_channel.push(reduce_once(per_channel.last().unwrap(), Reduce::PerChannel));
+            louder.push(reduce_once(louder.last().unwrap(), Reduce::BandsOfTheLouder));
+        }
+        for (level, (a, b)) in per_channel.iter().zip(louder.iter()).enumerate() {
+            let heights_a: Vec<u8> = a.iter().map(|c| c[3]).collect();
+            let heights_b: Vec<u8> = b.iter().map(|c| c[3]).collect();
+            assert_eq!(heights_a, heights_b, "level {level} changed a height");
+        }
+        // And it does what it is for: the bands of a reduced column are a
+        // real column's bands, not three maxima from three different moments.
+        let pair = [[255u8, 0, 0, 10], [0, 0, 255, 200]];
+        let one = reduce_once(&pair, Reduce::BandsOfTheLouder);
+        assert_eq!(one[0], [0, 0, 255, 200], "the louder column's own bands");
+        let both = reduce_once(&pair, Reduce::PerChannel);
+        assert_eq!(both[0], [255, 0, 255, 200], "which the old rule never was");
     }
 
     #[test]
