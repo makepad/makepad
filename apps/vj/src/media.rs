@@ -5642,8 +5642,7 @@ mod tests {
     }
 
     fn library_billboard(name: &str) -> Option<PathBuf> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library")
+        let path = makepad_asset_client::paths::library_root()
             .join(name);
         path.exists().then_some(path)
     }

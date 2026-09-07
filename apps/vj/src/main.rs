@@ -12981,7 +12981,7 @@ p2 {}
     /// Where the last-active workspace sleeps between sessions: one word in
     /// a file, so closing on any top-level tab reopens on that tab.
     fn ui_surface_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/ui-surface")
+        service::session_config_from_env().cache_parent.join("ui-surface")
     }
 
     fn save_ui_surface(mode: ConsoleMode) {
