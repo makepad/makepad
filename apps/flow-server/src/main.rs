@@ -80,8 +80,7 @@ fn parse_config() -> FlowServerConfig {
     }
     let mut config = FlowServerConfig::new(root.unwrap_or_else(default_root));
     config.asset.token = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/asset-ui/asset-server/admin-token"),
+        makepad_asset_client::paths::store_root().join("admin-token"),
     )
     .ok()
     .map(|token| token.trim().to_string())
