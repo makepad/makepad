@@ -5,7 +5,7 @@
 
 use crate::auth::Auth;
 use crate::budget::Budgets;
-use crate::catalog::{CandidateRow, CandidateState, Catalog, CATALOG_SCHEMA};
+use crate::catalog::{CandidateRow, CandidateState, Catalog, PublishExpectedHead, CATALOG_SCHEMA};
 use crate::error::{content_err_at, ServerError, ServerResult};
 use crate::gc::{Gc, GC_SCHEMA};
 use crate::imports::{Imports, IMPORT_SCHEMA};
@@ -457,6 +457,29 @@ impl CatalogCore {
         items: &[PublishBatchItem],
         now_ms: u64,
     ) -> ServerResult<Vec<PublishBatchOutcome>> {
+        self.publish_batch_inner(items, None, now_ms)
+    }
+
+    /// Atomic publication with explicit alias-scoped preconditions. A stale
+    /// item rolls back the whole page; admitted blobs remain available for retry.
+    pub fn publish_batch_guarded(
+        &self,
+        items: &[PublishBatchItem],
+        guards: &[PublishExpectedHead],
+        now_ms: u64,
+    ) -> ServerResult<Vec<PublishBatchOutcome>> {
+        if guards.len() != items.len() {
+            return Err(ServerError::InvalidInput { what: "publish guard count" });
+        }
+        self.publish_batch_inner(items, Some(guards), now_ms)
+    }
+
+    fn publish_batch_inner(
+        &self,
+        items: &[PublishBatchItem],
+        guards: Option<&[PublishExpectedHead]>,
+        now_ms: u64,
+    ) -> ServerResult<Vec<PublishBatchOutcome>> {
         let mut decoded: Vec<(AssetManifest, AssetRevisionId)> = Vec::with_capacity(items.len());
         for item in items {
             if item.manifest_bytes.len() as u64 > self.budgets.max_manifest_bytes {
@@ -468,6 +491,17 @@ impl CatalogCore {
             }
             let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
             let revision = AssetRevisionId::hash_of(&item.manifest_bytes);
+            if guards.is_some() {
+                // A guarded page may touch each identity/alias only once, so
+                // every precondition describes the same pre-commit snapshot.
+                if decoded.iter().any(|(previous, _)| previous.asset_id == manifest.asset_id)
+                    || item.alias.as_ref().is_some_and(|alias| {
+                        items[..decoded.len()].iter().any(|i| i.alias.as_ref() == Some(alias))
+                    })
+                {
+                    return Err(ServerError::InvalidInput { what: "duplicate guarded publication target" });
+                }
+            }
             if let Some(alias) = &item.alias {
                 if alias.namespace() != item.namespace {
                     return Err(ServerError::Conflict { what: "alias namespace" });
@@ -498,8 +532,27 @@ impl CatalogCore {
         let catalog = self.catalog();
         let search = self.search();
         self.db.tx(|db| {
+            let mut unchanged = vec![false; items.len()];
+            if let Some(guards) = guards {
+                for (index, (item, (manifest, revision))) in items.iter().zip(&decoded).enumerate() {
+                    unchanged[index] = catalog.check_publish_head_in_tx(
+                        item.alias.as_ref(),
+                        &AssetRevisionRef { asset_id: manifest.asset_id, revision: *revision },
+                        guards[index],
+                    )?;
+                }
+            }
             let mut outcomes = Vec::with_capacity(items.len());
-            for (item, (manifest, revision)) in items.iter().zip(&decoded) {
+            for (index, (item, (manifest, revision))) in items.iter().zip(&decoded).enumerate() {
+                if unchanged[index] {
+                    outcomes.push(PublishBatchOutcome {
+                        asset_id: manifest.asset_id,
+                        revision: *revision,
+                        already_published: true,
+                        unchanged: true,
+                    });
+                    continue;
+                }
                 catalog.register_asset(&manifest.asset_id, &item.namespace, now_ms)?;
                 let already_published = match catalog
                     .asset_candidate_state(&manifest.asset_id, revision)?
@@ -557,6 +610,7 @@ impl CatalogCore {
                     asset_id: manifest.asset_id,
                     revision: *revision,
                     already_published,
+                    unchanged: false,
                 });
             }
             Ok(outcomes)
@@ -586,6 +640,8 @@ pub struct PublishBatchOutcome {
     pub asset_id: AssetId,
     pub revision: AssetRevisionId,
     pub already_published: bool,
+    /// Guarded current-target replay: no annotation, alias, index or event write.
+    pub unchanged: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

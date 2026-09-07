@@ -193,6 +193,11 @@ pub fn path_publish_batch() -> String {
     "/v1/publish/batch".to_string()
 }
 
+/// Separate route so an older server cannot silently ignore a publication guard.
+pub fn path_publish_batch_guarded() -> String {
+    "/v1/publish/batch/guarded".to_string()
+}
+
 /// Most blobs one upload batch may carry (mirrors the server cap).
 pub const MAX_UPLOAD_BATCH_ITEMS: usize = 64;
 

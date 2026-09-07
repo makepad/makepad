@@ -557,13 +557,22 @@ impl PublishBundleFile {
     }
 }
 
-/// A canonical bounded multi-file publication: one request that uploads and
-/// deduplicates every blob, builds ONE deterministic [`AssetManifest`]
-/// carrying every `(role, tier, lod)` slot, stages it, publishes it
-/// all-or-nothing, and returns the exact resulting refs.
-///
-/// The single-file convenience path ([`PublishRequest`]) remains for plain
-/// media artifacts; this is the canonical shape for derived mesh/PBR sets.
+/// Publication precondition for one alias, not a global head for the asset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublishExpectedHead {
+    /// Legacy unconditional publication and alias rebinding.
+    #[default]
+    Any,
+    /// The alias must be absent and this asset ID must have no published revision.
+    Absent,
+    /// Compare this alias's complete target, including its stable asset identity.
+    Exact(AssetRevisionRef),
+}
+
+/// A bounded multi-file publication that uploads and deduplicates every blob,
+/// builds one deterministic [`AssetManifest`] containing every file slot,
+/// and returns its exact immutable references. Guarded publication commits
+/// the revision, annotation and alias together; `Any` keeps the legacy flow.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishBundle {
     pub namespace: String,
@@ -574,6 +583,10 @@ pub struct PublishBundle {
     pub alias: Option<AssetAlias>,
     /// Reuse an existing asset id (re-publish = new revision); None mints.
     pub asset_id: Option<AssetId>,
+    /// Alias-scoped publication guard. Guarded requests require a persisted
+    /// `asset_id` and `alias`; this does not establish a global asset head.
+    /// Retain the same request/identity when retrying a lost response.
+    pub expected_head: PublishExpectedHead,
     /// Every typed file of the revision. Order is irrelevant — the manifest
     /// canonicalizes — but each `(role, tier, lod)` slot must be unique.
     pub files: Vec<PublishBundleFile>,
@@ -618,6 +631,33 @@ pub struct PublishBundle {
 }
 
 impl PublishBundle {
+    /// Package a static editable model without introducing a new manifest
+    /// schema: runtime GLB plus one self-contained, versioned source bundle.
+    /// The source format belongs to its authoring engine and remains opaque
+    /// to the store. Set `asset_id`, `alias` and `expected_head` before guarded
+    /// publication; retain that identity and source bytes across retries.
+    /// Set measured mesh `stats` and bounds just as with [`Self::new`].
+    pub fn editable_model(
+        namespace: impl Into<String>,
+        title: impl Into<String>,
+        source_bundle: Vec<u8>,
+        render_glb: Vec<u8>,
+        thumbnail: PublishThumbnail,
+        rights: PublishRights,
+    ) -> Self {
+        Self::new(
+            namespace,
+            AssetKind::Prop,
+            title,
+            vec![
+                PublishBundleFile::bytes(FileRole::Source, MediaType::Bin, source_bundle, None),
+                PublishBundleFile::bytes(FileRole::RenderGlb, MediaType::Glb, render_glb, None),
+            ],
+            thumbnail,
+            rights,
+        )
+    }
+
     /// A minimally filled bundle; callers set metadata and geometry on top.
     /// Geometry defaults mirror [`PublishRequest::new`] (meter units,
     /// Y-up/-Z-forward, origin pivot, unit bounds, loopable for the timed
@@ -638,6 +678,7 @@ impl PublishBundle {
             description: String::new(),
             alias: None,
             asset_id: None,
+            expected_head: PublishExpectedHead::Any,
             files,
             thumbnail,
             dependencies: Vec::new(),
@@ -683,6 +724,19 @@ impl PublishBundle {
     /// contract re-validates everything at manifest build; these checks
     /// exist to refuse with a precise, friendly reason first.
     fn validate(&self) -> ClientResult<()> {
+        if self.expected_head != PublishExpectedHead::Any {
+            let asset_id = self.asset_id.ok_or(ClientError::InvalidInput {
+                what: "guarded publish requires persisted asset id",
+            })?;
+            if self.alias.is_none() {
+                return Err(ClientError::InvalidInput { what: "guarded publish requires alias" });
+            }
+            if let PublishExpectedHead::Exact(expected) = self.expected_head {
+                if expected.asset_id != asset_id {
+                    return Err(ClientError::InvalidInput { what: "publish expected asset identity" });
+                }
+            }
+        }
         if self.namespace.is_empty()
             || self.namespace.len() > wire::MAX_NAMESPACE_BYTES
             || !wire::query_value_ok(&self.namespace)
@@ -1134,6 +1188,8 @@ impl AssetClient {
     /// revisions, annotations and aliases together) is deliberately the
     /// commit point: after `Publishing` is reported it runs uninterruptibly,
     /// so a cancellation can never leave a published-but-unaliasable result.
+    /// Cancellation is checked once more after the `Publishing` callback,
+    /// allowing the caller to arbitrate cancellation immediately before commit.
     pub fn publish_bundles_with(
         &mut self,
         requests: &[PublishBundle],
@@ -1260,7 +1316,13 @@ impl AssetClient {
         // locally computed ones.
         gate()?;
         emit(PublishStage::Publishing);
-        let outcomes = self.api().publish_batch(&items)?;
+        gate()?;
+        let outcomes = if requests.iter().any(|r| r.expected_head != PublishExpectedHead::Any) {
+            let guards: Vec<_> = requests.iter().map(|r| r.expected_head).collect();
+            self.api().publish_batch_guarded(&items, &guards)?
+        } else {
+            self.api().publish_batch(&items)?
+        };
         for ((asset_id, revision, _already), local) in outcomes.iter().zip(&results) {
             if *asset_id != local.asset_id || *revision != local.revision {
                 return Err(ClientError::Protocol { what: "publish batch identity mismatch" });
@@ -1308,9 +1370,10 @@ impl AssetClient {
         // Register (or adopt) the asset id first: the manifest embeds it.
         gate()?;
         emit(PublishStage::RegisteringAsset);
-        let asset_id = match request.asset_id {
-            None => self.api().register_asset(&ns, None)?,
-            Some(id) => match self.api().register_asset(&ns, Some(&id)) {
+        let asset_id = match (request.expected_head, request.asset_id) {
+            (guard, Some(id)) if guard != PublishExpectedHead::Any => id,
+            (_, None) => self.api().register_asset(&ns, None)?,
+            (_, Some(id)) => match self.api().register_asset(&ns, Some(&id)) {
                 Ok(got) => got,
                 // Already registered (re-publish/retry): the 409 is expected.
                 Err(ClientError::Server { status: 409, .. }) => id,
@@ -1387,6 +1450,32 @@ impl AssetClient {
             }
         }
 
+        // A guarded publication commits annotation, revision and alias in one
+        // transaction. No catalog-visible write may precede the guard check.
+        if request.expected_head != PublishExpectedHead::Any {
+            let item = crate::api::PublishBatchWireItem {
+                namespace: ns,
+                manifest: canonical,
+                alias: request.alias.clone(),
+                annotation: request.annotation(),
+            };
+            gate()?;
+            emit(PublishStage::Publishing);
+            gate()?;
+            let outcomes = self.api().publish_batch_guarded(&[item], &[request.expected_head])?;
+            if outcomes[0].0 != asset_id || outcomes[0].1 != revision {
+                return Err(ClientError::Protocol { what: "publish batch identity mismatch" });
+            }
+            emit(PublishStage::Complete);
+            return Ok(PublishedBundle {
+                asset_id,
+                revision,
+                alias: request.alias.clone(),
+                files: file_refs,
+                thumbnail_blob,
+            });
+        }
+
         // Annotation BEFORE publish so the publish event carries the kind.
         gate()?;
         emit(PublishStage::Annotating);
@@ -1411,11 +1500,13 @@ impl AssetClient {
                 self.api().stage_asset_revision(&asset_id, &canonical)?;
                 gate()?;
                 emit(PublishStage::Publishing);
+                gate()?;
                 self.api().publish_asset_revision(&asset_id, &revision)?;
             }
             Some(CandidateStateDto::Staged) => {
                 gate()?;
                 emit(PublishStage::Publishing);
+                gate()?;
                 self.api().publish_asset_revision(&asset_id, &revision)?;
             }
             Some(CandidateStateDto::Published) => {
