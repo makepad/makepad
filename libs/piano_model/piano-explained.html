@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>The life of a piano note · Makepad Instrument Lab</title>
+<style>
+:root{--paper:#f5f2e9;--ink:#222722;--muted:#61675e;--rule:#d6d7ca;--amber:#eab66b;--coral:#df8065;--teal:#79bab1;--dark:#19221f;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;--serif:Georgia,'Times New Roman',serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}button,input,select{font:inherit}button,select,input{accent-color:#a65b35}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid #ac552d;outline-offset:5px}button{touch-action:manipulation}a{color:inherit;text-decoration-color:#ac552d;text-underline-offset:4px}p{margin:0 0 16px}main{width:min(1240px,calc(100% - 96px));margin:auto}.masthead{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--rule);padding:23px 0 16px;gap:15px;font:10px var(--mono);letter-spacing:1.8px}.brand{font-weight:800;font-size:12px;letter-spacing:2px}.masthead span{color:var(--muted)}.intro{display:grid;grid-template-columns:1.7fr 1fr;align-items:end;gap:40px;padding:29px 0 27px}h1{font:normal clamp(44px,5.6vw,78px)/1.04 var(--serif);letter-spacing:-3px;margin:0}h1 em{font-weight:normal;color:#9b5538}.lead{color:#575e55;font-size:16px;max-width:355px;margin:0 0 3px;line-height:1.65}.eyebrow{font:10px var(--mono);letter-spacing:1.7px;text-transform:uppercase}.instrument{background:var(--dark);color:#ecebdf;border-radius:7px;overflow:hidden;box-shadow:0 14px 40px #26322612}.instrument-top{padding:19px 24px 0;display:flex;justify-content:space-between;gap:12px;color:#b6c3b5}.instrument-top .signal{color:var(--amber)}.instrument-top .signal::before{content:'';display:inline-block;width:6px;height:6px;background:var(--amber);border-radius:50%;margin-right:8px}canvas{display:block;width:100%}#instrumentCanvas{height:310px}.stages{display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid #ffffff21;padding:0 13px}.stage{background:none;color:#b7c1b5;border:0;border-top:2px solid transparent;padding:15px 6px 16px;text-align:left;font-size:12px}.stage span{font:11px var(--mono);color:#81958b;margin-right:8px}.stage[aria-pressed="true"]{border-color:var(--amber);color:#fff2d9}.stage[aria-pressed="true"] span{color:var(--amber)}.stage:hover{background:#ffffff06}.stage:focus-visible{outline-color:var(--amber);outline-offset:-5px}.playbar{display:flex;align-items:center;gap:13px;padding:18px 0 13px;flex-wrap:wrap}.strike{background:var(--ink);border:1px solid var(--ink);color:var(--paper);font-weight:650;border-radius:4px;padding:14px 24px;min-height:51px}.strike:hover{background:#404a3d}.playkey{display:flex;align-items:center;justify-content:space-between;gap:28px;background:#fffdf5;border:1px solid #b8b9aa;border-bottom:5px solid #b8b9aa;border-radius:4px;padding:8px 15px;min-height:56px;min-width:155px;user-select:none;touch-action:none}.playkey strong{font:26px var(--serif)}.playkey small{display:block;text-align:left;font:10px/1.5 var(--mono);color:var(--muted)}.playkey[aria-pressed="true"]{border-bottom-width:1px;background:#eed3a8;transform:translateY(3px)}.transport{display:flex;gap:7px;align-items:center;margin-left:auto;flex-wrap:wrap}.quiet{background:transparent;border:1px solid #bec2b5;color:var(--ink);border-radius:4px;padding:8px 12px;font-size:12px;min-height:39px}.quiet:hover{background:#e9e7dc}.speed{display:flex;align-items:center;gap:7px;font:10px var(--mono);margin-left:7px}.speed select{background:transparent;border:0;border-bottom:1px solid #acb2a3;border-radius:0;padding:8px 3px;color:var(--ink)}.sound-tools{display:flex;align-items:center;gap:10px;border-left:1px solid var(--rule);padding-left:13px}.sound-tools input{width:74px}.sound-tools label{font:10px var(--mono)}.sound-tools output{display:inline-block;min-width:28px}.sound-note{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:11px;margin:0;padding-bottom:21px;border-bottom:1px solid var(--rule)}#audioStatus{max-width:480px;text-align:right;color:#795035}.motion-note{font-size:11px;color:var(--muted);margin:10px 0 0}.focus-section{display:grid;grid-template-columns:0.9fr 1.5fr;gap:60px;padding:40px 0 32px;border-bottom:1px solid var(--rule)}.focus-heading{display:flex;gap:14px;align-items:baseline;margin-bottom:16px}.chapter{font:italic 37px var(--serif);color:#a96744}h2{font:normal 32px/1.12 var(--serif);letter-spacing:-.7px;margin:0 0 18px}.focus-section h2{margin:0}.focus-section p{font-size:14px;color:#535d53;line-height:1.7}.fact{border-left:2px solid #b58b5b;padding:1px 0 1px 14px;font:11px/1.65 var(--mono);color:#695138;margin-top:21px}.detail-figure{margin:0;min-width:0;align-self:center}.figure-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px;font:10px var(--mono);color:#697164}.figure-head span:last-child{color:#956647;text-align:right}#detailCanvas{height:239px}.detail-figure figcaption{font-size:11px;color:var(--muted);margin-top:9px;min-height:34px}.controls-section{padding:32px 0 36px}.controls-heading{display:flex;justify-content:space-between;align-items:center;gap:20px}.controls-heading h2{font-size:29px;margin-bottom:8px}.controls-heading p{color:var(--muted);font-size:12px}.controls{display:grid;grid-template-columns:1fr 1fr 1fr;column-gap:34px}.control{padding:18px 0;border-bottom:1px solid var(--rule);min-width:0}.control-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;font-size:13px}.control-title output{font:12px var(--mono);color:#915738}.control small{display:block;font-size:11px;color:var(--muted);margin-top:8px;min-height:34px}.control input[type=range]{width:100%;margin:8px 0;height:15px;cursor:pointer}.note-select{width:100%;background:transparent;border:1px solid #b8beaf;color:var(--ink);border-radius:4px;padding:7px 10px}.pedal-scale{display:flex;justify-content:space-between;font:9px var(--mono);color:#777d70;margin-top:0}.audio-panel{border:1px solid var(--rule);border-radius:5px;padding:16px 18px;grid-column:3;grid-row:2;align-self:center;margin-top:15px}.audio-panel .figure-head{font-size:9px}#audioCanvas{height:56px}.audio-panel p{font-size:10px;line-height:1.45;color:var(--muted);margin:8px 0 0}.source-notes{border-top:1px solid var(--ink);border-bottom:1px solid var(--rule);margin-bottom:22px}summary{cursor:pointer;list-style:none;padding:22px 0;display:flex;justify-content:space-between;align-items:center;font:24px var(--serif)}summary::-webkit-details-marker{display:none}summary::after{content:'+';font:26px var(--mono)}details[open]>summary::after{content:'−'}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px 48px;padding:3px 0 23px}.source-grid h3{font-size:14px;font-weight:650;margin:0 0 8px}.source-grid p{font-size:12px;color:#566052}.source-grid code{font:11px/1.7 var(--mono);overflow-wrap:anywhere}.equation{display:block;background:#eae9df;padding:12px;margin:11px 0}.footer{display:flex;justify-content:space-between;gap:20px;font:9px var(--mono);letter-spacing:1px;color:#737b6b;padding:0 0 28px}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}noscript p{padding:20px;background:#edd6bc}
+.audio-panel{margin:15px 0 0;min-width:0}
+@media(min-width:1500px){.intro{padding-top:38px;padding-bottom:35px}#instrumentCanvas{height:335px}}
+@media(max-width:1050px){main{width:calc(100% - 48px)}.intro{gap:25px;grid-template-columns:1.4fr 1fr}h1{letter-spacing:-2px}.focus-section{gap:30px}.transport{margin-left:0}.sound-tools{margin-left:auto}.stage span{display:block;margin-bottom:4px}.playbar{gap:10px}.controls{column-gap:23px}}
+@media(max-width:650px){main{width:calc(100% - 32px)}.masthead{font-size:8px;letter-spacing:.8px;padding-top:18px}.masthead span:last-child{display:none}.brand{font-size:10px}.intro{grid-template-columns:1fr;gap:16px;padding:25px 0 23px}h1{font-size:47px;letter-spacing:-2px;max-width:340px}.lead{font-size:14px;max-width:340px}.instrument-top{padding:16px 16px 0;font-size:8px;letter-spacing:.8px}#instrumentCanvas{height:458px}.stages{grid-template-columns:repeat(3,1fr);padding:0 8px}.stage{padding:11px 5px;font-size:11px;border-bottom:1px solid #ffffff0e}.stage span{display:inline;margin-right:5px}.playbar{gap:10px;padding-top:16px}.strike{flex:1;padding:14px 17px}.playkey{flex:1;min-width:150px;gap:15px}.transport{width:100%;justify-content:space-between;gap:4px}.quiet{padding:8px 9px;font-size:11px}.speed{margin-left:0;font-size:9px;gap:4px}.sound-tools{border-left:0;padding-left:0;margin-left:0;justify-content:space-between;width:100%}.sound-tools input{width:125px}.sound-note{display:block;font-size:10px;padding-bottom:18px}.sound-note span{display:block}#audioStatus{text-align:left;margin-top:7px}.motion-note{font-size:10px;line-height:1.6}.focus-section{grid-template-columns:1fr;gap:24px;padding-top:27px}.focus-section h2{font-size:29px}.focus-section p{font-size:13px}.fact{margin-top:12px}.focus-section p:last-of-type{margin-bottom:0}#detailCanvas{height:243px}.controls{grid-template-columns:1fr 1fr;column-gap:21px}.control-title{font-size:12px;flex-wrap:wrap;gap:4px}.control-title output{font-size:11px}.control small{font-size:10px}.controls-heading h2{font-size:26px;max-width:240px}.controls-heading p{font-size:11px}.controls-heading{align-items:start}.audio-panel{grid-column:1 / -1;grid-row:4}.source-grid{grid-template-columns:1fr;gap:9px}.footer{font-size:8px;letter-spacing:.3px}.figure-head{font-size:9px}.detail-figure figcaption{font-size:10px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <div class="masthead"><div class="brand">MAKEPAD <span>/ INSTRUMENT LAB</span></div><span>FIELD NOTES № 01 &nbsp; · &nbsp; PHYSICAL SOUND</span></div>
+  <header class="intro"><h1>The life of<br>a <em>piano note.</em></h1><p class="lead">No recording hides inside the key. We compute the instrument’s motion: felt meets steel, strings move wood, and a note becomes a roomful of sound.</p></header>
+  <section class="instrument" aria-label="Explore the piano’s energy paths">
+    <div class="instrument-top eyebrow"><span>A GRAND PIANO, FROM THE INSIDE</span><span class="signal" id="visualState">ILLUSTRATIVE REPLAY</span></div>
+    <canvas id="instrumentCanvas" role="img" aria-label="Piano cutaway. Key drives felt hammer, then strings. Direct string radiation and the bridge soundboard path run in parallel to stereo output. The bridge also drives sympathetic strings, which feed the board."></canvas>
+    <nav class="stages" aria-label="Six stages of a note">
+      <button class="stage" data-stage="0" aria-pressed="false" aria-controls="focusSection"><span>01</span>The gesture</button>
+      <button class="stage" data-stage="1" aria-pressed="true" aria-controls="focusSection"><span>02</span>Felt meets steel</button>
+      <button class="stage" data-stage="2" aria-pressed="false" aria-controls="focusSection"><span>03</span>A living string</button>
+      <button class="stage" data-stage="3" aria-pressed="false" aria-controls="focusSection"><span>04</span>The wooden body</button>
+      <button class="stage" data-stage="4" aria-pressed="false" aria-controls="focusSection"><span>05</span>Other strings listen</button>
+      <button class="stage" data-stage="5" aria-pressed="false" aria-controls="focusSection"><span>06</span>Into the air</button>
+    </nav>
+  </section>
+  <div class="playbar" aria-label="Play and visualization controls">
+    <button id="strike" class="strike">↗ &nbsp; Strike a note</button>
+    <button id="playKey" class="playkey" aria-pressed="false" aria-label="Hold piano key. Press and hold D or Space, or hold this button."><strong id="keyName">C4</strong><small>PRESS &amp; HOLD<br><kbd>D</kbd> / SPACE</small></button>
+    <div class="transport"><button id="replay" class="quiet">↺ Replay visuals</button><button id="pause" class="quiet" aria-pressed="false">Ⅱ Pause visuals</button><label class="speed" for="speed">SPEED <select id="speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label></div>
+    <div class="sound-tools"><button id="mute" class="quiet" aria-pressed="false">Mute</button><label for="volume">VOL <output id="volumeValue" for="volume">45%</output></label><input id="volume" type="range" min="0" max="100" value="45" aria-label="Audio volume"></div>
+  </div>
+  <p class="sound-note"><span>Playable sound: a reduced browser demonstration of our physical engine.</span><span id="audioStatus" role="status">Sound starts on your first strike. One note, no samples.</span></p>
+  <p class="motion-note">Motion slowed and amplitudes enlarged. Diagrams show the model’s mechanisms, not a full solver. Visual speed and pause do not change audio.</p>
+  <section class="focus-section" id="focusSection" aria-label="Focused mechanism">
+    <div><div class="focus-heading"><span class="chapter" id="chapter">02</span><h2 id="focusTitle">A soft hammer.<br>A nonlinear encounter.</h2></div><p id="focusText"></p><p id="focusExtra"></p><div class="fact" id="focusFact"></div></div>
+    <figure class="detail-figure"><div class="figure-head"><span id="plotTitle">FELT COMPRESSION → FORCE</span><span id="plotTag">ILLUSTRATIVE</span></div><canvas id="detailCanvas" role="img" aria-label="Illustrative felt force curve"></canvas><figcaption id="plotCaption"></figcaption></figure>
+  </section>
+  <section class="controls-section" aria-labelledby="controlsTitle">
+    <div class="controls-heading"><div><h2 id="controlsTitle">Change the gesture.<br>Hear the difference.</h2><p>Every instrument control changes the sound and its explanation.</p></div><button class="quiet" id="reset">Reset defaults</button></div>
+    <div class="controls">
+      <div class="control"><label class="control-title" for="note">Note register <output id="noteValue" for="note">C4 · 261.6 Hz</output></label><select class="note-select" id="note"><option value="33">A1 · wound bass</option><option value="60" selected>C4 · middle C</option><option value="84">C6 · high treble</option></select><small id="registerHint">Three physical strings. Three reduced mode families.</small></div>
+      <div class="control"><label class="control-title" for="velocity">Strike velocity <output id="velocityValue" for="velocity">80 / 127</output></label><input id="velocity" type="range" min="12" max="127" step="1" value="80"><small id="velocityHint">A harder, briefer contact excites brighter partials. Applies on the next strike.</small></div>
+      <div class="control"><label class="control-title" for="stiffness">String stiffness B <output id="stiffnessValue" for="stiffness">0.00030</output></label><input id="stiffness" type="range" min="0" max="0.004" step="0.00005" value="0.0003"><small>Raise B to stretch upper partials away from whole-number harmonics. Retunes ringing modes.</small></div>
+      <div class="control"><label class="control-title" for="detune">Unison detune <output id="detuneValue" for="detune">2.0 cents</output></label><input id="detune" type="range" min="0" max="12" step="0.1" value="2"><small id="detuneHint">Slightly different frequencies drift in and out of step.</small></div>
+      <div class="control"><label class="control-title" for="pedal">Sustain pedal <output id="pedalValue" for="pedal">0.00 · up</output></label><input id="pedal" type="range" min="0" max="1" step="0.01" value="0"><div class="pedal-scale"><span>UP</span><span>0.75 = FULL LIFT →</span></div><small id="pedalHint">Release the key and the damper absorbs the motion. Try raising the pedal while a note rings.</small></div>
+      <figure class="audio-panel"><div class="figure-head"><span>ACTUAL AUDIO WAVEFORM</span><span id="audioMeter">WAITING FOR AUDIO</span></div><canvas id="audioCanvas" role="img" aria-label="Live waveform read from Web Audio AnalyserNode, after volume and mute"></canvas><p id="audioCaption">Live output, after volume &amp; mute. Real audio time; independent of the slowed diagrams.</p></figure>
+    </div>
+  </section>
+  <details class="source-notes"><summary>Inside the model</summary><div class="source-grid">
+    <div><h3>A physical engine, note by note</h3><p><a href="src/lib.rs">src/lib.rs</a> keeps state for all 88 keys, A0–C8 (MIDI 21–108). A restrike adds hammer force to strings still ringing; there is no voice stealing. This page focuses on the physical piano, separate from the learned electric engine.</p><p>The bridge bus feeds the shared board and the sympathetic bank. Direct string radiation and board output sum in parallel. Mechanical attack noise, phantom longitudinal modes and duplex ring add detail.</p></div>
+    <div><h3>Felt is an exciter, not a volume knob</h3><p><a href="src/hammer.rs">src/hammer.rs</a> integrates a hammer in f64 with symplectic Euler, four substeps per sample. A local string impedance and smoothed, delayed agraffe reflection can cause repeated contact.</p><code class="equation">u = x_h − y_s<br>F ≈ K · max(u, 0)^p</code><p>The full contact includes felt lock-up, loading/unloading, a finite force clamp and deterministic roughness. Bottom-octave voicing is different: the bottom two octaves approach p ≈ 1.05 with little lock-up, so loudness need not imply the same brightening as in treble.</p></div>
+    <div><h3>Motion as a sum of modes</h3><p><a href="src/modal.rs">src/modal.rs</a> uses damped complex rotators, not a finite-difference grid or delay-line string model.</p><code class="equation">z[k+1] = r · exp(iθ) · z[k] + g_in · F[k]<br>r = exp(−σ/f_s) &lt; 1 &nbsp; · &nbsp; θ = 2πf/f_s<br>f_n = n · f₀ · √(1 + Bn²)</code><p>Force enters the real axis and output primarily reads the imaginary axis, giving a sine impulse response; coupled modes have complex output residues. Decaying poles make bounded-input resonators stable. In <a href="src/keys.rs">src/keys.rs</a>, f₀ is a stretched tuning reference, slightly different from the first partial when B &gt; 0. Strike position weights modes near sin(nπx₀/L); higher partials generally damp faster. The default bass cap reaches 240 partials per oscillator, limited by the audio band.</p></div>
+    <div><h3>More than independent strings</h3><p>There is one physical string for A0–E1, two for F1–E2 and three for F2–C8. A one-string note has two polarisations; unisons use three reduced normal-mode families: VERT, HORZ and ANTI. Coupled coefficients encode prompt sound, aftersound and beating without a full bridge feedback solver. The strings drawn above are physical strings, not a one-to-one picture of oscillator banks.</p><p><a href="src/sympathetic.rs">src/sympathetic.rs</a> uses one-directional bridge drive into other strings and then the board. Held keys, lifted dampers and the permanently undamped keys above MIDI 88 can ring; damped strings can still weakly couple. A pedal value ≥ 0.75 gives full lift; half-pedalling leaves partial contact. The pedal adds no new hammer energy.</p></div>
+    <div><h3>A body, a room, two ears</h3><p><a href="src/soundboard.rs">src/soundboard.rs</a> is a shared modal radiating board with four bridge regions and two listening positions. Small time and level differences make stereo. Its resonances bloom beneath the immediate direct attack; this is not convolution with a recorded impulse response.</p><p>In <a href="src/lib.rs">src/lib.rs</a>, EQ precedes parallel dry sound, early reflections and FDN reverb. Tone and DC blocking follow, with optional limiting and soft saturation. Events land at exact sample offsets; a 64-sample control grid makes decisions consistent across host blocks. The audio callback has preallocated state and performs no allocation, locking or I/O.</p></div>
+    <div><h3>What you are hearing here</h3><p>This HTML uses one long-lived AudioWorklet: 24 band-limited partials in each of three simplified detuned families, distinct decays, a velocity-shaped contact pulse, eight sympathetic resonators and eight body modes. Damper loss follows key hold and continuous pedal position. A small stereo delay and different board weights produce two listening channels. Arrays are allocated once; rendering never creates buffers. Messages arrive asynchronously, not at the Rust engine’s exact event offsets.</p><p>The browser demonstration omits the full hammer/contact solver, exact coupled normal-mode residues, calibrated voicing, the complete 88-key resonance bank, mechanical/longitudinal/duplex detail and the room/EQ chain. It is <strong>not identical Rust engine output</strong>. Here f₀ uses equal-tempered references for comparison. The graphs are illustrative, except the computed partial frequencies and the actual analyser waveform.</p><p>The stock Rust engine’s <a href="src/calibration.rs">src/calibration.rs</a> and <a href="src/calibration_data.rs">src/calibration_data.rs</a> adjust force response and per-partial decay against acoustic reference targets. Those tables are numerical calibration, not playback samples. The browser sound is uncalibrated.</p></div>
+  </div></details>
+  <footer class="footer"><span>MAKEPAD / COMPUTING THE INSTRUMENT</span><span>ONE NOTE. MANY MOVING PARTS.</span></footer>
+  <p id="liveStatus" class="sr-only" role="status" aria-live="polite"></p>
+  <noscript><p>This exhibit needs JavaScript for its diagrams and playable note. The source explanation above is available without it.</p></noscript>
+</main>
+<!-- A separate inline script keeps the audio renderer inspectable and extractable. -->
+<script id="piano-worklet" type="text/plain">
+'use strict';
+class PianoNote extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.count = 72;
+    this.re = new Float64Array(72); this.im = new Float64Array(72);
+    this.cr = new Float64Array(72); this.ci = new Float64Array(72);
+    this.gain = new Float64Array(72);
+    this.sr = new Float64Array(8); this.si = new Float64Array(8);
+    this.sc = new Float64Array(8); this.ss = new Float64Array(8);
+    this.br = new Float64Array(8); this.bi = new Float64Array(8);
+    this.bc = new Float64Array(8); this.bs = new Float64Array(8);
+    this.bl = new Float64Array(8); this.bright = new Float64Array(8);
+    this.delay = new Float64Array(64); this.dp = 0;
+    this.pulseAge = new Int32Array(8); this.pulseLength = new Int32Array(8);
+    this.pulseGain = new Float64Array(8); this.pulsePower = new Float64Array(8);
+    this.pulseSlot = 0; this.held = false; this.autoRelease = 0;
+    this.note = 60; this.b = 0.0003; this.detune = 2; this.pedal = 0;
+    this.damp = 1; this.dampTarget = 1; this.symDamp = 1; this.symTarget = 1;
+    this.dcL = 0; this.dcR = 0; this.lastL = 0; this.lastR = 0;
+    this.dcPole = Math.exp(-2 * Math.PI * 12 / sampleRate);
+    this.rateScale = 48000 / sampleRate;
+    this.delaySamples = Math.min(63, Math.round(sampleRate * 0.00038));
+    const body = [97, 151, 223, 337, 489, 731, 1093, 1619];
+    for (let i = 0; i < 8; i++) {
+      const r = Math.exp(-(12 + i * 4) / sampleRate), a = 2 * Math.PI * body[i] / sampleRate;
+      this.bc[i] = r * Math.cos(a); this.bs[i] = r * Math.sin(a);
+      this.bl[i] = (i % 2 ? -1 : 1) * (0.9 + 0.08 * i);
+      this.bright[i] = this.bl[i] * (i % 3 ? 0.87 : 1.15);
+    }
+    this.configure();
+    this.port.onmessage = event => {
+      const m = event.data;
+      if (m.type === 'params') {
+        this.note = m.note; this.b = m.b; this.detune = m.detune; this.pedal = m.pedal;
+        this.configure();
+      } else if (m.type === 'strike') {
+        const v = Math.max(0.01, Math.min(1, m.velocity / 127));
+        const bass = this.note < 45;
+        const duration = bass ? 0.0035 - 0.00025 * v : (this.note > 75 ? 0.00125 - 0.0007 * v : 0.0026 - 0.0016 * v);
+        const j = this.pulseSlot; this.pulseSlot = (j + 1) % 8;
+        this.pulseAge[j] = 0;
+        this.pulseLength[j] = Math.max(8, Math.round(duration * sampleRate));
+        this.pulseGain[j] = 3.8 * Math.pow(v, 1.45) / this.pulseLength[j];
+        this.pulsePower[j] = bass ? 1.05 : 2.3 + 0.6 * v;
+        this.held = m.held || m.oneShot;
+        this.autoRelease = m.oneShot && !m.held ? Math.round(0.55 * sampleRate) : 0;
+        this.updateDamper();
+      } else if (m.type === 'hold') {
+        this.held = m.held; this.autoRelease = 0; this.updateDamper();
+      } else if (m.type === 'silence') {
+        this.re.fill(0); this.im.fill(0); this.br.fill(0); this.bi.fill(0);
+        this.sr.fill(0); this.si.fill(0); this.delay.fill(0); this.pulseLength.fill(0);
+        this.dcL = this.dcR = this.lastL = this.lastR = 0;
+        this.held = false; this.autoRelease = 0; this.updateDamper();
+      }
+    };
+  }
+  configure() {
+    const f0 = 440 * Math.pow(2, (this.note - 69) / 12);
+    const registerDecay = this.note < 45 ? 0.6 : this.note > 75 ? 1.8 : 1;
+    for (let family = 0; family < 3; family++) {
+      const cents = family === 0 ? 0 : (family === 1 ? -0.5 : 0.5) * this.detune;
+      const det = Math.pow(2, cents / 1200);
+      for (let n = 1; n <= 24; n++) {
+        const i = family * 24 + n - 1;
+        const f = n * f0 * Math.sqrt(1 + this.b * n * n) * det;
+        const sigma = registerDecay * (0.22 + 0.065 * n + 0.0028 * n * n + (family === 0 ? 1.7 : family === 1 ? 0 : 0.16));
+        const r = Math.exp(-sigma / sampleRate), a = 2 * Math.PI * f / sampleRate;
+        this.cr[i] = r * Math.cos(a); this.ci[i] = r * Math.sin(a);
+        const position = Math.sin(n * Math.PI * 0.137);
+        this.gain[i] = f < sampleRate * 0.44 ? position * position / Math.pow(n, 0.72) * (family === 0 ? 1 : family === 1 ? 0.22 : 0.26) : 0;
+        if (!this.gain[i]) { this.re[i] = 0; this.im[i] = 0; }
+      }
+    }
+    for (let i = 0; i < 8; i++) {
+      const ratio = i === 0 ? 0.5 : i === 1 ? 1 : i === 2 ? 1.5 : i - 1;
+      const f = f0 * ratio * Math.sqrt(1 + this.b * ratio * ratio);
+      const r = Math.exp(-(0.65 + i * 0.11) / sampleRate), a = 2 * Math.PI * f / sampleRate;
+      this.sc[i] = f < sampleRate * 0.44 ? r * Math.cos(a) : 0;
+      this.ss[i] = f < sampleRate * 0.44 ? r * Math.sin(a) : 0;
+    }
+    this.updateDamper();
+  }
+  updateDamper() {
+    const contact = Math.pow(Math.max(0, (0.75 - this.pedal) / 0.75), 2.5);
+    this.dampTarget = Math.exp(-(this.held || this.note > 88 ? 0 : 20 * contact) / sampleRate);
+    this.symTarget = Math.exp(-14 * contact / sampleRate);
+    this.symSend = (0.00011 + 0.00062 * (1 - contact)) * this.rateScale;
+  }
+  process(_inputs, outputs) {
+    const left = outputs[0][0], right = outputs[0][1];
+    for (let k = 0; k < left.length; k++) {
+      if (this.autoRelease > 0 && --this.autoRelease === 0) { this.held = false; this.updateDamper(); }
+      let force = 0;
+      for (let p = 0; p < 8; p++) {
+        if (this.pulseAge[p] < this.pulseLength[p]) {
+          const x = ++this.pulseAge[p] / this.pulseLength[p];
+          force += this.pulseGain[p] * Math.pow(Math.max(0, Math.sin(Math.PI * x)), this.pulsePower[p]);
+        }
+      }
+      this.damp += 0.004 * (this.dampTarget - this.damp);
+      this.symDamp += 0.004 * (this.symTarget - this.symDamp);
+      let direct = 0;
+      for (let i = 0; i < this.count; i++) {
+        const re = this.re[i], im = this.im[i];
+        this.re[i] = (this.cr[i] * re - this.ci[i] * im) * this.damp + force * this.gain[i];
+        this.im[i] = (this.ci[i] * re + this.cr[i] * im) * this.damp;
+        direct += this.im[i];
+      }
+      let sympathetic = 0;
+      for (let i = 0; i < 8; i++) {
+        const re = this.sr[i], im = this.si[i];
+        this.sr[i] = (this.sc[i] * re - this.ss[i] * im) * this.symDamp + direct * this.symSend;
+        this.si[i] = (this.ss[i] * re + this.sc[i] * im) * this.symDamp;
+        sympathetic += this.si[i] * 0.045;
+      }
+      const bridge = direct + sympathetic;
+      let boardL = 0, boardR = 0;
+      for (let i = 0; i < 8; i++) {
+        const re = this.br[i], im = this.bi[i];
+        this.br[i] = this.bc[i] * re - this.bs[i] * im + bridge * 0.0017 * this.rateScale;
+        this.bi[i] = this.bs[i] * re + this.bc[i] * im;
+        boardL += this.bi[i] * this.bl[i]; boardR += this.bi[i] * this.bright[i];
+      }
+      const l = 1.8 * (direct * 0.85 + boardL + sympathetic * 0.7);
+      const r = 1.8 * (direct * 0.81 + boardR + sympathetic * 0.7);
+      this.delay[this.dp] = r;
+      const delayed = this.delay[(this.dp - this.delaySamples + 64) % 64];
+      this.dp = (this.dp + 1) % 64;
+      this.dcL = l - this.lastL + this.dcPole * this.dcL; this.lastL = l;
+      this.dcR = delayed - this.lastR + this.dcPole * this.dcR; this.lastR = delayed;
+      left[k] = this.dcL / (1 + Math.abs(this.dcL));
+      if (right) right[k] = this.dcR / (1 + Math.abs(this.dcR));
+    }
+    return true;
+  }
+}
+registerProcessor('piano-note', PianoNote);
+</script>
+<script>
+'use strict';
+(() => {
+  const $ = id => document.getElementById(id);
+  const TAU = Math.PI * 2;
+  const colors = {amber:'#eab66b', coral:'#df8065', teal:'#79bab1', pale:'#e8eadb', line:'#4d5d51', ink:'#26352d', muted:'#717d6e'};
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const defaults = {note:60, velocity:80, b:0.0003, detune:2, pedal:0, volume:45};
+  const state = {...defaults, stage:1, paused:reduced.matches, speed:1, muted:false};
+  const sim = {time:0, age:0.15, energy:0.9, held:false, auto:true, struck:true};
+  const holds = new Set();
+  let ctx, node, analyser, master, audioData, audioPromise, audioError = '', strikeSerial = 0;
+  let lastFrame = 0, lastMeter = 0, lastMeterText = 0;
+  const noteNames = {33:'A1',60:'C4',84:'C6'};
+  const f0 = () => 440 * 2 ** ((state.note - 69) / 12);
+  const partial = n => n * f0() * Math.sqrt(1 + state.b * n * n);
+  const beatHz = () => partial(1) * (2 ** (state.detune / 2400) - 2 ** (-state.detune / 2400));
+  const contactTime = () => (state.note < 45 ? 3.5 - 0.25 * state.velocity / 127 : state.note > 75 ? 1.25 - 0.7 * state.velocity / 127 : 2.6 - 1.6 * state.velocity / 127);
+  const exponent = () => state.note < 45 ? 1.05 : 2.3 + 0.6 * state.velocity / 127;
+  const openness = () => 1 - Math.max(0, (0.75 - state.pedal) / 0.75) ** 2.5;
+  const announcements = message => { $('liveStatus').textContent = message; };
+  function sendParams() { if (node) node.port.postMessage({type:'params',note:state.note,b:state.b,detune:state.detune,pedal:state.pedal}); }
+  function setVolume(immediate = false) {
+    if (!master || !ctx) return;
+    const target = state.muted || document.hidden ? 0 : state.volume / 100;
+    master.gain.cancelScheduledValues(ctx.currentTime);
+    if (immediate) master.gain.setValueAtTime(target, ctx.currentTime);
+    else master.gain.setTargetAtTime(target, ctx.currentTime, 0.012);
+  }
+  async function ensureAudio() {
+    if (!audioPromise) {
+      // Store one promise before awaiting: fast gestures cannot create extra contexts.
+      audioPromise = (async () => {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error('Web Audio is unavailable in this browser.');
+        ctx = new AudioContextClass({latencyHint:'interactive'});
+        if (!ctx.audioWorklet) throw new Error('AudioWorklet is unavailable in this context. Try opening this local file in Chrome.');
+        const url = 'data:application/javascript;charset=utf-8,' + encodeURIComponent($('piano-worklet').textContent);
+        await Promise.all([ctx.resume(), ctx.audioWorklet.addModule(url)]);
+        node = new AudioWorkletNode(ctx, 'piano-note', {numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
+        master = ctx.createGain(); master.gain.value = 0;
+        analyser = ctx.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0;
+        audioData = new Float32Array(analyser.fftSize);
+        node.connect(master); master.connect(analyser); analyser.connect(ctx.destination);
+        node.onprocessorerror = () => {
+          audioError = 'The audio processor stopped. Reload this file to try again; diagrams remain available.';
+          master.gain.value = 0; $('audioStatus').textContent = audioError;
+        };
+        sendParams();
+        if (document.hidden) { node.port.postMessage({type:'silence'}); await ctx.suspend(); }
+        return true;
+      })().catch(error => {
+        audioError = 'Sound unavailable: ' + error.message + ' The diagrams still work.';
+        $('audioStatus').textContent = audioError;
+        if (ctx) ctx.close().catch(() => {});
+        return false;
+      });
+    }
+    const ready = await audioPromise;
+    if (!ready || audioError || document.hidden) return false;
+    try {
+      if (ctx.state === 'suspended') await ctx.resume();
+      if (document.hidden) return false;
+      setVolume(); return true;
+    } catch (error) {
+      $('audioStatus').textContent = 'Audio could not resume. Strike again to retry. Diagrams remain available.';
+      return false;
+    }
+  }
+  function visualStrike(oneShot) {
+    sim.energy = Math.min(1.5, sim.energy + 0.35 + state.velocity / 140);
+    sim.age = state.paused ? 0.16 : 0;
+    sim.struck = true; sim.held = holds.size > 0; sim.auto = oneShot;
+    drawVisuals(); updateVisualStatus();
+  }
+  async function strike(oneShot = true) {
+    const serial = ++strikeSerial;
+    visualStrike(oneShot);
+    $('audioStatus').textContent = audioError || (node ? 'Struck ' + noteNames[state.note] + (state.muted ? ' · muted.' : ' · reduced physical sound.') : 'Preparing the audio instrument…');
+    announcements(noteNames[state.note] + ' struck at velocity ' + state.velocity + '.');
+    const velocity = state.velocity;
+    if (!await ensureAudio() || serial !== strikeSerial || document.hidden) return;
+    // Read the current gate after setup. An early key-up must never become a stuck note.
+    sendParams();
+    node.port.postMessage({type:'strike',velocity,held:holds.size > 0,oneShot});
+    $('audioStatus').textContent = state.muted ? 'Audio ready · muted.' : noteNames[state.note] + ' · audio ready. Hold the key or strike again.';
+  }
+  function beginHold(source) {
+    if (holds.has(source)) return;
+    const wasHeld = holds.size > 0; holds.add(source);
+    sim.held = true; sim.auto = false;
+    $('playKey').setAttribute('aria-pressed','true');
+    if (!wasHeld) strike(false);
+  }
+  function endHold(source) {
+    if (!holds.delete(source)) return;
+    sim.held = holds.size > 0;
+    $('playKey').setAttribute('aria-pressed',String(sim.held));
+    if (node) node.port.postMessage({type:'hold',held:sim.held});
+    if (!sim.held) announcements('Key released. ' + (state.pedal >= 0.75 ? 'Pedal holds the dampers open.' : 'Damper contact follows the pedal.'));
+    updateVisualStatus(); drawVisuals();
+  }
+  function clearHolds() {
+    ++strikeSerial; holds.clear(); sim.held = false; sim.auto = false;
+    $('playKey').setAttribute('aria-pressed','false');
+    if (node) node.port.postMessage({type:'hold',held:false});
+    drawVisuals(); updateVisualStatus();
+  }
+  function silence() {
+    clearHolds(); sim.energy = 0;
+    if (node) node.port.postMessage({type:'silence'});
+    if (master && ctx) { master.gain.cancelScheduledValues(ctx.currentTime); master.gain.setValueAtTime(0,ctx.currentTime); }
+    if (ctx && ctx.state !== 'closed') ctx.suspend().catch(() => {});
+    $('audioStatus').textContent = audioError || 'Audio silenced while the page is away. Strike to play again.';
+    drawAudio();
+  }
+  $('strike').addEventListener('click', () => strike(true));
+  const key = $('playKey');
+  key.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault(); key.focus({preventScroll:true});
+    key.setPointerCapture(event.pointerId); beginHold('pointer' + event.pointerId);
+  });
+  for (const name of ['pointerup','pointercancel','lostpointercapture']) key.addEventListener(name, event => endHold('pointer' + event.pointerId));
+  key.addEventListener('click', event => { if (event.detail === 0) strike(true); });
+  function editing(target) { return target instanceof Element && (target.matches('input,select,textarea,summary') || target.isContentEditable); }
+  window.addEventListener('keydown', event => {
+    if (event.ctrlKey || event.metaKey || event.altKey || editing(event.target)) return;
+    const onButton = event.target instanceof Element && event.target.closest('button,a');
+    const play = event.code === 'KeyD' || (event.code === 'Space' && (event.target === key || !onButton)) || (event.code === 'Enter' && event.target === key);
+    if (!play) return;
+    event.preventDefault(); if (!event.repeat) beginHold(event.code);
+  });
+  window.addEventListener('keyup', event => { if (holds.has(event.code)) { event.preventDefault(); endHold(event.code); } });
+  window.addEventListener('blur', clearHolds);
+  window.addEventListener('pagehide', silence);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) silence(); else { lastFrame = 0; drawVisuals(); } });
+  function updatePause() {
+    $('pause').textContent = state.paused ? '▶ Resume visuals' : 'Ⅱ Pause visuals';
+    $('pause').setAttribute('aria-pressed', String(state.paused));
+    updateVisualStatus();
+  }
+  $('pause').addEventListener('click', () => { state.paused = !state.paused; updatePause(); });
+  $('speed').addEventListener('change', event => { state.speed = +event.target.value; });
+  $('replay').addEventListener('click', () => {
+    sim.energy = 0; visualStrike(true);
+    announcements(state.paused ? 'Visual replay reset to the contact frame. Resume visuals to animate.' : 'Visual replay started. Audio is unchanged.');
+  });
+  reduced.addEventListener('change', event => { if (event.matches) { state.paused = true; updatePause(); drawVisuals(); } });
+  $('mute').addEventListener('click', () => {
+    state.muted = !state.muted; $('mute').textContent = state.muted ? 'Unmute' : 'Mute';
+    $('mute').setAttribute('aria-pressed',String(state.muted)); setVolume();
+    $('audioStatus').textContent = audioError || (state.muted ? 'Muted. The physical demonstration keeps running.' : node ? 'Audio unmuted.' : 'Sound starts on your first strike.');
+  });
+  $('volume').addEventListener('input', event => { state.volume = +event.target.value; $('volumeValue').textContent = state.volume + '%'; setVolume(); });
+  const stages = [
+    ['The gesture starts it.', 'A key sets a hammer in motion. Velocity is the launch speed, not a command to replay a louder recording. Hold the key to keep its damper away from the strings.', 'Strike again while it rings: fresh force joins the motion already there. In our engine every key keeps its own state.', 'VELOCITY → CONTACT PULSE', 'ILLUSTRATIVE'],
+    ['A soft hammer. A nonlinear encounter.', 'Felt compresses against steel. As compression rises, its resisting force rises too. A harder blow changes the shape and duration of the contact, shaping the spectrum as well as the loudness.', 'The bass has its own voice: the bottom two octaves use nearly linear felt. The pronounced brightening of a hard treble strike is not imposed equally on every key.', 'FELT COMPRESSION → FORCE', 'ILLUSTRATIVE'],
+    ['One note. A whole spectrum.', 'A string bends in many patterns at once. Stiffness pushes the high partials sharp; higher modes generally lose energy faster. Their sum gives the note its changing colour.', 'A unison group also drifts in and out of step. Reduced normal-mode families encode a strong prompt sound and a quieter, longer aftersound. They are not one oscillator per visible string.', 'PARTIALS & THE AFTERSOUND', 'COMPUTED FREQUENCIES'],
+    ['Steel lends its motion to wood.', 'The bridge drives a shared resonating soundboard. Many plate modes overlap across four bridge regions, turning concentrated string motion into a much larger radiating surface.', 'Listen for body under the attack. Direct string radiation reaches the output in parallel while the board’s resonances bloom. No recorded impulse response is involved.', 'OVERLAPPING BOARD MODES', 'SCHEMATIC PLATE'],
+    ['Other strings are listening.', 'The bridge also excites unstruck strings. With the sustain pedal down, more dampers lift and this sympathetic bed can linger. Half-pedalling lets felt absorb part of that motion.', 'A held key lifts its own damper; the top keys above MIDI 88 have none. Even damped strings can couple weakly. The pedal releases a constraint; it adds no hammer energy.', 'PEDAL → RESONATOR OPENNESS', 'ONE-WAY BRIDGE DRIVE'],
+    ['The note finds two ears.', 'Direct radiation gives the immediate attack. Board motion gives the body. These paths are added together, with sympathetic strings feeding the board; they are not a single long delay.', 'Two listening positions hear small time and level differences. The Rust engine then shapes the sum with EQ, parallel dry sound, early reflections and FDN reverb, followed by tone, DC blocking and optional limiting.', 'PARALLEL PATHS → STEREO', 'SIGNAL FLOW']
+  ];
+  const stageButtons = [...document.querySelectorAll('.stage')];
+  function selectStage(index, announce = false) {
+    state.stage = index; stageButtons.forEach((button,i) => button.setAttribute('aria-pressed',String(i === index)));
+    const s = stages[index];
+    $('chapter').textContent = String(index + 1).padStart(2,'0'); $('focusTitle').textContent = s[0];
+    $('focusText').textContent = s[1]; $('focusExtra').textContent = s[2];
+    $('plotTitle').textContent = s[3]; $('plotTag').textContent = s[4];
+    updateDetailText(); drawVisuals();
+    if (announce) announcements('Stage ' + (index + 1) + ': ' + s[0]);
+  }
+  stageButtons.forEach((button,i) => button.addEventListener('click', () => selectStage(i,true)));
+  function updateDetailText() {
+    const facts = [
+      'NEXT STRIKE · ' + noteNames[state.note] + ' · velocity ' + state.velocity + '/127 · browser pulse ≈ ' + contactTime().toFixed(2) + ' ms',
+      (state.note < 45 ? 'A1 · near-linear bass felt · p ≈ 1.05' : noteNames[state.note] + ' · nonlinear felt · pulse exponent ≈ ' + exponent().toFixed(2)) + ' · normalized force diagram',
+      'f₁ ' + partial(1).toFixed(1) + ' Hz · f₈ ' + partial(8).toFixed(1) + ' Hz · outer-family beat ≈ ' + beatHz().toFixed(2) + ' Hz',
+      '4 BRIDGE REGIONS → SHARED PLATE → 2 LISTENING POSITIONS',
+      'PEDAL ' + state.pedal.toFixed(2) + ' · ' + (state.pedal >= 0.75 ? 'full damper lift' : state.pedal > 0 ? 'partial damper contact' : 'dampers resting') + ' · no new excitation',
+      'DIRECT + BOARD → EQ → [DRY + EARLY + FDN] → TONE / DC / OPTIONAL LIMITER'
+    ];
+    const captions = [
+      'The browser’s short force pulse, plotted in normalized units. Velocity changes its height and duration; this is not the Rust hammer solver.',
+      'The curve shows a simplified F ∝ uᵖ law. The dot follows the selected velocity’s illustrative peak compression; no absolute newtons are implied.',
+      'First 8 partials only. Hollow marks: n·f₀. Amber: computed stiff-string frequencies; stem heights illustrate decay. Below: schematic prompt, aftersound and beating sum; the cursor follows visual time.',
+      'Illustrative plate interference, with nodal lines where motion cancels. Colour and displacement are enlarged; this is not a calculated board mesh.',
+      'Eight schematic unstruck resonators. The gaps show damper lift, and the curve shows residual contact. Full lift starts at 0.75.',
+      'The parallel paths meet at a sum. The live waveform below comes from the browser synth’s real audio output, not from this diagram.'
+    ];
+    $('focusFact').textContent = facts[state.stage]; $('plotCaption').textContent = captions[state.stage];
+    $('detailCanvas').setAttribute('aria-label', stages[state.stage][3] + '. ' + facts[state.stage] + '. ' + captions[state.stage]);
+  }
+  function updateControls() {
+    $('noteValue').textContent = noteNames[state.note] + ' · ' + f0().toFixed(1) + ' Hz'; $('keyName').textContent = noteNames[state.note];
+    $('registerHint').textContent = (state.note < 45 ? 'Two' : 'Three') + ' physical strings. Three reduced mode families. Changing register retunes this single voice.';
+    $('velocityValue').textContent = state.velocity + ' / 127';
+    $('velocityHint').textContent = state.note < 45 ? 'Bass felt is nearly linear: more energy, only a small change in contact duration. Next strike.' : 'A harder, briefer contact excites brighter partials. Applies on the next strike.';
+    $('stiffnessValue').textContent = state.b.toFixed(5); $('detuneValue').textContent = state.detune.toFixed(1) + ' cents';
+    $('detuneHint').textContent = 'Outer-family separation at the first partial: ' + beatHz().toFixed(2) + ' Hz. Retunes ringing modes.';
+    $('pedalValue').textContent = state.pedal.toFixed(2) + (state.pedal >= 0.75 ? ' · lifted' : state.pedal ? ' · half' : ' · up');
+    $('pedalHint').textContent = state.pedal >= 0.75 ? 'Full lift: releasing the key leaves the strings free to decay. The pedal adds no energy.' : state.pedal > 0 ? 'Partial contact: the released note fades more slowly as you press the pedal farther.' : 'Release the key and the damper absorbs the motion. Press the pedal down to lift it.';
+    updateDetailText();
+  }
+  for (const [id, prop, stage] of [['note','note',2],['velocity','velocity',1],['stiffness','b',2],['detune','detune',2],['pedal','pedal',4]]) {
+    $(id).addEventListener('input', event => { state[prop] = +event.target.value; updateControls(); sendParams(); selectStage(stage); });
+  }
+  $('reset').addEventListener('click', () => {
+    clearHolds(); if (node) node.port.postMessage({type:'silence'});
+    Object.assign(state,defaults,{speed:1,muted:false,paused:reduced.matches});
+    for (const [id,prop] of [['note','note'],['velocity','velocity'],['stiffness','b'],['detune','detune'],['pedal','pedal'],['volume','volume']]) $(id).value = state[prop];
+    $('speed').value = '1'; $('volumeValue').textContent = '45%'; $('mute').textContent = 'Mute'; $('mute').setAttribute('aria-pressed','false');
+    sim.energy = 0; sim.struck = false; sim.age = 12; sendParams(); setVolume();
+    updateControls(); updatePause(); selectStage(1); announcements('Defaults restored. Audio silenced.');
+    $('audioStatus').textContent = audioError || 'Defaults restored. Strike to play C4.';
+  });
+  function updateVisualStatus() {
+    $('visualState').textContent = state.paused ? 'VISUALS PAUSED' : sim.held ? 'KEY HELD' : sim.energy < 0.005 ? 'READY TO STRIKE' : sim.auto ? 'ILLUSTRATIVE REPLAY' : state.pedal >= 0.75 ? 'PEDAL SUSTAIN' : 'RINGING';
+  }
+  // Canvas coordinates are diagram units. Each canvas is fitted independently at device resolution.
+  function surface(id, width, height) {
+    const canvas = $(id), rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1,2);
+    const pw = Math.max(1,Math.round(rect.width * dpr)), ph = Math.max(1,Math.round(rect.height * dpr));
+    if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
+    const c = canvas.getContext('2d'); c.setTransform(pw / width,0,0,ph / height,0,0); c.clearRect(0,0,width,height);
+    return c;
+  }
+  function line(c,x1,y1,x2,y2,color,width=1) { c.strokeStyle=color;c.lineWidth=width;c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke(); }
+  function text(c,label,x,y,size=11,color=colors.pale,align='left',serif=false) { c.font=(serif ? '' : '500 ') + size + 'px ' + (serif ? 'Georgia,serif' : 'ui-monospace,Consolas,monospace');c.fillStyle=color;c.textAlign=align;c.fillText(label,x,y); }
+  function circle(c,x,y,r,color,fill=true) { c.beginPath();c.arc(x,y,r,0,TAU);if(fill){c.fillStyle=color;c.fill();}else{c.strokeStyle=color;c.lineWidth=1;c.stroke();} }
+  function arrow(c,points,color,flow=true) {
+    c.beginPath(); c.moveTo(points[0][0],points[0][1]);
+    for(let i=1;i<points.length;i++)c.lineTo(points[i][0],points[i][1]);
+    c.strokeStyle=color;c.lineWidth=1;c.globalAlpha=0.55;c.stroke();c.globalAlpha=1;
+    const end=points[points.length-1],pre=points[points.length-2],a=Math.atan2(end[1]-pre[1],end[0]-pre[0]);
+    c.beginPath();c.moveTo(end[0],end[1]);c.lineTo(end[0]-6*Math.cos(a-.5),end[1]-6*Math.sin(a-.5));c.moveTo(end[0],end[1]);c.lineTo(end[0]-6*Math.cos(a+.5),end[1]-6*Math.sin(a+.5));c.stroke();
+    if(!flow || sim.energy<0.008)return;
+    let length=0;for(let i=1;i<points.length;i++)length+=Math.hypot(points[i][0]-points[i-1][0],points[i][1]-points[i-1][1]);
+    for(let j=0;j<3;j++){
+      let distance=((sim.time*.23+j/3)%1)*length;
+      for(let i=1;i<points.length;i++){
+        const a=points[i-1],b=points[i],d=Math.hypot(b[0]-a[0],b[1]-a[1]);
+        if(distance<=d){circle(c,a[0]+(b[0]-a[0])*distance/d,a[1]+(b[1]-a[1])*distance/d,2.1,color);break;}distance-=d;
+      }
+    }
+  }
+  function badge(c,n,x,y,label) {
+    const active=state.stage===n-1;
+    circle(c,x,y,9,active?colors.amber:'#2c3a31');
+    text(c,String(n).padStart(2,'0'),x,y+3,8,active?'#19221f':'#a4b5a6','center');
+    text(c,label,x+16,y+4,10,active?'#f0d6ac':'#b9c6b5');
+  }
+  function drawStrings(c,x,y,w) {
+    const count=state.note<45?2:3, amp=Math.min(1.3,sim.energy)*(4+state.velocity/18);
+    c.fillStyle='#222e26';c.fillRect(x-7,y-20,w+14,71);
+    for(let s=0;s<count;s++) {
+      const yy=y+s*14;c.strokeStyle=s===1?'#f3d59e':colors.amber;c.lineWidth=s===1?1.8:1;
+      c.beginPath();
+      for(let q=0;q<=100;q++){
+        const t=q/100;let v=0;
+        for(let n=1;n<=5;n++)v+=Math.sin(n*Math.PI*t)*Math.sin(sim.time*(6+n*3)*(state.note===84?1.5:state.note===33?.6:1)*Math.sqrt(1+state.b*n*n)+s*sim.time*beatHz()*.9)/(n*n);
+        const yy1=yy+v*amp;if(q===0)c.moveTo(x,yy1);else c.lineTo(x+t*w,yy1);
+      }c.stroke();circle(c,x,yy,2.5,'#ac956b');circle(c,x+w,yy,2.5,'#ac956b');
+    }
+    const lifted=sim.held || state.pedal>=.75 || sim.auto&&sim.age<.65;
+    const dy=lifted?-18:-3-14*openness();
+    c.fillStyle=lifted?'#758173':'#a5a692';c.fillRect(x+w*.65,y+dy,22,6);
+    line(c,x+w*.65+11,y+dy,x+w*.65+11,y-30,'#708172',2);
+  }
+  function drawBoard(c,x,y,w,h) {
+    c.save();c.translate(x,y);
+    c.beginPath();c.moveTo(0,10);c.bezierCurveTo(w*.34,-12,w*.98,-10,w,h*.36);c.bezierCurveTo(w+5,h*.8,w*.78,h+5,w*.46,h);c.lineTo(0,h*.87);c.closePath();
+    c.fillStyle='#34443a';c.fill();c.strokeStyle='#667355';c.lineWidth=1;c.stroke();c.clip();
+    for(let q=0;q<12;q++)line(c,q*w/11,0,q*w/11,h,'#9eac7820');
+    const amp=sim.energy*(.45+state.pedal*.25);
+    for(let j=0;j<8;j++){
+      c.beginPath();
+      for(let i=0;i<=60;i++){
+        const u=i/60,yy=(j+1)*h/10+Math.sin(u*TAU*(1.2+j*.09)+sim.time*3)*amp*10*Math.sin(u*Math.PI);
+        if(i===0)c.moveTo(u*w,yy);else c.lineTo(u*w,yy);
+      }c.strokeStyle=j%2?'#a6c5a565':'#d3d39750';c.lineWidth=1;c.stroke();
+    }
+    c.restore();
+  }
+  function drawSympathetic(c,x,y,w) {
+    for(let j=0;j<6;j++){
+      const yy=y+j*7;line(c,x,yy,x+w,yy,'#46675e');
+      c.strokeStyle=colors.teal;c.lineWidth=.8;c.beginPath();
+      for(let i=0;i<=35;i++){
+        const u=i/35,v=Math.sin(u*Math.PI*(j%3+1))*Math.sin(sim.time*(3+j*.7))*(.15+openness()*3)*sim.energy;
+        if(i===0)c.moveTo(x,yy+v);else c.lineTo(x+u*w,yy+v);
+      }c.stroke();
+      c.fillStyle='#8b9b83';c.fillRect(x+w*.45,y-4+j*7-openness()*4,13,3);
+    }
+  }
+  function drawHammer(c,x,y) {
+    const hit=sim.struck&&sim.age<.65?Math.sin(Math.min(1,sim.age/.5)*Math.PI):0;
+    c.save();c.translate(x,y);c.rotate(-.4+hit*.55);
+    line(c,0,35,19,-11,colors.coral,5);circle(c,0,35,4,'#bf9170');
+    c.fillStyle=colors.coral;c.beginPath();c.ellipse(22,-17,17,11,-.25,0,TAU);c.fill();
+    c.strokeStyle='#f5c0a1';c.lineWidth=3;c.beginPath();c.ellipse(22,-17,17,11,-.25,Math.PI,TAU);c.stroke();
+    c.restore();
+    if(hit>.65){circle(c,x+24,y-24,23,colors.coral,false);circle(c,x+24,y-24,29,'#df806540',false);}
+  }
+  function drawKey(c,x,y,w) {
+    c.save();c.translate(x,y+(sim.held?4:0));
+    c.fillStyle='#64715f';c.fillRect(0,6,w,17);c.fillStyle='#e8e6d5';c.fillRect(0,0,w,18);
+    for(let i=1;i<5;i++)line(c,i*w/5,0,i*w/5,18,'#7c8971',1);
+    c.fillStyle='#1a211e';for(let i=0;i<4;i++)if(i!==2)c.fillRect(12+i*w/5,0,w/10,10);
+    c.fillStyle=colors.amber;c.fillRect(w*.41,10,w*.17,8);c.restore();
+  }
+  function drawOutput(c,x,y) {
+    for(let j=0;j<2;j++){
+      circle(c,x+j*33,y,9,'#2e3e34');circle(c,x+j*33,y,4,colors.pale,false);
+      text(c,j?'R':'L',x+j*33,y+23,9,'#b5c8b6','center');
+      for(let i=0;i<3;i++){c.beginPath();c.arc(x+j*33,y,14+i*4,-.6,.6);c.strokeStyle='#acc7b1'+(sim.energy>.01?'70':'35');c.stroke();}
+    }
+  }
+  function drawInstrument() {
+    const mobile=$('instrumentCanvas').clientWidth<600;
+    const c=surface('instrumentCanvas',mobile?360:1100,mobile?458:310);
+    if(mobile){
+      // A folded path keeps every stage and branch legible on a 390 px screen.
+      line(c,22,89,331,89,'#ffffff09');line(c,22,280,331,280,'#ffffff09');
+      drawKey(c,29,72,88);badge(c,1,31,35,'KEY');
+      drawHammer(c,171,66);badge(c,2,166,35,'HAMMER / FELT');
+      arrow(c,[[123,78],[148,78]],colors.coral);arrow(c,[[204,83],[204,117],[60,117],[60,151]],colors.coral);
+      drawStrings(c,47,176,232);badge(c,3,44,140,noteNames[state.note]+' · '+(state.note<45?'2':'3')+' STRINGS');
+      text(c,'damper',233,227,8,'#93a58f');
+      arrow(c,[[280,187],[330,187],[330,402],[299,402]],colors.amber);
+      c.save();c.translate(343,240);c.rotate(Math.PI/2);text(c,'DIRECT RADIATION',0,0,8,'#c5ad7d');c.restore();
+      line(c,280,163,280,216,colors.coral,5);text(c,'BRIDGE',271,241,8,colors.coral,'right');
+      arrow(c,[[276,221],[253,264]],colors.coral);
+      drawBoard(c,188,279,119,80);badge(c,4,187,265,'BOARD');
+      drawSympathetic(c,36,305,105);badge(c,5,32,276,'SYMPATHETIC');
+      arrow(c,[[245,245],[159,245],[159,312],[143,312]],colors.teal);
+      arrow(c,[[85,348],[85,369],[198,369],[198,359]],colors.teal);
+      text(c,'pedal '+state.pedal.toFixed(2),37,352,8,'#93bdb0');
+      arrow(c,[[256,362],[256,390]],colors.teal);drawOutput(c,255,404);badge(c,6,182,442,'STEREO OUTPUT');
+      text(c,'TWO PATHS, ONE SOUND',30,420,8,'#819987');
+    }else{
+      // Sparse structural ribs give the cutaway depth without obscuring the energy paths.
+      for(let i=0;i<8;i++)line(c,190+i*87,285,270+i*84,40,'#ffffff05');
+      drawKey(c,54,204,134);badge(c,1,56,253,'KEY');
+      arrow(c,[[193,213],[222,213]],colors.coral);drawHammer(c,247,173);badge(c,2,215,253,'HAMMER / FELT');
+      arrow(c,[[281,164],[309,164],[309,120]],colors.coral);
+      drawStrings(c,332,107,354);badge(c,3,336,54,noteNames[state.note]+' · '+(state.note<45?'2':'3')+' PHYSICAL STRINGS');
+      text(c,'DAMPER',561,73,8,'#93a58f');
+      line(c,688,90,688,150,colors.coral,5);text(c,'BRIDGE',704,123,9,colors.coral);
+      arrow(c,[[690,104],[805,104],[805,64],[999,64],[999,166]],colors.amber);
+      text(c,'DIRECT STRING RADIATION',826,52,9,'#d5b986');
+      arrow(c,[[690,147],[719,147],[744,178]],colors.coral);
+      drawBoard(c,713,181,205,104);badge(c,4,734,160,'SOUNDBOARD');
+      drawSympathetic(c,415,225,176);badge(c,5,418,202,'SYMPATHETIC STRINGS');
+      arrow(c,[[704,150],[650,180],[650,238],[601,238]],colors.teal);
+      arrow(c,[[599,265],[674,265],[710,248]],colors.teal);
+      text(c,'PEDAL '+state.pedal.toFixed(2)+' · BRIDGE-DRIVEN',417,286,8,'#93bdb0');
+      arrow(c,[[927,222],[989,222],[989,203]],colors.teal);
+      drawOutput(c,989,185);badge(c,6,973,255,'STEREO');
+      text(c,'PARALLEL PATHS',979,287,8,'#819987','center');
+    }
+  }
+  function plotAxes(c,x,y,w,h,xlabel,ylabel) {
+    for(let i=1;i<=3;i++)line(c,x,y+h*i/4,x+w,y+h*i/4,'#d7dbcd');
+    line(c,x,y,x,y+h,'#a6af9d');line(c,x,y+h,x+w,y+h,'#a6af9d');
+    text(c,xlabel,x+w,y+h+22,10,colors.muted,'right');text(c,ylabel,x,y-10,10,colors.muted);
+  }
+  function graph(c,x,y,w,h,fn,color,width=2) {
+    c.beginPath();for(let i=0;i<=180;i++){const u=i/180,yy=y+h-h*fn(u);if(i===0)c.moveTo(x,yy);else c.lineTo(x+w*u,yy);}c.strokeStyle=color;c.lineWidth=width;c.stroke();
+  }
+  function drawDetail() {
+    const narrow=$('detailCanvas').clientWidth<430;
+    const w=narrow?340:580,h=239,c=surface('detailCanvas',w,h), v=state.velocity/127;
+    const amber='#a96831',coral='#be6952',teal='#437f76';
+    if(state.stage===0){
+      plotAxes(c,33,35,w-51,165,'contact time / milliseconds','normalized force');
+      const duration=contactTime();
+      graph(c,33,35,w-51,165,u=>{const t=u*4/duration;return t>1?0:Math.pow(Math.max(0,Math.sin(Math.PI*t)),exponent())*Math.pow(v,1.45);},coral,2.4);
+      const x=33+(w-51)*duration/8;circle(c,x,200-165*Math.pow(v,1.45),4,coral);
+      text(c,duration.toFixed(2)+' ms pulse',w-22,47,12,coral,'right');
+      text(c,'0',33,216,9,colors.muted);text(c,'4',w-20,216,9,colors.muted);
+    }else if(state.stage===1){
+      const x=36,y=27,ww=w-62,hh=171;
+      plotAxes(c,x,y,ww,hh,'felt compression u / normalized','force F / normalized');
+      c.setLineDash([3,4]);graph(c,x,y,ww,hh,u=>u,'#aab09c',1);c.setLineDash([]);
+      graph(c,x,y,ww,hh,u=>Math.pow(u,exponent()),coral,2.6);
+      const peak=.22+.78*v,force=peak**exponent();
+      line(c,x+ww*peak,y+hh,x+ww*peak,y+hh-hh*force,'#be69526a');
+      circle(c,x+ww*peak,y+hh-hh*force,5,coral);circle(c,x+ww*peak,y+hh-hh*force,10,'#be695235',false);
+      text(c,'p ≈ '+exponent().toFixed(2),x+12,y+22,21,coral,'left',true);
+      text(c,'dashed: linear felt',x+12,y+41,10,colors.muted);
+      text(c,'v = '+state.velocity,w-26,22,10,coral,'right');
+    }else if(state.stage===2){
+      const x=25,ww=w-50,top=26,bottom=104,max=partial(8)*1.075;
+      for(let n=1;n<=8;n++){
+        const xx=x+partial(n)/max*ww,ideal=x+n*f0()/max*ww;
+        circle(c,ideal,bottom,3,'#9fa994',false);
+        const decay=Math.exp(-(0.2+n*.045)*Math.min(sim.age,8));
+        line(c,xx,bottom,xx,top+(1-decay)*48,amber,2.5);
+        circle(c,xx,top+(1-decay)*48,3,amber);
+        text(c,String(n),xx,top-9,9,colors.muted,'center');
+      }
+      line(c,x,bottom,x+ww,bottom,'#bdc5b3');
+      text(c,'0 Hz',x,120,9,colors.muted);text(c,partial(8).toFixed(0)+' Hz →',x+ww,120,9,colors.muted,'right');
+      const y=149,hh=64;
+      graph(c,x,y,ww,hh,u=>.94*Math.exp(-u*8),coral,1.3);
+      graph(c,x,y,ww,hh,u=>.32*Math.exp(-u*1.7),teal,1.3);
+      graph(c,x,y,ww,hh,u=>(.64*Math.exp(-u*8)+.28*Math.exp(-u*1.7))*(.75+.25*Math.cos(TAU*beatHz()*u*6)),colors.ink,1.8);
+      const pos=x+ww*Math.min(sim.age/6,1);line(c,pos,y-4,pos,y+hh,'#8f9d8660');
+      text(c,'PROMPT',x,140,8,coral);text(c,'AFTERSOUND',x+69,140,8,teal);text(c,'SUM / BEATING',x+164,140,8,colors.ink);
+      text(c,'0',x,230,9,colors.muted);text(c,'6 illustrative seconds',x+ww,230,9,colors.muted,'right');
+    }else if(state.stage===3){
+      const pw=w-53,ph=171,ox=26,oy=25;
+      const phase=sim.energy>0?sim.time:0.4;
+      for(let x=0;x<pw;x+=5)for(let y=0;y<ph;y+=5){
+        const u=x/pw,vv=y/ph;
+        const z=Math.sin(u*Math.PI)*Math.sin(vv*Math.PI*2)*Math.cos(phase*2)+.6*Math.sin(u*Math.PI*3)*Math.sin(vv*Math.PI)*Math.sin(phase*2.7+.7);
+        c.fillStyle=z>0?'rgba(57,123,112,'+(.08+Math.abs(z)*.42)+')':'rgba(177,110,57,'+(.08+Math.abs(z)*.42)+')';c.fillRect(ox+x,oy+y,5,5);
+      }
+      for(let j=0;j<4;j++){circle(c,ox+pw*(j+1)/5,oy+ph*.58,5,colors.ink);text(c,'B'+(j+1),ox+pw*(j+1)/5,oy+ph+17,9,colors.muted,'center');}
+      text(c,'+ displacement',ox,13,9,teal);text(c,'− displacement',w-26,13,9,amber,'right');
+      text(c,'four bridge regions',w/2,235,9,colors.muted,'center');
+    }else if(state.stage===4){
+      const gap=openness()*31;
+      for(let j=0;j<8;j++){
+        const x=31+j*(w-58)/7;
+        c.strokeStyle=teal;c.lineWidth=1.5;c.beginPath();
+        for(let i=0;i<=50;i++){const y=51+i*1.9,xx=x+Math.sin(i/50*Math.PI)*Math.sin(sim.time*(2+j*.35))*sim.energy*(1+openness()*6);if(i===0)c.moveTo(xx,y);else c.lineTo(xx,y);}c.stroke();
+        c.fillStyle='#7d8974';c.fillRect(x-8,78-gap,16,8);line(c,x,28,x,78-gap,'#9aa28f');
+      }
+      text(c,'DAMPER LIFT',24,15,9,colors.muted);text(c,(openness()*100).toFixed(0)+'% schematic openness',w-17,169,10,teal,'right');
+      line(c,28,211,w-23,211,'#bdc5b3');
+      graph(c,28,181,w-51,30,u=>Math.max(0,(.75-u)/.75)**2.5,coral,2);
+      circle(c,28+(w-51)*state.pedal,211-30*(1-openness()),4,coral);
+      text(c,'pedal up',28,233,9,colors.muted);text(c,'0.75 · full lift',28+(w-51)*.75,233,9,colors.muted,'center');
+      text(c,'residual contact',28,173,9,coral);
+    }else{
+      const left=30,split=w*.35,sum=w*.81;
+      circle(c,left,108,6,amber);text(c,'STRINGS',left,91,10,colors.ink);
+      arrow(c,[[left+8,108],[split,108],[split,46],[sum,46],[sum,100]],amber);
+      arrow(c,[[split,108],[split,177],[sum,177],[sum,118]],teal);
+      text(c,'DIRECT',split+12,36,10,amber);text(c,'BOARD + SYMPATHETIC',split+8,163,narrow?8:10,teal);
+      circle(c,sum,109,10,'#dce1d1');text(c,'+',sum,114,18,colors.ink,'center');
+      arrow(c,[[sum+12,109],[w-15,109]],colors.ink);
+      text(c,'L / R',w-14,92,10,colors.ink,'right');
+      text(c,'IMMEDIATE ATTACK + RESONANT BODY',w/2,226,narrow?9:11,colors.muted,'center');
+    }
+  }
+  function drawVisuals() { drawInstrument(); drawDetail(); }
+  function drawAudio(now = performance.now()) {
+    const c=surface('audioCanvas',300,56);
+    line(c,0,28,300,28,'#c9d2be');
+    for(let i=1;i<6;i++)line(c,i*50,0,i*50,56,'#dfe3d5');
+    let rms=0;
+    if(analyser&&ctx.state==='running'&&!document.hidden&&!audioError){
+      analyser.getFloatTimeDomainData(audioData);
+      c.beginPath();
+      for(let i=0;i<audioData.length;i++){
+        rms+=audioData[i]*audioData[i];const x=i/(audioData.length-1)*300,y=28-audioData[i]*125;
+        if(i===0)c.moveTo(x,y);else c.lineTo(x,y);
+      }
+      rms=Math.sqrt(rms/audioData.length);c.strokeStyle='#437f76';c.lineWidth=1.2;c.stroke();
+    }
+    if(now-lastMeterText>250 || !analyser){
+      $('audioMeter').textContent=audioError?'UNAVAILABLE':!analyser?'WAITING FOR AUDIO':ctx.state!=='running'?'SILENCED':state.muted?'MUTED':rms<.00001?'SILENT':(20*Math.log10(rms)).toFixed(1)+' dBFS RMS';
+      if(analyser)$('audioCaption').textContent='Actual '+(2048/ctx.sampleRate*1000).toFixed(1)+' ms window · after volume & mute · display gain ×4.5. Real audio time.';
+      lastMeterText=now;
+    }
+  }
+  function frame(now) {
+    const dt=lastFrame?Math.min((now-lastFrame)/1000,.06):0;lastFrame=now;
+    if(!state.paused&&!document.hidden){
+      const t=dt*state.speed;sim.time+=t;sim.age+=t;
+      if(sim.auto&&sim.age>.65)sim.auto=false;
+      const held=sim.held||sim.auto;
+      const loss=held?.24:.28+(1-openness())*3.8;
+      sim.energy*=Math.exp(-t*loss);
+      if(sim.energy<.004)sim.energy=0;
+      drawVisuals();updateVisualStatus();
+    }
+    // Audio data follows real audio time even when the illustrative motion is paused.
+    if(now-lastMeter>40&&!document.hidden){drawAudio(now);lastMeter=now;}
+    requestAnimationFrame(frame);
+  }
+  const resize=new ResizeObserver(() => {drawVisuals();drawAudio();});
+  resize.observe($('instrumentCanvas'));resize.observe($('detailCanvas'));resize.observe($('audioCanvas'));
+  updateControls();updatePause();selectStage(1);drawAudio();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
