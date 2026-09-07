@@ -143,6 +143,7 @@ pub mod callout_tooltip;
 pub mod file_tree;
 pub mod modal;
 pub mod page_flip;
+pub mod pagination;
 pub mod placeholder;
 pub mod popup_notification;
 pub mod slides_view;
