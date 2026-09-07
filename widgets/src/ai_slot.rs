@@ -7,9 +7,9 @@
 //! NAME, `mod.widgets.AiChatOverlay{}`, which exists when the app links
 //! the `makepad-aichat` crate and calls its `script_mod` (the same two
 //! lines every app already does for widgets). An app that did not link it
-//! gets one log line and nothing on screen. Hosted by the window manager
-//! the slot is inert: the WM's own pane is the chat then, and it takes
-//! F10 before any tile sees it.
+//! gets one log line and nothing on screen. Generic window-manager tiles
+//! leave F10 to the WM. Studio evaluation apps with a feedback identity keep
+//! their own slot so selection and feedback stay attached to that app run.
 //!
 //! Open, the overlay slides in on the LEFT and PUSHES the body in
 //! (decision 17): the slot reserves a strip — the body's left inset,
@@ -105,6 +105,25 @@ pub struct AiSlotRequests {
     pub say: Vec<String>,
     /// The slot's state as it last reported it, for whoever asks.
     pub is_open: bool,
+    /// The standalone window whose F10 pane most recently received input.
+    pub current_window: Option<usize>,
+    /// Ask that window to intercept a drag over its application content.
+    pub select_region: Option<usize>,
+    /// Completed region in window-local layout coordinates; consumed by chat.
+    pub selected_region: Option<AiSelectedRegion>,
+    pub region_cancelled: bool,
+    /// Enabled by the shared chat module only for a Studio feedback launch.
+    pub feedback_enabled: bool,
+    pub feedback_selecting: bool,
+    pub feedback_busy: bool,
+    pub feedback_focus: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AiSelectedRegion {
+    pub window_id: usize,
+    pub window_size: Vec2d,
+    pub rect: Rect,
 }
 
 /// The slide, as plain state: open or not, how far in (0 hidden, 1
@@ -227,9 +246,88 @@ pub struct AiChatSlot {
     /// by the window between frames, so it is drawn empty while hidden.
     #[rust]
     overlay_list: Option<DrawList2d>,
+    #[rust]
+    selecting_region: bool,
+    #[rust]
+    region_start: Option<Vec2d>,
+    #[rust]
+    region_rect: Option<Rect>,
+    #[rust]
+    region_started_open: bool,
 }
 
 impl AiChatSlot {
+    fn region_event(&mut self, cx: &mut Cx, event: &Event, window_id: WindowId) -> bool {
+        if cx.global::<AiSlotRequests>().select_region == Some(window_id.0) {
+            cx.global::<AiSlotRequests>().select_region = None;
+            if !self.ensure_overlay(cx) { return false; }
+            self.selecting_region = true;
+            self.region_started_open = self.slide.is_open();
+            cx.global::<AiSlotRequests>().feedback_selecting = true;
+            self.region_start = None;
+            self.region_rect = None;
+            cx.redraw_all();
+        }
+        if !self.selecting_region { return false; }
+        if self.slide.is_open() != self.region_started_open || matches!(event, Event::KeyDown(e) if e.key_code == KeyCode::Escape) {
+            self.selecting_region = false;
+            self.region_start = None;
+            self.region_rect = None;
+            cx.global::<AiSlotRequests>().region_cancelled = true;
+            cx.global::<AiSlotRequests>().feedback_selecting = false;
+            cx.set_cursor(MouseCursor::Default);
+            cx.new_next_frame();
+            cx.redraw_all();
+            return true;
+        }
+        let body = SlideState::body_beside(self.body_rect, self.applied_inset);
+        let clamp = |p: Vec2d| dvec2(
+            p.x.clamp(body.pos.x, body.pos.x + body.size.x),
+            p.y.clamp(body.pos.y, body.pos.y + body.size.y),
+        );
+        match event {
+            Event::MouseDown(e) if e.window_id == window_id => {
+                if body.contains(e.abs) && e.button == MouseButton::PRIMARY {
+                    self.region_start = Some(clamp(e.abs));
+                    self.region_rect = None;
+                }
+                cx.set_cursor(MouseCursor::Crosshair);
+                true
+            }
+            Event::MouseMove(e) if e.window_id == window_id => {
+                if let Some(start) = self.region_start {
+                    let end = clamp(e.abs);
+                    self.region_rect = Some(Rect {
+                        pos: dvec2(start.x.min(end.x), start.y.min(end.y)),
+                        size: dvec2((end.x-start.x).abs(), (end.y-start.y).abs()),
+                    });
+                    cx.redraw_all();
+                }
+                cx.set_cursor(MouseCursor::Crosshair);
+                true
+            }
+            Event::MouseUp(e) if e.window_id == window_id => {
+                if let Some(start) = self.region_start.take() {
+                    let end = clamp(e.abs);
+                    let rect = Rect { pos: dvec2(start.x.min(end.x), start.y.min(end.y)), size: dvec2((end.x-start.x).abs(), (end.y-start.y).abs()) };
+                    if rect.size.x >= 4.0 && rect.size.y >= 4.0 {
+                        let window_size = cx.windows[window_id].get_inner_size();
+                        cx.global::<AiSlotRequests>().selected_region = Some(AiSelectedRegion {window_id:window_id.0,window_size,rect});
+                        self.selecting_region = false;
+                        cx.global::<AiSlotRequests>().feedback_selecting = false;
+                        cx.set_cursor(MouseCursor::Default);
+                    }
+                    self.region_rect = None;
+                    cx.new_next_frame();
+                    cx.redraw_all();
+                }
+                true
+            }
+            Event::Scroll(e) if e.window_id == window_id => true,
+            _ => false,
+        }
+    }
+
     pub fn is_open(&self) -> bool {
         self.slide.is_open()
     }
@@ -340,6 +438,11 @@ impl AiChatSlot {
     /// the slot's own dispatch, whichever comes first, so a bridge request
     /// lands on the very next event rather than waiting for the pointer.
     fn take_requests(&mut self, cx: &mut Cx) {
+        // A Studio evaluation app exports live design changes even if the
+        // person has never opened F10. The hidden overlay owns its worker.
+        if cx.global::<AiSlotRequests>().feedback_enabled {
+            self.ensure_overlay(cx);
+        }
         if let Some(open) = cx.global::<AiSlotRequests>().open.take() {
             self.set_open(cx, open);
         }
@@ -371,7 +474,11 @@ impl AiChatSlot {
 
     fn claim_keyboard(&mut self, cx: &mut Cx) {
         if let Some(overlay) = &self.overlay {
-            overlay.text_input(cx, ids!(panel.input)).set_key_focus(cx);
+            if std::mem::take(&mut cx.global::<AiSlotRequests>().feedback_focus) {
+                overlay.text_input(cx, ids!(studio_feedback.feedback_message)).set_key_focus(cx);
+            } else {
+                overlay.text_input(cx, ids!(panel.input)).set_key_focus(cx);
+            }
         }
         self.focus_pending = false;
     }
@@ -382,6 +489,8 @@ impl AiChatSlot {
             Event::MouseDown(e) => Some(e.abs),
             Event::MouseUp(e) => Some(e.abs),
             Event::Scroll(e) => Some(e.abs),
+            Event::Drag(e) => Some(e.abs),
+            Event::Drop(e) => Some(e.abs),
             _ => None,
         }
     }
@@ -395,18 +504,43 @@ fn bare_key(m: &KeyModifiers) -> bool {
 /// Called by `Window::handle_event` beside the tweaker's intercept, in
 /// place of ordinary dispatch. `true` when the event was the slot's alone:
 /// the bare F10 (toggled), or a pointer event inside the open overlay.
-/// Hosted by the window manager nothing is intercepted — the WM's pane is
-/// the chat, and it takes F10 before any tile sees it anyway.
+/// Generic window-manager tiles leave input to the WM's pane. A managed
+/// evaluation app retains its local feedback pane and region-selection input.
 pub fn window_intercept(
     cx: &mut Cx,
     event: &Event,
     window_view: &mut View,
     window_id: WindowId,
 ) -> bool {
-    if cx.in_makepad_studio() {
+    if cx.in_makepad_studio() && !cx.global::<AiSlotRequests>().feedback_enabled {
         return false;
     }
+    match event {
+        Event::WindowGotFocus(id) if *id == window_id => cx.global::<AiSlotRequests>().current_window = Some(window_id.0),
+        Event::MouseDown(e) if e.window_id == window_id => cx.global::<AiSlotRequests>().current_window = Some(window_id.0),
+        _ => {},
+    }
     if let Event::KeyDown(key_event) = event {
+        if key_event.key_code == KeyCode::F10 && key_event.modifiers.control && key_event.modifiers.shift
+            && !key_event.modifiers.alt && !key_event.modifiers.logo && cx.global::<AiSlotRequests>().feedback_enabled {
+            let target = cx.global::<AiSlotRequests>().current_window.unwrap_or(window_id.0);
+            if target != window_id.0 { return false; }
+            let event_id = cx.event_id();
+            let guard = cx.global::<AiSlotToggleGuard>();
+            if guard.event_id != Some(event_id) {
+                guard.event_id = Some(event_id);
+                let req = cx.global::<AiSlotRequests>();
+                if !req.feedback_busy && !req.feedback_selecting {
+                    req.current_window = Some(window_id.0);
+                    req.selected_region = None;
+                    req.region_cancelled = false;
+                    req.select_region = Some(window_id.0);
+                    cx.new_next_frame();
+                    cx.redraw_all();
+                }
+            }
+            return true;
+        }
         if key_event.key_code == KeyCode::F10 && bare_key(&key_event.modifiers) {
             // Several windows see the same key: one toggle per event.
             let event_id = cx.event_id();
@@ -421,7 +555,6 @@ pub fn window_intercept(
             }
             return true;
         }
-        return false;
     }
     let slot = window_view
         .children
@@ -444,6 +577,9 @@ pub fn window_intercept(
             s.set_body_rect(body.area().clipped_rect(cx));
         }
         s.apply_inset(cx, window_view);
+        if s.region_event(cx, event, window_id) {
+            return true;
+        }
         if !s.showing() {
             return false;
         }
@@ -454,6 +590,7 @@ pub fn window_intercept(
                     Event::MouseDown(e) => e.window_id == window_id,
                     Event::MouseUp(e) => e.window_id == window_id,
                     Event::Scroll(e) => e.window_id == window_id,
+                    Event::Drag(_) | Event::Drop(_) => cx.global::<AiSlotRequests>().current_window.is_none_or(|id| id == window_id.0),
                     _ => false,
                 };
                 for_this_window && s.contains(abs)
@@ -463,6 +600,7 @@ pub fn window_intercept(
         (s.showing(), inside)
     };
     if showing && inside {
+        cx.global::<AiSlotRequests>().current_window = Some(window_id.0);
         // The overlay's alone: the tile of the app beneath never sees it.
         slot.handle_event(cx, event, &mut Scope::empty());
         return true;
@@ -508,7 +646,7 @@ impl Widget for AiChatSlot {
         // Nothing exists until the first open: closed and never opened
         // costs nothing.
         if self.overlay_list.is_none() {
-            if !self.showing() {
+            if !self.showing() && !self.selecting_region {
                 return DrawStep::done();
             }
             self.overlay_list = Some(DrawList2d::new(cx));
@@ -533,6 +671,19 @@ impl Widget for AiChatSlot {
                     // The overlay just drew: its composer has an area to focus.
                     self.claim_keyboard(cx);
                 }
+            }
+        }
+        if self.selecting_region {
+            if let Some(r) = self.region_rect {
+                let color = self.draw_edge.color;
+                self.draw_edge.color = vec4(0.35, 0.63, 0.96, 1.0);
+                for edge in [
+                    Rect {pos:r.pos,size:dvec2(r.size.x,2.0)},
+                    Rect {pos:r.pos+dvec2(0.0,r.size.y-2.0),size:dvec2(r.size.x,2.0)},
+                    Rect {pos:r.pos,size:dvec2(2.0,r.size.y)},
+                    Rect {pos:r.pos+dvec2(r.size.x-2.0,0.0),size:dvec2(2.0,r.size.y)},
+                ] { self.draw_edge.draw_abs(cx,edge); }
+                self.draw_edge.color = color;
             }
         }
         cx.end_pass_sized_turtle();
