@@ -4340,7 +4340,7 @@ impl App {
         self.import_page.set_task_pool(pool.clone());
         self.music_import_page.set_task_pool(pool.clone());
         self.load_fleet_prefs();
-        self.library = Some(Library::open(repo_path("local/ai_content_library")));
+        self.library = Some(Library::open(makepad_asset_client::paths::library_root()));
         self.saved_presets = fast_presets::load(&fast_presets::store_path());
         if let Some(library) = &mut self.library {
             crate::enhance_meta::apply_catalog_names(library);
@@ -4364,7 +4364,7 @@ impl App {
         // must publish. Library::open ran above, so the product backfill is
         // already on disk when the watcher's first poll reads index.json.
         self.store.start(
-            PathBuf::from(repo_path("local/ai_content_library")),
+            makepad_asset_client::paths::library_root(),
             pool,
             spawner,
         );
@@ -4710,7 +4710,7 @@ impl App {
     }
 
     fn fleet_prefs_path() -> PathBuf {
-        PathBuf::from(repo_path("local/ai_content_library/fleet_prefs.json"))
+        makepad_asset_client::paths::library_root().join("fleet_prefs.json")
     }
 
     fn load_fleet_prefs(&mut self) {
@@ -7740,7 +7740,7 @@ impl App {
         if self.file_drag_active {
             return;
         }
-        let managed_root = match std::fs::canonicalize(repo_path("local/ai_content_library")) {
+        let managed_root = match std::fs::canonicalize(makepad_asset_client::paths::library_root()) {
             Ok(path) => path,
             Err(error) => {
                 log!("library: cannot resolve managed root for outbound drag: {error}");
