@@ -9917,7 +9917,18 @@ impl Tweaker {
         // clamped into the band.
         if let Some(hover) = self.hover_doc.clone() {
             let label_height = 16.0;
-            let approx = (hover.text.chars().count() as f64) * 5.4 + 10.0;
+            // MEASURED, not counted. The plate used a per-character average
+            // while the words on it were drawn at their true advances, so it
+            // was visibly too wide on ordinary text and ran past the band on a
+            // long annotation. The run is available here because this is a
+            // draw pass; the count stays only as the fallback for text the
+            // layout engine returns no row for.
+            let approx = self
+                .draw_label
+                .prepare_single_line_run(cx, &hover.text)
+                .map(|run| run.width_in_lpxs as f64)
+                .unwrap_or_else(|| (hover.text.chars().count() as f64) * 5.4)
+                + 10.0;
             let mut pos = hover.pos;
             pos.x = pos
                 .x
