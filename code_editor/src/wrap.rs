@@ -1,4 +1,4 @@
-use crate::{char::CharExt, layout::InlineElement, str::StrExt, Line};
+use crate::{layout::InlineElement, str::StrExt, Line};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct WrapData {
@@ -7,13 +7,12 @@ pub struct WrapData {
 }
 
 pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize) -> WrapData {
+    let tab_column_count = line.tab_column_count.max(1);
     let indent_column_count: usize = line
         .text
         .indent()
         .unwrap_or("")
-        .chars()
-        .map(|char| char.column_count())
-        .sum();
+        .column_count_at(0, tab_column_count);
     let mut byte_index = 0;
     let mut column_index = 0;
     let mut wraps = Vec::new();
@@ -21,7 +20,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize) -> WrapData {
         match element {
             InlineElement::Text { text, .. } => {
                 for string in text.split_whitespace_boundaries() {
-                    let column_count: usize = string.chars().map(|char| char.column_count()).sum();
+                    let column_count = string.column_count_at(column_index, tab_column_count);
                     if column_index + column_count > wrap_column {
                         column_index = indent_column_count;
                         wraps.push(byte_index);
