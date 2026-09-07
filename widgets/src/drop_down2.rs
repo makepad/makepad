@@ -621,7 +621,11 @@ impl DropDown2 {
 
     fn draw_popup(&mut self, cx: &mut Cx2d, trigger: Rect) {
         let pass = cx.current_pass_size();
-        let font_px = 9.0;
+        // The size the items are ABOUT to be drawn at, not a number typed
+        // once. It was hardcoded to 9 while the theme drew them larger, so
+        // the popup came up too narrow for its own contents and sliced the
+        // tail off the longest option with nothing to say it had.
+        let font_px = self.draw_item_text.text_style.font_size as f64;
         let content_w = estimate_label_width(&self.labels, font_px);
         let mut geom = layout_covering_popup(
             pass,
