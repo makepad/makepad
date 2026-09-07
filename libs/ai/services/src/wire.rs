@@ -45,8 +45,12 @@ pub const MAX_BRIEF_BYTES: usize = 4 * 1024;
 pub const MAX_DESCRIPTION_BYTES: usize = 512;
 /// Bytes of one tool's JSON-schema text.
 pub const MAX_PARAMETERS_BYTES: usize = 8 * 1024;
-/// Tools one service may declare.
-pub const MAX_TOOLS: usize = 64;
+/// Tools one service may declare. Studio's F10 service alone carries its
+/// tab, canvas, code, iteration and architecture tools; 128 leaves room for
+/// the architecture view's later waves without folding tools into
+/// dispatchers. The bound is a count, not a prompt budget: the model-facing
+/// cost is bounded by [`MAX_MANIFEST_BYTES`] below.
+pub const MAX_TOOLS: usize = 128;
 /// Topics one service may publish.
 pub const MAX_TOPICS: usize = 16;
 /// Bytes of a subscription filter JSON object.
@@ -69,10 +73,33 @@ pub const MAX_SERVICE_ID: usize = 24;
 pub const MAX_TOOL_NAME: usize = 32;
 /// Longest call id or endpoint id.
 pub const MAX_ID_BYTES: usize = 64;
-/// Bytes of a whole manifest's text fields together.
-pub const MAX_MANIFEST_BYTES: usize = 640 * 1024;
-/// Bytes of one hosted frame. Anything larger is dropped unread.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Bytes of a whole manifest's text fields together: brief, label and every
+/// tool's and topic's name, description and schema. Sized so a manifest at
+/// every per-field cap still fits ([`MAX_TOOLS`] tools and [`MAX_TOPICS`]
+/// topics, each at [`MAX_DESCRIPTION_BYTES`] + [`MAX_PARAMETERS_BYTES`] +
+/// [`MAX_TOOL_NAME`], plus [`MAX_BRIEF_BYTES`] and the label): 1,262,128
+/// bytes, rounded up to 5 × 256 KiB. The compile-time check below keeps it
+/// consistent with the per-field caps.
+pub const MAX_MANIFEST_BYTES: usize = 1280 * 1024;
+/// Bytes of one hosted frame. Anything larger is dropped unread. A
+/// `Register` frame carries a whole manifest as JSON, and JSON escaping can
+/// at worst double a text field (every byte a quote or a backslash), so the
+/// frame cap is at least twice [`MAX_MANIFEST_BYTES`] plus envelope room:
+/// a manifest the validator accepts always transports.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Bytes the label may occupy (checked in [`ServiceManifest::validate`]).
+const MAX_LABEL_BYTES: usize = 48;
+/// Worst-case text bytes of one tool or topic at every per-field cap.
+const MAX_ENTRY_BYTES: usize = MAX_DESCRIPTION_BYTES + MAX_PARAMETERS_BYTES + MAX_TOOL_NAME;
+const _: () = assert!(
+    MAX_MANIFEST_BYTES >= MAX_TOOLS * MAX_ENTRY_BYTES + MAX_TOPICS * MAX_ENTRY_BYTES + MAX_BRIEF_BYTES + MAX_LABEL_BYTES,
+    "MAX_MANIFEST_BYTES must hold a manifest at every per-field cap"
+);
+const _: () = assert!(
+    MAX_FRAME_BYTES >= 2 * MAX_MANIFEST_BYTES + 64 * 1024,
+    "MAX_FRAME_BYTES must hold a JSON-escaped maximal manifest plus its envelope"
+);
 /// Bytes of an instance's display name or location line.
 pub const MAX_META_BYTES: usize = 128;
 
@@ -201,8 +228,8 @@ impl ServiceManifest {
         if !is_ident(&self.id, MAX_SERVICE_ID) {
             return Err(format!("service id '{}' is not [a-z0-9_]{{1,{}}}", self.id, MAX_SERVICE_ID));
         }
-        if self.label.trim().is_empty() || self.label.len() > 48 {
-            return Err(format!("service '{}' label must be 1..48 bytes", self.id));
+        if self.label.trim().is_empty() || self.label.len() > MAX_LABEL_BYTES {
+            return Err(format!("service '{}' label must be 1..{} bytes", self.id, MAX_LABEL_BYTES));
         }
         if self.brief.len() > MAX_BRIEF_BYTES {
             return Err(format!("service '{}' brief is {} bytes; the cap is {}", self.id, self.brief.len(), MAX_BRIEF_BYTES));
@@ -989,6 +1016,77 @@ mod tests {
         let mut topic_schema = route();
         topic_schema.topics[0].schema = Some("[]".into());
         assert!(topic_schema.validate().unwrap_err().contains("schema is not a JSON object"));
+    }
+
+    /// A tool at every per-field cap: a 32-byte name, a 512-byte
+    /// description and an 8 KiB schema that is still a valid argument object.
+    fn maximal_tool(index: usize) -> ToolDef {
+        let name = format!("{:_<width$}", format!("t{index}"), width = MAX_TOOL_NAME);
+        let head = r#"{"type":"object","properties":{"p":{"type":"string","description":""#;
+        let tail = r#""}},"additionalProperties":false}"#;
+        let schema = format!("{head}{}{tail}", "s".repeat(MAX_PARAMETERS_BYTES - head.len() - tail.len()));
+        assert_eq!(schema.len(), MAX_PARAMETERS_BYTES);
+        ToolDef::new(name, "d".repeat(MAX_DESCRIPTION_BYTES), &schema, Risk::Act)
+    }
+
+    fn maximal_topic(index: usize) -> TopicDef {
+        let name = format!("{:_<width$}", format!("p{index}"), width = MAX_TOOL_NAME);
+        let head = r#"{"type":"object","properties":{"v":{"type":"string","description":""#;
+        let tail = r#""}}}"#;
+        let schema = format!("{head}{}{tail}", "s".repeat(MAX_PARAMETERS_BYTES - head.len() - tail.len()));
+        TopicDef::new(name, "d".repeat(MAX_DESCRIPTION_BYTES)).with_schema(schema)
+    }
+
+    #[test]
+    fn the_tool_cap_admits_128_and_names_the_cap_at_129() {
+        let mut m = ServiceManifest::new("studio", "Studio", "The IDE.");
+        for i in 0..MAX_TOOLS {
+            m = m.with_tool(ToolDef::new(format!("tool_{i}"), "Does one thing.", r#"{"type":"object","properties":{}}"#, Risk::Read));
+        }
+        assert_eq!(m.tools.len(), 128);
+        assert!(m.validate().is_ok(), "{:?}", m.validate());
+        let over = m.with_tool(ToolDef::new("tool_129", "One too many.", r#"{"type":"object","properties":{}}"#, Risk::Read));
+        let err = over.validate().unwrap_err();
+        assert!(err.contains("129 tools; the cap is 128"), "{err}");
+    }
+
+    #[test]
+    fn a_manifest_at_every_cap_validates_and_transports() {
+        let mut m = ServiceManifest::new(
+            &"s".repeat(MAX_SERVICE_ID),
+            &"l".repeat(MAX_LABEL_BYTES),
+            &"b".repeat(MAX_BRIEF_BYTES),
+        );
+        for i in 0..MAX_TOOLS {
+            m = m.with_tool(maximal_tool(i));
+        }
+        for i in 0..MAX_TOPICS {
+            m = m.with_topic(maximal_topic(i));
+        }
+        assert!(m.validate().is_ok(), "{:?}", m.validate());
+        let text_bytes = m.brief.len()
+            + m.label.len()
+            + m.tools.iter().map(|t| t.name.len() + t.description.len() + t.parameters.len()).sum::<usize>()
+            + m.topics.iter().map(|t| t.name.len() + t.description.len() + t.schema.as_ref().map_or(0, |s| s.len())).sum::<usize>();
+        assert!(text_bytes <= MAX_MANIFEST_BYTES, "{text_bytes} > {MAX_MANIFEST_BYTES}");
+        assert!(text_bytes > MAX_MANIFEST_BYTES * 9 / 10, "the cap is not slack: {text_bytes}");
+        // The registration frame of that manifest must survive the frame cap
+        // with every quote escaped.
+        let up = HostedUp { from: None, msg: ServiceUp::Register { manifest: m.clone(), port_tag: 1 } };
+        let json = up.to_json();
+        assert!(json.len() <= MAX_FRAME_BYTES, "{} > {MAX_FRAME_BYTES}", json.len());
+        let parsed = HostedUp::parse(&json).expect("a maximal manifest transports");
+        assert_eq!(parsed.msg, up.msg);
+        // One more byte of text and the byte cap, not the tool cap, says no.
+        let mut fat = m;
+        fat.brief.push('b');
+        assert!(fat.validate().unwrap_err().contains("brief"));
+        // The frame cap still refuses anything larger than it.
+        let huge = format!(
+            "{{\"wm_ai\":{{\"from\":null,\"msg\":{{\"Unregister\":{{}}}}}},\"pad\":\"{}\"}}",
+            "x".repeat(MAX_FRAME_BYTES)
+        );
+        assert_eq!(HostedUp::parse(&huge), None);
     }
 
     #[test]
