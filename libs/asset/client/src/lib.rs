@@ -58,6 +58,7 @@ pub mod http;
 // The module moved; this re-export keeps every dependent's `makepad_asset_client::json::Value` path compiling.
 pub mod json { pub use makepad_strict_json::*; }
 pub mod location;
+pub mod paths;
 pub mod transport;
 pub mod cache_store;
 pub mod static_store;
@@ -166,7 +167,7 @@ pub use cache_store::FsCacheStore;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use http::HttpLimits;
 pub use publish::{
-    PublishBundle, PublishBundleFile, PublishFile, PublishProvenance, PublishRequest,
+    PublishBundle, PublishBundleFile, PublishExpectedHead, PublishFile, PublishProvenance, PublishRequest,
     PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
     PublishedFile,
 };

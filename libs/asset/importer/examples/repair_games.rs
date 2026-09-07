@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 fn server_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("local/asset-ui/asset-server")
+    makepad_asset_client::paths::store_root()
 }
 
 fn connect() -> AssetClient {
@@ -96,6 +96,7 @@ fn games(
         live_only: true,
         page_size: 50,
         facets: 0,
+        newest: false,
     };
     let page = client.catalog_search(&query, None).expect("search games");
     page.hits

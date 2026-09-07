@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! MAKEPAD_LIVE_STORE=127.0.0.1:55463:55464 \
-//! MAKEPAD_LIVE_TOKEN_FILE=local/asset-ui/asset-server/admin-token \
+//! MAKEPAD_LIVE_TOKEN_FILE=local/asset-library/store/admin-token \
 //! cargo test -p makepad-asset-chat-ui --test live_feed -- --ignored --nocapture
 //! ```
 //!

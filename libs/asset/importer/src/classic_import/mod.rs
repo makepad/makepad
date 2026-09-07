@@ -1836,8 +1836,7 @@ mod tests {
         let dests = [
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../local/ai_content_app/import/freedoom/work/source/worlds/freedoom2/map27.glb"),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../local/ai_content_library/lib-1047.glb"),
+            makepad_asset_client::paths::library_root().join("lib-1047.glb"),
         ];
         for dest in dests {
             if let Some(parent) = dest.parent() {
@@ -2333,8 +2332,7 @@ mod tests {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
                     "../../local/ai_content_app/import/freedoom/work/source/worlds/freedoom2/map27.glb",
                 ),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../local/ai_content_library/lib-1047.glb"),
+                makepad_asset_client::paths::library_root().join("lib-1047.glb"),
             ];
             for dest in dests {
                 if dest.parent().is_some_and(|p| p.exists()) {

@@ -16,7 +16,7 @@
 //! When this process HOSTS the embedded server it also runs the continuous
 //! library publisher (`makepad_asset_importer::watch`) on one background
 //! thread, so everything the generation pipelines write into
-//! `local/ai_content_library/` reaches the catalog — intermediates tagged
+//! `local/asset-library/` reaches the catalog — intermediates tagged
 //! `intermediate` so program surfaces can exclude them.
 //!
 //! When another process already holds the root lock this one ATTACHES to the
@@ -33,7 +33,7 @@
 //!   unset = LAN discovery on the standard beacon port.
 //! - `ASSET_UI_ASSET_SERVER_ID=<32 hex>` — pin the server identity.
 //! - Token: `ASSET_UI_ASSET_TOKEN`, then `ASSET_UI_ASSET_TOKEN_FILE`, then
-//!   `local/asset-ui/asset-server/admin-token` (the running server's
+//!   `local/asset-library/store/admin-token` (the running server's
 //!   bootstrap token), then `local/asset-ui/asset-server.token`.
 //!   No token = anonymous probe.
 //! - `ASSET_UI_ASSET_CACHE=<dir>` — cache parent, default
@@ -973,7 +973,7 @@ impl AssetStore {
             exclude_tag: None,
             creator: None,
             live_only: false,
-            newest: true,
+            newest: false,
             // The SAME page size for every page of a walk: a cursor is
             // bound to the exact query shape that minted it, page size
             // included, so a "bigger continuation page" is a refused cursor.
@@ -1512,10 +1512,7 @@ pub fn instance_cache_parent() -> PathBuf {
 }
 
 pub(crate) fn default_asset_server_root() -> PathBuf {
-    if let Ok(root) = std::env::var("AI_CONTENT_ASSET_ROOT") {
-        return PathBuf::from(root);
-    }
-    asset_ui_home().join("asset-server")
+    makepad_asset_client::paths::store_root()
 }
 
 /// `ASSET_UI_ASSET_BEACON=off` (`0`/`no`/`silent`) starts a server without
