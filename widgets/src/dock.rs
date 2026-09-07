@@ -1728,8 +1728,25 @@ impl Dock {
     }
 }
 
-impl Widget for Dock {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+/// Whether `Dock::handle_event_with_bodies` dispatches to the tab bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyDispatch {
+    Existing,
+    Skip,
+}
+
+impl Dock {
+    /// The full Dock event handler with the tab-body dispatch made explicit.
+    /// `Existing` is the ordinary behaviour; `Skip` handles only the Dock's
+    /// own chrome (splitters, tab bars, drag/drop) and leaves the bodies to
+    /// the caller.
+    pub fn handle_event_with_bodies(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        scope: &mut Scope,
+        bodies: BodyDispatch,
+    ) {
         let uid = self.widget_uid();
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
@@ -1814,7 +1831,10 @@ impl Widget for Dock {
         let visible_items_only = event.requires_visibility()
             || matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd);
 
-        if visible_items_only {
+        if bodies == BodyDispatch::Skip {
+            // The caller pumps the tab bodies itself (Studio's resident pump
+            // delivers async events once across several presentations).
+        } else if visible_items_only {
             for (_id, item) in self.visible_items() {
                 item.handle_event(cx, event, scope);
             }
@@ -1904,6 +1924,13 @@ impl Widget for Dock {
             }
             _ => {}
         }
+    }
+
+}
+
+impl Widget for Dock {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.handle_event_with_bodies(cx, event, scope, BodyDispatch::Existing)
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
