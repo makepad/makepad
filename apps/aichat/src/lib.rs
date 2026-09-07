@@ -18,6 +18,7 @@ use makepad_widgets::*;
 
 pub mod bus;
 pub mod gen;
+pub mod feedback;
 pub mod overlay;
 pub mod panel;
 pub mod settings;
@@ -30,7 +31,9 @@ pub use settings::AiSettings;
 /// Register the panel and the overlay, and give the bridge its `/ai`
 /// routes. Call once after `makepad_widgets::script_mod`.
 pub fn script_mod(vm: &mut ScriptVm) {
+    vm.cx_mut().global::<makepad_widgets::ai_slot::AiSlotRequests>().feedback_enabled = crate::feedback::enabled_from_env();
     crate::panel::script_mod(vm);
+    crate::feedback::script_mod(vm);
     crate::overlay::script_mod(vm);
     vm.cx_mut().ai_callback = Some(ai_callback);
 }
