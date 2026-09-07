@@ -47,6 +47,7 @@ use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_draw::makepad_platform::DrawShaderId;
 use crate::makepad_script::trap::NoTrap;
+use crate::makepad_micro_serde::*;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,7 +93,7 @@ enum PickStyle {
     PinnedQuiet,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, SerJson)]
 pub struct TweakDiffEntry {
     pub seq: u64,
     pub path: String,
@@ -263,6 +264,55 @@ fn session() -> &'static Mutex<TweakSession> {
     static S: OnceLock<Mutex<TweakSession>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(TweakSession::default()))
 }
+
+/// A complete current design delta. Empty entries mean all edits were undone.
+/// No source files are written by the tweaker or this export.
+pub struct TweakFeedbackSnapshot {
+    pub generation: u64,
+    pub entries: Result<Vec<TweakDiffEntry>, String>,
+}
+
+/// Read only after a change, without waiting on the session lock. Keep the UI
+/// copy bounded; an oversized session is reported instead of partially exported.
+pub fn feedback_snapshot(after_generation: u64) -> Option<TweakFeedbackSnapshot> {
+    let s = session().try_lock().ok()?;
+    if s.apply_gen == after_generation {
+        return None;
+    }
+    let entries = (|| {
+        if s.diff.len() > 32768 {
+            return Err("Too many live tweak edits to export; reset unused changes".into());
+        }
+        let mut out: Vec<TweakDiffEntry> = Vec::new();
+        for entry in &s.diff {
+            if entry.path.len() + entry.prop.len() + entry.old.len() + entry.new.len()
+                + entry.origin.len() + entry.scope.len() > 8192 {
+                return Err("A live tweak value exceeds the feedback size limit".into());
+            }
+            if let Some(existing) = out.iter_mut().find(|e| e.path == entry.path && e.prop == entry.prop) {
+                existing.new = entry.new.clone();
+                existing.seq = entry.seq;
+                existing.origin = entry.origin.clone();
+                existing.scope = entry.scope.clone();
+                existing.siblings = entry.siblings;
+            } else {
+                if out.len() == 128 {
+                    return Err("More than 128 live tweak properties; reset unused changes before exporting".into());
+                }
+                out.push(entry.clone());
+            }
+        }
+        out.retain(|entry| entry.old != entry.new);
+        let bytes: usize = out.iter().map(|entry| entry.path.len() + entry.prop.len()
+            + entry.old.len() + entry.new.len() + entry.origin.len() + entry.scope.len()).sum();
+        if bytes > 8192 {
+            return Err("Live design changes exceed 8 KiB; reset unused changes before exporting".into());
+        }
+        Ok(out)
+    })();
+    Some(TweakFeedbackSnapshot { generation: s.apply_gen, entries })
+}
+
 
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
 const SPLITTER_WIDTH: f64 = 5.0;
@@ -710,7 +760,12 @@ pub fn window_intercept(
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.is_tweaker_toggle() {
+        let f12 = key_event.key_code == KeyCode::F12
+            && !key_event.modifiers.shift
+            && !key_event.modifiers.control
+            && !key_event.modifiers.alt
+            && !key_event.modifiers.logo;
+        if key_event.is_tweaker_toggle() || f12 {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
@@ -728,6 +783,11 @@ pub fn window_intercept(
         return false;
     }
     if !tweak_is_on() {
+        return false;
+    }
+    // Region feedback owns this drag, including when the design panel is open.
+    let feedback = cx.global::<crate::ai_slot::AiSlotRequests>();
+    if feedback.feedback_selecting || feedback.select_region == Some(window_id.0) {
         return false;
     }
 

@@ -339,6 +339,10 @@ pub struct Window {
     /// window rather than whichever one presents first.
     #[live]
     screen_cap: ScreenCap,
+    #[rust]
+    managed_close_pending: bool,
+    #[rust]
+    managed_quit_pending: bool,
     #[live]
     window: ScriptWindowHandle,
     #[live]
@@ -737,6 +741,16 @@ impl SsaaStack {
 }
 
 impl Window {
+    fn close_after_recording(&mut self, cx: &mut Cx) {
+        if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
+            self.managed_close_pending = true;
+            self.screen_cap.stop(cx);
+            self.view.redraw(cx);
+        } else {
+            self.window.handle.close(cx);
+        }
+    }
+
     /// A compositor can own the recording shortcut without forwarding it to
     /// embedded applications (which each have their own Window recorder).
     pub fn toggle_recording(&mut self, cx: &mut Cx) {
@@ -934,6 +948,8 @@ impl Window {
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
         }
+        self.screen_cap.set_window_id(self.window.window_id().id());
+        self.screen_cap.start_managed_once(cx);
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
@@ -1229,7 +1245,7 @@ impl WindowRef {
     /// button does — the app sees the ordinary window-close path.
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.window.handle.close(cx);
+            inner.close_after_recording(cx);
         }
     }
     /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
@@ -1335,6 +1351,26 @@ impl Widget for Window {
         // works while a text input holds the caret, and is told which window
         // it is recording so its capture sink follows THIS window.
         self.screen_cap.set_window_id(self.window.window_id().id());
+        if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
+            match event {
+                Event::QuitRequested(request) => {
+                    // If the app already owns asynchronous shutdown, leave
+                    // the final quit to it. Otherwise this Window resumes it
+                    // after every managed window's encoder has finished.
+                    self.managed_quit_pending |= !request.handled.get();
+                    request.handle();
+                    self.screen_cap.stop(cx);
+                }
+                Event::WindowCloseRequested(request)
+                    if request.window_id == self.window.window_id() && request.accept_close.get() => {
+                    request.accept_close.set(false);
+                    self.managed_close_pending = true;
+                    log!("[makepad-remote] user closed window {}; finalizing Studio recording", request.window_id.id());
+                    self.screen_cap.stop(cx);
+                }
+                _ => {}
+            }
+        }
         self.screen_cap.handle_event(cx, event, scope);
         if self.screen_cap.take_redraw_request() {
             // The REC dot appearing or disappearing is a change to the draw
@@ -1346,6 +1382,14 @@ impl Widget for Window {
             // an empty file. A pass repaint re-presents the existing draw lists
             // at frame rate without re-running the widget tree.
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
+        }
+        if self.managed_quit_pending && !ScreenCap::managed_recordings_pending() && !self.screen_cap.is_busy() {
+            self.managed_quit_pending = false;
+            self.managed_close_pending = false;
+            cx.quit();
+        } else if self.managed_close_pending && !self.screen_cap.is_busy() {
+            self.managed_close_pending = false;
+            self.window.handle.close(cx);
         }
         if self.demo_next_frame.is_event(event).is_some() {
             if self.demo {
@@ -1534,7 +1578,10 @@ impl Widget for Window {
                 .desktop_button(cx, ids!(windows_buttons.close))
                 .clicked(&actions)
             {
-                self.window.handle.close(cx);
+                if self.screen_cap.is_managed() {
+                    log!("[makepad-remote] user closed window {}; finalizing Studio recording", self.window.window_id().id());
+                }
+                self.close_after_recording(cx);
             }
         }
 
