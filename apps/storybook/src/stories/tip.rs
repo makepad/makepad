@@ -26,6 +26,14 @@ script_mod! {
             Tip{text: "Above, right edges" place: TopEnd Button{text: "TopEnd"}}
         }
 
+        StoryNote{text: "A side can align too: Start puts the tip's top edge level with the control's, End its bottom. The controls here are tall on purpose, since against a control the tip's own height the two look the same."}
+        StoryRow{
+            Tip{text: "Left, top edges" place: LeftStart Button{height: 70. text: "LeftStart"}}
+            Tip{text: "Left, bottom edges" place: LeftEnd Button{height: 70. text: "LeftEnd"}}
+            Tip{text: "Right, top edges" place: RightStart Button{height: 70. text: "RightStart"}}
+            Tip{text: "Right, bottom edges" place: RightEnd Button{height: 70. text: "RightEnd"}}
+        }
+
         StoryHeading{text: "With a pointer"}
         StoryNote{text: "The arrow sits on the bubble's anchor-facing edge, at the point the placement worked out, so it keeps aiming at the control after a flip."}
         StoryRow{
