@@ -12,6 +12,7 @@ use crate::glb::inspect_glb;
 use crate::stateful_billboard::StatefulBillboard;
 use crate::world_nav::WorldNav;
 use crate::thumbs::{jpeg_dims, parse_wav, png_dims, thumbnail_is_placeholder};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::videothumb::probe_video;
 use makepad_asset_client::json::{self, obj, s, Value};
 use makepad_asset_client::util::from_hex_exact;
@@ -30,14 +31,20 @@ use makepad_asset_data::{
 use makepad_render::skin::SkinnedModel;
 use makepad_render::StaticModel;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 /// Stable leaf names written into `--out`.
 pub const SOURCE_COLLECTION_FILE: &str = "source_collection.canon";
@@ -1550,29 +1557,27 @@ struct DirSnapshot {
     names: Vec<String>,
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn scan_pack(_root: &PackRoot) -> Result<(Vec<DiscoveredFile>, Vec<DirSnapshot>), PackImportError> {
+    Err(pack_os_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn scan_pack(root: &PackRoot) -> Result<(Vec<DiscoveredFile>, Vec<DirSnapshot>), PackImportError> {
     let mut files = Vec::new();
     let mut snaps = Vec::new();
     let mut dirs = 0usize;
     let mut entries = 0usize;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        walk_dir(
-            &root.dir,
-            "",
-            root,
-            0,
-            &mut dirs,
-            &mut entries,
-            &mut files,
-            &mut snaps,
-        )?;
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (root, &mut dirs, &mut entries, &mut snaps);
-        return Err(pack_os_unsupported());
-    }
+    walk_dir(
+        &root.dir,
+        "",
+        root,
+        0,
+        &mut dirs,
+        &mut entries,
+        &mut files,
+        &mut snaps,
+    )?;
     if files.is_empty() {
         return Err(PackImportError::new(
             PackImportErrorKind::Empty,
@@ -1698,7 +1703,9 @@ fn walk_dir(
     Ok(())
 }
 
-#[cfg(unix)]
+// These handwritten filesystem ABIs are validated only on desktop macOS/Linux.
+// Android and other Unix targets must use the fail-closed outer entry points.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod unix {
     use super::*;
     use std::ffi::{CStr, CString};
@@ -3485,6 +3492,12 @@ fn reverify_hashed(root: &PackRoot, hashed: &[HashedFile]) -> Result<(), PackImp
     Ok(())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn reverify_tree(_root: &PackRoot, _snaps: &[DirSnapshot]) -> Result<(), PackImportError> {
+    Err(pack_os_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn reverify_tree(root: &PackRoot, snaps: &[DirSnapshot]) -> Result<(), PackImportError> {
     let mut entries = 0usize;
     for snap in snaps {
@@ -4728,18 +4741,17 @@ fn probe_mp4_trusted(
             format!("{pack_path}: probe bytes do not match digest"),
         ));
     }
-    // Split rather than nested: an ATTRIBUTED BLOCK in tail position is a
-    // statement, so `let hex = { #[cfg(not(unix))] { return … ; } }` binds
-    // `()` on Windows instead of diverging — which is exactly how this
-    // stopped compiling off unix. `return` as the initializer expression
-    // has type `!` and coerces, so both arms really do bind a String.
-    #[cfg(unix)]
+    probe_mp4_verified(bytes, pack_path)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn probe_mp4_verified(_bytes: &[u8], _pack_path: &str) -> Result<u32, PackImportError> {
+    Err(pack_os_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn probe_mp4_verified(bytes: &[u8], pack_path: &str) -> Result<u32, PackImportError> {
     let hex = unix::random_hex16()?;
-    #[cfg(not(unix))]
-    let hex: String = return Err(PackImportError::new(
-        PackImportErrorKind::Io,
-        format!("{pack_path}: getentropy probe dir unavailable"),
-    ));
     let dir = std::env::temp_dir().join(format!(".pack-import-probe-{hex}"));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -7093,6 +7105,12 @@ fn existing_bundle_matches(
     Ok(true)
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn assert_pack_identity(_pack: &PackRoot) -> Result<(), PackImportError> {
+    Err(pack_os_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn assert_pack_identity(pack: &PackRoot) -> Result<(), PackImportError> {
     #[cfg(unix)]
     {
@@ -7120,19 +7138,16 @@ fn assert_existing_out_outside_pack(
     pack: &PackRoot,
     out_dir: &Path,
 ) -> Result<(), PackImportError> {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let dir = unix::open_dir_path(out_dir)?;
         unix::assert_fd_outside_pack(&dir, pack, "existing --out")?;
         return Ok(());
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (pack, out_dir);
-        Err(PackImportError::new(
-            PackImportErrorKind::Io,
-            "parent-descriptor publish is required and unavailable on this platform",
-        ))
+        Err(pack_os_unsupported())
     }
 }
 
@@ -7141,20 +7156,14 @@ fn commit_new_bundle(
     out_dir: &Path,
     dests: &[(&str, &[u8]); 3],
 ) -> Result<(), PackImportError> {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         return unix::publish_bundle(pack, out_dir, dests);
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (pack, dests);
-        Err(PackImportError::new(
-            PackImportErrorKind::Io,
-            format!(
-                "parent-descriptor publish is required and unavailable; {}",
-                out_dir.display()
-            ),
-        ))
+        let _ = (pack, out_dir, dests);
+        Err(pack_os_unsupported())
     }
 }
 
