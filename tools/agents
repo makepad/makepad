@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+(cd "$repo_dir" && cargo build --release -p makepad-screen)
+
+screen_target_dir=${CARGO_TARGET_DIR:-"$repo_dir/target"}
+case "$screen_target_dir" in
+    /*) ;;
+    *) screen_target_dir="$repo_dir/$screen_target_dir" ;;
+esac
+
+# Reuse the workspace's existing Studio sessions when present. Explicit
+# --state-dir arguments still take precedence inside the Rust launcher.
+if [ -z "${MAKEPAD_SCREEN_STATE_DIR:-}" ] &&
+   [ -d "$repo_dir/local/agent_state/studio/iteration-verification/state/agent_sessions" ]; then
+    MAKEPAD_SCREEN_STATE_DIR="$repo_dir/local/agent_state/studio/iteration-verification/state/agent_sessions"
+    export MAKEPAD_SCREEN_STATE_DIR
+fi
+
+exec "$screen_target_dir/release/makepad-screen" agents "$@"
