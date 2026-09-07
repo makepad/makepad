@@ -31,6 +31,7 @@ pub enum Mode {
     Structured,
     #[default]
     Canvas,
+    Architecture,
 }
 
 impl Mode {
@@ -38,6 +39,7 @@ impl Mode {
         match self {
             Self::Structured => "structured",
             Self::Canvas => "canvas",
+            Self::Architecture => "architecture",
         }
     }
 }

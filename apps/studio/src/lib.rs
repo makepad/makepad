@@ -9,18 +9,36 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 pub mod activity;
+pub mod activity_dashboard;
+pub mod activity_demo;
+pub mod activity_views;
+pub mod agent_session;
 pub mod ai;
 pub mod appearance;
+pub mod atlas;
 pub mod canvas;
+pub mod canvas_draw;
 mod canvas_input;
 pub mod disk;
 pub mod disk_graph;
 pub mod document;
 pub mod document_worker;
+pub mod iteration;
+pub mod iteration_git;
+pub mod iteration_host;
+pub mod iteration_host_view;
+pub mod iteration_tools;
+pub mod iteration_view;
+pub mod iteration_worker;
+pub mod mcp;
+pub mod presentation;
 pub mod project_tree;
 pub mod state;
+pub mod surface_pump;
 pub mod usage;
 pub mod usage_codex;
+pub mod usage_history_view;
+pub mod usage_stall;
 pub mod workspace;
 
 script_mod! {
@@ -107,7 +125,13 @@ script_mod! {
 
     /** One terminal tab: the terminal library widget, full size. */
     mod.widgets.StudioTerminalTab = View{
-        width: Fill height: Fill
+        width: Fill height: Fill flow: Down
+        View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
+            terminal_session_status := Hint{width: Fill text: "Connecting persistent terminal…"}
+            Tip{text: "Connect to a running Studio terminal"
+                connect_terminal := Button{width: 24 height: 22 text: ">_" padding: 0}
+            }
+        }
         term := MpTerm{}
     }
 
@@ -142,7 +166,6 @@ script_mod! {
         show_bg: true draw_bg +: {color: theme.color_bg_app}
         Row{
             SectionTitle{width: Fill text: "AI usage"}
-            refresh_usage := Button{text: "Refresh"}
         }
         usage_poll_status := Hint{text: "Checking provider limits…"}
         Card{

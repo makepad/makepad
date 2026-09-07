@@ -184,8 +184,8 @@ mod native {
 
     pub(super) fn run(cwd: PathBuf, rx: Receiver<()>, tx: SyncSender<Arc<Snapshot>>, stop: Arc<AtomicBool>) {
         let mut s = Snapshot { root: cwd.clone(), ..Default::default() };
-        match command("git", &["rev-parse", "--show-toplevel"], &cwd, &stop) {
-            Ok(root) => s.root = PathBuf::from(root.trim_end()),
+        match makepad_git::Repository::open(&cwd) {
+            Ok(repo) => s.root = fs::canonicalize(&repo.workdir).unwrap_or(repo.workdir),
             Err(e) => s.errors.push(format!("repository discovery: {e}")),
         }
         let mut next_sample = Instant::now();
@@ -300,10 +300,8 @@ mod native {
         let mut errors = Vec::new();
         let mut worktrees = Vec::new();
         let discovery_deadline = Instant::now() + Duration::from_secs(15);
-        match command("git", &["worktree", "list", "--porcelain", "-z"], root, stop) {
-            Ok(text) => for field in text.split('\0') {
-                if let Some(path) = field.strip_prefix("worktree ") { worktrees.push(PathBuf::from(path)); }
-            },
+        match makepad_git::Repository::open(root).and_then(|repo| repo.worktree_list()) {
+            Ok(list) => worktrees.extend(list.into_iter().filter(|tree| tree.prunable.is_none()).map(|tree| tree.path)),
             Err(e) => errors.push(format!("worktree list: {e}")),
         }
         if worktrees.is_empty() { worktrees.push(root.to_owned()); }

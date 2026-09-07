@@ -21,8 +21,6 @@ workspace.members = [
     "apps/asset-ui",
     "apps/asset-server",
     "apps/flow-server",
-    "apps/flow-ui",
-    "libs/flowgraph",
     "libs/media_view",
     "apps/ai-hub",
     "apps/vj",
@@ -105,6 +103,8 @@ workspace.members = [
     "xr",
     # === studio ===
     "apps/studio",
+    "libs/code_graph",
+    "libs/code_atlas",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
@@ -161,6 +161,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/screen",
     "tools/dj_pack",
     "libs/system_speech",
     # === tests ===

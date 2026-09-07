@@ -112,9 +112,16 @@ impl UsageWindow {
             return "—".into();
         };
         if part.len() == 10 && part.as_bytes()[4] == b'-' && part.as_bytes()[7] == b'-' {
-            part = part[5..].into();
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            if let (Ok(month), Ok(day)) = (part[5..7].parse::<usize>(), part[8..].parse::<u8>()) {
+                if (1..=12).contains(&month) {
+                    part = format!("{} {day}", MONTHS[month - 1]);
+                }
+            }
         }
-        if zone.as_deref() == Some("UTC") {
+        if self.scope == Some("session") && zone.as_deref() == Some("UTC") {
             part.push_str(" UTC");
         }
         part
@@ -146,6 +153,9 @@ pub struct ProviderUsage {
     pub plan: Option<String>,
     /// Latest CLI identity, independent of the last successful quota sample.
     pub account_email: Option<String>,
+    /// Identity verified for the retained quota observation, which can differ
+    /// from the latest account lookup when a refresh fails.
+    pub quota_account_email: Option<String>,
     pub raw: String,
     pub error: Option<String>,
 }
@@ -191,6 +201,8 @@ impl ProviderUsage {
 
 #[derive(Clone, Debug, Default)]
 pub struct UsageSnapshot {
+    pub account_history: Vec<AccountUsageHistory>,
+    pub history_error: Option<String>,
     pub providers: Vec<ProviderUsage>,
     pub polling: Option<UsageProvider>,
     pub next_poll_at: u64,
@@ -245,6 +257,8 @@ impl UsageSnapshot {
     }
 }
 
+include!("usage_history.rs");
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -261,6 +275,12 @@ pub struct UsageWorker {
 }
 impl UsageWorker {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
+        Self::start_inner(spawner, None)
+    }
+    pub fn start_with_history(spawner: &ThreadSpawner, path: &std::path::Path) -> Result<Self, String> {
+        Self::start_inner(spawner, Some(path.to_owned()))
+    }
+    fn start_inner(spawner: &ThreadSpawner, history_path: Option<std::path::PathBuf>) -> Result<Self, String> {
         let (commands, rx) = mpsc::sync_channel(1);
         let (tx, snapshots) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
@@ -271,7 +291,7 @@ impl UsageWorker {
                     name: Some("studio-usage".into()),
                     ..Default::default()
                 },
-                move || run(rx, tx, cancel),
+                move || run(rx, tx, cancel, history_path),
             )
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -327,19 +347,25 @@ fn publish(tx: &SyncSender<Arc<UsageSnapshot>>, pending: &mut Option<Arc<UsageSn
 }
 
 fn retain_last_success(previous: &mut ProviderUsage, mut incoming: ProviderUsage) {
-    let changed_account =
-        incoming.account_email.is_some() && incoming.account_email != previous.account_email;
-    if incoming.error.is_some() && previous.observed_at > 0 && !changed_account {
+    let previous_owner = previous.quota_account_email.clone().or_else(|| {
+        previous.error.is_none().then(|| previous.account_email.clone()).flatten()
+    });
+    // An unknown current identity may retain explicitly stale anonymous
+    // display data, but later learning a different identity cannot relabel it.
+    let same_owner = incoming.account_email.is_none()
+        || incoming.account_email.as_ref() == previous_owner.as_ref();
+    if incoming.error.is_some() && previous.observed_at > 0 && same_owner {
         incoming.observed_at = previous.observed_at;
         incoming.windows = previous.windows.clone();
         incoming.plan = previous.plan.clone();
+        incoming.quota_account_email = previous_owner;
     }
     incoming.raw = truncate(&incoming.raw, MAX_RAW_BYTES);
     incoming.windows.truncate(MAX_WINDOWS);
     *previous = incoming;
 }
 
-fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<AtomicBool>) {
+fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<AtomicBool>, history_path: Option<std::path::PathBuf>) {
     let mut snapshot = UsageSnapshot {
         providers: vec![
             ProviderUsage {
@@ -355,6 +381,9 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
         ],
         ..Default::default()
     };
+    let mut history = UsageHistoryStore::open(history_path);
+    snapshot.account_history = history.accounts.clone();
+    snapshot.history_error = history.error.clone();
     let mut claude = ClaudeTerminal::default();
     let mut due = [Instant::now(); 2];
     let mut pending = None;
@@ -381,6 +410,9 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
             } else {
                 POLL_SECONDS
             };
+            history.observe(&incoming, now());
+            snapshot.account_history = history.accounts.clone();
+            snapshot.history_error = history.error.clone();
             retain_last_success(&mut snapshot.providers[index], incoming);
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
@@ -425,6 +457,7 @@ fn failed(provider: UsageProvider, source: &str, error: impl Into<String>) -> Pr
 struct ClaudeTerminal {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     session: Option<ClaudeSession>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     account_email: Option<String>,
 }
 impl ClaudeTerminal {
@@ -457,7 +490,17 @@ impl ClaudeTerminal {
                     failed(UsageProvider::Claude, SOURCE, error)
                 }
             };
-            usage.account_email = email;
+            let current_email = claude_account_email(stop);
+            if current_email != email {
+                self.session = None;
+                self.account_email = current_email.clone();
+                usage.windows.clear();
+                usage.observed_at = 0;
+                usage.error = Some("Account identity changed or became unavailable during the usage refresh".into());
+            } else if usage.error.is_none() && current_email.is_some() {
+                usage.quota_account_email = current_email.clone();
+            }
+            usage.account_email = current_email;
             usage
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -481,6 +524,7 @@ pub(crate) fn account_email(value: Option<&str>) -> Option<String> {
     (!local.is_empty() && !domain.is_empty() && !domain.contains('@')).then(|| email.to_owned())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn parse_claude_account(raw: &[u8]) -> Option<String> {
     if raw.len() > MAX_RAW_BYTES {
         return None;
@@ -1152,7 +1196,7 @@ mod tests {
                 Some("UTC".into())
             )
         );
-        assert_eq!(utc.reset_brief(), "09-12 UTC");
+        assert_eq!(utc.reset_brief(), "Sep 12");
         let unknown = UsageWindow {
             reset_text: Some("Resets soon".into()),
             ..Default::default()

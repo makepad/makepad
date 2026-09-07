@@ -27,6 +27,7 @@ fn unavailable(error: impl Into<String>, raw: String) -> ProviderUsage {
         windows: Vec::new(),
         plan: None,
         account_email: None,
+        quota_account_email: None,
         raw: bounded(&raw, MAX_RAW),
         error: Some(bounded(&error.into(), 800)),
     }
@@ -74,6 +75,7 @@ pub fn parse_rate_limits(raw: &str, observed_at: u64) -> ProviderUsage {
         windows: Vec::new(),
         plan: None,
         account_email: None,
+        quota_account_email: None,
         raw: bounded(&safe_raw, MAX_RAW),
         error: None,
     };
@@ -203,13 +205,20 @@ pub fn parse_rate_limits(raw: &str, observed_at: u64) -> ProviderUsage {
 /// Keep only the current ChatGPT email. API-key/other account types, missing
 /// identities and protocol failures never fall back to a previously seen user.
 /// The account response itself (including any unknown auth fields) is discarded.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn parse_account_email(raw: &str) -> Option<String> {
-    if raw.len() > MAX_RESPONSE { return None; }
+    if raw.len() > MAX_RESPONSE {
+        return None;
+    }
     let value = parse_depth(raw.as_bytes(), 16).ok()?;
-    if value.get("error").is_some_and(|error| !error.is_null()) { return None; }
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return None;
+    }
     let result = value.get("result").unwrap_or(&value);
     let account = result.get("account")?;
-    if account.get("type").and_then(Value::as_str) != Some("chatgpt") { return None; }
+    if account.get("type").and_then(Value::as_str) != Some("chatgpt") {
+        return None;
+    }
     crate::usage::account_email(account.get("email").and_then(Value::as_str))
 }
 
@@ -239,6 +248,12 @@ pub fn fetch(cancel: &AtomicBool) -> ProviderUsage {
             Ok(result) => {
                 let mut usage = parse_rate_limits(&result.limits, crate::usage::now());
                 usage.account_email = result.account_email;
+                usage.quota_account_email = result.quota_account_email;
+                if result.identity_unstable {
+                    usage.windows.clear();
+                    usage.observed_at = 0;
+                    usage.error = Some("Account identity changed or became unavailable during the usage refresh".into());
+                }
                 usage
             }
             Err(error) => unavailable(error, String::new()),
@@ -271,6 +286,8 @@ mod native {
     pub(super) struct QueryResult {
         pub limits: String,
         pub account_email: Option<String>,
+        pub quota_account_email: Option<String>,
+        pub identity_unstable: bool,
     }
 
     fn nonblocking(fd: i32) -> Result<(), String> {
@@ -461,18 +478,58 @@ mod native {
             return Err("Codex usage initialization returned no result".into());
         }
         send(input, b"{\"method\":\"initialized\",\"params\":{}}\n{\"id\":2,\"method\":\"account/rateLimits/read\"}\n", cancel, deadline)?;
-        let limits = response(&mut output, &mut pending, &mut total, 2, cancel, deadline)?;
+        let mut limits = response(&mut output, &mut pending, &mut total, 2, cancel, deadline)?;
         // Identity is optional and must not turn a successful quota read into
         // a failure on older CLIs, sign-out, malformed output or timeout. Read
         // sequentially so responses cannot be lost by the single-ID reader.
         let account_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
-        let account_email = send(input,
+        let mut account_email = send(
+            input,
             b"{\"id\":3,\"method\":\"account/read\",\"params\":{\"refreshToken\":false}}\n",
-            cancel, account_deadline)
-            .and_then(|_| response(&mut output, &mut pending, &mut total, 3, cancel, account_deadline))
-            .ok()
-            .and_then(|raw| parse_account_email(&raw));
-        Ok(QueryResult { limits, account_email })
+            cancel,
+            account_deadline,
+        )
+        .and_then(|_| {
+            response(
+                &mut output,
+                &mut pending,
+                &mut total,
+                3,
+                cancel,
+                account_deadline,
+            )
+        })
+        .ok()
+        .and_then(|raw| parse_account_email(&raw));
+        let mut quota_account_email = None;
+        let mut identity_unstable = false;
+        if let Some(before) = account_email.clone() {
+            // A second quota read is bracketed by identity observations in
+            // this same private app-server. IDs can be reused after the prior
+            // request completed; there is only one in-flight request.
+            let verified = (|| {
+                send(input, b"{\"id\":2,\"method\":\"account/rateLimits/read\"}\n", cancel, deadline)?;
+                let fresh = response(&mut output, &mut pending, &mut total, 2, cancel, deadline)?;
+                send(input, b"{\"id\":3,\"method\":\"account/read\",\"params\":{\"refreshToken\":false}}\n", cancel, deadline)?;
+                let after = response(&mut output, &mut pending, &mut total, 3, cancel, deadline)?;
+                Ok::<_, String>((fresh, parse_account_email(&after)))
+            })();
+            match verified {
+                Ok((fresh, after)) => {
+                    limits = fresh;
+                    quota_account_email = after.as_ref().filter(|email| *email == &before).cloned();
+                    identity_unstable = quota_account_email.is_none();
+                    account_email = after;
+                }
+                Err(_) => { account_email = None; identity_unstable = true; }
+            }
+        }
+        Ok(QueryResult {
+            limits,
+            account_email,
+            quota_account_email,
+            identity_unstable,
+        })
     }
 
     #[cfg(test)]
@@ -525,11 +582,16 @@ printf '%s' 'graceful EOF' > "$0.closed"
         #[test]
         fn identity_errors_eof_and_timeout_preserve_successful_quotas() {
             let dir = std::env::temp_dir().join(format!(
-                "studio-usage-identity-failure-{}-{}", std::process::id(), crate::usage::now()
+                "studio-usage-identity-failure-{}-{}",
+                std::process::id(),
+                crate::usage::now()
             ));
             fs::create_dir(&dir).unwrap();
             for (name, reply) in [
-                ("unsupported", "printf '%s\\n' '{\"id\":3,\"error\":{\"message\":\"unsupported method\"}}'"),
+                (
+                    "unsupported",
+                    "printf '%s\\n' '{\"id\":3,\"error\":{\"message\":\"unsupported method\"}}'",
+                ),
                 ("malformed", "printf '%s\\n' 'invalid JSON'"),
                 ("eof", "exit 0"),
                 ("silent", ":"),
@@ -553,7 +615,12 @@ done
                 // under parallel test load a 400ms deadline could expire before
                 // account/read was reached. The silent identity case still
                 // exercises its separate, bounded two-second timeout.
-                let result = query_program(script.as_os_str(), &AtomicBool::new(false), Duration::from_secs(15)).unwrap();
+                let result = query_program(
+                    script.as_os_str(),
+                    &AtomicBool::new(false),
+                    Duration::from_secs(15),
+                )
+                .unwrap();
                 let usage = parse_rate_limits(&result.limits, 1);
                 assert!(usage.error.is_none(), "{name}");
                 assert_eq!(usage.windows[0].used_percent, Some(27.0), "{name}");
@@ -571,7 +638,11 @@ mod tests {
     #[test]
     fn account_identity_keeps_only_valid_current_chatgpt_email() {
         assert_eq!(parse_account_email(r#"{"id":3,"result":{"account":{"type":"chatgpt","email":" user@example.com ","accessToken":"do-not-retain","planType":"pro"}}}"#).as_deref(), Some("user@example.com"));
-        assert_eq!(parse_account_email(r#"{"account":{"type":"chatgpt","email":"another@example.com"}}"#).as_deref(), Some("another@example.com"));
+        assert_eq!(
+            parse_account_email(r#"{"account":{"type":"chatgpt","email":"another@example.com"}}"#)
+                .as_deref(),
+            Some("another@example.com")
+        );
         for raw in [
             r#"{"result":{"account":null}}"#,
             r#"{"result":{"account":{"type":"apiKey","email":"user@example.com"}}}"#,
@@ -583,7 +654,9 @@ mod tests {
             r#"{"result":{"account":{"type":"chatgpt","email":"a\nb@example.com"}}}"#,
             r#"{"error":{"message":"signed out"},"result":{"account":{"type":"chatgpt","email":"old@example.com"}}}"#,
             "invalid JSON",
-        ] { assert!(parse_account_email(raw).is_none(), "{raw}"); }
+        ] {
+            assert!(parse_account_email(raw).is_none(), "{raw}");
+        }
         assert!(parse_account_email(&" ".repeat(MAX_RESPONSE + 1)).is_none());
     }
 
