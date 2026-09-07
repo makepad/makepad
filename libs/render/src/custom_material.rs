@@ -113,7 +113,8 @@ script_mod! {
             // a pool additionally fills that shadow back in, so a lamp drowns
             // out the streak its own pole throws across its own pool:
             // lightmap::lamp_shadow_fill.
-            let local = lamps + self.v_dl
+            var local = lamps + self.v_dl
+            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
             let sun_lit = self.sun_filled(sun_all, local)
             let analytic = self.v_ambient * (ao * sao)
                 + self.v_direct * (ao_direct * sun_lit)
@@ -168,7 +169,10 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
         return NIL;
     }
     if vm.bx.heap.type_default_for_id(DrawSceneSkinned::script_type_id_static()).is_none() {
+        crate::local_shadows::sampling::script_mod(vm);
+        crate::clustered::script_mod(vm);
         crate::shaders::script_mod(vm);
+        crate::local_shadows::script_mod(vm);
     }
     script_mod(vm)
 }

@@ -27,7 +27,7 @@ script_mod! {
     }
 
     mod.draw.DrawSceneTexture = mod.std.set_type_default() do #(DrawSceneTexture::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
         scene_texture: texture_2d(float)
 
         pixel: fn() {
@@ -45,7 +45,7 @@ script_mod! {
     // per-instance because shadows switch it off individually.
     mod.draw.DrawSceneCube = mod.std.set_type_default() do #(DrawSceneCube::script_shader(vm)){
         ..mod.draw.DrawCube,
-        ..ColorAdjust
+        ..ColorAdjust,
         // The platform default is OFF (draw_shader.rs:41) and DrawCube does not
         // override it, so every slab, crate, ground plane and rigid body was
         // rasterising its BACK faces too — invisible, and double the fill. A
@@ -258,7 +258,7 @@ script_mod! {
         dl_pos7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_col7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         v_dl_pos: varying(vec3f)
-        v_dl_nrm: varying(vec3f)
+        v_dl_nrm: varying(vec3f),
 
         // One dynamic light's contribution at world point `wp` with world
         // normal `n`. Attenuation (1 - d/r)^2; the spot factor mirrors
@@ -267,6 +267,9 @@ script_mod! {
         // harvested street lamps' convention. Empty slots (radius 0) and
         // out-of-radius fragments return early, so the common case of zero
         // active transients costs 8 uniform reads and 8 branches.
+        ..mod.draw.ClusteredLighting,
+        ..mod.draw.FastGiSampling,
+
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
                 return vec3(0.0, 0.0, 0.0)
@@ -284,6 +287,7 @@ script_mod! {
         }
 
         dl_sum: fn(wp: vec3, n: vec3) -> vec3 {
+            if self.cluster_on > 0.5 { return vec3(0.0, 0.0, 0.0) }
             var dl = vec3(0.0, 0.0, 0.0)
             dl = dl + self.dl_term(wp, n, self.dl_pos0, self.dl_col0)
             dl = dl + self.dl_term(wp, n, self.dl_pos1, self.dl_col1)
@@ -301,6 +305,7 @@ script_mod! {
         // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            if self.cluster_on > 0.5 { return sun_vis }
             let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
@@ -391,23 +396,25 @@ script_mod! {
                 self.csm_p.x
             )
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm)
+            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
             // The lamps light this fragment WITHOUT the sun's shadow (a shadow
             // is the absence of sun, not of light), and a strong enough pool
             // fills that shadow back in — lightmap::lamp_shadow_fill.
-            let local = lamps + dl
-            let c = self.lit_color.xyz + self.v_direct * self.sun_filled(sun_vis, local)
+            let local = lamps + dl + self.cluster_sum(self.v_dl_pos, self.v_dl_nrm)
+            let ambient=mix(self.sun_ground,self.sun_sky,clamp(self.v_dl_nrm.y*0.5+0.5,0.0,1.0))
+            let gi=self.gi_ambient(self.v_dl_pos,self.v_dl_nrm,ambient)-ambient
+            let c = self.lit_color.xyz + self.v_albedo*gi + self.v_direct * self.sun_filled(sun_vis, local)
                 + self.v_albedo * local
             let fogged = mix(c, self.fog_color, self.v_fog)
-            return vec4(fogged, self.lit_color.w)
+            return self.gi_display(vec4(fogged, self.lit_color.w),self.v_dl_pos,self.v_dl_nrm)
         }
     }
 
     // Same shading, alpha-blended: water, sensor ghosts, blob shadows, and the
     // particle batch.
     mod.draw.DrawSceneAlpha = mod.std.set_type_default() do #(DrawSceneAlpha::script_shader(vm)){
-        ..mod.draw.DrawSceneCube
+        ..mod.draw.DrawSceneCube,
         alpha_blend: true
         // DELIBERATE, do not "fix": this batch carries flat single-sided
         // geometry — blob shadows and water surfaces — whose winding is not
@@ -800,7 +807,7 @@ script_mod! {
     // flare quad geometry (geom_pos.xy = corner in -0.5..0.5, geom_uv 0..1).
     // Opaque and depth-written, so the world occludes it like any solid.
     mod.draw.DrawSceneScreen = mod.std.set_type_default() do #(DrawSceneScreen::script_shader(vm)){
-        ..ColorAdjust
+        ..ColorAdjust,
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -919,7 +926,7 @@ script_mod! {
     // Sky dome: a big cube around the camera, gradient by view direction
     // (the Godot ProceduralSkyMaterial look).
     mod.draw.DrawSceneSky = mod.std.set_type_default() do #(DrawSceneSky::script_shader(vm)){
-        ..mod.draw.DrawCube
+        ..mod.draw.DrawCube,
         // DELIBERATE: the sky is a cube the camera sits INSIDE, so every
         // visible face is a back face. Culling erases the sky completely.
         backface_culling: false
@@ -963,7 +970,7 @@ script_mod! {
     // anyway. DrawSceneSky keeps the authored-gradient path; this one
     // carries Preetham + the setting sun disc + the night star dome.
     mod.draw.DrawSceneSkyAnalytic = mod.std.set_type_default() do #(DrawSceneSkyAnalytic::script_shader(vm)){
-        ..mod.draw.DrawCube
+        ..mod.draw.DrawCube,
         // Same deliberate choice as DrawSceneSky: the camera sits INSIDE
         // the dome, every visible face is a back face.
         backface_culling: false
@@ -1181,7 +1188,7 @@ script_mod! {
     // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
-        ..ColorAdjust
+        ..ColorAdjust,
         alpha_blend: false
         // Imported model layers may be deliberate sheets (roof soffits,
         // glazing, CAD faces). The shadow depth path is already two-sided;
@@ -1447,6 +1454,9 @@ script_mod! {
         // Attenuation (1 - d/r)^2; the spot factor mirrors lightmap.rs's
         // lamp pass (SPILL = 0.35, squared, mixed by lc.w) with the
         // emission axis fixed straight DOWN — the street-lamp convention.
+        ..mod.draw.ClusteredLighting,
+        ..mod.draw.FastGiSampling,
+
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
                 return vec3(0.0, 0.0, 0.0)
@@ -1466,6 +1476,7 @@ script_mod! {
         // The 8-slot sum with the per-instance static gate: slot i counts
         // when the instance is dynamic (dl_apply = 1) OR i < dl_split.
         dl_sum_gated: fn(wp: vec3, n: vec3) -> vec3 {
+            if self.cluster_on > 0.5 { return vec3(0.0, 0.0, 0.0) }
             var dl = vec3(0.0, 0.0, 0.0)
             let g = self.dl_apply
             dl = dl + self.dl_term(wp, n, self.dl_pos0, self.dl_col0)
@@ -1492,6 +1503,7 @@ script_mod! {
         // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete. Inherited by DrawScenePbr.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            if self.cluster_on > 0.5 { return sun_vis }
             let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
@@ -1548,6 +1560,7 @@ script_mod! {
 
         vertex: fn() {
             var pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            if self.morph_ctl.w>0.5{pos=pos+self.morph_delta(self.geom.ao_uv,0.0)}
             // ao_uv is unorm16x2 (model.rs pack_ao_uv), NOT an f16 pair — f16
             // spacing near 1.0 is a full texel of a 1024 atlas. Each axis is
             // (lo + 256*hi)/257 of the two unpacked bytes: 255*257 = 65535.
@@ -1574,11 +1587,13 @@ script_mod! {
                 }
                 chart_uv = vec2(0.0, 0.0)
             }
+            if self.morph_ctl.w>0.5{chart_uv=vec2(0.0,0.0)}
             self.v_ao_uv = chart_uv
             // The lightmap REUSES the chart parameterisation: this instance's
             // atlas window is one offset/scale over the same uv.
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
-            let normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
+            var normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
+            if self.morph_ctl.w>0.5{normal_in=normalize(normal_in+self.morph_delta(self.geom.ao_uv,1.0))}
             let model_view = self.draw_list.view_transform * self.transform
             let raw_world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
@@ -1730,16 +1745,17 @@ script_mod! {
                 self.csm_p.x
             )
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm)
+            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
             // Local light — baked pools plus the per-frame slots — reaches
             // this fragment WITHOUT the sun's shadow term, because a shadow
             // is the absence of SUN and of nothing else. Over its bright core
             // a pool additionally fills that shadow back in, so a lamp drowns
             // out the streak its own pole throws across its own pool:
             // lightmap::lamp_shadow_fill.
-            let local = lamps + self.v_dl
+            var local = lamps + self.v_dl
+            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
             let sun_lit = self.sun_filled(sun_all, local)
-            let analytic = self.v_ambient * (ao * sao)
+            let analytic = self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * (ao * sao)
                 + self.v_direct * (ao_direct * sun_lit)
                 + local * ao_direct
             // prelit: albedo already carries COLOR_0 = LM×4. Multiplying
@@ -1776,12 +1792,178 @@ script_mod! {
                     1.0
                 )
             }
-            return vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0)
+            return self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0),self.v_csm.xyz,self.v_csm_n)
         }
 
         fragment: fn() {
             self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
+        morph_map: texture_2d(float)
+        morph_delta: fn(vertex:float,lane:float)->vec3f {
+            var delta=vec3(0.0,0.0,0.0)
+            if self.morph_ctl.w > 0.5 {
+                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.x
+            }
+            if self.morph_ctl.w > 1.5 {
+                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.y
+            }
+            if self.morph_ctl.w > 2.5 {
+                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.z
+            }
+            if self.morph_ctl.w > 3.5 {
+                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.w
+            }
+            if self.morph_ctl.w > 4.5 {
+                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.x
+            }
+            if self.morph_ctl.w > 5.5 {
+                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.y
+            }
+            if self.morph_ctl.w > 6.5 {
+                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.z
+            }
+            if self.morph_ctl.w > 7.5 {
+                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.w
+            }
+            if self.morph_ctl.w > 8.5 {
+                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.x
+            }
+            if self.morph_ctl.w > 9.5 {
+                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.y
+            }
+            if self.morph_ctl.w > 10.5 {
+                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.z
+            }
+            if self.morph_ctl.w > 11.5 {
+                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.w
+            }
+            if self.morph_ctl.w > 12.5 {
+                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.x
+            }
+            if self.morph_ctl.w > 13.5 {
+                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.y
+            }
+            if self.morph_ctl.w > 14.5 {
+                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.z
+            }
+            if self.morph_ctl.w > 15.5 {
+                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.w
+            }
+            if self.morph_ctl.w > 16.5 {
+                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.x
+            }
+            if self.morph_ctl.w > 17.5 {
+                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.y
+            }
+            if self.morph_ctl.w > 18.5 {
+                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.z
+            }
+            if self.morph_ctl.w > 19.5 {
+                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.w
+            }
+            if self.morph_ctl.w > 20.5 {
+                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.x
+            }
+            if self.morph_ctl.w > 21.5 {
+                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.y
+            }
+            if self.morph_ctl.w > 22.5 {
+                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.z
+            }
+            if self.morph_ctl.w > 23.5 {
+                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.w
+            }
+            if self.morph_ctl.w > 24.5 {
+                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.x
+            }
+            if self.morph_ctl.w > 25.5 {
+                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.y
+            }
+            if self.morph_ctl.w > 26.5 {
+                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.z
+            }
+            if self.morph_ctl.w > 27.5 {
+                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.w
+            }
+            if self.morph_ctl.w > 28.5 {
+                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.x
+            }
+            if self.morph_ctl.w > 29.5 {
+                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.y
+            }
+            if self.morph_ctl.w > 30.5 {
+                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.z
+            }
+            if self.morph_ctl.w > 31.5 {
+                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.w
+            }
+            return delta
+        }
+
     }
 
     // Static props whose glTF material actually carries SHININESS: a
@@ -1810,11 +1992,14 @@ script_mod! {
     //     still work on every OTHER prop in the scene; a shiny generated mesh
     //     simply keeps its lit look while they are on).
     mod.draw.DrawScenePbr = mod.std.set_type_default() do #(DrawScenePbr::script_shader(vm)){
-        ..mod.draw.DrawSceneSkinned
+        ..mod.draw.DrawSceneSkinned,
         // The glTF metallicRoughnessTexture: G = roughness, B = metallic,
         // and the factors multiply what it says. Declared AFTER the whole
         // inherited set, so it takes the slot past ssao_map (slot 8).
         orm_map: texture_2d(float)
+        normal_map: texture_2d(float)
+        occlusion_map: texture_2d(float)
+        emissive_map: texture_2d(float)
         // TRUE world camera position (w unused). A specular lobe is the one
         // term in this file that needs the eye: everything else here is
         // view-independent. TRUE world, not stage world, so it matches
@@ -1831,9 +2016,9 @@ script_mod! {
 
         pixel: fn() {
             let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
-            if tex.w < 0.5 {
-                discard()
-            }
+            let alpha=tex.w*self.material_alpha*mix(1.0,self.v_tint.w,self.surface_on)
+            if self.surface_on<0.5 && tex.w<0.5 {discard()}
+            if self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff {discard()}
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
             let albedo = self.color_adjust(
                 vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z),
@@ -1848,7 +2033,7 @@ script_mod! {
                 sin(dot(self.world.xy + self.world.zz, vec2(12.9898, 78.233))) * 43758.5453
             )
             let ao = clamp(
-                mix(self.v_tint.w, baked, self.ao_enabled) + (hash - 0.5) * 0.03,
+                mix(mix(self.v_tint.w,1.0,self.surface_on), baked, self.ao_enabled) + (hash - 0.5) * 0.03,
                 0.0, 1.0
             )
             let ao_direct = mix(1.0, ao, 0.75)
@@ -1875,10 +2060,11 @@ script_mod! {
                 self.csm_p.x
             )
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm)
-            // Unshadowed local light, and the sun gate a strong pool fills
-            // back in — lightmap::lamp_shadow_fill, exactly as DrawSceneSkinned.
-            let local = lamps + self.v_dl
+            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
+            // Legacy local diffuse; clustered PBR evaluates the same light
+            // list once below, including each lamp's GGX specular response.
+            var local = lamps + self.v_dl
+            if self.cluster_on > 0.5 { local = vec3(0.0,0.0,0.0) }
             let sun_lit = self.sun_filled(sun_all, local)
 
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
@@ -1891,7 +2077,22 @@ script_mod! {
             let metal = clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0)
 
             // TRUE world space for all three vectors.
-            let n = normalize(self.v_csm_n)
+            var n=normalize(self.v_csm_n)
+            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
+            if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
+                let dp1=dFdx(self.v_csm.xyz)
+                let dp2=dFdy(self.v_csm.xyz)
+                let du1=dFdx(self.v_uv)
+                let du2=dFdy(self.v_uv)
+                let determinant=du1.x*du2.y-du1.y*du2.x
+                if abs(determinant)>0.00000001 {
+                    let orientation=sign(determinant)
+                    let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
+                    let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
+                    let mapped=self.normal_map.sample_as_bgra_repeat(self.v_uv).xyz*2.0-vec3(1.0,1.0,1.0)
+                    n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
+                }
+            }
             let l = normalize(self.light_dir)
             let v = normalize(self.eye.xyz - self.v_csm.xyz)
             let h = normalize(l + v)
@@ -1915,7 +2116,9 @@ script_mod! {
             // no cosine of its own — the two compose to the standard
             // radiance * BRDF * N.L. Shadowed exactly like the diffuse sun:
             // a highlight surviving inside a shadow is the classic tell.
-            let sun_spec = self.v_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001))
+            let surface_direct=mix(self.v_direct,self.sun_color*ndl,self.surface_on)
+            let surface_ambient=self.gi_ambient(self.v_csm.xyz,n,mix(self.v_ambient,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)),self.surface_on))
+            let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001))
                 * (sun_lit * ao_direct)
 
             // Ambient specular WITHOUT an environment map: the hemisphere
@@ -1936,11 +2139,15 @@ script_mod! {
             // it. (The (1 - F) half of the split is deliberately dropped:
             // at grazing angles it only ever darkens, and without an
             // environment probe there is nothing to hand the energy to.)
-            let analytic = self.v_ambient * (ao * sao)
-                + self.v_direct * (ao_direct * sun_lit)
+            let analytic = surface_ambient * (ao * sao)
+                + surface_direct * (ao_direct * sun_lit)
                 + local * ao_direct
-            let lit = albedo * ((1.0 - metal) * analytic) + sun_spec * f + amb_spec
-            return vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0)
+            let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.eye.xyz, albedo, rough, metal)
+            let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)
+            let emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
+            let lit = albedo * ((1.0 - metal) * (surface_ambient*(ao*sao*occlusion)+surface_direct*(ao_direct*sun_lit)+local*ao_direct)) + sun_spec*f + amb_spec*occlusion + local_pbr*ao_direct + emission
+            let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
+            return self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.v_fog)*coverage,coverage),self.v_csm.xyz,n)
         }
 
         // Re-declared rather than inherited so the depth-clip wrapper is
@@ -2026,7 +2233,7 @@ script_mod! {
     // static world must never pay. Lighting/fog match DrawSceneSkinned minus
     // the AO path — a deforming mesh cannot carry a baked occlusion atlas.
     mod.draw.DrawSceneSkinnedGpu = mod.std.set_type_default() do #(DrawSceneSkinnedGpu::script_shader(vm)){
-        ..ColorAdjust
+        ..ColorAdjust,
         alpha_blend: false
         backface_culling: true
         vertex_pos: vertex_position(vec4f)
@@ -2036,6 +2243,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.GameMeshVertexSkin, geom.GameMeshSkinGeom)
         tex: texture_2d(float)
+        v_color: varying(vec4f)
         joint_tex: texture_2d(float)
         // Rest-pose AO chart atlas, one per rig, sampled per FRAGMENT: the
         // per-vertex bake it replaced interpolated an ear's darkness across
@@ -2242,6 +2450,9 @@ script_mod! {
         // Same term as DrawSceneSkinned: (1 - d/r)^2 falloff, spot factor
         // mirroring lightmap.rs's lamp pass (SPILL = 0.35, emission axis
         // straight down), empty slots rejected on radius.
+        ..mod.draw.ClusteredLighting,
+        ..mod.draw.FastGiSampling,
+
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
                 return vec3(0.0, 0.0, 0.0)
@@ -2259,6 +2470,7 @@ script_mod! {
         }
 
         dl_sum: fn(wp: vec3, n: vec3) -> vec3 {
+            if self.cluster_on > 0.5 { return vec3(0.0, 0.0, 0.0) }
             var dl = vec3(0.0, 0.0, 0.0)
             dl = dl + self.dl_term(wp, n, self.dl_pos0, self.dl_col0)
             dl = dl + self.dl_term(wp, n, self.dl_pos1, self.dl_col1)
@@ -2276,6 +2488,7 @@ script_mod! {
         // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            if self.cluster_on > 0.5 { return sun_vis }
             let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
@@ -2294,9 +2507,17 @@ script_mod! {
             )
         }
 
+        affine_normal: fn(r0: vec3, r1: vec3, r2: vec3, n: vec3) -> vec3 {
+            let co0 = cross(r1, r2)
+            let det = dot(r0, co0)
+            if abs(det) < 0.00000001 { return vec3(dot(r0,n),dot(r1,n),dot(r2,n)) }
+            return vec3(dot(co0,n),dot(cross(r2,r0),n),dot(cross(r0,r1),n)) / det
+        }
+
         vertex: fn() {
-            let rest = vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
-            let rn = self.oct_decode(unpack2f16(self.geom.nrm))
+            var rest = vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
+            var rn = self.oct_decode(unpack2f16(self.geom.nrm))
+            if self.morph_ctl.w>0.5{rest=vec4(rest.xyz+self.morph_delta(self.geom.source_vertex,0.0),1.0);rn=normalize(rn+self.morph_delta(self.geom.source_vertex,1.0))}
             let jj = unpack4u8(self.geom.joints)
             let jw = unpack4u8(self.geom.weights)
             var pos = vec3(0.0, 0.0, 0.0)
@@ -2309,7 +2530,7 @@ script_mod! {
                 let r1 = self.jrow(b + 1.0)
                 let r2 = self.jrow(b + 2.0)
                 pos = pos + vec3(dot(r0, rest), dot(r1, rest), dot(r2, rest)) * jw.x
-                nrm = nrm + vec3(dot(r0.xyz, rn), dot(r1.xyz, rn), dot(r2.xyz, rn)) * jw.x
+                nrm = nrm + self.affine_normal(r0.xyz, r1.xyz, r2.xyz, rn) * jw.x
             }
             if jw.y > 0.0 {
                 let b = self.joint_base + floor(jj.y * 255.0 + 0.5) * 3.0
@@ -2317,7 +2538,7 @@ script_mod! {
                 let r1 = self.jrow(b + 1.0)
                 let r2 = self.jrow(b + 2.0)
                 pos = pos + vec3(dot(r0, rest), dot(r1, rest), dot(r2, rest)) * jw.y
-                nrm = nrm + vec3(dot(r0.xyz, rn), dot(r1.xyz, rn), dot(r2.xyz, rn)) * jw.y
+                nrm = nrm + self.affine_normal(r0.xyz, r1.xyz, r2.xyz, rn) * jw.y
             }
             if jw.z > 0.0 {
                 let b = self.joint_base + floor(jj.z * 255.0 + 0.5) * 3.0
@@ -2325,7 +2546,7 @@ script_mod! {
                 let r1 = self.jrow(b + 1.0)
                 let r2 = self.jrow(b + 2.0)
                 pos = pos + vec3(dot(r0, rest), dot(r1, rest), dot(r2, rest)) * jw.z
-                nrm = nrm + vec3(dot(r0.xyz, rn), dot(r1.xyz, rn), dot(r2.xyz, rn)) * jw.z
+                nrm = nrm + self.affine_normal(r0.xyz, r1.xyz, r2.xyz, rn) * jw.z
             }
             if jw.w > 0.0 {
                 let b = self.joint_base + floor(jj.w * 255.0 + 0.5) * 3.0
@@ -2333,7 +2554,7 @@ script_mod! {
                 let r1 = self.jrow(b + 1.0)
                 let r2 = self.jrow(b + 2.0)
                 pos = pos + vec3(dot(r0, rest), dot(r1, rest), dot(r2, rest)) * jw.w
-                nrm = nrm + vec3(dot(r0.xyz, rn), dot(r1.xyz, rn), dot(r2.xyz, rn)) * jw.w
+                nrm = nrm + self.affine_normal(r0.xyz, r1.xyz, r2.xyz, rn) * jw.w
             }
             let model_view = self.draw_list.view_transform * self.transform
             let world_normal = normalize((model_view * vec4(nrm.x, nrm.y, nrm.z, 0.0)).xyz)
@@ -2368,6 +2589,7 @@ script_mod! {
             self.v_lmg = vec4(lg_uv.x, lg_uv.y, lg_in, dl_wp.y)
             self.v_csm = vec4(dl_wp.x, dl_wp.y, dl_wp.z, dp)
             self.v_csm_n = dl_n
+            self.v_color=unpack4u8(self.geom.color)
             self.v_uv = unpack2f16(self.geom.uv)
             // ao_uv is unorm16x2 (model.rs pack_ao_uv), NOT an f16 pair — f16
             // spacing near 1.0 is a full texel of the atlas. Each axis is
@@ -2383,9 +2605,18 @@ script_mod! {
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
 
+        orm_map: texture_2d(float)
+        normal_map: texture_2d(float)
+        occlusion_map: texture_2d(float)
+        emissive_map: texture_2d(float)
+
+        surface_linear: fn(v:vec3)->vec3 {return mix(v/12.92,pow((v+vec3(0.055,0.055,0.055))/1.055,vec3(2.4,2.4,2.4)),step(vec3(0.04045,0.04045,0.04045),v))}
+        surface_display: fn(v:vec3)->vec3 {return mix(v*12.92,1.055*pow(max(v,vec3(0.0,0.0,0.0)),vec3(0.4166667,0.4166667,0.4166667))-vec3(0.055,0.055,0.055),step(vec3(0.0031308,0.0031308,0.0031308),v))}
         pixel: fn() {
-            let tex = self.tex.sample_as_bgra(self.v_uv)
-            let albedo = self.color_adjust(tex.xyz, self.tint, self.color_adjust_ctl)
+            let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
+            let alpha=tex.w*self.v_color.w*self.material_alpha
+            if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{discard()}
+            let albedo = self.color_adjust(tex.xyz*self.v_color.xyz, self.tint, self.color_adjust_ctl)
             // Same occlusion idiom as DrawSceneSkinned: per-fragment atlas
             // sample, world-anchored hash dither against 8-bit banding,
             // ambient scaled fully and direct partially — a crease should
@@ -2419,17 +2650,232 @@ script_mod! {
             // gets the same fill the ground under its feet does, or it would
             // read as the one thing in the pool the lamp failed to light —
             // lightmap::lamp_shadow_fill.
+            var local = self.v_dl
+            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
             let lit = albedo * (
-                self.v_ambient * ao
-                    + (self.v_direct * self.sun_filled(sun_vis, self.v_dl) + self.v_dl)
+                self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * ao
+                    + (self.v_direct * self.sun_filled(sun_vis, local) + local)
                         * ao_direct
             )
-            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+            if self.surface_on>0.5 {
+                let base=self.color_adjust(self.surface_linear(tex.xyz)*self.v_color.xyz,self.tint,self.color_adjust_ctl)
+                var n=normalize(self.v_csm_n)
+                let view=normalize(self.eye-self.v_csm.xyz)
+                if self.double_sided>0.5 && dot(n,view)<0.0{n=n*(-1.0)}
+                let dp1=dFdx(self.v_csm.xyz)
+                let dp2=dFdy(self.v_csm.xyz)
+                let du1=dFdx(self.v_uv)
+                let du2=dFdy(self.v_uv)
+                let determinant=du1.x*du2.y-du1.y*du2.x
+                if abs(determinant)>0.00000001 && abs(self.normal_scale)>0.00001 {
+                    let orientation=sign(determinant)
+                    let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
+                    let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
+                    let mapped=self.normal_map.sample_as_bgra_repeat(self.v_uv).xyz*2.0-vec3(1.0,1.0,1.0)
+                    n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
+                }
+                let orm=self.orm_map.sample_as_bgra_repeat(self.v_uv)
+                let rough=clamp(self.roughness*orm.y,0.045,1.0)
+                let metal=clamp(self.metallic*orm.z,0.0,1.0)
+                let light=normalize(self.light_dir)
+                let halfdir=normalize(light+view)
+                let ndv=max(dot(n,view),0.0001)
+                let ndl=max(dot(n,light),0.0)
+                let ndh=max(dot(n,halfdir),0.0)
+                let vdh=max(dot(view,halfdir),0.0)
+                let f0=mix(vec3(0.04,0.04,0.04),base,metal)
+                let f=f0+(vec3(1.0,1.0,1.0)-f0)*pow(1.0-vdh,5.0)
+                let a2=rough*rough*rough*rough
+                let denominator=ndh*ndh*(a2-1.0)+1.0
+                let distribution=a2/max(3.14159265*denominator*denominator,0.000001)
+                let k=(rough+1.0)*(rough+1.0)*0.125
+                let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
+                let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
+                let diffuse=(vec3(1.0,1.0,1.0)-f)*base*((1.0-metal)/3.14159265)
+                let direct=(diffuse+spec)*self.sun_color*(ndl*sun_vis*ao_direct)
+                let reflection=n*(2.0*ndv)-view
+                let environment=mix(self.sun_ground,self.sun_sky,clamp(reflection.y*0.5+0.5,0.0,1.0))
+                let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
+                let ambient=(base*(1.0-metal)*self.gi_ambient(self.v_csm.xyz,n,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)))+environment*fresnel)*ao
+                let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength)
+                let emission=self.surface_linear(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
+                let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
+                let result=direct+ambient*occlusion+punctual*ao_direct+emission
+                let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
+                return self.gi_display(vec4(mix(self.surface_display(result),self.fog_color,self.v_fog)*coverage,coverage),self.v_csm.xyz,n)
+            }
+            return self.gi_display(vec4(mix(lit, self.fog_color, self.v_fog), 1.0),self.v_csm.xyz,self.v_csm_n)
         }
 
         fragment: fn() {
             self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
+        morph_map: texture_2d(float)
+        morph_delta: fn(vertex:float,lane:float)->vec3f {
+            var delta=vec3(0.0,0.0,0.0)
+            if self.morph_ctl.w > 0.5 {
+                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.x
+            }
+            if self.morph_ctl.w > 1.5 {
+                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.y
+            }
+            if self.morph_ctl.w > 2.5 {
+                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.z
+            }
+            if self.morph_ctl.w > 3.5 {
+                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.w
+            }
+            if self.morph_ctl.w > 4.5 {
+                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.x
+            }
+            if self.morph_ctl.w > 5.5 {
+                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.y
+            }
+            if self.morph_ctl.w > 6.5 {
+                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.z
+            }
+            if self.morph_ctl.w > 7.5 {
+                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.w
+            }
+            if self.morph_ctl.w > 8.5 {
+                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.x
+            }
+            if self.morph_ctl.w > 9.5 {
+                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.y
+            }
+            if self.morph_ctl.w > 10.5 {
+                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.z
+            }
+            if self.morph_ctl.w > 11.5 {
+                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.w
+            }
+            if self.morph_ctl.w > 12.5 {
+                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.x
+            }
+            if self.morph_ctl.w > 13.5 {
+                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.y
+            }
+            if self.morph_ctl.w > 14.5 {
+                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.z
+            }
+            if self.morph_ctl.w > 15.5 {
+                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.w
+            }
+            if self.morph_ctl.w > 16.5 {
+                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.x
+            }
+            if self.morph_ctl.w > 17.5 {
+                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.y
+            }
+            if self.morph_ctl.w > 18.5 {
+                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.z
+            }
+            if self.morph_ctl.w > 19.5 {
+                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.w
+            }
+            if self.morph_ctl.w > 20.5 {
+                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.x
+            }
+            if self.morph_ctl.w > 21.5 {
+                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.y
+            }
+            if self.morph_ctl.w > 22.5 {
+                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.z
+            }
+            if self.morph_ctl.w > 23.5 {
+                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.w
+            }
+            if self.morph_ctl.w > 24.5 {
+                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.x
+            }
+            if self.morph_ctl.w > 25.5 {
+                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.y
+            }
+            if self.morph_ctl.w > 26.5 {
+                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.z
+            }
+            if self.morph_ctl.w > 27.5 {
+                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.w
+            }
+            if self.morph_ctl.w > 28.5 {
+                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.x
+            }
+            if self.morph_ctl.w > 29.5 {
+                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.y
+            }
+            if self.morph_ctl.w > 30.5 {
+                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.z
+            }
+            if self.morph_ctl.w > 31.5 {
+                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.w
+            }
+            return delta
+        }
+
     }
 
     // Generated foliage: the OPT-IN variant that adds growth and wind.
@@ -2749,7 +3195,10 @@ script_mod! {
         dl_pos7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_col7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         v_dl_pos: varying(vec3f)
-        v_dl_nrm: varying(vec3f)
+        v_dl_nrm: varying(vec3f),
+
+        ..mod.draw.ClusteredLighting,
+        ..mod.draw.FastGiSampling,
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
@@ -2768,6 +3217,7 @@ script_mod! {
         }
 
         dl_sum: fn(wp: vec3, n: vec3) -> vec3 {
+            if self.cluster_on > 0.5 { return vec3(0.0, 0.0, 0.0) }
             var dl = vec3(0.0, 0.0, 0.0)
             dl = dl + self.dl_term(wp, n, self.dl_pos0, self.dl_col0)
             dl = dl + self.dl_term(wp, n, self.dl_pos1, self.dl_col1)
@@ -2785,6 +3235,7 @@ script_mod! {
         // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            if self.cluster_on > 0.5 { return sun_vis }
             let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
@@ -2961,13 +3412,13 @@ script_mod! {
                 self.csm_p.x
             )
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm)
+            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
             // Local light reaches the ground WITHOUT the sun's shadow term,
             // and over its bright core a pool fills that shadow back in —
             // this is the surface a street lamp's own pole shadow lands on,
             // so it is where the fill has to read: lightmap::lamp_shadow_fill.
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
-            let local = lamps + dl
+            let local = lamps + dl + self.cluster_sum(self.v_dl_pos, self.v_dl_nrm)
             let sun_lit = self.sun_filled(sun_vis, local)
             if self.lm_debug > 0.5 {
                 return vec4(
@@ -2975,9 +3426,10 @@ script_mod! {
                     1.0
                 )
             }
-            let c = self.lit_color.xyz + self.v_direct_col * sun_lit
+            let ambient=mix(self.sun_ground,self.sun_sky,clamp(self.v_dl_nrm.y*0.5+0.5,0.0,1.0))
+            let c = self.lit_color.xyz + self.v_albedo*(self.gi_ambient(self.v_dl_pos,self.v_dl_nrm,ambient)-ambient) + self.v_direct_col * sun_lit
                 + self.v_albedo * local
-            return vec4(mix(c, self.fog_color, self.v_fog), self.lit_color.w)
+            return self.gi_display(vec4(mix(c, self.fog_color, self.v_fog), self.lit_color.w),self.v_dl_pos,self.v_dl_nrm)
         }
 
         fragment: fn() {
@@ -3116,7 +3568,9 @@ script_mod! {
         v_clip: varying(vec2f)
 
         vertex: fn() {
-            let wp = self.transform * vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
+            var pos=vec3(self.geom.px,self.geom.py,self.geom.pz)
+            if self.morph_ctl.w > 0.5 { pos=pos+self.morph_delta(self.geom.ao_uv,0.0) }
+            let wp = self.transform * vec4(pos, 1.0)
             let nx = dot(self.sun_rx.xyz, wp.xyz) + self.sun_rx.w
             let ny = dot(self.sun_ry.xyz, wp.xyz) + self.sun_ry.w
             let nz = dot(self.sun_rz.xyz, wp.xyz) + self.sun_rz.w
@@ -3154,6 +3608,171 @@ script_mod! {
 
         fragment: fn() {
             self.fb0 = self.pixel()
+        }
+        morph_map: texture_2d(float)
+        morph_delta: fn(vertex:float,lane:float)->vec3f {
+            var delta=vec3(0.0,0.0,0.0)
+            if self.morph_ctl.w > 0.5 {
+                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.x
+            }
+            if self.morph_ctl.w > 1.5 {
+                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.y
+            }
+            if self.morph_ctl.w > 2.5 {
+                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.z
+            }
+            if self.morph_ctl.w > 3.5 {
+                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.w
+            }
+            if self.morph_ctl.w > 4.5 {
+                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.x
+            }
+            if self.morph_ctl.w > 5.5 {
+                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.y
+            }
+            if self.morph_ctl.w > 6.5 {
+                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.z
+            }
+            if self.morph_ctl.w > 7.5 {
+                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.w
+            }
+            if self.morph_ctl.w > 8.5 {
+                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.x
+            }
+            if self.morph_ctl.w > 9.5 {
+                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.y
+            }
+            if self.morph_ctl.w > 10.5 {
+                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.z
+            }
+            if self.morph_ctl.w > 11.5 {
+                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.w
+            }
+            if self.morph_ctl.w > 12.5 {
+                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.x
+            }
+            if self.morph_ctl.w > 13.5 {
+                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.y
+            }
+            if self.morph_ctl.w > 14.5 {
+                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.z
+            }
+            if self.morph_ctl.w > 15.5 {
+                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.w
+            }
+            if self.morph_ctl.w > 16.5 {
+                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.x
+            }
+            if self.morph_ctl.w > 17.5 {
+                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.y
+            }
+            if self.morph_ctl.w > 18.5 {
+                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.z
+            }
+            if self.morph_ctl.w > 19.5 {
+                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.w
+            }
+            if self.morph_ctl.w > 20.5 {
+                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.x
+            }
+            if self.morph_ctl.w > 21.5 {
+                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.y
+            }
+            if self.morph_ctl.w > 22.5 {
+                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.z
+            }
+            if self.morph_ctl.w > 23.5 {
+                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.w
+            }
+            if self.morph_ctl.w > 24.5 {
+                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.x
+            }
+            if self.morph_ctl.w > 25.5 {
+                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.y
+            }
+            if self.morph_ctl.w > 26.5 {
+                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.z
+            }
+            if self.morph_ctl.w > 27.5 {
+                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.w
+            }
+            if self.morph_ctl.w > 28.5 {
+                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.x
+            }
+            if self.morph_ctl.w > 29.5 {
+                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.y
+            }
+            if self.morph_ctl.w > 30.5 {
+                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.z
+            }
+            if self.morph_ctl.w > 31.5 {
+                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.w
+            }
+            return delta
         }
     }
 
@@ -3194,7 +3813,8 @@ script_mod! {
         // dropped). MUST stay in lockstep with the visible draw or the
         // baked shadow detaches from the body that casts it.
         skinned_pos: fn() -> vec3f {
-            let rest = vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
+            var rest = vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
+            if self.morph_ctl.w > 0.5 { rest=vec4(rest.xyz+self.morph_delta(self.geom.source_vertex,0.0),1.0) }
             let jj = unpack4u8(self.geom.joints)
             let jw = unpack4u8(self.geom.weights)
             var pos = vec3(0.0, 0.0, 0.0)
@@ -3264,6 +3884,171 @@ script_mod! {
         fragment: fn() {
             self.fb0 = self.pixel()
         }
+        morph_map: texture_2d(float)
+        morph_delta: fn(vertex:float,lane:float)->vec3f {
+            var delta=vec3(0.0,0.0,0.0)
+            if self.morph_ctl.w > 0.5 {
+                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.x
+            }
+            if self.morph_ctl.w > 1.5 {
+                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.y
+            }
+            if self.morph_ctl.w > 2.5 {
+                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.z
+            }
+            if self.morph_ctl.w > 3.5 {
+                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.w
+            }
+            if self.morph_ctl.w > 4.5 {
+                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.x
+            }
+            if self.morph_ctl.w > 5.5 {
+                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.y
+            }
+            if self.morph_ctl.w > 6.5 {
+                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.z
+            }
+            if self.morph_ctl.w > 7.5 {
+                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.w
+            }
+            if self.morph_ctl.w > 8.5 {
+                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.x
+            }
+            if self.morph_ctl.w > 9.5 {
+                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.y
+            }
+            if self.morph_ctl.w > 10.5 {
+                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.z
+            }
+            if self.morph_ctl.w > 11.5 {
+                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.w
+            }
+            if self.morph_ctl.w > 12.5 {
+                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.x
+            }
+            if self.morph_ctl.w > 13.5 {
+                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.y
+            }
+            if self.morph_ctl.w > 14.5 {
+                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.z
+            }
+            if self.morph_ctl.w > 15.5 {
+                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.w
+            }
+            if self.morph_ctl.w > 16.5 {
+                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.x
+            }
+            if self.morph_ctl.w > 17.5 {
+                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.y
+            }
+            if self.morph_ctl.w > 18.5 {
+                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.z
+            }
+            if self.morph_ctl.w > 19.5 {
+                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.w
+            }
+            if self.morph_ctl.w > 20.5 {
+                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.x
+            }
+            if self.morph_ctl.w > 21.5 {
+                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.y
+            }
+            if self.morph_ctl.w > 22.5 {
+                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.z
+            }
+            if self.morph_ctl.w > 23.5 {
+                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.w
+            }
+            if self.morph_ctl.w > 24.5 {
+                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.x
+            }
+            if self.morph_ctl.w > 25.5 {
+                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.y
+            }
+            if self.morph_ctl.w > 26.5 {
+                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.z
+            }
+            if self.morph_ctl.w > 27.5 {
+                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.w
+            }
+            if self.morph_ctl.w > 28.5 {
+                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.x
+            }
+            if self.morph_ctl.w > 29.5 {
+                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.y
+            }
+            if self.morph_ctl.w > 30.5 {
+                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.z
+            }
+            if self.morph_ctl.w > 31.5 {
+                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.w
+            }
+            return delta
+        }
     }
 
     // Lamp-view depth: the same geometry seen from a lamp, six 90-degree
@@ -3286,7 +4071,9 @@ script_mod! {
         v_view: varying(vec3f)
 
         vertex: fn() {
-            let wp = self.transform * vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
+            var pos=vec3(self.geom.px,self.geom.py,self.geom.pz)
+            if self.morph_ctl.w > 0.5 { pos=pos+self.morph_delta(self.geom.ao_uv,0.0) }
+            let wp = self.transform * vec4(pos, 1.0)
             let vx = dot(self.face_rx.xyz, wp.xyz) + self.face_rx.w
             let vy = dot(self.face_ry.xyz, wp.xyz) + self.face_ry.w
             let vz = dot(self.face_rz.xyz, wp.xyz) + self.face_rz.w
@@ -3318,6 +4105,171 @@ script_mod! {
 
         fragment: fn() {
             self.fb0 = self.pixel()
+        }
+        morph_map: texture_2d(float)
+        morph_delta: fn(vertex:float,lane:float)->vec3f {
+            var delta=vec3(0.0,0.0,0.0)
+            if self.morph_ctl.w > 0.5 {
+                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.x
+            }
+            if self.morph_ctl.w > 1.5 {
+                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.y
+            }
+            if self.morph_ctl.w > 2.5 {
+                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.z
+            }
+            if self.morph_ctl.w > 3.5 {
+                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights0.w
+            }
+            if self.morph_ctl.w > 4.5 {
+                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.x
+            }
+            if self.morph_ctl.w > 5.5 {
+                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.y
+            }
+            if self.morph_ctl.w > 6.5 {
+                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.z
+            }
+            if self.morph_ctl.w > 7.5 {
+                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights1.w
+            }
+            if self.morph_ctl.w > 8.5 {
+                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.x
+            }
+            if self.morph_ctl.w > 9.5 {
+                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.y
+            }
+            if self.morph_ctl.w > 10.5 {
+                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.z
+            }
+            if self.morph_ctl.w > 11.5 {
+                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights2.w
+            }
+            if self.morph_ctl.w > 12.5 {
+                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.x
+            }
+            if self.morph_ctl.w > 13.5 {
+                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.y
+            }
+            if self.morph_ctl.w > 14.5 {
+                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.z
+            }
+            if self.morph_ctl.w > 15.5 {
+                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights3.w
+            }
+            if self.morph_ctl.w > 16.5 {
+                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.x
+            }
+            if self.morph_ctl.w > 17.5 {
+                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.y
+            }
+            if self.morph_ctl.w > 18.5 {
+                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.z
+            }
+            if self.morph_ctl.w > 19.5 {
+                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights4.w
+            }
+            if self.morph_ctl.w > 20.5 {
+                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.x
+            }
+            if self.morph_ctl.w > 21.5 {
+                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.y
+            }
+            if self.morph_ctl.w > 22.5 {
+                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.z
+            }
+            if self.morph_ctl.w > 23.5 {
+                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights5.w
+            }
+            if self.morph_ctl.w > 24.5 {
+                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.x
+            }
+            if self.morph_ctl.w > 25.5 {
+                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.y
+            }
+            if self.morph_ctl.w > 26.5 {
+                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.z
+            }
+            if self.morph_ctl.w > 27.5 {
+                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights6.w
+            }
+            if self.morph_ctl.w > 28.5 {
+                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.x
+            }
+            if self.morph_ctl.w > 29.5 {
+                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.y
+            }
+            if self.morph_ctl.w > 30.5 {
+                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.z
+            }
+            if self.morph_ctl.w > 31.5 {
+                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                delta=delta+self.morph_map.sample_nearest(uv).xyz*self.morph_weights7.w
+            }
+            return delta
         }
     }
 
@@ -4680,7 +5632,7 @@ script_mod! {
     // (rings). Everything else a HUD needs is text, which DrawText already
     // does, or an icon, which is an SVG or a store image and never a shader.
     mod.draw.DrawHudShape = mod.std.set_type_default() do #(DrawHudShape::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
         // `fill`, `stroke`, `border`, `radius`, `shape`, `from`, `sweep`,
         // `thickness` and `frac` are the Rust struct's own #[live] instance
         // fields — `script_shader` declares them. Re-declaring them here as
@@ -4719,7 +5671,7 @@ script_mod! {
     // pixel-art lane used by both HUD catalog sprites and FPS weapon/flash
     // sheets; callers can clear `pixelated` for genuinely smooth content.
     mod.draw.DrawHudImage = mod.std.set_type_default() do #(DrawHudImage::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
         tex: texture_2d(float)
         // `tint` and the sampling mode come from the Rust struct.
         pixel: fn() {
@@ -4985,6 +5937,15 @@ pub struct DrawSceneSkyMap {
 pub struct DrawSceneSkinned {
     #[deref]
     pub draw_vars: DrawVars,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_ctl:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights0:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights1:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights2:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights3:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights4:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights5:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights6:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights7:Vec4f,
     #[live]
     pub transform: Mat4f,
     #[live(1.0)]
@@ -5079,6 +6040,15 @@ pub struct DrawScenePbr {
     /// 1x1 fetch and nothing else.
     #[live(0.0)]
     pub orm_on: f32,
+    #[live(0.0)] pub surface_on:f32,
+    #[live(1.0)] pub material_alpha:f32,
+    #[live(0.0)] pub alpha_mode:f32,
+    #[live(0.5)] pub alpha_cutoff:f32,
+    #[live(0.0)] pub normal_scale:f32,
+    #[live(0.0)] pub occlusion_strength:f32,
+    #[live(vec3(0.0,0.0,0.0))] pub emissive:Vec3f,
+    #[live(0.0)] pub double_sided:f32,
+
 }
 
 /// Minimal camera-space held-model shader. The transform is the only instance
@@ -5195,6 +6165,26 @@ pub struct DrawSceneScreen {
 pub struct DrawSceneSkinnedGpu {
     #[deref]
     pub draw_vars: DrawVars,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_ctl:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights0:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights1:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights2:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights3:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights4:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights5:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights6:Vec4f,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights7:Vec4f,
+    #[live(0.0)] pub surface_on:f32,
+    #[live(1.0)] pub material_alpha:f32,
+    #[live(0.0)] pub alpha_mode:f32,
+    #[live(0.5)] pub alpha_cutoff:f32,
+    #[live(0.0)] pub normal_scale:f32,
+    #[live(0.0)] pub occlusion_strength:f32,
+    #[live(vec3(0.0,0.0,0.0))] pub emissive:Vec3f,
+    #[live(vec3(0.0,0.0,0.0))] pub eye:Vec3f,
+    #[live(0.0)] pub double_sided:f32,
+    #[live(0.0)] pub metallic:f32,
+    #[live(1.0)] pub roughness:f32,
     #[live]
     pub transform: Mat4f,
     #[live(1.0)]
@@ -5440,6 +6430,25 @@ pub struct DrawLmSunDepth {
     /// = the whole target (every atlas pass).
     #[live(vec4(1.0, 1.0, 0.0, 0.0))]
     pub tile_a: Vec4f,
+    #[live]
+    pub morph_ctl: Vec4f,
+    #[live]
+    pub morph_weights0: Vec4f,
+    #[live]
+    pub morph_weights1: Vec4f,
+    #[live]
+    pub morph_weights2: Vec4f,
+    #[live]
+    pub morph_weights3: Vec4f,
+    #[live]
+    pub morph_weights4: Vec4f,
+    #[live]
+    pub morph_weights5: Vec4f,
+    #[live]
+    pub morph_weights6: Vec4f,
+    #[live]
+    pub morph_weights7: Vec4f,
+
 }
 
 /// Lamp-view depth pass: six 90-degree faces tiled 3x2. `face_r*` are the
@@ -5462,6 +6471,25 @@ pub struct DrawLmLampDepth {
     pub tile_a: Vec4f,
     #[live(vec4(0.25, 8.0, 0.0, 0.0))]
     pub lamp_range: Vec4f,
+    #[live]
+    pub morph_ctl: Vec4f,
+    #[live]
+    pub morph_weights0: Vec4f,
+    #[live]
+    pub morph_weights1: Vec4f,
+    #[live]
+    pub morph_weights2: Vec4f,
+    #[live]
+    pub morph_weights3: Vec4f,
+    #[live]
+    pub morph_weights4: Vec4f,
+    #[live]
+    pub morph_weights5: Vec4f,
+    #[live]
+    pub morph_weights6: Vec4f,
+    #[live]
+    pub morph_weights7: Vec4f,
+
 }
 
 /// Skinned sun-view depth pass (Realtime characters in the bake): the
@@ -5490,6 +6518,25 @@ pub struct DrawLmSunDepthSkinned {
     /// (sx, sy, ox, oy) clip-space tile mapping — see [`DrawLmSunDepth`].
     #[live(vec4(1.0, 1.0, 0.0, 0.0))]
     pub tile_a: Vec4f,
+    #[live]
+    pub morph_ctl: Vec4f,
+    #[live]
+    pub morph_weights0: Vec4f,
+    #[live]
+    pub morph_weights1: Vec4f,
+    #[live]
+    pub morph_weights2: Vec4f,
+    #[live]
+    pub morph_weights3: Vec4f,
+    #[live]
+    pub morph_weights4: Vec4f,
+    #[live]
+    pub morph_weights5: Vec4f,
+    #[live]
+    pub morph_weights6: Vec4f,
+    #[live]
+    pub morph_weights7: Vec4f,
+
 }
 
 /// Sun gather over a mesh region's chart, at 4x. `target_a` maps chart uv
@@ -5751,7 +6798,25 @@ mod shader_registration_tests {
                 }
             });
             vm.bx.heap.new_module(id!(widgets));
+            crate::local_shadows::sampling::script_mod(vm);
+            crate::clustered::script_mod(vm);
+            crate::fast_gi::script_mod(vm);
             super::script_mod(vm);
+            crate::local_shadows::script_mod(vm);
+            crate::custom_material::register(vm);
+
+            // These shaders write numeric payloads (including negatives and
+            // triangle ids), not display colors. A successful shader compile
+            // alone does not detect an 8-bit pipeline / float-target mismatch.
+            for vars in [
+                crate::fast_gi::DrawGiTrace::script_new_with_default(vm).quad.draw_vars,
+                crate::fast_gi::DrawGiRelight::script_new_with_default(vm).quad.draw_vars,
+                crate::fast_gi::DrawGiGather::script_new_with_default(vm).quad.draw_vars,
+            ] {
+                let id=vars.draw_shader_id.expect("GI shader registered");
+                assert_eq!(format!("{:?}",vm.cx().draw_shaders[id.index].mapping.color_format),"Rgba32F");
+                assert!(!vars.options.alpha_blend,"GI payloads must overwrite, not blend");
+            }
 
             let cube_errors = script_eval!(vm, {
                 mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCube)
@@ -5774,6 +6839,75 @@ mod shader_registration_tests {
             assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
             assert!(cube_errors.is_empty(), "DrawSceneCube: {cube_errors}");
             assert!(alpha_errors.is_empty(), "DrawSceneAlpha: {alpha_errors}");
+            for (name, result) in [
+                ("GI trace", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawGiTrace)})),
+                ("GI relight", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawGiRelight)})),
+                ("GI gather", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawGiGather)})),
+                ("terrain", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneTerrain)})),
+                ("model", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinned)})),
+                ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
+                ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
+                ("custom", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCustom)})),
+                ("local shadow skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLocalShadowSkinned)})),
+                ("sun depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepth)})),
+                ("sun skin depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepthSkinned)})),
+                ("lamp depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepth)})),
+            ] {
+                let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                assert!(errors.is_empty(), "{name}: {errors}");
+            }
+            // Cross-target Rust checks do not compile runtime Splash
+            // shaders. Exercise GLSL and HLSL emission explicitly too.
+            for (name, result) in [
+                ("cube GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCube, "glsl", false)})),
+                ("PBR GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "glsl", false)})),
+                ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
+                ("cube HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCube, "hlsl", false)})),
+                ("PBR HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "hlsl", false)})),
+                ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
+            ] {
+                let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
+                assert!(source.contains("cluster_lights"), "{name}: missing clustered shader");
+            }
+            for (name,result) in [
+                ("GI trace GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiTrace,"glsl",false)})),
+                ("GI relight GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiRelight,"glsl",false)})),
+                ("GI gather GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiGather,"glsl",false)})),
+                ("GI trace HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiTrace,"hlsl",false)})),
+                ("GI relight HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiRelight,"hlsl",false)})),
+                ("GI gather HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiGather,"hlsl",false)})),
+            ] {
+                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
+                assert!(source.contains("gi_"),"{name}: missing GI code");
+            }
+            for (name,result) in [
+                ("sun depth GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmSunDepth,"glsl",false)})),
+                ("skin depth GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmSunDepthSkinned,"glsl",false)})),
+                ("lamp depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmLampDepth,"hlsl",false)})),
+                ("local skin depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLocalShadowSkinned,"hlsl",false)})),
+            ] {
+                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
+                assert!(source.contains("morph_map"),"{name}: missing morph deformation");
+            }
+            let pbr = DrawScenePbr::script_new_with_default(vm);
+            let id = pbr.skinned.draw_vars.draw_shader_id.expect("registered PBR shader");
+            let cx = vm.cx();
+            let textures = &cx.draw_shaders[id.index].mapping.textures;
+            assert!(textures.len()<=pbr.skinned.draw_vars.texture_slots.len(),"PBR exceeds available combined texture bindings");
+            // morph_map is sampled by vertex deformation only. All remaining
+            // bindings conservatively count against WebGL2's 16-fragment-unit
+            // floor, even when a material disables a branch at runtime.
+            assert!(textures.iter().filter(|t|t.id!=live_id!(morph_map)).count()<=16,"PBR exceeds WebGL2 fragment texture budget");
+            assert!(!textures.iter().any(|t|t.id==live_id!(gi_positions)||t.id==live_id!(gi_movers)),"GI preparation textures leaked into the scene shader");
+            assert!(textures.iter().any(|texture|texture.id==live_id!(gi_field)));
+            assert_eq!(textures[8].id, live_id!(cluster_data));
+            assert_eq!(textures[9].id, live_id!(local_shadow_data));
+            assert_eq!(textures[10].id, live_id!(local_shadow_map));
+            assert!(textures.iter().any(|texture|texture.id==live_id!(orm_map)));
+            assert!(textures.iter().any(|texture|texture.id==live_id!(morph_map)));
         });
     }
 }
@@ -5841,3 +6975,27 @@ mod lm_soft_tests {
         assert_eq!(sites, 1, "expected exactly the DrawLmTop gate");
     }
 }
+
+macro_rules! depth_morph_binding {
+    ($kind:ty) => { impl $kind {
+        pub(crate) fn set_morph(&mut self,cx:&Cx,morph:Option<&crate::asset_morph::DepthMorph>) {
+            self.morph_ctl=morph.map_or(Vec4f::default(),|m|m.control);
+            if let Some(morph)=morph {
+                self.morph_weights0=morph.weights[0];
+                self.morph_weights1=morph.weights[1];
+                self.morph_weights2=morph.weights[2];
+                self.morph_weights3=morph.weights[3];
+                self.morph_weights4=morph.weights[4];
+                self.morph_weights5=morph.weights[5];
+                self.morph_weights6=morph.weights[6];
+                self.morph_weights7=morph.weights[7];
+                if let Some(shader)=self.draw_vars.draw_shader_id {
+                    if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|texture|texture.id==live_id!(morph_map)) {self.draw_vars.set_texture(slot,&morph.texture);}
+                }
+            }
+        }
+    }};
+}
+depth_morph_binding!(DrawLmSunDepth);
+depth_morph_binding!(DrawLmSunDepthSkinned);
+depth_morph_binding!(DrawLmLampDepth);

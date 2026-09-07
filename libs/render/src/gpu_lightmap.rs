@@ -280,6 +280,7 @@ pub struct GpuLmMover {
     /// Skinned casters (characters): rest mesh in `geometry`, pose from the
     /// frame's joint palette. `None` = rigid.
     pub skin: Option<GpuLmSkin>,
+    pub morph: Option<crate::asset_morph::DepthMorph>,
 }
 
 /// A skinned mover's pose source: the frame's shared joint-palette texture
@@ -1305,6 +1306,10 @@ impl GpuLightmapBaker {
         ))
     }
 
+    pub(crate) fn parent_csm_to(&self,cx:&mut Cx,parent:DrawPassId){
+        if self.csm_binding().is_some(){for p in &self.csm_pool{cx.passes[p.pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(parent);}}
+    }
+
     /// DEBUG: the stage textures worth dumping alongside the atlas. The mask
     /// scratches hold whichever region was processed LAST (see
     /// MAKEPAD_GPU_LM_ONLY_REGION to pin one).
@@ -1891,6 +1896,7 @@ impl GpuLightmapBaker {
                 // Statics only: the atlas is the STATIC bake in both modes
                 // (Realtime dynamics live in the cascades, section 8).
                 let d = &mut draws.sun_depth;
+                d.set_morph(cx.cx,None);
                 d.sun_rx = cam.rx;
                 d.sun_ry = cam.ry;
                 d.sun_rz = cam.rz;
@@ -2078,6 +2084,7 @@ impl GpuLightmapBaker {
                 for face in 0..6 {
                     let (rx, ry, rz, tile) = lamp_face(light.pos, face);
                     let d = &mut draws.lamp_depth;
+                    d.set_morph(cx.cx,None);
                     d.lamp_range = lamp_range;
                     d.face_rx = rx;
                     d.face_ry = ry;
@@ -2372,6 +2379,7 @@ impl GpuLightmapBaker {
                     // serves the OnChange ground-projection path, and its
                     // blockers are the baked scene's.
                     let d = &mut draws.sun_depth;
+                d.set_morph(cx.cx,None);
                     d.sun_rx = cam.rx;
                     d.sun_ry = cam.ry;
                     d.sun_rz = cam.rz;
@@ -2530,6 +2538,7 @@ impl GpuLightmapBaker {
                 w: 0.0,
             };
             let d = &mut draws.sun_depth;
+                d.set_morph(cx.cx,None);
             d.sun_rx = casc.rx;
             d.sun_ry = casc.ry;
             d.sun_rz = casc.rz;
@@ -2563,6 +2572,7 @@ impl GpuLightmapBaker {
                 }
             }
             for mv in movers.iter().filter(|m| m.skin.is_none()) {
+                d.set_morph(cx.cx,mv.morph.as_ref());
                 d.transform = mv.transform;
                 d.draw_vars.geometry_id = Some(mv.geometry);
                 if d.draw_vars.can_instance() {
@@ -2572,6 +2582,7 @@ impl GpuLightmapBaker {
             for mv in movers {
                 let Some(skin) = &mv.skin else { continue };
                 let ds = &mut draws.sun_depth_skinned;
+                ds.set_morph(cx.cx,mv.morph.as_ref());
                 ds.sun_rx = casc.rx;
                 ds.sun_ry = casc.ry;
                 ds.sun_rz = casc.rz;
@@ -2988,6 +2999,7 @@ mod tests {
             radius,
             dir: v3(0.0, -1.0, 0.0),
             spot: 1.0,
+            ..Default::default()
         }];
         let e = region_exposure(&region, &blown, daylight, tpu);
         assert_eq!(e.lamps, 1);

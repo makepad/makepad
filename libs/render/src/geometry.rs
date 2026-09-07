@@ -294,7 +294,7 @@ mod shape_tests {
             "self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)",
             // Baked AO and screen-space AO both gate the AMBIENT fill only;
             // the direct sun term must never carry the screen-space factor.
-            "self.v_ambient * (ao * sao)",
+            "self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * (ao * sao)",
             "self.v_direct * (ao_direct * sun_lit)",
         ] {
             assert!(decl.contains(expression), "model lighting lost `{expression}`");

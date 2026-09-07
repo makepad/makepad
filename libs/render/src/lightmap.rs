@@ -448,16 +448,27 @@ pub struct LmLight {
     /// omni at the bulb lights the roof beside it brighter than the street
     /// below, which reads as the fixture shining upward).
     pub dir: Vec3f,
-    /// 0 = omni. Otherwise how tightly emission hugs `dir`: the factor is
+    /// Negative = glTF punctual inverse-square photometry. For legacy
+    /// lights, 0 = omni. Otherwise how tightly emission hugs `dir`: the factor is
     /// `clamp((dot(to_texel, dir) + spill) / (1 + spill), 0, 1)` squared,
     /// so 1.0 gives a wide soft downlight with a little wall spill.
     pub spot: f32,
+    /// Optional explicit (inner, outer) half-angles in degrees. None keeps
+    /// the legacy soft downlight response; Some is a true cutoff spotlight.
+    pub cone: Option<(f32, f32)>,
+    /// Request a budgeted realtime shadow. Unallocated requests are omitted
+    /// rather than silently lighting through walls.
+    pub shadows: bool,
+}
+
+impl Default for LmLight {
+    fn default() -> Self { Self::omni(Vec3f::default(), Vec3f::default(), 0.0) }
 }
 
 impl LmLight {
     /// An omnidirectional light.
     pub fn omni(pos: Vec3f, color: Vec3f, radius: f32) -> Self {
-        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0 }
+        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false }
     }
 }
 
@@ -849,6 +860,7 @@ mod tests {
             radius,
             dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
             spot: 1.0,
+            ..Default::default()
         };
         assert_eq!(cap_lamp_pool(&mut sane, mount, tpu), 1.0);
         assert_eq!(
@@ -866,6 +878,7 @@ mod tests {
             radius: 8.0,
             dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
             spot: 1.0,
+            ..Default::default()
         };
         assert!(
             lamp_saturated_ground_texels(mount, 8.0, 4.0, 1.0, tpu) > LM_LAMP_SAT_TEXELS,
@@ -1006,6 +1019,7 @@ mod tests {
             radius,
             dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
             spot: 1.0,
+            ..Default::default()
         };
         // A ground region under the lamp: the bound must cover the nadir
         // peak, which is the brightest texel that exists.
@@ -1141,6 +1155,7 @@ mod tests {
                 radius,
                 dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
                 spot: 1.0,
+                ..Default::default()
             };
             let housing = mount * HOUSING_FRACTION;
             assert!(
