@@ -138,4 +138,44 @@ use mod.text.*
 mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
 mod.theme.font_label = mod.theme.font_label{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
 mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+// The Architecture map's categorical palette (top-level directory ownership), kind stripes and status roles.
+mod.theme.color_map_1 = #286cab
+mod.theme.color_map_2 = #00816b
+mod.theme.color_map_3 = #906b00
+mod.theme.color_map_4 = #78569e
+mod.theme.color_map_5 = #04869c
+mod.theme.color_map_6 = #3b7d3f
+mod.theme.color_map_7 = #9c5313
+mod.theme.color_map_8 = #a04b6f
+mod.theme.color_map_9 = #b64f4b
+mod.theme.color_map_10 = #606cbd
+mod.theme.color_map_11 = #737c24
+mod.theme.color_map_kind_module = #94bfff
+mod.theme.color_map_kind_file = #b7c0cc
+mod.theme.color_map_kind_struct = #74cbb7
+mod.theme.color_map_kind_enum = #9bcb79
+mod.theme.color_map_kind_trait = #c1a0e0
+mod.theme.color_map_kind_impl = #8aace0
+mod.theme.color_map_kind_fn = #ddc27b
+mod.theme.color_map_kind_const = #daa37d
+mod.theme.color_map_kind_type_alias = #84c7d8
+mod.theme.color_map_kind_macro = #d895b6
+mod.theme.color_success = #79be93
+mod.theme.color_map_basis_exact = #b8c2cf
+mod.theme.color_map_basis_inferred = #d9ae6b
+mod.theme.color_map_basis_candidates = #b69acf
+mod.theme.color_syntax_keyword = #90badc
+mod.theme.color_syntax_ident = #d4d4d4
+mod.theme.color_syntax_type = #a7d2cb
+mod.theme.color_syntax_fn = #d6c9ac
+mod.theme.color_syntax_literal = #b3d1af
+mod.theme.color_syntax_string = #e0baac
+mod.theme.color_syntax_comment = #b2c3ae
+mod.theme.color_syntax_macro = #d8bcde
+mod.theme.color_syntax_attribute = #e7c8a6
+mod.theme.color_syntax_punctuation = #d4d4d4
+mod.theme.color_syntax_keyword_branch = #d8bcde
+mod.theme.color_syntax_keyword_loop = #e7c8a6
+mod.theme.color_syntax_constant = #e0baac
+mod.theme.color_syntax_bg = #202125
 true
