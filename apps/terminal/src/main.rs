@@ -9,10 +9,10 @@
 //!                      Space bar for text, source and everything else no
 //!                      viewer app claims.
 
-pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_widgets::*;
 use makepad_terminal::widget::{MpTerm, MpTermAction};
+pub use makepad_widgets;
+use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 
 mod ai;
@@ -22,6 +22,8 @@ app_main!(
     font_assets: [
         "makepad_widgets/resources/jetbrains_mono_variable.ttf",
         "makepad_widgets/resources/fa-solid-900.ttf",
+        "makepad_widgets/resources/NotoColorEmoji.ttf",
+        "makepad_widgets/resources/Inter.ttf",
     ]
 );
 
@@ -128,7 +130,6 @@ impl MatchEvent for App {
         }
     }
 
-
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
             // The widget emits through cx.widget_action, which wraps the
@@ -160,7 +161,11 @@ impl App {
             return;
         };
         let shown = std::env::var_os("HOME")
-            .and_then(|home| cwd.strip_prefix(PathBuf::from(home)).ok().map(Path::to_path_buf))
+            .and_then(|home| {
+                cwd.strip_prefix(PathBuf::from(home))
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
             .map(|rest| {
                 if rest.as_os_str().is_empty() {
                     "~".to_string()
@@ -235,9 +240,7 @@ impl App {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.display().to_string());
                 let title = format!("{} \u{2014} preview", name);
-                self.ui
-                    .window(cx, ids!(main_window))
-                    .set_title(cx, &title);
+                self.ui.window(cx, ids!(main_window)).set_title(cx, &title);
                 makepad_wm_api::set_title(cx, &title);
             }
             WmEvent::PreviewUnload => {

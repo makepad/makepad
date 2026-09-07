@@ -44,6 +44,50 @@ script_mod! {
         }
     }
 
+    // Each cell shades a continuing stroke at its outer edges. Independent
+    // antialiased vector paths fade at every cell boundary and make TUI rules
+    // look dotted, especially when the terminal sits on a zoomed canvas.
+    set_type_default() do #(DrawTermBox::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        draw_call_group: @term_box
+        color: #fff
+        arms: vec4(0.0, 0.0, 0.0, 0.0)
+        center: vec2(0.0, 0.0)
+        corner: vec2(0.0, 0.0)
+        thickness: 1.0
+        radius: 0.0
+        pixel_size: 1.0
+        pixel: fn() {
+            let d = self.pos * self.rect_size - self.center
+            let half = self.thickness * 0.5
+            var distance = 10000.0
+            if self.radius > 0.0 {
+                let q = d * self.corner
+                if q.x >= self.radius {
+                    distance = abs(q.y) - half
+                } else if q.y >= self.radius {
+                    distance = abs(q.x) - half
+                } else {
+                    distance = abs(length(q - vec2(self.radius)) - self.radius) - half
+                }
+            } else {
+                if self.arms.x + self.arms.y > 0.0 {
+                    let left = if self.arms.x > 0.0 {-10000.0} else {-half}
+                    let right = if self.arms.y > 0.0 {10000.0} else {half}
+                    distance = max(abs(d.y) - half, max(left - d.x, d.x - right))
+                }
+                if self.arms.z + self.arms.w > 0.0 {
+                    let top = if self.arms.z > 0.0 {-10000.0} else {-half}
+                    let bottom = if self.arms.w > 0.0 {10000.0} else {half}
+                    distance = min(distance, max(abs(d.x) - half, max(top - d.y, d.y - bottom)))
+                }
+            }
+            let coverage = clamp(0.5 - distance / self.pixel_size, 0.0, 1.0)
+            let alpha = self.color.a * coverage
+            return vec4(self.color.rgb * alpha, alpha)
+        }
+    }
+
     set_type_default() do #(DrawTermUnderline::script_shader(vm)) {
         ..mod.draw.DrawQuad
         draw_call_group: @term_underline
@@ -121,8 +165,20 @@ script_mod! {
         draw_bg +: {
             color: uniform(#x1a1b26)
             inset: uniform(0.0)
+            corner_radius: uniform(0.0)
+            frame_width: uniform(0.0)
+            frame_color: uniform(#0000)
             pixel: fn() {
                 let p = self.pos * self.rect_size
+                if self.corner_radius > 0.0 {
+                    let sdf = Sdf2d.viewport(p)
+                    let edge = self.frame_width
+                    sdf.box(edge, edge, self.rect_size.x - 2.0 * edge,
+                        self.rect_size.y - 2.0 * edge, self.corner_radius)
+                    sdf.fill_keep(self.color)
+                    sdf.stroke(self.frame_color, edge)
+                    return sdf.result
+                }
                 let tl = min(p.x, p.y)
                 let br = min(self.rect_size.x - p.x, self.rect_size.y - p.y)
                 if min(tl, br) < self.inset {
@@ -155,9 +211,38 @@ script_mod! {
                         res: crate_resource("self:../../widgets/resources/fa-solid-900.ttf")
                         asc: 0.0 desc: 0.0
                     }
+                    emoji := FontMember{
+                        res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                        asc: 0.0 desc: 0.0
+                    }
+                    symbols := FontMember{
+                        res: crate_resource("self:../../widgets/resources/Inter.ttf")
+                        asc: 0.0 desc: 0.0
+                    }
                 }
-                line_spacing: 1.35
+                line_spacing: 1.0
             }
+        }
+        bold_text_style: TextStyle{
+            font_family: FontFamily{
+                latin := FontMember{
+                    res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                    asc: 0.0 desc: 0.0 weight: 800.0
+                }
+                icons := FontMember{
+                    res: crate_resource("self:../../widgets/resources/fa-solid-900.ttf")
+                    asc: 0.0 desc: 0.0
+                }
+                emoji := FontMember{
+                    res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                    asc: 0.0 desc: 0.0
+                }
+                symbols := FontMember{
+                    res: crate_resource("self:../../widgets/resources/Inter.ttf")
+                    asc: 0.0 desc: 0.0
+                }
+            }
+            line_spacing: 1.0
         }
         draw_cell_bg +: {}
         draw_underline +: {}
@@ -187,6 +272,27 @@ struct DrawTermUnderline {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
+struct DrawTermBox {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    color: Vec4f,
+    #[live]
+    arms: Vec4f,
+    #[live]
+    center: Vec2f,
+    #[live]
+    corner: Vec2f,
+    #[live]
+    thickness: f32,
+    #[live]
+    radius: f32,
+    #[live]
+    pixel_size: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
 struct DrawTermCursor {
     #[deref]
     draw_super: DrawQuad,
@@ -202,6 +308,10 @@ pub enum MpTermAction {
     PwdChanged(String),
     Bell,
     Exited,
+    FileDropped {
+        path: PathBuf,
+    },
+    PromptSubmitted,
     #[default]
     None,
 }
@@ -211,6 +321,7 @@ struct CachedGlyph {
     rasterized: RasterizedGlyph,
     font_size_in_lpxs: f32,
     x_offset_in_lpxs: f32,
+    y_offset_in_lpxs: f32,
 }
 
 /// The tokyo-night terminal palette (terminal's default look; makepad-wm
@@ -248,6 +359,16 @@ const SELECTION_COLOR: Vec4f = Vec4f {
     w: 1.0,
 };
 
+/// Optional host frame. Padding belongs to the terminal grid, so drawing,
+/// pointer input and IME use the same full-sized rounded surface.
+#[derive(Clone, Copy, PartialEq)]
+pub struct TerminalPresentationFrame {
+    pub padding: f64,
+    pub radius: f32,
+    pub border_width: f32,
+    pub border_color: Vec4f,
+}
+
 #[derive(Script, Widget)]
 pub struct MpTerm {
     #[uid]
@@ -263,6 +384,12 @@ pub struct MpTerm {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText,
+    #[live]
+    bold_text_style: TextStyle,
+    #[live]
+    draw_boxes: DrawTermBox,
+    #[live]
+    draw_dots: DrawVector,
     #[live]
     draw_cell_bg: DrawTermBg,
     #[live]
@@ -306,9 +433,9 @@ pub struct MpTerm {
     #[rust]
     cell_baseline: f64,
     #[rust]
-    glyph_cache: HashMap<char, Option<CachedGlyph>>,
+    glyph_cache: HashMap<(char, bool, u8), Option<CachedGlyph>>,
     #[rust]
-    glyph_cache_key: (u32, u64),
+    glyph_cache_key: (u64, u64, u64),
     /// Lines scrolled back from the bottom (0 = live).
     #[rust]
     view_offset: usize,
@@ -333,7 +460,14 @@ pub struct MpTerm {
     /// blends premultiplied, so the wallpaper shows through for free.
     #[rust((1.0, 1.0))]
     bg_opacity: (f32, f32),
-    #[rust] opaque_style: bool,
+    #[rust]
+    opaque_style: bool,
+    #[rust]
+    background_dimming: f32,
+    #[rust(1.0)]
+    presentation_font_scale: f64,
+    #[rust]
+    presentation_frame: Option<TerminalPresentationFrame>,
     #[rust]
     style_colors: Option<(Rgb, Rgb)>,
     #[rust]
@@ -341,27 +475,100 @@ pub struct MpTerm {
 }
 
 impl ScriptHook for MpTerm {
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        self.glyph_cache.clear();
         let style = desktop_style::current_style(vm);
-        let retro = matches!(style, desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
+        let retro = matches!(
+            style,
+            desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep
+        );
         self.opaque_style = retro || style == desktop_style::DesktopStyle::Android;
-        self.draw_bg.draw_vars.set_uniform(vm.cx_mut(), id!(inset), &[if retro {2.0} else {0.0}]);
+        self.draw_bg.draw_vars.set_uniform(
+            vm.cx_mut(),
+            id!(inset),
+            &[if retro { 2.0 } else { 0.0 }],
+        );
         self.style_colors = if desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
             makepad_wm_theme::current_for_vm(vm).and_then(|p| {
-                Some((parse_hex_rgb(p.get("term.foreground").or_else(|| p.get("foreground"))?)?,
-                    parse_hex_rgb(p.get("term.background").or_else(|| p.get("background"))?)?))
+                Some((
+                    parse_hex_rgb(p.get("term.foreground").or_else(|| p.get("foreground"))?)?,
+                    parse_hex_rgb(p.get("term.background").or_else(|| p.get("background"))?)?,
+                ))
             })
-        } else { None };
-        if let (Some(session), Some((mut palette, fg, bg))) = (&mut self.session, self.original_colors) {
+        } else {
+            None
+        };
+        if let (Some(session), Some((mut palette, fg, bg))) =
+            (&mut self.session, self.original_colors)
+        {
             let (fg, bg) = self.style_colors.unwrap_or((fg, bg));
-            palette[0] = bg; palette[7] = fg;
+            palette[0] = bg;
+            palette[7] = fg;
             session.terminal.set_theme(&palette, fg, bg);
         }
     }
 }
 
 impl MpTerm {
-    pub fn child_pid(&self) -> Option<i32> { self.session.as_ref().map(Session::child_pid) }
+    pub fn set_presentation_frame(&mut self, cx: &mut Cx, frame: Option<TerminalPresentationFrame>) {
+        if self.presentation_frame != frame {
+            self.presentation_frame = frame;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn inner_padding(&self) -> DVec2 {
+        self.presentation_frame.map_or(dvec2(self.pad_x, self.pad_y), |frame| {
+            dvec2(frame.padding, frame.padding)
+        })
+    }
+
+    /// Scale a hosted terminal's typography without replacing its session or
+    /// changing the user's configured base font size.
+    pub fn set_presentation_font_scale(&mut self, cx: &mut Cx, scale: f64) {
+        let scale = scale.clamp(0.5, 2.0);
+        if self.presentation_font_scale != scale {
+            self.presentation_font_scale = scale;
+            self.draw_bg.redraw(cx);
+        }
+    }
+    /// A hosted presentation can deepen the surface without changing the PTY
+    /// palette or restarting its session. Zero restores the provider theme.
+    pub fn set_background_dimming(&mut self, cx: &mut Cx, amount: f32) {
+        let amount = amount.clamp(0.0, 0.8);
+        if self.background_dimming != amount {
+            self.background_dimming = amount;
+            self.draw_bg.redraw(cx);
+        }
+    }
+    /// Start the session now rather than on the first draw: a restored
+    /// resident that a hidden presentation has not drawn yet still runs.
+    pub fn ensure_started(&mut self, cx: &mut Cx) {
+        self.ensure_session(cx);
+    }
+    /// A hosting presentation is hiding this terminal: end any selection
+    /// drag and its edge auto-scroll so nothing keeps requesting frames.
+    pub fn cancel_gestures(&mut self, cx: &mut Cx) {
+        if self.selecting || self.last_finger.is_some() {
+            self.selecting = false;
+            self.last_finger = None;
+            self.area.redraw(cx);
+        }
+    }
+    pub fn child_pid(&self) -> Option<i32> {
+        self.session.as_ref().map(Session::child_pid)
+    }
+
+    /// Whether keyboard input currently goes to this terminal's PTY area.
+    pub fn has_input_focus(&self, cx: &Cx) -> bool {
+        cx.has_key_focus(self.area)
+    }
 
     /// Rows currently painted in the widget, or the last `lines` rows of
     /// scrollback plus the active grid. Used by the terminal's AI service;
@@ -394,6 +601,21 @@ impl MpTerm {
         };
         session.write(bytes);
         true
+    }
+
+    /// Insert one file exactly as a native terminal drop: shell-quoted path,
+    /// trailing space, normal bracketed-paste protocol, and never Enter.
+    /// The caller owns any file inspection/copying; this performs no file I/O.
+    pub fn ai_drop_file(&mut self, path: &Path) -> bool {
+        let Some(path) = path.to_str().filter(|text| Self::valid_drop_path(text)) else {
+            return false;
+        };
+        let quoted = format!("'{}' ", path.replace('\'', "'\\''"));
+        self.paste_bytes(&quoted)
+    }
+
+    fn valid_drop_path(path: &str) -> bool {
+        Path::new(path).is_absolute() && path.len() <= 4096 && !path.chars().any(char::is_control)
     }
 
     /// Quick Look retarget (`WmEvent::PreviewFile`): tear down the current
@@ -430,7 +652,9 @@ impl MpTerm {
         let cols = 80;
         let rows = 24;
         if let Ok(spec) = std::env::var("MAKEPAD_TERMINAL_OPACITY") {
-            let mut it = spec.split_whitespace().filter_map(|s| s.parse::<f32>().ok());
+            let mut it = spec
+                .split_whitespace()
+                .filter_map(|s| s.parse::<f32>().ok());
             if let Some(active) = it.next() {
                 let inactive = it.next().unwrap_or(active);
                 self.bg_opacity = (active.clamp(0.0, 1.0), inactive.clamp(0.0, 1.0));
@@ -472,7 +696,10 @@ impl MpTerm {
                 }
                 self.original_colors = Some((base16, fg, bg));
                 if let Some((style_fg, style_bg)) = self.style_colors {
-                    fg = style_fg; bg = style_bg; base16[0] = bg; base16[7] = fg;
+                    fg = style_fg;
+                    bg = style_bg;
+                    base16[0] = bg;
+                    base16[7] = fg;
                 }
                 session.terminal.set_theme(&base16, fg, bg);
                 self.session = Some(session);
@@ -484,10 +711,12 @@ impl MpTerm {
     }
 
     fn refresh_metrics(&mut self, cx: &mut Cx2d) {
-        self.draw_text.text_style.font_size = self.font_size as f32;
+        let font_size = self.font_size * self.presentation_font_scale;
+        self.draw_text.text_style.font_size = font_size as f32;
         let key = (
-            (self.font_size * 64.0) as u32,
+            font_size.to_bits(),
             cx.current_dpi_factor().to_bits(),
+            self.raster_scale().to_bits(),
         );
         if key != self.glyph_cache_key {
             self.glyph_cache.clear();
@@ -498,43 +727,199 @@ impl MpTerm {
             self.cell_w = g.advance_in_lpxs as f64;
             let glyph_h = (run.ascender_in_lpxs - run.descender_in_lpxs) as f64;
             self.cell_h = glyph_h * self.draw_text.text_style.line_spacing as f64;
-            self.cell_baseline =
-                (self.cell_h - glyph_h) * 0.5 + run.ascender_in_lpxs as f64;
+            self.cell_baseline = (self.cell_h - glyph_h) * 0.5 + run.ascender_in_lpxs as f64;
         }
         if self.cell_w <= 0.0 {
-            self.cell_w = self.font_size * 0.6;
+            self.cell_w = font_size * 0.6;
         }
         if self.cell_h <= 0.0 {
-            self.cell_h = self.font_size * 1.35;
+            self.cell_h = font_size * 1.35;
         }
     }
 
     fn grid_size(&self) -> (usize, usize) {
-        let cols = ((self.rect.size.x - self.pad_x * 2.0) / self.cell_w)
+        let padding = self.inner_padding();
+        let cols = ((self.rect.size.x - padding.x * 2.0) / self.cell_w)
             .floor()
             .max(2.0) as usize;
-        let rows = ((self.rect.size.y - self.pad_y * 2.0) / self.cell_h)
+        let rows = ((self.rect.size.y - padding.y * 2.0) / self.cell_h)
             .floor()
             .max(2.0) as usize;
         (cols, rows)
     }
 
-    fn cached_glyph(&mut self, cx: &mut Cx2d, ch: char) -> Option<CachedGlyph> {
-        if let Some(hit) = self.glyph_cache.get(&ch) {
+    fn raster_scale(&self) -> f64 {
+        self.canvas_ime_anchor
+            .map(|(_, transform)| transform.scale)
+            .filter(|scale| scale.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.1, 8.0)
+    }
+
+    fn cached_glyph(
+        &mut self,
+        cx: &mut Cx2d,
+        ch: char,
+        bold: bool,
+        columns: u8,
+    ) -> Option<CachedGlyph> {
+        if let Some(hit) = self.glyph_cache.get(&(ch, bold, columns)) {
             return *hit;
         }
         let mut buf = [0u8; 4];
         let text: &str = ch.encode_utf8(&mut buf);
+        // Rasterize at the actual screen size, then retain local-grid metrics.
+        // Canvas zoom otherwise scales a low-resolution glyph cached at 1x.
+        let scale = self.raster_scale() as f32;
+        let style = self.draw_text.text_style.clone();
+        if bold {
+            self.draw_text.text_style.font_family = self.bold_text_style.font_family.clone();
+        }
+        self.draw_text.text_style.font_size *= scale;
         let prepared = self.draw_text.prepare_single_line_run(cx, text);
+        self.draw_text.text_style = style;
         let cached = prepared.and_then(|run| {
-            run.glyphs.first().map(|g| CachedGlyph {
-                rasterized: g.rasterized,
-                font_size_in_lpxs: g.font_size_in_lpxs,
-                x_offset_in_lpxs: g.pen_x_in_lpxs + g.offset_x_in_lpxs,
+            run.glyphs.first().map(|g| {
+                // Proportional fallback symbols must stay inside the cells
+                // allocated by the terminal, without shrinking normal mono
+                // glyphs for small rounding differences in the grid advance.
+                let available = self.cell_w as f32 * columns.max(1) as f32;
+                let advance = run.width_in_lpxs / scale;
+                let fit = if advance > available * 1.05 {
+                    available / advance
+                } else {
+                    1.0
+                };
+                let font_size = g.font_size_in_lpxs / scale;
+                let center_y = (-g.rasterized.origin_in_dpxs.y
+                    - g.rasterized.atlas_image_bounds.size.height as f32 * 0.5)
+                    * font_size
+                    / g.rasterized.dpxs_per_em;
+                CachedGlyph {
+                    rasterized: g.rasterized,
+                    font_size_in_lpxs: font_size * fit,
+                    x_offset_in_lpxs: (g.pen_x_in_lpxs + g.offset_x_in_lpxs) / scale * fit,
+                    y_offset_in_lpxs: center_y * (1.0 - fit),
+                }
             })
         });
-        self.glyph_cache.insert(ch, cached);
+        self.glyph_cache.insert((ch, bold, columns), cached);
         cached
+    }
+
+    /// Cell geometry, rather than a font's side bearings/line gap, joins
+    /// common TUI borders. Thin strokes occupy whole device pixels; rounded
+    /// corners remain curves, and ANSI faint is applied once to the result.
+    fn draw_box_glyph(&mut self, cx: &mut Cx2d, ch: char, x: f64, y: f64, color: Vec4f) -> bool {
+        let (arms, heavy, rounded) = match ch {
+            '─' => (3, false, false),
+            '━' => (3, true, false),
+            '│' => (12, false, false),
+            '┃' => (12, true, false),
+            '┌' => (10, false, false),
+            '┏' => (10, true, false),
+            '╭' => (10, false, true),
+            '┐' => (9, false, false),
+            '┓' => (9, true, false),
+            '╮' => (9, false, true),
+            '└' => (6, false, false),
+            '┗' => (6, true, false),
+            '╰' => (6, false, true),
+            '┘' => (5, false, false),
+            '┛' => (5, true, false),
+            '╯' => (5, false, true),
+            '├' => (14, false, false),
+            '┣' => (14, true, false),
+            '┤' => (13, false, false),
+            '┫' => (13, true, false),
+            '┬' => (11, false, false),
+            '┳' => (11, true, false),
+            '┴' => (7, false, false),
+            '┻' => (7, true, false),
+            '┼' => (15, false, false),
+            '╋' => (15, true, false),
+            _ => return false,
+        };
+        let scale = self.raster_scale();
+        let dpi = cx.current_dpi_factor().max(0.1);
+        let physical = dpi * scale;
+        let pixels = ((self.font_size * self.presentation_font_scale * 0.07 * physical)
+            .round()
+            .max(1.0))
+            * if heavy { 2.0 } else { 1.0 };
+        let thickness = pixels / physical;
+        let (mx, my) = (x + self.cell_w * 0.5, y + self.cell_h * 0.5);
+        let translation = self
+            .canvas_ime_anchor
+            .map(|(_, transform)| transform.translation)
+            .unwrap_or_default();
+        let snap = |value: f64, translation: f64| {
+            (((value * scale + translation) * dpi - pixels * 0.5).round() + pixels * 0.5) / physical
+                - translation / scale
+        };
+        let (mx, my) = (snap(mx, translation.x), snap(my, translation.y));
+        self.draw_boxes.color = color;
+        self.draw_boxes.arms = vec4(
+            (arms & 1 != 0) as u8 as f32,
+            (arms & 2 != 0) as u8 as f32,
+            (arms & 4 != 0) as u8 as f32,
+            (arms & 8 != 0) as u8 as f32,
+        );
+        self.draw_boxes.center = vec2((mx - x) as f32, (my - y) as f32);
+        self.draw_boxes.corner = vec2(
+            if arms & 2 != 0 { 1.0 } else { -1.0 },
+            if arms & 8 != 0 { 1.0 } else { -1.0 },
+        );
+        self.draw_boxes.thickness = thickness as f32;
+        self.draw_boxes.radius = if rounded {
+            (self.cell_w.min(self.cell_h) * 0.35).max(thickness) as f32
+        } else {
+            0.0
+        };
+        self.draw_boxes.pixel_size = (1.0 / physical) as f32;
+        self.draw_boxes.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(x, y),
+                size: dvec2(self.cell_w, self.cell_h),
+            },
+        );
+        true
+    }
+
+    /// Braille is a fixed two-by-four dot grid, also used by terminal plots
+    /// and animated logos. Render all 256 patterns without font fallback.
+    fn draw_braille_glyph(&mut self, ch: char, x: f64, y: f64, color: Vec4f) -> bool {
+        let Some(pattern) = (ch as u32).checked_sub(0x2800).filter(|v| *v <= 0xff) else {
+            return false;
+        };
+        if pattern == 0 {
+            return true;
+        }
+        self.draw_dots.clear();
+        self.draw_dots.set_color(color.x, color.y, color.z, color.w);
+        let radius = (self.cell_w * 0.13).min(self.cell_h * 0.065) as f32;
+        // Unicode dot numbering: 1,2,3,7 down the left; 4,5,6,8 right.
+        for (bit, col, row) in [
+            (0, 0, 0),
+            (1, 0, 1),
+            (2, 0, 2),
+            (6, 0, 3),
+            (3, 1, 0),
+            (4, 1, 1),
+            (5, 1, 2),
+            (7, 1, 3),
+        ] {
+            if pattern & (1 << bit) != 0 {
+                self.draw_dots.circle(
+                    (x + self.cell_w * (0.25 + col as f64 * 0.5)) as f32,
+                    (y + self.cell_h * (0.125 + row as f64 * 0.25)) as f32,
+                    radius,
+                );
+            }
+        }
+        self.draw_dots.fill();
+        true
     }
 
     fn rgb_to_vec4(rgb: Rgb, alpha: f32) -> Vec4f {
@@ -661,8 +1046,9 @@ impl MpTerm {
     fn pick(&self, abs_pos: Vec2d) -> Option<(u64, usize)> {
         let session = self.session.as_ref()?;
         let screen = session.terminal.screen();
-        let local_x = abs_pos.x - self.rect.pos.x - self.pad_x;
-        let local_y = abs_pos.y - self.rect.pos.y - self.pad_y;
+        let padding = self.inner_padding();
+        let local_x = abs_pos.x - self.rect.pos.x - padding.x;
+        let local_y = abs_pos.y - self.rect.pos.y - padding.y;
         let col = (local_x / self.cell_w).floor().max(0.0) as usize;
         let col = col.min(screen.cols.saturating_sub(1));
         let visual_row = (local_y / self.cell_h).floor().max(0.0) as usize;
@@ -740,12 +1126,19 @@ impl MpTerm {
     }
 
     fn paste(&mut self, cx: &mut Cx, text: &str) {
+        if self.paste_bytes(text) {
+            self.redraw(cx);
+        }
+    }
+
+    fn paste_bytes(&mut self, text: &str) -> bool {
         let Some(bracketed) = self
             .session
             .as_ref()
+            .filter(|session| !session.exited)
             .map(|s| s.terminal.modes.get(Mode::BracketedPaste))
         else {
-            return;
+            return false;
         };
         let mut bytes = Vec::with_capacity(text.len() + 16);
         if bracketed {
@@ -760,10 +1153,9 @@ impl MpTerm {
             }
         }
         self.scroll_to_bottom();
-        if let Some(session) = self.session.as_mut() {
-            session.write(&bytes);
-        }
-        self.redraw(cx);
+        self.session
+            .as_mut()
+            .is_some_and(|session| session.try_write(&bytes))
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -801,10 +1193,17 @@ impl MpTerm {
     }
 
     fn mouse_cell(&self, abs: Vec2d) -> (u32, u32, u32, u32) {
-        let x = (abs.x - self.rect.pos.x - self.pad_x).max(0.0);
-        let y = (abs.y - self.rect.pos.y - self.pad_y).max(0.0);
-        let col = (x / self.cell_w).floor() as u32;
-        let row = (y / self.cell_h).floor() as u32;
+        let padding = self.inner_padding();
+        let (cols, rows) = self.session.as_ref().map(|session| {
+            let screen = session.terminal.screen();
+            (screen.cols, screen.rows)
+        }).unwrap_or_else(|| self.grid_size());
+        let x = (abs.x - self.rect.pos.x - padding.x)
+            .clamp(0.0, (cols as f64 * self.cell_w - 1.0).max(0.0));
+        let y = (abs.y - self.rect.pos.y - padding.y)
+            .clamp(0.0, (rows as f64 * self.cell_h - 1.0).max(0.0));
+        let col = ((x / self.cell_w).floor() as u32).min(cols.saturating_sub(1) as u32);
+        let row = ((y / self.cell_h).floor() as u32).min(rows.saturating_sub(1) as u32);
         (col, row, x as u32, y as u32)
     }
 
@@ -940,10 +1339,37 @@ impl MpTerm {
     // Drawing
     // --------------------------------------------------------------
 
+    fn draw_terminal_background(&mut self, cx: &mut Cx2d, bg: Rgb, inverse: bool) {
+        let alpha = if self.opaque_style { 1.0 }
+            else if cx.has_key_focus(self.area) { self.bg_opacity.0 }
+            else { self.bg_opacity.1 };
+        let mut v = Self::rgb_to_vec4(bg, alpha);
+        if !inverse {
+            let scale = 1.0 - self.background_dimming;
+            v.x *= scale;
+            v.y *= scale;
+            v.z *= scale;
+        }
+        self.draw_bg.draw_vars.set_uniform(cx, id!(color), &[v.x, v.y, v.z, v.w]);
+        let (radius, width, color) = self.presentation_frame.map(|frame| {
+            // The stroke extends both ways from its inset. Keep the inside
+            // edge clear of the grid even at the smallest canvas zoom.
+            (frame.radius, frame.border_width.min(frame.padding as f32 * 0.5), frame.border_color)
+        }).unwrap_or((0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)));
+        self.draw_bg.draw_vars.set_uniform(cx, id!(corner_radius), &[radius]);
+        self.draw_bg.draw_vars.set_uniform(cx, id!(frame_width), &[width]);
+        self.draw_bg.draw_vars.set_uniform(cx, id!(frame_color), &[color.x, color.y, color.z, color.w]);
+        self.draw_bg.draw_abs(cx, self.rect);
+    }
+
     fn draw_terminal(&mut self, cx: &mut Cx2d) {
         // The session moves out of self for the draw so cached-glyph and
         // selection helpers can borrow self freely.
         let Some(mut session) = self.session.take() else {
+            let bg = self.style_colors.map(|(_, bg)| bg)
+                .or_else(|| self.original_colors.map(|(_, _, bg)| bg))
+                .unwrap_or_else(|| default_theme().2);
+            self.draw_terminal_background(cx, bg, false);
             return;
         };
         self.draw_terminal_inner(cx, &mut session);
@@ -954,8 +1380,9 @@ impl MpTerm {
         session.terminal.dirty = false;
 
         let has_focus = cx.has_key_focus(self.area);
-        let origin_x = self.rect.pos.x + self.pad_x;
-        let origin_y = self.rect.pos.y + self.pad_y;
+        let padding = self.inner_padding();
+        let origin_x = self.rect.pos.x + padding.x;
+        let origin_y = self.rect.pos.y + padding.y;
         let (cell_w, cell_h) = (self.cell_w, self.cell_h);
         let global_inverse = session.terminal.modes.get(Mode::ReverseColors);
         let cursor_visible = session.terminal.modes.get(Mode::CursorVisible);
@@ -975,16 +1402,7 @@ impl MpTerm {
         } else {
             default_bg
         };
-        let alpha = if self.opaque_style {1.0} else if has_focus {
-            self.bg_opacity.0
-        } else {
-            self.bg_opacity.1
-        };
-        let v = Self::rgb_to_vec4(bg_fill, alpha);
-        self.draw_bg
-            .draw_vars
-            .set_uniform(cx, id!(color), &[v.x, v.y, v.z, v.w]);
-        self.draw_bg.draw_abs(cx, self.rect);
+        self.draw_terminal_background(cx, bg_fill, global_inverse);
 
         let screen = session.terminal.screen();
         let rows = screen.rows;
@@ -1006,6 +1424,7 @@ impl MpTerm {
             ch: char,
             color: Vec4f,
             bold: bool,
+            columns: u8,
         }
         struct DecoDraw {
             x: f64,
@@ -1038,11 +1457,7 @@ impl MpTerm {
                     None => (None, None),
                 };
                 let selected = self.cell_selected(abs, col);
-                let bg = if selected {
-                    Some(SELECTION_COLOR)
-                } else {
-                    bg
-                };
+                let bg = if selected { Some(SELECTION_COLOR) } else { bg };
 
                 // Merge bg runs.
                 match (&mut run, bg) {
@@ -1110,6 +1525,7 @@ impl MpTerm {
                                 ch: *c,
                                 color: fg,
                                 bold: cell.style.flags.has(StyleFlags::BOLD),
+                                columns: cell.content.width(),
                             });
                         }
                     }
@@ -1123,6 +1539,7 @@ impl MpTerm {
                                 ch: *c,
                                 color: fg,
                                 bold: cell.style.flags.has(StyleFlags::BOLD),
+                                columns: cell.content.width(),
                             });
                         }
                     }
@@ -1202,6 +1619,8 @@ impl MpTerm {
         }
 
         // Layer 3: glyphs, one batch.
+        self.draw_boxes.new_draw_call(cx);
+        self.draw_dots.begin();
         self.draw_text.new_draw_call(cx);
         self.draw_text.begin_many_instances(cx);
         let baseline = self.cell_baseline;
@@ -1224,10 +1643,16 @@ impl MpTerm {
                     color = Self::rgb_to_vec4(default_bg, 1.0);
                 }
             }
-            if let Some(glyph) = self.cached_glyph(cx, g.ch) {
+            if self.draw_box_glyph(cx, g.ch, g.x, g.y, color) {
+                continue;
+            }
+            if self.draw_braille_glyph(g.ch, g.x, g.y, color) {
+                continue;
+            }
+            if let Some(glyph) = self.cached_glyph(cx, g.ch, g.bold, g.columns) {
                 let point = Point::new(
                     (g.x + glyph.x_offset_in_lpxs as f64) as f32,
-                    (g.y + baseline) as f32,
+                    (g.y + baseline) as f32 + glyph.y_offset_in_lpxs,
                 );
                 self.draw_text.draw_rasterized_glyph_abs(
                     cx,
@@ -1236,19 +1661,10 @@ impl MpTerm {
                     glyph.rasterized,
                     color,
                 );
-                if g.bold {
-                    // Synthetic bold: second strike, half-pixel offset.
-                    self.draw_text.draw_rasterized_glyph_abs(
-                        cx,
-                        Point::new(point.x + 0.5, point.y),
-                        glyph.font_size_in_lpxs,
-                        glyph.rasterized,
-                        color,
-                    );
-                }
             }
         }
         self.draw_text.end_many_instances(cx);
+        self.draw_dots.end(cx);
 
         // Layer 4: decorations.
         if !decos.is_empty() {
@@ -1280,8 +1696,7 @@ impl MpTerm {
         if self.bell_frames > 0 {
             self.bell_frames -= 1;
             self.draw_cell_bg.new_draw_call(cx);
-            self.draw_cell_bg.color =
-                vec4(1.0, 1.0, 1.0, 0.06 * self.bell_frames as f32);
+            self.draw_cell_bg.color = vec4(1.0, 1.0, 1.0, 0.06 * self.bell_frames as f32);
             self.draw_cell_bg.draw_abs(cx, self.rect);
             self.draw_bg.redraw(cx);
         }
@@ -1391,7 +1806,11 @@ impl Widget for MpTerm {
         // hold its own key focus for them to land).
         if !self.took_focus {
             self.took_focus = true;
-            cx.set_key_focus(self.area);
+            // Canvas hosts decide focus from actual input. Redrawing their
+            // areas must still let the framework migrate an existing focus.
+            if self.canvas_ime_anchor.is_none() {
+                cx.set_key_focus(self.area);
+            }
         }
         if self.session.is_some() && cx.has_key_focus(self.area) {
             let s = self
@@ -1402,12 +1821,13 @@ impl Widget for MpTerm {
                     (sc.cursor.x, sc.cursor.y)
                 })
                 .unwrap_or((0, 0));
-            let ime = dvec2(
-                self.pad_x + s.0 as f64 * self.cell_w,
-                self.pad_y + (s.1 + 1) as f64 * self.cell_h,
+            let ime = self.inner_padding() + dvec2(
+                s.0 as f64 * self.cell_w,
+                (s.1 + 1) as f64 * self.cell_h,
             );
             if let Some((anchor, transform)) = self.canvas_ime_anchor {
-                let screen = (self.area.clipped_rect(cx).pos + ime) * transform.scale + transform.translation;
+                let screen = (self.rect.pos + ime) * transform.scale
+                    + transform.translation;
                 let cursor = screen - anchor.rect(cx).pos;
                 cx.show_text_ime(anchor, cursor);
             } else {
@@ -1418,6 +1838,40 @@ impl Widget for MpTerm {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if matches!(event, Event::Drag(_) | Event::Drop(_)) {
+            match event.drag_hits(cx, self.area) {
+                DragHit::Drag(drag) => {
+                    let accepts = self.session.as_ref().is_some_and(|session| !session.exited)
+                        && drag.items.iter().any(|item| matches!(item, DragItem::FilePath {path,..} if Self::valid_drop_path(path)));
+                    if let Ok(mut response) = drag.response.try_lock() {
+                        *response = if accepts {
+                            DragResponse::Copy
+                        } else {
+                            DragResponse::None
+                        };
+                    }
+                }
+                DragHit::Drop(drop) => {
+                    if let Some(path) = drop.items.iter().find_map(|item| match item {
+                        DragItem::FilePath { path, .. } if Self::valid_drop_path(path) => {
+                            Some(path)
+                        }
+                        _ => None,
+                    }) {
+                        if self.ai_drop_file(Path::new(path)) {
+                            cx.widget_action(
+                                self.uid,
+                                MpTermAction::FileDropped {
+                                    path: PathBuf::from(path),
+                                },
+                            );
+                            self.redraw(cx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if let Event::Signal = event {
             // No check_and_clear here: the event loop already consumed the
             // global flag to dispatch this event, so a second check would
@@ -1542,6 +1996,16 @@ impl Widget for MpTerm {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
+                if self.session.is_some()
+                    && e.key_code == KeyCode::ReturnKey
+                    && !e.is_repeat
+                    && !e.modifiers.shift
+                    && !e.modifiers.control
+                    && !e.modifiers.logo
+                    && !e.modifiers.alt
+                {
+                    cx.widget_action(self.uid, MpTermAction::PromptSubmitted);
+                }
                 // Clear selection on typing.
                 if Self::is_special(e.key_code) {
                     self.sel_anchor = None;
