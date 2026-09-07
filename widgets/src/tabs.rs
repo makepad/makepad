@@ -128,10 +128,19 @@ script_mod! {
         can_add: true
         /** offer a close mark on the tabs */
         can_close: true
+        /** the tabs to start with, by name */
+        labels: []
 
-        draw_bg +: {color: theme.color_surface_container_low}
-        draw_tab +: {color: theme.color_surface_container}
-        draw_tab_hover +: {color: theme.color_surface_container_high}
+        /* The whole look is one ladder, and its order is the point. The
+         * strip is the app's own background, a quiet tab is that same
+         * background so it RECEDES into the frame rather than sitting on
+         * it, hovering lifts a tab part of the way, and only the tab in use
+         * carries the panel's colour. Brighten a quiet tab past the one in
+         * use and the eye picks the wrong tab, which is what a row of
+         * buttons looks like. */
+        draw_bg +: {color: theme.color_bg_app}
+        draw_tab +: {color: theme.color_bg_app}
+        draw_tab_hover +: {color: mix(theme.color_bg_app, theme.color_surface_container_low, 0.55)}
         draw_tab_active +: {color: theme.color_surface_container_low}
         draw_sep +: {color: theme.color_outline_variant radius: 0.5}
         draw_mark +: {color: theme.color_text_meta}
@@ -204,9 +213,15 @@ pub struct Tabs {
     pub can_add: bool,
     #[live(true)]
     pub can_close: bool,
+    /// The tabs to start with, by name, for a strip declared in markup.
+    #[live]
+    pub labels: Vec<String>,
 
     #[rust]
     entries: Vec<TabEntry>,
+    /// Whether the names in `labels` have been turned into tabs yet.
+    #[rust]
+    seeded: bool,
     #[rust]
     selected: Option<LiveId>,
     #[rust]
@@ -292,6 +307,22 @@ pub fn tab_width_for(count: usize, room: f64, max: f64, min: f64) -> f64 {
 
 impl Widget for Tabs {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // A strip declared in markup has to show its tabs without a host
+        // saying anything. Seeding on the first draw rather than waiting for
+        // an action is what makes that true after a reload as well, when
+        // nothing has happened yet to prompt the host.
+        if !self.seeded {
+            self.seeded = true;
+            if self.entries.is_empty() && !self.labels.is_empty() {
+                let entries = self
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| TabEntry::new(LiveId(i as u64 + 1), name))
+                    .collect();
+                self.set_tabs(cx.cx.cx, entries);
+            }
+        }
         self.draw_bg.begin(cx, walk, self.layout);
         let strip = cx.turtle().rect();
         self.hits.clear();
@@ -435,6 +466,12 @@ impl TabsRef {
 
     pub fn selected(&self) -> Option<LiveId> {
         self.borrow().and_then(|inner| inner.selected())
+    }
+
+    /// How many tabs are open, so a host that owns the order can tell when
+    /// the strip has been rebuilt underneath it and hand the list back.
+    pub fn count(&self) -> usize {
+        self.borrow().map(|inner| inner.entries.len()).unwrap_or(0)
     }
 
     /// The tab chosen this pass, if one was.
