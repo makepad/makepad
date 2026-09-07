@@ -23,6 +23,7 @@ pub mod accordion;
 pub mod dialog;
 pub mod drawer;
 pub mod overlay;
+pub mod popover;
 pub mod toast;
 pub mod select;
 pub mod tip;
@@ -107,6 +108,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     dialog::script_mod(vm);
     drawer::script_mod(vm);
     overlay::script_mod(vm);
+    popover::script_mod(vm);
     toast::script_mod(vm);
     alert::script_mod(vm);
     divider::script_mod(vm);
@@ -163,6 +165,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         dialog::STORIES,
         drawer::STORIES,
         overlay::STORIES,
+        popover::STORIES,
         toast::STORIES,
         alert::STORIES,
         divider::STORIES,
