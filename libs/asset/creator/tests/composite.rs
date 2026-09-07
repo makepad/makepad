@@ -132,12 +132,13 @@ fn character_owns_jobs_relays_nearest_bytes_and_preserves_every_output() {
     let result = run(&Recipe::content(Kind::Character, "alpine dragon", Some(2.0)), &state, &CancelFlag::default()).unwrap();
     let s = state.borrow();
     assert_eq!(s.requests.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), character::CHARACTER_DOMAINS);
+    assert_eq!(s.requests[0].1.model, "fake-text", "text expansion must use the available routed model, not a retired pin");
     assert_eq!(decode(&s.requests[2].1), b"image");
     assert_eq!(decode(&s.requests[3].1), b"matte");
     assert_eq!(decode(&s.requests[4].1), b"mesh-from-image");
     assert_eq!(decode(&s.requests[5].1), skin(false));
     for (index, ((domain, request), (_, pin))) in s.requests.iter().zip(character::CHARACTER_PINS).enumerate() {
-        assert_eq!(&request.model, pin, "{domain}");
+        assert_eq!(request.model, if pin.is_empty() { format!("fake-{domain}") } else { pin.to_string() }, "{domain}");
         assert_eq!(request.seed, Some(41 + index as u64));
     }
     assert_eq!(s.requests[0].1.identity_anchor.as_deref(), Some("alpine dragon"));

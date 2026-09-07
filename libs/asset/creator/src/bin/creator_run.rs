@@ -1,21 +1,9 @@
-//! makepad-creator-run: the detached client for long pipeline runs
-//! (aicore §9 — "a run that must outlive a window is a client that does not
-//! close"). Drives one library pipeline against a hub node and writes the
-//! finished artifacts beside it; close your laptop lid AFTER starting this,
-//! not instead of it.
-//!
-//! ```text
-//! makepad-creator-run --base http://10.0.0.217:8765 --stages text,image \
-//!     --prompt "a rusted lighthouse" [--model-0 qwen3.5-9b] [--out DIR]
-//! ```
-//!
-//! v1 drives a linear chain: each stage's domain in order, the first stage
-//! takes the prompt, every later stage splices its predecessor (text →
-//! prompt, artifact → input image). The named-pipeline catalogue replaces
-//! `--stages` as chains migrate in.
+//! Headless Flow instance client for a linear named-stage pipeline.
+//! Uses CREATOR_FLOW_* configuration by default. --base URL selects the
+//! compatibility embedded host with a fixed hub provider.
 
 use makepad_asset_creator::engine::{
-    run, EngineConfig, RunEvent, Splice, StageOrder,
+    run, run_in, EngineConfig, RunEvent, Splice, StageOrder,
 };
 use makepad_asset_creator::pipeline::{PipelineSpec, StageSpec, DEFAULT_STAGE_WEIGHT};
 use makepad_asset_creator::makepad_ai_hub::client::LocalService;
@@ -61,8 +49,8 @@ fn run_cli() -> Result<(), String> {
             }
         }
     }
-    if base.is_empty() || stages.is_empty() || prompt.is_empty() {
-        return Err("usage: --base URL --stages a,b,c --prompt TEXT [--model-N id] [--out DIR] [--seed N]".into());
+    if stages.is_empty() || prompt.is_empty() {
+        return Err("usage: [--base URL] --stages a,b,c --prompt TEXT [--model-N id] [--out DIR] [--seed N]".into());
     }
 
     let spec = PipelineSpec {
@@ -135,17 +123,21 @@ fn run_cli() -> Result<(), String> {
             }
         }
     });
-    let outputs = run(
+    let result = if base.is_empty() {
+        let flow = makepad_asset_creator::flow::CreatorFlow::shared()
+            .map_err(makepad_asset_creator::makepad_ai_hub::error::AssetAiError::Unavailable);
+        flow.and_then(|flow| run_in(&flow, &spec, &orders, &EngineConfig::default(), &events_tx, &cancel))
+    } else { run(
         &spec,
         &orders,
-        &provider,
+        Arc::new(provider),
         &EngineConfig::default(),
         &events_tx,
         &cancel,
-    )
-    .map_err(|e| e.to_string())?;
+    ) };
     drop(events_tx);
     let _ = printer.join();
+    let outputs = result.map_err(|e| e.to_string())?;
 
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     for (key, output) in &outputs {
