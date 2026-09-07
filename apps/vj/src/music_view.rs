@@ -5282,6 +5282,33 @@ impl WaveLane {
         self.position_at(now) * ZOOM_COLS_PER_SEC
     }
 
+    /// The nearest mark strictly ahead of `at_secs` -- the cue, every
+    /// saved loop's start, every found loop's start -- or `None` when
+    /// nothing left in the record is marked. Source seconds, the same
+    /// space `position_secs` lives in.
+    pub fn next_mark_secs(&self, at_secs: f64) -> Option<f64> {
+        std::iter::once(self.cue_secs)
+            .chain(self.saved_slots.iter().map(|entry| entry.1))
+            .chain(self.found_loops.iter().map(|span| span.0))
+            .filter(|&secs| secs > at_secs)
+            .fold(None, |best: Option<f64>, secs| Some(best.map_or(secs, |b| b.min(secs))))
+    }
+
+    /// What to show next to the playhead for the nearest mark ahead of
+    /// it: beats when the grid can count them (what a DJ actually plans
+    /// around -- "two bars to the cue"), seconds when it cannot.
+    pub fn next_mark_label(&self, now: f64) -> Option<String> {
+        let at = self.position_at(now);
+        let next = self.next_mark_secs(at)?;
+        match self.grid.filter(|grid| grid.has_grid()) {
+            Some(grid) => {
+                let beats = (grid.beat_at(next) - grid.beat_at(at)).max(0.0);
+                Some(format!("{beats:.0} beats"))
+            }
+            None => Some(crate::clock::countdown(next - at)),
+        }
+    }
+
     /// The zoom for ONE lane, from the shared one.
     ///
     /// The tiles are in SOURCE columns, so a record running fast crosses
@@ -6238,6 +6265,24 @@ impl Widget for VjWaveScroll {
                     },
                 );
             }
+        }
+        // What's coming: beats or time to the nearest mark ahead of the
+        // playhead, right beside the head line rather than back at the
+        // strip -- the strip answers WHERE in the whole record, this
+        // answers HOW SOON, which is the question actually asked while
+        // playing.
+        for index in 0..2 {
+            let Some(label) = self.lanes[index].next_mark_label(now) else { continue };
+            let lane_rect = self.lane_rects[index];
+            let head_x = lane_rect.pos.x + lane_rect.size.x * self.head_fraction;
+            self.draw_text.text_style.font_size = 9.0;
+            draw_outlined_text(
+                &mut self.draw_text,
+                cx,
+                dvec2(head_x + 9.0, lane_rect.pos.y + 2.0),
+                &label,
+                Vec4f::from_u32(0xf4f7faff),
+            );
         }
         DrawStep::done()
     }
@@ -9210,6 +9255,38 @@ mod tests {
         assert_eq!(lane.warn_at(100.0, 0.0005), 0.0, "outside a half-second window");
         lane.position_secs = 299.9999;
         assert!(lane.warn_at(100.0, 0.0005) > 0.0, "inside it");
+    }
+
+    #[test]
+    fn the_next_mark_is_the_nearest_one_still_ahead() {
+        let mut lane = lane(120.0, 10.0);
+        lane.cue_secs = 5.0; // behind the playhead: not a candidate
+        lane.saved_slots = vec![(1, 40.0, 44.0, 0), (2, 15.0, 16.0, 0)];
+        lane.found_loops = vec![(12.0, 12.5)];
+        // Nearest of the three ahead of 10.0 is the found loop at 12.0,
+        // not the saved slot that is merely first in the list.
+        assert_eq!(lane.next_mark_secs(10.0), Some(12.0));
+        // Once the playhead passes it, the next saved slot takes over.
+        assert_eq!(lane.next_mark_secs(13.0), Some(15.0));
+        // Past everything, there is nothing left to point at.
+        assert_eq!(lane.next_mark_secs(41.0), None);
+    }
+
+    #[test]
+    fn the_next_mark_label_counts_beats_with_a_grid_and_seconds_without() {
+        let mut with_grid = lane(120.0, 10.0); // 0.5s a beat
+        with_grid.saved_slots = vec![(1, 12.0, 13.0, 0)];
+        // Two seconds at 120bpm is exactly four beats.
+        assert_eq!(with_grid.next_mark_label(10.0), Some("4 beats".to_string()));
+
+        let mut no_grid = with_grid.clone();
+        no_grid.grid = None;
+        assert_eq!(no_grid.next_mark_label(10.0), Some(crate::clock::countdown(2.0)));
+
+        // Nothing ahead: nothing to say next to the playhead at all.
+        let mut nothing_ahead = with_grid.clone();
+        nothing_ahead.saved_slots.clear();
+        assert_eq!(nothing_ahead.next_mark_label(10.0), None);
     }
 
     #[test]
