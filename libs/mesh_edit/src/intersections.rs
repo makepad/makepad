@@ -47,8 +47,35 @@ impl Mesh {
         if report.local.is_closed_manifold&&hits.is_empty(){
             let mut membership=BTreeMap::new();for(i,faces)in components.iter().enumerate(){for &face in faces{ctx.checkpoint(1)?;membership.insert(face,i);}}
             let mut groups=vec![Vec::new();components.len()];for tri in &triangles{ctx.checkpoint(1)?;groups[membership[&tri.face]].push(tri);}
-            for (i,group) in groups.iter().enumerate(){ctx.checkpoint(1)?;let mut depth=0;let point=group[0].points[0];
-                for (j,other) in groups.iter().enumerate(){if i!=j&&inside_shell(point,other,ctx)?{depth+=1;}}
+            // Disconnected fibers are closed shells too. Reject impossible
+            // containment using exact component bounds before summing winding
+            // angles over every triangle of every other strand. Nested shells
+            // still receive the complete orientation and containment checks.
+            let mut bounds = Vec::with_capacity(groups.len());
+            for group in &groups {
+                let mut bound = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+                for tri in group {
+                    ctx.checkpoint(1)?;
+                    for d in 0..3 {
+                        bound[0][d] = bound[0][d].min(tri.bounds[0][d]);
+                        bound[1][d] = bound[1][d].max(tri.bounds[1][d]);
+                    }
+                }
+                bounds.push(bound);
+            }
+            for (i, group) in groups.iter().enumerate() {
+                ctx.checkpoint(1)?;
+                let mut depth = 0;
+                let point = group[0].points[0];
+                for (j, other) in groups.iter().enumerate() {
+                    ctx.checkpoint(1)?;
+                    if i != j
+                        && (0..3).all(|d| point[d] >= bounds[j][0][d] && point[d] <= bounds[j][1][d])
+                        && inside_shell(point, other, ctx)?
+                    {
+                        depth += 1;
+                    }
+                }
                 let sign=shell_sign(group,ctx)?;if sign!=(if depth%2==0{1}else{-1}){report.orientation_errors+=1;}
             }
         }

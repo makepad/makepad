@@ -61,15 +61,15 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             mesh: mesh::Limits::default(),
-            max_objects: 128,
-            max_materials: 64,
+            max_objects: 2048,
+            max_materials: 512,
             max_operations: 256,
-            max_history: 128,
+            max_history: 4096,
             max_receipts: 128,
             max_name_bytes: 96,
-            max_source_bytes: 64 * 1024 * 1024,
-            max_transaction_bytes: 16 * 1024 * 1024,
-            max_texture_bytes: 8 * 1024 * 1024,
+            max_source_bytes: 256 * 1024 * 1024,
+            max_transaction_bytes: 64 * 1024 * 1024,
+            max_texture_bytes: 64 * 1024 * 1024,
             max_texture_dimension: 2048,
             max_joints: 64,
             max_clips: 64,
@@ -142,6 +142,14 @@ impl Receipt {
 }
 const MAX_RECEIPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_IDENTITIES: usize = 65_536;
+/// Serialized size and work of the checkpoint section of a version 2 source.
+/// Measured from trusted execution whenever the checkpoint is established, so
+/// admitting a transaction never re-serializes the checkpoint geometry.
+#[derive(Clone, Copy, Debug, Default)]
+struct SourceMeasure {
+    bytes: usize,
+    work: u64,
+}
 
 /// Single-owner state: run this on a long-lived worker or transfer ownership
 /// between pool tasks. Element selectors are scoped to expected Head and object
@@ -159,6 +167,7 @@ pub struct Document {
     hash_work: Vec<u64>,
     checkpoint_load_work: u64,
     checkpoint_hash_work: u64,
+    checkpoint_source: SourceMeasure,
     cursor: usize,
     pub(crate) state: State,
     head: Head,
@@ -175,14 +184,14 @@ impl Document {
         let mut ctx = mesh::Context::new(limits.mesh.clone(), None);
         let hash = state_hash(&state, &limits, &mut ctx)?;
         let checkpoint_hash_work=ctx.work_used();
-        let checkpoint_load_work=checkpoint_load_work(&state,&limits)?;
+        let (checkpoint_load_work,checkpoint_source)=checkpoint_load_work(&state,&limits)?;
         Ok(Self {
             limits,
             checkpoint: state.clone(),
             log: Vec::new(),
             log_memory: Vec::new(),
             replay_work: Vec::new(), hash_work: Vec::new(),
-            checkpoint_load_work, checkpoint_hash_work,
+            checkpoint_load_work, checkpoint_hash_work, checkpoint_source,
             cursor: 0,
             state,
             head: Head {
@@ -224,7 +233,7 @@ impl Document {
     pub fn soft_body(&self) -> Option<&makepad_gltf::SoftBodyMetadata> { self.state.soft_body.as_ref() }
     pub(crate) fn render_copy(&self, working:usize) -> Result<Self> {
         self.admit(working.saturating_add(self.state.memory_bytes()))?;
-        Ok(Self { limits:self.limits.clone(), checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), replay_work:Vec::new(), hash_work:Vec::new(), checkpoint_load_work:0, checkpoint_hash_work:0,
+        Ok(Self { limits:self.limits.clone(), checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), replay_work:Vec::new(), hash_work:Vec::new(), checkpoint_load_work:0, checkpoint_hash_work:0, checkpoint_source:SourceMeasure::default(),
             cursor:0, state:self.state.clone(), head:self.head, receipts:VecDeque::new(), request_identities:BTreeSet::new() })
     }
     pub fn history_position(&self) -> (usize, usize) {
@@ -266,10 +275,14 @@ impl Document {
         if tx.operations.is_empty() {
             return Err(Error::Invalid("empty transaction"));
         }
-        let mut encoded = Writer::new(self.limits.max_transaction_bytes);
-        write_head(&mut encoded, tx.expected)?;
-        write_ops(&mut encoded, &tx.operations, &self.limits)?;
-        let fingerprint = sha256(&encoded.bytes);
+        // The fingerprint encoding is released before admission; it is not
+        // resident while the transaction executes.
+        let fingerprint = {
+            let mut encoded = Writer::new(self.limits.max_transaction_bytes);
+            write_head(&mut encoded, tx.expected)?;
+            write_ops(&mut encoded, &tx.operations, &self.limits)?;
+            sha256(&encoded.bytes)
+        };
         if let Some(receipt) = self.receipts.iter().find(|r| r.id == tx.request_id) {
             if receipt.fingerprint != fingerprint {
                 return Err(Error::RequestIdReused);
@@ -302,24 +315,38 @@ impl Document {
             .operations
             .iter()
             .fold(0usize, |n, op| n.saturating_add(op.memory_bytes()));
-        self.admit(
-            self.memory_bytes()
-                .saturating_add(self.state.memory_bytes())
-                .saturating_add(operation_bytes.saturating_mul(2))
-                .saturating_add(encoded.bytes.len()),
-        )?;
-        ctx.limits.max_bytes = ctx.limits.max_bytes.saturating_sub(self.memory_bytes());
-        // Admission before copying; budgets bound source and every mesh operation.
-        let mut candidate = self.state.clone();
+        // Resident while a transaction is admitted: the retained document, the
+        // transaction, one candidate copy of the state and the re-serialized
+        // history that bounds the source. Nothing else is cloned. Leading
+        // whole-object deletions never read the mesh they remove, so the
+        // candidate carries an empty stand-in for that geometry instead of a
+        // copy; execute still performs and validates the deletion itself.
+        let retained = self.memory_bytes();
+        let state_bytes = self.state.memory_bytes();
+        let history_bytes = retained
+            .saturating_sub(state_bytes)
+            .saturating_sub(self.checkpoint.memory_bytes());
+        let released = released_objects(&self.state, &tx.operations);
+        let placeholder_bytes = mesh::Mesh::new().memory_bytes();
+        let candidate_bytes = released.iter().fold(state_bytes, |n, name| {
+            n.saturating_sub(self.state.objects[*name].memory_bytes())
+                .saturating_add(placeholder_bytes)
+        });
+        let transaction_bytes = operation_bytes
+            .saturating_mul(2)
+            .saturating_add(history_bytes);
+        self.admit(candidate_bytes.saturating_add(transaction_bytes))?;
+        // Mesh operations work beside the retained document and the
+        // transaction; execute pins the candidate itself per operation.
+        ctx.limits.max_bytes = ctx
+            .limits
+            .max_bytes
+            .saturating_sub(retained)
+            .saturating_sub(operation_bytes);
+        let mut candidate = candidate_state(&self.state, &released);
         let replay_start=ctx.work_used();
         let results = execute(&mut candidate, &tx.operations, &self.limits, &mut ctx)?;
-        self.admit(
-            candidate
-                .memory_bytes()
-                .saturating_add(self.checkpoint.memory_bytes())
-                .saturating_add(operation_bytes)
-                .saturating_add(encoded.bytes.len()),
-        )?;
+        self.admit(candidate.memory_bytes().saturating_add(transaction_bytes))?;
         let hash_start=ctx.work_used();
         let content = state_hash(&candidate, &self.limits, &mut ctx)?;
         let hash_work=ctx.work_used()-hash_start;
@@ -332,43 +359,80 @@ impl Document {
                 .ok_or(Error::Budget("generation"))?,
             content,
         };
-        // Account for retained redo history and receipts before installing anything.
-        let mut next = Self {
-            limits: self.limits.clone(),
-            checkpoint: self.checkpoint.clone(),
-            log: self.log[..self.cursor].to_vec(),
-            log_memory: self.log_memory[..self.cursor].to_vec(),
-            replay_work: self.replay_work[..self.cursor].to_vec(),
-            hash_work: self.hash_work[..self.cursor].to_vec(),
-            checkpoint_load_work:self.checkpoint_load_work,
-            checkpoint_hash_work:self.checkpoint_hash_work,
-            cursor: self.cursor + 1,
-            state: candidate,
-            head,
-            receipts: self.receipts.clone(),
-            request_identities: self.request_identities.clone(),
-        };
-        next.request_identities.insert(request_identity);
-        next.log.push(tx.operations);
-        next.log_memory.push(operation_bytes);
-        next.replay_work.push(replay_work);
-        next.hash_work.push(hash_work);
-        next.receipts.push_back(Receipt {
+        let receipt = Receipt {
             id: tx.request_id,
             fingerprint,
             head,
             results: results.clone(),
-        });
-        let mut receipt_bytes=next.receipts.iter().map(Receipt::memory_bytes).sum::<usize>();
-        while next.receipts.len()>next.limits.max_receipts || receipt_bytes>MAX_RECEIPT_BYTES {
-            let Some(old)=next.receipts.pop_front() else { break; };
-            receipt_bytes=receipt_bytes.saturating_sub(old.memory_bytes());
-        }
+        };
+        let (evicted, retain_receipt) =
+            plan_receipt_eviction(&self.receipts, &receipt, self.limits.max_receipts);
+        // Bound the source and history work of the document that would result
+        // before installing anything. The redo branch is dropped only on
+        // success; the checkpoint section is measured, not re-serialized.
+        let log = self.log[..self.cursor]
+            .iter()
+            .map(Vec::as_slice)
+            .chain(std::iter::once(tx.operations.as_slice()))
+            .collect::<Vec<_>>();
+        let receipts = self
+            .receipts
+            .iter()
+            .skip(evicted)
+            .chain(retain_receipt.then_some(&receipt))
+            .collect::<Vec<_>>();
         let encode_start=ctx.work_used();
-        next.encode(&mut ctx)?;
-        next.admit_history_work(ctx.work_used()-encode_start)?;
+        encode_source(
+            &SourceParts {
+                head,
+                checkpoint: CheckpointSource::Measured(self.checkpoint_source),
+                cursor: self.cursor + 1,
+                log: &log,
+                receipts: &receipts,
+                identities: &self.request_identities,
+                added_identity: Some(request_identity),
+            },
+            &self.limits,
+            &mut ctx,
+            2,
+        )?;
+        let needed = history_work(
+            self.replay_work[..self.cursor]
+                .iter()
+                .copied()
+                .chain(std::iter::once(replay_work)),
+            self.hash_work[..self.cursor]
+                .iter()
+                .copied()
+                .chain(std::iter::once(hash_work)),
+            self.checkpoint_load_work,
+            self.checkpoint_hash_work,
+            ctx.work_used()-encode_start,
+        );
+        if needed > self.limits.mesh.max_work {
+            return Err(Error::Budget("history replay work; checkpoint explicitly before editing further"));
+        }
         ctx.checkpoint(1)?;
-        *self = next;
+        // Install in place: nothing below can fail, so the previous state, the
+        // redo branch and evicted receipts are released only after every check.
+        self.log.truncate(self.cursor);
+        self.log_memory.truncate(self.cursor);
+        self.replay_work.truncate(self.cursor);
+        self.hash_work.truncate(self.cursor);
+        self.log.push(tx.operations);
+        self.log_memory.push(operation_bytes);
+        self.replay_work.push(replay_work);
+        self.hash_work.push(hash_work);
+        for _ in 0..evicted {
+            self.receipts.pop_front();
+        }
+        if retain_receipt {
+            self.receipts.push_back(receipt);
+        }
+        self.request_identities.insert(request_identity);
+        self.state = candidate;
+        self.head = head;
+        self.cursor += 1;
         Ok(Applied {
             committed: head,
             current: head,
@@ -382,12 +446,13 @@ impl Document {
     /// before installing the new state; explicit checkpointing is the user's
     /// choice, so admission never silently removes undo entries.
     fn history_work_needed(&self,encode_work:u64)->u64 {
-        let cursor_hash=self.hash_work.iter().copied().fold(self.checkpoint_hash_work,u64::max);
-        let work=self.replay_work.iter().fold(2u64,|n,w|n.saturating_add(*w))
-            .saturating_add(self.checkpoint_load_work)
-            .saturating_add(if self.log.is_empty(){0}else{self.checkpoint_hash_work})
-            .saturating_add(cursor_hash).saturating_add(encode_work);
-        work
+        history_work(
+            self.replay_work.iter().copied(),
+            self.hash_work.iter().copied(),
+            self.checkpoint_load_work,
+            self.checkpoint_hash_work,
+            encode_work,
+        )
     }
     fn admit_history_work(&self,encode_work:u64)->Result<()> {
         if self.history_work_needed(encode_work)>self.limits.mesh.max_work{return Err(Error::Budget("history replay work; checkpoint explicitly before editing further"));}
@@ -449,11 +514,12 @@ impl Document {
             .checked_add(1)
             .ok_or(Error::Budget("generation"))?;
         self.admit(self.state.memory_bytes())?;
-        let load_work=checkpoint_load_work(&self.state,&self.limits)?;
+        let (load_work,source)=checkpoint_load_work(&self.state,&self.limits)?;
         let hash_work=if self.cursor==0{self.checkpoint_hash_work}else{self.hash_work[self.cursor-1]};
         self.checkpoint = self.state.clone();
         self.checkpoint_load_work=load_work;
         self.checkpoint_hash_work=hash_work;
+        self.checkpoint_source=source;
         self.log.clear();
         self.log_memory.clear();
         self.replay_work.clear();self.hash_work.clear();
@@ -483,46 +549,26 @@ impl Document {
             self.memory_bytes()
                 .saturating_sub(self.state.memory_bytes()),
         )?;
-        let mut w = Writer::new(self.limits.max_source_bytes);
-        w.raw(b"MPMODEL\0")?;
-        w.u32(version)?;
-        write_head(&mut w, self.head)?;
-        write_state(&mut w, if snapshot { &self.state } else { &self.checkpoint }, &self.limits, ctx, version >= 2)?;
-        let log = if snapshot { &[][..] } else { self.log.as_slice() };
-        w.count(if snapshot { 0 } else { self.cursor })?;
-        w.count(log.len())?;
-        for ops in log {
-            ctx.checkpoint(1)?;
-            write_ops(&mut w, ops, &self.limits)?;
-        }
-        w.count(self.receipts.len())?;
-        for receipt in &self.receipts {
-            w.string(&receipt.id)?;
-            w.raw(&receipt.fingerprint)?;
-            write_head(&mut w, receipt.head)?;
-            w.count(receipt.results.len())?;
-            for result in &receipt.results {
-                w.string(&result.object)?;
-                w.count(result.faces.len())?;
-                for face in &result.faces {
-                    w.u64(face.0)?;
-                }
-                w.count(result.vertices.len())?;
-                for vertex in &result.vertices {
-                    w.u64(vertex.0)?;
-                }
-                if version >= 2 {
-                    w.count(result.metrics.len())?;
-                    for (name, value) in &result.metrics { w.string(name)?; w.u64(*value as u64)?; }
-                }
-            }
-        }
-        w.count(self.request_identities.len())?;
-        for identity in &self.request_identities {
-            w.raw(identity)?;
-        }
-        ctx.checkpoint(w.bytes.len() as u64)?;
-        Ok(w.bytes)
+        let log = if snapshot {
+            Vec::new()
+        } else {
+            self.log.iter().map(Vec::as_slice).collect::<Vec<_>>()
+        };
+        let receipts = self.receipts.iter().collect::<Vec<_>>();
+        encode_source(
+            &SourceParts {
+                head: self.head,
+                checkpoint: CheckpointSource::State(if snapshot { &self.state } else { &self.checkpoint }),
+                cursor: if snapshot { 0 } else { self.cursor },
+                log: &log,
+                receipts: &receipts,
+                identities: &self.request_identities,
+                added_identity: None,
+            },
+            &self.limits,
+            ctx,
+            version,
+        )
     }
     pub fn from_bytes(
         bytes: &[u8],
@@ -547,10 +593,11 @@ impl Document {
         if !(1..=2).contains(&version) { return Err(Error::Corrupt("unsupported model source version")); }
         let head = read_head(&mut r)?;
         let checkpoint = read_state(&mut r, &limits, &mut ctx, version)?;
-        let checkpoint_load_work=ctx.work_used()-1;
         if checkpoint.memory_bytes().saturating_mul(3) > ctx.limits.max_bytes {
             return Err(Error::Budget("decode checkpoint copies"));
         }
+        let checkpoint_source=checkpoint_source_measure(&checkpoint,&limits,&mut ctx)?.1;
+        let checkpoint_load_work=ctx.work_used()-1;
         let cursor = r.u32()? as usize;
         let count = r.count(limits.max_history)?;
         let mut checkpoint_hash_work=0;
@@ -660,7 +707,7 @@ impl Document {
             checkpoint,
             log,
             log_memory,
-            replay_work,hash_work,checkpoint_load_work,checkpoint_hash_work,
+            replay_work,hash_work,checkpoint_load_work,checkpoint_hash_work,checkpoint_source,
             cursor,
             state: current,
             head,
@@ -675,6 +722,165 @@ impl Document {
         out.admit_history_work(ctx.work_used()-encode_start)?;
         Ok(out)
     }
+}
+
+/// Retained history must fit the same aggregate budget used to decode it,
+/// including checkpoint decoding, every accepted transaction, the most
+/// expensive possible undo cursor hash, and canonical re-encoding.
+fn history_work(
+    replay_work: impl Iterator<Item = u64>,
+    hash_work: impl Iterator<Item = u64>,
+    checkpoint_load_work: u64,
+    checkpoint_hash_work: u64,
+    encode_work: u64,
+) -> u64 {
+    let mut entries = 0usize;
+    let replay = replay_work.fold(2u64, |n, w| {
+        entries += 1;
+        n.saturating_add(w)
+    });
+    let cursor_hash = hash_work.fold(checkpoint_hash_work, u64::max);
+    replay
+        .saturating_add(checkpoint_load_work)
+        .saturating_add(if entries == 0 { 0 } else { checkpoint_hash_work })
+        .saturating_add(cursor_hash)
+        .saturating_add(encode_work)
+}
+/// Objects removed by the leading whole-object deletions of a transaction.
+/// Execute never reads such a mesh before removing it, except as vertex colour
+/// provenance, which it snapshots before the first operation; coloured objects
+/// therefore stay excluded so replay observes identical inputs.
+fn released_objects<'a>(state: &State, ops: &'a [Operation]) -> BTreeSet<&'a str> {
+    let mut released = BTreeSet::new();
+    for op in ops {
+        let Operation::DeleteObject { object } = op else { break };
+        let coloured = state.surface.vertex_colors.keys().any(|(name, _)| name == object);
+        if state.objects.contains_key(object) && !coloured {
+            released.insert(object.as_str());
+        }
+    }
+    released
+}
+/// Copy of the state for execution, with released objects replaced by empty
+/// stand-ins so deleted heavy geometry is never duplicated.
+fn candidate_state(state: &State, released: &BTreeSet<&str>) -> State {
+    State {
+        objects: state
+            .objects
+            .iter()
+            .map(|(name, mesh)| {
+                let mesh = if released.contains(name.as_str()) { mesh::Mesh::new() } else { mesh.clone() };
+                (name.clone(), mesh)
+            })
+            .collect(),
+        materials: state.materials.clone(),
+        skeleton: state.skeleton.clone(),
+        clips: state.clips.clone(),
+        scene: state.scene.clone(),
+        selections: state.selections.clone(),
+        rig: state.rig.clone(),
+        surface: state.surface.clone(),
+        soft_body: state.soft_body.clone(),
+    }
+}
+/// Eviction that appending `added` would cause: oldest receipts first while
+/// over the count or byte bound, then the new receipt itself. Returns the
+/// number of leading receipts evicted and whether `added` is retained.
+fn plan_receipt_eviction(receipts: &VecDeque<Receipt>, added: &Receipt, max_receipts: usize) -> (usize, bool) {
+    let mut bytes = receipts
+        .iter()
+        .fold(added.memory_bytes(), |n, r| n.saturating_add(r.memory_bytes()));
+    let mut count = receipts.len() + 1;
+    let mut evicted = 0usize;
+    let mut retain_added = true;
+    while count > max_receipts || bytes > MAX_RECEIPT_BYTES {
+        if evicted < receipts.len() {
+            bytes = bytes.saturating_sub(receipts[evicted].memory_bytes());
+            evicted += 1;
+        } else if retain_added {
+            bytes = bytes.saturating_sub(added.memory_bytes());
+            retain_added = false;
+        } else {
+            break;
+        }
+        count -= 1;
+    }
+    (evicted, retain_added)
+}
+/// Checkpoint section of a source: serialized in full, or stood in for by its
+/// measurement when only the bound on the remaining sections is needed.
+/// Measured sections are version 2 only and the returned bytes then omit the
+/// checkpoint, so callers use them for admission rather than as a document.
+enum CheckpointSource<'a> {
+    State(&'a State),
+    Measured(SourceMeasure),
+}
+struct SourceParts<'a> {
+    head: Head,
+    checkpoint: CheckpointSource<'a>,
+    cursor: usize,
+    log: &'a [&'a [Operation]],
+    receipts: &'a [&'a Receipt],
+    identities: &'a BTreeSet<[u8; 32]>,
+    /// Written in canonical order as if it were already a member of `identities`.
+    added_identity: Option<[u8; 32]>,
+}
+fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Context, version: u32) -> Result<Vec<u8>> {
+    let measured = match &parts.checkpoint {
+        CheckpointSource::Measured(m) => m.bytes,
+        CheckpointSource::State(_) => 0,
+    };
+    // Reserving the measured section keeps the source bound identical.
+    let mut w = Writer::new(limits.max_source_bytes.saturating_sub(measured));
+    w.raw(b"MPMODEL\0")?;
+    w.u32(version)?;
+    write_head(&mut w, parts.head)?;
+    match &parts.checkpoint {
+        CheckpointSource::State(state) => write_state(&mut w, state, limits, ctx, version >= 2)?,
+        CheckpointSource::Measured(m) => ctx.checkpoint(m.work)?,
+    }
+    w.count(parts.cursor)?;
+    w.count(parts.log.len())?;
+    for ops in parts.log {
+        ctx.checkpoint(1)?;
+        write_ops(&mut w, ops, limits)?;
+    }
+    w.count(parts.receipts.len())?;
+    for receipt in parts.receipts {
+        w.string(&receipt.id)?;
+        w.raw(&receipt.fingerprint)?;
+        write_head(&mut w, receipt.head)?;
+        w.count(receipt.results.len())?;
+        for result in &receipt.results {
+            w.string(&result.object)?;
+            w.count(result.faces.len())?;
+            for face in &result.faces {
+                w.u64(face.0)?;
+            }
+            w.count(result.vertices.len())?;
+            for vertex in &result.vertices {
+                w.u64(vertex.0)?;
+            }
+            if version >= 2 {
+                w.count(result.metrics.len())?;
+                for (name, value) in &result.metrics { w.string(name)?; w.u64(*value as u64)?; }
+            }
+        }
+    }
+    w.count(parts.identities.len().saturating_add(parts.added_identity.is_some() as usize))?;
+    let mut added = parts.added_identity;
+    for identity in parts.identities {
+        if let Some(a) = added.filter(|a| a < identity) {
+            w.raw(&a)?;
+            added = None;
+        }
+        w.raw(identity)?;
+    }
+    if let Some(a) = added {
+        w.raw(&a)?;
+    }
+    ctx.checkpoint(w.bytes.len().saturating_add(measured) as u64)?;
+    Ok(w.bytes)
 }
 
 fn check_name(name: &str, limits: &Limits) -> Result<()> {
@@ -1155,15 +1361,24 @@ fn read_head(r: &mut Reader) -> Result<Head> {
         content: r.raw(32)?.try_into().unwrap(),
     })
 }
+// Serialize the checkpoint exactly as a version 2 source does and measure it.
+// The measured section stands in for the checkpoint when a transaction bounds
+// the source it would produce, so this is the single source of that measure.
+fn checkpoint_source_measure(state:&State,limits:&Limits,ctx:&mut mesh::Context)->Result<(Vec<u8>,SourceMeasure)>{
+    let mut writer=Writer::new(limits.max_source_bytes);
+    let start=ctx.work_used();
+    write_state(&mut writer,state,limits,ctx,true)?;
+    let measure=SourceMeasure{bytes:writer.bytes.len(),work:ctx.work_used()-start};
+    Ok((writer.bytes,measure))
+}
 // Compute once per checkpoint (and derive directly while decoding). The
 // serialized work counters are deliberately not trusted or persisted.
-fn checkpoint_load_work(state:&State,limits:&Limits)->Result<u64>{
-    let mut writer=Writer::new(limits.max_source_bytes);
-    write_state(&mut writer,state,limits,&mut mesh::Context::new(limits.mesh.clone(),None),true)?;
-    let mut reader=Reader::new(&writer.bytes);
+fn checkpoint_load_work(state:&State,limits:&Limits)->Result<(u64,SourceMeasure)>{
     let mut ctx=mesh::Context::new(limits.mesh.clone(),None);
+    let (bytes,source)=checkpoint_source_measure(state,limits,&mut ctx)?;
+    let mut reader=Reader::new(&bytes);
     read_state(&mut reader,limits,&mut ctx,2)?;reader.end()?;
-    Ok(ctx.work_used())
+    Ok((ctx.work_used(),source))
 }
 fn state_hash(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<[u8; 32]> {
     let mut w = Writer::new(limits.max_source_bytes);

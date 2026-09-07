@@ -196,7 +196,9 @@ pub struct MeshedModel {
     pub rig: Option<MeshedRig>,
 }
 #[derive(Clone, Debug)]
-pub struct PartPreview { pub completed: usize, pub total: usize, pub model: MeshedModel }
+/// One completed rigid part. The parent index refers to declaration order
+/// in the final model; the final bound rig is delivered only once at the end.
+pub struct PartPreview { pub completed: usize, pub total: usize, pub part: MeshedPart }
 #[derive(Clone, Debug)]
 pub struct Thumbnail { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
 
@@ -847,8 +849,8 @@ fn mesh_node(document: Arc<CsgDocument>, id: NodeId) -> Result<Solid, CsgError> 
     Ok(solid)
 }
 
-/// Exact-mesh named parts in declaration order. Boolean children fan out on
-/// the shared CAD pool; every completed top-level part is a preview stage.
+/// Exact-mesh named parts in declaration order. Boolean children follow the
+/// active execution scope; each preview contains only its newly finished part.
 pub fn mesh_document(document: CsgDocument, mut preview: impl FnMut(PartPreview)) -> Result<MeshedModel, CsgError> {
     let document = Arc::new(document);
     let mut model = MeshedModel { warnings: document.warnings.clone(), ..Default::default() };
@@ -867,7 +869,7 @@ pub fn mesh_document(document: CsgDocument, mut preview: impl FnMut(PartPreview)
         let pivot = part.pivot.unwrap_or_else(|| { let b = mesh.bounding_box(); let c = (b.min + b.max) * 0.5; [c.x, c.y, c.z] });
         model.triangles = found;
         model.parts.push(MeshedPart { name: part.name, pivot: [pivot[0] as f32, pivot[1] as f32, pivot[2] as f32], color: part.color, parent: part.parent, animation: part.animation, mesh });
-        preview(PartPreview { completed: model.parts.len(), total, model: model.clone() });
+        preview(PartPreview { completed: model.parts.len(), total, part: model.parts.last().unwrap().clone() });
     }
     model.rig = rig::bind_document(&document, &model)?;
     if model.rig.is_some() { check_running(&document)?; }
@@ -965,6 +967,29 @@ csg.anim("tail", {kind: "swing", axis: "y", degrees: 40, hz: 3})
             if let Err(error) = mesh_document(document, |_| {}) { panic!("stage {count}: {error}") }
         }
     }
+    #[test]
+    fn serial_nested_booleans_emit_single_part_deltas() {
+        thread_pool::with_serial(|| {
+            let owner = std::thread::current().id();
+            let mut solid = "csg.box({size:vec3(1,1,1)})".to_string();
+            for offset in 1..=6 {
+                solid = format!("csg.union({solid},csg.move(csg.box({{size:vec3(1,1,1)}}),vec3({},0,0)))", offset * 2);
+            }
+            let source = format!("csg.part(\"chain\",{solid},{{}})\ncsg.part(\"other\",csg.box({{size:vec3(1,1,1)}}),{{}})");
+            let doc = evaluate_program(&source, CsgBudgets::default()).unwrap();
+            let mut names = Vec::new();
+            let model = mesh_document(doc, |preview| {
+                assert_eq!(std::thread::current().id(), owner);
+                assert_eq!(thread_pool::thread_count(), 1);
+                assert_eq!(preview.total, 2);
+                assert_eq!(preview.completed, names.len() + 1);
+                names.push(preview.part.name);
+            }).unwrap();
+            assert_eq!(names, ["chain", "other"]);
+            assert_eq!(model.parts.len(), 2);
+        });
+    }
+
     #[test] fn budgets_timeout_and_cancel_fail_closed() {
         let mut b=CsgBudgets::default();b.max_nodes=1;assert!(matches!(evaluate_program(DOG,b),Err(CsgError::Eval(_))));
         let mut b=CsgBudgets::default();b.max_triangles=10;let d=evaluate_program(DOG,b).unwrap();assert!(matches!(mesh_document(d,|_|{}),Err(CsgError::Budget{what:"triangle",..})));

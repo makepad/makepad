@@ -3,7 +3,7 @@
 use crate::{json::{self, Value}, mesh, Document, Error, Head, Limits, Material, Operation, Result, Transaction};
 use std::collections::BTreeMap;
 
-pub const MAX_OPEN_DOCUMENTS: usize = 4;
+pub const MAX_OPEN_DOCUMENTS: usize = 16;
 pub const MAX_INSPECTION_PAGE: usize = 128;
 /// Leaves room for the chat ToolOutcome wrapper inside its 16 KiB envelope.
 pub const MAX_REPLY_BYTES:usize = 12 * 1024;
