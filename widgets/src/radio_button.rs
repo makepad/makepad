@@ -242,6 +242,17 @@ script_mod! {
         }
         padding: theme.mspace_2{left: -2.}
 
+        // A tab is a radio button WITHOUT the circle, so the room the circle
+        // needed has to be given back. The inherited walk carried that room
+        // as a left margin and no size at all, which a tab cannot survive:
+        // an icon in one collapsed the whole tab to a sliver rather than
+        // merely sitting too far in.
+        icon_walk: Walk{
+            width: theme.size_icon_s
+            height: theme.size_icon_s
+            margin: Inset{left: 0.}
+        }
+
         draw_bg +: {
             color: theme.color_inset
             color_active: theme.color_outset_active
