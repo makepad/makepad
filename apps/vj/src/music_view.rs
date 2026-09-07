@@ -39,6 +39,16 @@ pub const STEM_COLORS: [[f32; 4]; 4] = [
 /// A killed lane's knob: the same hue, drained of it.
 pub const STEM_COLOR_KILLED: [f32; 4] = [0.35, 0.38, 0.42, 1.0];
 
+/// How far a phrase stub stays off each end of the strip: the chip rows
+/// are 11 points tall at rest and grow to 17 under the pointer, so this is
+/// the grown height and the stub is clear even while a chip is being read.
+pub const CHANGE_CLEAR: f64 = 18.0;
+
+/// The closest two turns may be drawn. A build-up can turn every few
+/// seconds, which on a whole-track strip is a hatch that hides the drop it
+/// is marking; past this they are one turn, which is what they look like.
+pub const CHANGE_MIN_PX: f64 = 5.0;
+
 /// Deepest pyramid level built: 2^15 finest columns is about five minutes
 /// in one texel, past which a level holds a single column.
 const MAX_WAVE_LEVELS: usize = 16;
@@ -833,6 +843,7 @@ script_mod! {
             color: #x8e9aa7
             text_style: theme.font_bold{font_size: 8}
         }
+        draw_body_edge +: { color: #xb4c0cd }
         draw_mark_top +: {
             color: #xe5484d
             pixel: fn() {
@@ -993,6 +1004,15 @@ script_mod! {
         // it is a fact about the recording rather than a mark anybody put
         // there, and every chip draws over it.
         draw_edge_sound +: { color: #x6b7683 }
+        // Where the BODY starts and ends, which is what the automation
+        // aims at -- brighter than the two that only say where the
+        // recording makes a noise.
+        draw_edge_body +: { color: #xb4c0cd }
+        // Where the arrangement turns. A stub rather than a rule, because
+        // the difference that has to survive a glance at a loud passage is
+        // a difference in SHAPE: three greys separated only by lightness
+        // all read as "a dark hairline" over a bright waveform.
+        draw_change +: { color: #x8e9aa8 }
         draw_marker_found +: {
             color: uniform(#xf5c542)
             pixel: fn() {
@@ -5110,6 +5130,14 @@ pub struct WaveLane {
     pub loop_span: Option<(f64, f64)>,
     /// One-based loop slot shown at the overlay's top-left.
     pub loop_slot: Option<u8>,
+    /// Where the body of the record begins and ends, in source seconds --
+    /// the two edges the automation aims at. `None` when the analysis did
+    /// not actually find them: the fallback it hands back in that case is a
+    /// fraction of the duration, and a rule drawn across the lane saying
+    /// "the intro ends here" would be a measurement that never happened.
+    /// The strip still draws the guess, where it sits among the whole
+    /// record and reads as one.
+    pub body: Option<(f64, f64)>,
     /// The operator's own marks, in source seconds — the tile timebase,
     /// like `loop_span`. The cue, the saved slots with the colour each
     /// is wearing, and the loops the finder offered. Named apart from
@@ -5297,6 +5325,11 @@ pub struct VjWaveScroll {
     /// top edge and a chip standing on the bottom one. The colour is a
     /// per-instance field, so one drawer serves the cue and every saved
     /// slot's own hue without a uniform lingering between draws.
+    /// The body edges. A rule the full height of the lane rather than a
+    /// chip, because nobody placed it and nothing can be done to it: it is
+    /// a fact about the record, like the ruling it crosses.
+    #[live]
+    draw_body_edge: DrawColor,
     #[live]
     draw_mark_top: DrawColor,
     #[live]
@@ -5537,6 +5570,15 @@ impl VjWaveScroll {
     /// knob comes down and vanishes when it is killed.
     /// The marks for one deck. Named as the strip's are, so the two
     /// surfaces read the same at the call site.
+    pub fn set_body(&mut self, cx: &mut Cx, deck: DeckId, body: Option<(f64, f64)>) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.body == body {
+            return;
+        }
+        lane.body = body;
+        self.area.redraw(cx);
+    }
+
     pub fn set_cue_marker(&mut self, cx: &mut Cx, deck: DeckId, secs: f64) {
         let lane = &mut self.lanes[deck.index()];
         if (lane.cue_secs - secs).abs() < 1e-9 {
@@ -5926,6 +5968,24 @@ impl Widget for VjWaveScroll {
                 size: dvec2(chip_w, chip_h),
             };
 
+            // Where the body begins and ends, under everything a hand
+            // placed: this is a fact the analysis noticed, and it must not
+            // sit on top of a mark somebody put there on purpose.
+            if let Some((intro_end, outro_start)) = self.lanes[index].body {
+                for at in [intro_end, outro_start] {
+                    let x = x_of(at);
+                    if x >= lane_rect.pos.x && x <= lane_rect.pos.x + lane_rect.size.x {
+                        self.draw_body_edge.draw_abs(
+                            cx,
+                            Rect {
+                                pos: dvec2(x.round(), lane_rect.pos.y),
+                                size: dvec2(1.0, lane_rect.size.y.max(1.0)),
+                            },
+                        );
+                    }
+                }
+            }
+
             for k in 0..self.lanes[index].found_loops.len() {
                 let (start, _) = self.lanes[index].found_loops[k];
                 let x = x_of(start);
@@ -6178,6 +6238,10 @@ pub struct VjWaveOverview {
     /// track that opens with silence.
     #[rust]
     sound: Option<(f64, f64)>,
+    /// Where the arrangement turns, in seconds. The analysis has always
+    /// worked these out and only the automation ever saw them.
+    #[rust]
+    changes: Vec<f64>,
     /// The record's shape: the four edges, in order. Drawn under every
     /// chip and moved by the wheel over the strip's middle band, which
     /// nothing else claims.
@@ -6213,6 +6277,10 @@ pub struct VjWaveOverview {
     draw_edge_found: DrawColor,
     #[live]
     draw_edge_sound: DrawColor,
+    #[live]
+    draw_edge_body: DrawColor,
+    #[live]
+    draw_change: DrawColor,
     /// The red chip at CUE's landing — the track start — so the button's
     /// destination is visible at a glance.
     #[live]
@@ -6330,6 +6398,14 @@ impl VjWaveOverview {
     }
 
     /// The record's four edges, diffed like the rest.
+    pub fn set_changes(&mut self, cx: &mut Cx, changes: &[f64]) {
+        if self.changes == changes {
+            return;
+        }
+        self.changes = changes.to_vec();
+        self.area.redraw(cx);
+    }
+
     pub fn set_shape(&mut self, cx: &mut Cx, shape: Option<[f64; 4]>) {
         if self.shape == shape {
             return;
@@ -6856,12 +6932,36 @@ impl Widget for VjWaveOverview {
                 Some(edges) => edges.to_vec(),
                 None => self.sound.map(|(a, b)| vec![a, b]).unwrap_or_default(),
             };
-            for at in edges {
-                self.draw_edge_sound.draw_abs(
+            for (index, at) in edges.iter().copied().enumerate() {
+                // With four edges the middle two are the body's; with two
+                // there is only the recording's own extent to show.
+                let body = edges.len() == 4 && (index == 1 || index == 2);
+                let edge = if body { &mut self.draw_edge_body } else { &mut self.draw_edge_sound };
+                edge.draw_abs(
                     cx,
                     Rect {
                         pos: dvec2(centre_of(at) - 0.75, rect.pos.y),
                         size: dvec2(1.5, rect.size.y),
+                    },
+                );
+            }
+            // The turns, in the strip's middle band so they stay clear of
+            // both chip rows, and thinned: a build-up can put changes a few
+            // seconds apart, which on a whole-track strip is a picket fence
+            // that hides the drop it is marking rather than showing it.
+            let band = (rect.size.y - CHANGE_CLEAR * 2.0).max(2.0);
+            let mut last_x = f64::NEG_INFINITY;
+            for at in self.changes.iter().copied() {
+                let x = centre_of(at).round();
+                if x - last_x < CHANGE_MIN_PX {
+                    continue;
+                }
+                last_x = x;
+                self.draw_change.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(x, rect.pos.y + CHANGE_CLEAR),
+                        size: dvec2(1.0, band),
                     },
                 );
             }
@@ -9073,6 +9173,73 @@ mod tests {
         let top = c[0].max(c[1]).max(c[2]);
         let low = c[0].min(c[1]).min(c[2]);
         if top <= 1e-6 { 0.0 } else { (top - low) / top }
+    }
+
+    /// A build-up can turn every few seconds. Across a whole record that is
+    /// a hatch that hides the drop it is marking rather than showing it.
+    #[test]
+    fn turns_too_close_together_are_drawn_as_one() {
+        // The rule the strip draws by, in the same order.
+        let thin = |xs: &[f64]| {
+            let mut out = Vec::new();
+            let mut last = f64::NEG_INFINITY;
+            for x in xs.iter().copied() {
+                if x - last >= CHANGE_MIN_PX {
+                    out.push(x);
+                    last = x;
+                }
+            }
+            out
+        };
+        // A build-up: eight turns inside twelve pixels.
+        let fence: Vec<f64> = (0..8).map(|i| 100.0 + i as f64 * 1.5).collect();
+        let drawn = thin(&fence);
+        assert!(drawn.len() <= 3, "a picket fence survived: {drawn:?}");
+        assert_eq!(drawn[0], 100.0, "and the first turn is always kept");
+        // An ordinary arrangement is untouched: nothing is thinned away
+        // that the operator could have seen.
+        let phrases: Vec<f64> = (0..12).map(|i| i as f64 * 21.0).collect();
+        assert_eq!(thin(&phrases), phrases, "a real arrangement must survive whole");
+    }
+
+    /// The stub has to clear both chip rows even while one is being read:
+    /// a chip grows under the pointer.
+    #[test]
+    fn a_turn_stays_clear_of_both_chip_rows() {
+        // The grown chip height, from the strip's own chip_bottom.
+        let grown_chip = 17.0;
+        assert!(
+            CHANGE_CLEAR >= grown_chip,
+            "a turn would run under a chip being hovered: {CHANGE_CLEAR} vs {grown_chip}"
+        );
+        // And on a strip too short to hold the band, the stub still has a
+        // height rather than a negative one.
+        for height in [2.0f64, 8.0, 24.0, 40.0, 120.0] {
+            let band = (height - CHANGE_CLEAR * 2.0).max(2.0);
+            assert!(band >= 2.0, "height {height} gave a band of {band}");
+        }
+    }
+
+    /// When the analysis cannot find a body it still hands back numbers, and
+    /// on a long record that guess looks exactly like a real intro.
+    #[test]
+    fn a_guessed_shape_never_reaches_the_mixing_lane() {
+        let measured = crate::track_shape::TrackShape {
+            intro_start_secs: 0.0,
+            intro_end_secs: 30.0,
+            outro_start_secs: 240.0,
+            outro_end_secs: 300.0,
+            detected: true,
+        };
+        let guessed = crate::track_shape::TrackShape { detected: false, ..measured };
+        // The lane takes the pair only from a shape that was really found.
+        let body = |shape: crate::track_shape::TrackShape| {
+            Some(shape)
+                .filter(|s| s.detected)
+                .map(|s| (s.intro_end_secs, s.outro_start_secs))
+        };
+        assert_eq!(body(measured), Some((30.0, 240.0)));
+        assert_eq!(body(guessed), None, "a guess must not draw as a measurement");
     }
 
     /// Brightness in this lane already says what has been played and which

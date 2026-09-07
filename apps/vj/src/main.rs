@@ -24268,6 +24268,21 @@ p2 {}
     /// own marks differently would be a bug nobody could explain, and the
     /// binding path and the per-frame path are two callers of the same
     /// question.
+    /// The two edges the automation aims at, or nothing.
+    ///
+    /// `detected` is the whole of it. When the analysis cannot find a body
+    /// it still hands back numbers -- a fraction of the duration -- and on
+    /// a five minute record that guess looks exactly like a real intro and
+    /// outro. The strip draws it anyway, among the whole record where it
+    /// reads as one shape among four; a rule across the mixing lane saying
+    /// "the intro ends here" would be a measurement nobody took.
+    fn deck_body(state: &crate::decks::DeckState) -> Option<(f64, f64)> {
+        state
+            .shape
+            .filter(|shape| shape.detected)
+            .map(|shape| (shape.intro_end_secs, shape.outro_start_secs))
+    }
+
     fn deck_marks(
         state: &crate::decks::DeckState,
     ) -> (f64, Vec<(u16, f64, f64, u32)>, Vec<(f64, f64)>) {
@@ -24303,7 +24318,9 @@ p2 {}
             .unwrap_or(0);
         let state = self.decks.deck(deck);
         let (cue_secs, saved_slots, found_loops) = Self::deck_marks(state);
+        let body = Self::deck_body(state);
         let lane = WaveLane {
+            body,
             pyramid,
             stem_pyramid,
             cols,
@@ -24339,6 +24356,14 @@ p2 {}
         };
         // The strip is the same store at its deepest levels: one pyramid,
         // both views.
+        //
+        // The turns are bound here rather than pushed every frame because
+        // they are a fact about the record, settled when its analysis
+        // lands and never again -- and this runs when it lands.
+        let changes: Vec<f64> = self.deck_analysis[index]
+            .as_ref()
+            .map(|analysis| analysis.changes_secs.clone())
+            .unwrap_or_default();
         let strip_widget = self.ui.widget(cx, Self::overview_path(deck));
         if let Some(mut strip) = strip_widget.borrow_mut::<VjWaveOverview>() {
             strip.set_track(
@@ -24347,6 +24372,11 @@ p2 {}
                 self.deck_stem_tex[index].clone(),
                 cols,
             );
+            // Where the arrangement turns. The analysis has always worked
+            // these out and handed them to the automation alone, so a
+            // transition that bailed on a phrase boundary looked arbitrary
+            // -- the operator could not see the boundary it landed on.
+            strip.set_changes(cx, &changes);
         };
     }
 
@@ -24571,6 +24601,10 @@ p2 {}
             };
             let loop_on = state.loop_on();
             let (cue_secs, loop_slots, found_loops) = Self::deck_marks(state);
+            // Taken here with the rest, not read again further down: the
+            // loop makes `&mut self` calls after this point, and one more
+            // touch of `state` would hold its borrow across them.
+            let body = Self::deck_body(state);
             let loop_beats = state.loop_ticks;
             let loop_armed = state.loop_armed.is_some();
             let refined_by_beats = self.deck_analysis[index]
@@ -24861,6 +24895,7 @@ p2 {}
                 // The same marks the strip gets, from the same locals: the
                 // lane is the surface an operator actually mixes against,
                 // and it was the one that could not show them.
+                scroll.set_body(cx, deck, body);
                 scroll.set_cue_marker(cx, deck, cue_secs);
                 scroll.set_loop_slots(cx, deck, &loop_slots);
                 scroll.set_found_loops(cx, deck, &found_loops);
