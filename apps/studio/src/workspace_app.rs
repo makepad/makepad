@@ -8,9 +8,22 @@ impl App {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
     fn workers_finished(&self) -> bool {
-        self.disk_worker
+        self.iterations
+            .worker
             .as_ref()
-            .is_none_or(DiskWorker::is_finished)
+            .is_none_or(IterationWorker::is_finished)
+            && self
+                .agent_sessions
+                .worker
+                .as_ref()
+                .is_none_or(|w| w.is_finished())
+            && !self.demo_recording
+            && !self.demo_record_starting
+            && !self.demo_finalizing
+            && self
+                .disk_worker
+                .as_ref()
+                .is_none_or(DiskWorker::is_finished)
             && self
                 .document_worker
                 .as_ref()
@@ -123,7 +136,6 @@ impl App {
         {
             let w = &surface.workspace;
             let width = self.ui.window(cx, ids!(main_window)).get_inner_size(cx).x;
-            let compact = width > 0.0 && width < 800.0;
             self.ui
                 .dock(cx, ids!(dock))
                 .item(id!(project_tree_tab))
@@ -134,12 +146,6 @@ impl App {
             self.ui
                 .widget(cx, ids!(canvas_summary))
                 .set_visible(cx, w.mode == Mode::Canvas && width >= 1100.0);
-            self.ui
-                .widget(cx, ids!(status_style))
-                .set_visible(cx, !compact);
-            self.ui
-                .widget(cx, ids!(status_mode))
-                .set_visible(cx, !compact);
 
             self.ui.radio_button(cx, ids!(mode_structured)).set_active(
                 cx,
@@ -149,6 +155,11 @@ impl App {
             self.ui.radio_button(cx, ids!(mode_canvas)).set_active(
                 cx,
                 w.mode == Mode::Canvas,
+                Animate::No,
+            );
+            self.ui.radio_button(cx, ids!(mode_architecture)).set_active(
+                cx,
+                w.mode == Mode::Architecture,
                 Animate::No,
             );
             self.ui
@@ -265,7 +276,10 @@ impl App {
             card.parent = Some(project);
             if *kind == id!(TerminalTab) {
                 if let Some(term) = dock.item(*id).widget(cx, ids!(term)).borrow::<MpTerm>() {
-                    if let Some(pid) = term.child_pid() {
+                    if let Some(pid) = self
+                        .agent_pid_for_tab(id.0)
+                        .or_else(|| term.child_pid().map(|p| p as u32))
+                    {
                         terminal_pids.insert(pid as u32, id.0);
                         card.detail = format!(
                             "Live PTY · PID {pid} · {}",
@@ -275,7 +289,9 @@ impl App {
                                 .unwrap_or_default()
                         );
                     } else {
-                        card.detail = "Starting live terminal".into();
+                        card.detail = self
+                            .agent_terminal_status(id.0)
+                            .unwrap_or_else(|| "Starting live terminal".into());
                     }
                 }
             } else if *kind == id!(CodeTab) {
@@ -453,6 +469,9 @@ impl App {
     fn open_code(&mut self, cx: &mut Cx, path: PathBuf, focus: bool) -> Result<String, String> {
         if !path.is_absolute() {
             return Err("Source path must be absolute".into());
+        }
+        if focus {
+            self.ensure_visible_host(cx);
         }
         if let Some((&id, _)) = self.code_tabs.iter().find(|(_, p)| {
             **p == path
@@ -651,6 +670,17 @@ impl App {
         }
     }
     fn drain_activity(&mut self, cx: &mut Cx) {
+        let roots = self
+            .agent_sessions
+            .bindings
+            .keys()
+            .filter_map(|id| self.agent_pid_for_tab(*id))
+            .collect();
+        if let Some(worker) = &mut self.activity_worker {
+            if let Err(error) = worker.set_external_roots(roots) {
+                log!("studio agent observation: {error}");
+            }
+        }
         if let Some(snapshot) = self.activity_worker.as_mut().and_then(ActivityWorker::poll) {
             let changes = snapshot.changed_files.clone();
             self.activity_snapshot = snapshot;

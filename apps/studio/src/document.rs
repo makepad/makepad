@@ -5,8 +5,9 @@ use crate::document_worker::{FileSnapshot, MAX_DOCUMENTS, MAX_FILE_BYTES};
 use makepad_code_editor::{
     code_editor::{CodeEditorAction, KeepCursorInView},
     decoration::DecorationSet,
-    history::EditKind,
-    selection::SelectionSet,
+    history::{EditKind, NewGroup},
+    selection::{Affinity, SelectionSet},
+    session::SelectionMode,
     text::{Change, Drift, Edit, Position},
     CodeDocument, CodeEditor, CodeSession,
 };
@@ -172,7 +173,7 @@ impl DocumentHandle {
         }
     }
 
-    fn view_session(&self) -> Rc<RefCell<CodeSession>> {
+    pub(crate) fn view_session(&self) -> Rc<RefCell<CodeSession>> {
         let session = Rc::new(RefCell::new(CodeSession::new(self.0.document.clone())));
         let mut sessions = self.0.sessions.borrow_mut();
         sessions.retain(|s| s.strong_count() > 0);
@@ -448,6 +449,40 @@ pub struct StudioCodeEditor {
 }
 
 impl StudioCodeEditor {
+    /// Atlas hosting bridge. The closure can attach a worker-prepared or retained
+    /// session and configure the real editor without constructing another view.
+    /// A working-tree session must use the supplied shared document. Historical
+    /// sessions pass `None` and remain read-only in their host.
+    pub(crate) fn bind_view<R>(
+        &mut self,
+        document: Option<&DocumentHandle>,
+        bind: impl FnOnce(
+            &mut CodeEditor,
+            &mut Option<Rc<RefCell<CodeSession>>>,
+            Option<&CodeDocument>,
+        ) -> R,
+    ) -> R {
+        let previous = self.session.as_ref().map(Rc::as_ptr);
+        let result = bind(
+            &mut self.editor,
+            &mut self.session,
+            document.map(|handle| &handle.0.document),
+        );
+        if previous != self.session.as_ref().map(Rc::as_ptr) {
+            self.document = document.cloned();
+            self.seen_revision = document.map_or(0, DocumentHandle::revision);
+        }
+        if let (Some(document), Some(session)) = (&self.document, &self.session) {
+            let weak = Rc::downgrade(session);
+            let mut sessions = document.0.sessions.borrow_mut();
+            sessions.retain(|session| session.strong_count() > 0);
+            if !sessions.iter().any(|session| session.ptr_eq(&weak)) {
+                sessions.push(weak);
+            }
+        }
+        result
+    }
+
     pub fn bind_document(&mut self, cx: &mut Cx, document: DocumentHandle) {
         if self
             .document
@@ -502,6 +537,35 @@ impl StudioCodeEditor {
 
     pub fn focus(&mut self, cx: &mut Cx) {
         self.editor.set_key_focus(cx);
+    }
+
+    /// Select a 0-based inclusive line range (the cursor at its start) and
+    /// scroll it into view once, without rebinding the document or resetting
+    /// the session. Lines past the document's end are clamped.
+    pub fn reveal_range(&mut self, cx: &mut Cx, start_line: u32, end_line: u32) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        {
+            let session = session.borrow();
+            let last = session.document().as_text().as_lines().len().saturating_sub(1);
+            let start = (start_line as usize).min(last);
+            let end = (end_line as usize).clamp(start, last);
+            let end_byte = session.document().as_text().as_lines()[end].len();
+            session.set_selection(
+                Position { line_index: end, byte_index: end_byte },
+                Affinity::Before,
+                SelectionMode::Simple,
+                NewGroup::Yes,
+            );
+            session.move_to(
+                Position { line_index: start, byte_index: 0 },
+                Affinity::Before,
+                NewGroup::No,
+            );
+        }
+        self.editor.keep_cursor_in_view = KeepCursorInView::Once;
+        self.editor.redraw(cx);
     }
 }
 
@@ -746,6 +810,7 @@ mod tests {
             revision: 1,
             text: Some(Arc::new("source".into())),
             error: None,
+            observed: None,
         };
         let a = registry.apply_snapshot(&s).unwrap();
         s.requested_path = PathBuf::from("/work/file");

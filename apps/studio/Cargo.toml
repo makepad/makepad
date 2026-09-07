@@ -14,6 +14,24 @@ path = "src/lib.rs"
 name = "studio"
 path = "src/main.rs"
 
+[[bin]]
+name = "studio-git-guard"
+path = "src/bin/studio_git_guard.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "studio-rustc-guard"
+path = "src/bin/studio_rustc_guard.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "studio-flow"
+path = "src/bin/studio_flow.rs"
+test = false
+bench = false
+
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-terminal = { path = "../terminal" }
@@ -22,6 +40,12 @@ makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-aichat = { path = "../aichat" }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-bounded-http = { path = "../../libs/bounded_http" }
 
 makepad-code-editor = { path = "../../code_editor" }
-makepad-flowgraph = { path = "../../libs/flowgraph" }
+makepad-code-graph = { path = "../../libs/code_graph" }
+makepad-code-atlas = { path = "../../libs/code_atlas" }
+makepad-git = { path = "../../libs/git" }
+
+[target.'cfg(windows)'.dependencies]
+makepad-screen = { path = "../../tools/screen" }
