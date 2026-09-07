@@ -166,6 +166,28 @@ impl SplitterAlign {
     }
 }
 
+/// Clamp a split position into the room both panes' own floors actually
+/// allow. This is the one rule every place a position is resolved shares —
+/// a live drag and the next layout pass alike — so a floor set once holds
+/// whether or not a finger is on the bar: a resize that leaves less room
+/// than `align` remembers is corrected the moment it is next drawn, not
+/// only the next time someone drags.
+///
+/// If the two floors do not both fit in the room at all (a pane squeezed
+/// narrower than either floor demands), the floors lose rather than the
+/// caller: the position lands in the middle of whatever room is left,
+/// because a pane that cannot exist is a worse outcome than one that is
+/// merely below its own floor.
+fn clamp_split_position(position: f64, room: f64, min_a: f64, min_b: f64) -> f64 {
+    let room = room.max(0.0);
+    let ceiling = room - min_b;
+    if min_a <= ceiling {
+        position.clamp(min_a, ceiling)
+    } else {
+        room * 0.5
+    }
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSplitter {
@@ -297,16 +319,20 @@ impl Widget for Splitter {
                         SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,
                         SplitterAxis::Vertical => f.abs.y - f.abs_start.y,
                     };
-                    let new_position = drag_start_align.to_position(self.axis, self.rect) + delta;
+                    let raw_position = drag_start_align.to_position(self.axis, self.rect) + delta;
+                    let room = match self.axis {
+                        SplitterAxis::Horizontal => self.rect.size.x,
+                        SplitterAxis::Vertical => self.rect.size.y,
+                    };
+                    let (min_a, min_b) = self.axis_min_max();
+                    let new_position = clamp_split_position(raw_position, room, min_a, min_b);
                     self.align = match self.axis {
                         SplitterAxis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromA(new_position.max(self.min_vertical))
+                                SplitterAlign::FromA(new_position)
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromB(
-                                    (self.rect.size.x - new_position).max(self.max_vertical),
-                                )
+                                SplitterAlign::FromB(self.rect.size.x - new_position)
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.x)
                             }
@@ -314,11 +340,9 @@ impl Widget for Splitter {
                         SplitterAxis::Vertical => {
                             let center = self.rect.size.y / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromA(new_position.max(self.min_horizontal))
+                                SplitterAlign::FromA(new_position)
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromB(
-                                    (self.rect.size.y - new_position).max(self.max_horizontal),
-                                )
+                                SplitterAlign::FromB(self.rect.size.y - new_position)
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.y)
                             }
@@ -387,7 +411,13 @@ impl Splitter {
         }
 
         self.rect = cx.turtle().inner_rect();
-        self.position = self.align.to_position(self.axis, self.rect);
+        let room = match self.axis {
+            SplitterAxis::Horizontal => self.rect.size.x,
+            SplitterAxis::Vertical => self.rect.size.y,
+        };
+        let (min_a, min_b) = self.axis_min_max();
+        self.position =
+            clamp_split_position(self.align.to_position(self.axis, self.rect), room, min_a, min_b);
 
         let walk = match self.axis {
             SplitterAxis::Horizontal => Walk::new(Size::Fixed(self.position), Size::fill()),
@@ -416,6 +446,18 @@ impl Splitter {
     pub fn end(&mut self, cx: &mut Cx2d) {
         cx.end_turtle_with_area(&mut self.area_b);
         cx.end_turtle();
+    }
+
+    /// The floor for pane A and the floor for pane B, on this instance's own
+    /// axis. Named for the bar's orientation (`_vertical` for the vertical
+    /// bar a `Horizontal` axis draws), which is the pairing every existing
+    /// caller in this repo already relies on — this reads the same fields
+    /// the drag handler always has, it just now reads them from one place.
+    fn axis_min_max(&self) -> (f64, f64) {
+        match self.axis {
+            SplitterAxis::Horizontal => (self.min_vertical, self.max_vertical),
+            SplitterAxis::Vertical => (self.min_horizontal, self.max_horizontal),
+        }
     }
 
     pub fn axis(&self) -> SplitterAxis {
@@ -513,5 +555,47 @@ impl SplitterRef {
 
     pub fn position(&self) -> Option<f64> {
         self.borrow().map(|inner| inner.position())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Room to spare: the position is already inside both floors, so it is
+    /// returned unchanged.
+    #[test]
+    fn a_position_inside_both_floors_is_untouched() {
+        assert_eq!(clamp_split_position(200.0, 500.0, 50.0, 50.0), 200.0);
+    }
+
+    /// Below pane A's floor, the floor wins.
+    #[test]
+    fn a_position_below_a_floor_is_raised_to_it() {
+        assert_eq!(clamp_split_position(10.0, 500.0, 50.0, 50.0), 50.0);
+    }
+
+    /// Close enough to the far edge that pane B would be squeezed under its
+    /// own floor: the position is pulled back to leave B exactly its floor.
+    #[test]
+    fn a_position_that_would_starve_b_is_pulled_back() {
+        assert_eq!(clamp_split_position(490.0, 500.0, 50.0, 50.0), 450.0);
+    }
+
+    /// The two floors do not fit in the room at all (a window squeezed
+    /// narrower than both floors combined): the floors lose and the split
+    /// lands in the middle of what room there is, rather than handing one
+    /// pane a negative size or the other the whole strip.
+    #[test]
+    fn floors_that_do_not_both_fit_land_in_the_middle_instead() {
+        assert_eq!(clamp_split_position(999.0, 80.0, 50.0, 50.0), 40.0);
+        assert_eq!(clamp_split_position(-999.0, 80.0, 50.0, 50.0), 40.0);
+    }
+
+    /// No room at all is the same degenerate case, not a division or a
+    /// negative width.
+    #[test]
+    fn no_room_at_all_still_answers() {
+        assert_eq!(clamp_split_position(50.0, 0.0, 50.0, 50.0), 0.0);
     }
 }
