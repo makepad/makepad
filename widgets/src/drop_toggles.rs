@@ -299,6 +299,13 @@ pub struct DropToggles {
     /// side has no `Cx2d` to ask, so the draw side leaves it here.
     #[rust]
     pass_size: DVec2,
+    /// The widest label as actually LAID OUT, left here by the draw pass.
+    /// Zero until an open panel has been drawn once, and then the size is
+    /// measured rather than guessed. Here for the same reason `pass_size`
+    /// is: text cannot be measured without a `Cx2d`, and the panel's offset
+    /// has to be worked out on the event side.
+    #[rust]
+    label_w: f64,
     /// The chip's FINAL rect, captured on the event side. Mid-draw the chip
     /// only knows its pre-alignment position — a chip in a right-aligned row
     /// has not been moved yet — and the flip/clamp decision needs the place
@@ -457,6 +464,10 @@ impl DropToggles {
     fn panel_size(&self) -> DVec2 {
         let rows = self.item_count().max(1) as f64;
         let font = (self.draw_label.text_style.font_size as f64).max(6.0);
+        // Measured if a draw has happened, guessed only before the first
+        // one. The guess is a per-character average with no slack in it, so
+        // capitals and digits, whose advances run wider than the average,
+        // were sliced off at the panel's edge with no ellipsis to say so.
         let chars = self
             .labels
             .iter()
@@ -464,7 +475,8 @@ impl DropToggles {
             .map(|label| label.chars().count())
             .max()
             .unwrap_or(1) as f64;
-        let w = (chars * font * 0.62 + PANEL_PAD_X * 2.0 + MARK + MARK_GAP)
+        let text_w = if self.label_w > 0.0 { self.label_w } else { chars * font * 0.62 };
+        let w = (text_w + PANEL_PAD_X * 2.0 + MARK + MARK_GAP)
             .clamp(PANEL_MIN_W, PANEL_MAX_W);
         dvec2(w, rows * ROW_H + PANEL_PAD_Y * 2.0)
     }
@@ -641,6 +653,16 @@ impl Widget for DropToggles {
                 },
                 size: drawn.size,
             };
+            // Measure the real advances now that there is a Cx2d to do it
+            // in, every open frame, so a label swap cannot leave a stale
+            // width behind.
+            let mut widest: f64 = 0.0;
+            for label in self.labels.iter().take(MAX_ITEMS) {
+                if let Some(run) = self.draw_label.prepare_single_line_run(cx, label) {
+                    widest = widest.max(run.width_in_lpxs as f64);
+                }
+            }
+            self.label_w = widest.ceil();
             let panel_size = self.panel_size();
             let offset = self.panel_offset(anchor);
             let mask = self.active;
