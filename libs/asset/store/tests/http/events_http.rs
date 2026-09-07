@@ -42,6 +42,118 @@ fn content_clients(ts: &TestServer, admin: &str, ns: &str) -> (Client, Client) {
     (ts.control(Some(&token)), ts.data(Some(&token)))
 }
 
+fn preview_api(ts: &TestServer) -> makepad_asset_client::Api {
+    use makepad_asset_client::{Api, ApiEndpoints, HttpLimits};
+    Api::new(ApiEndpoints { control: ts.server.control_addr(), data: ts.server.data_addr() },
+        HttpLimits::default_v1(), Some(ts.admin_token())).unwrap()
+}
+
+#[test]
+fn draft_preview_http_bootstraps_all_cages_and_streams_u64_parts_without_catalog_writes() {
+    use makepad_asset_data::{AssetAlias, BlobId};
+    let mut ts = start_server("preview_bootstrap");
+    let api = preview_api(&ts);
+    for id in 0..12 {
+        let alias = AssetAlias::new(format!("gen/drafts/car-{id}")).unwrap();
+        api.open_model_preview(&alias, &format!("edit-{id}"), "{\"kind\":\"editable_creation\"}").unwrap();
+    }
+    // limit applies to deltas, never truncates an atomic late-join snapshot.
+    let page = api.events_page(None, 0, 1, None).unwrap();
+    assert_eq!(page.events.len(), 12);
+    assert!(page.events.iter().all(|e| e.model_preview.as_ref().is_some_and(|p| p.open && p.parts.is_empty())));
+    let cursor = page.cursor;
+    api.update_model_preview("edit-0", None, &[], &[]).unwrap();
+    let unchanged = api.events_page(Some(&cursor), 0, 1, None).unwrap();
+    assert_eq!(unchanged.cursor, cursor);
+    assert!(unchanged.events.is_empty());
+    let name = format!("draft-{}", u64::MAX);
+    let mesh = b"ephemeral draft GLB bytes";
+    let token = api.upload_model_preview_part("edit-0", &name, mesh).unwrap();
+    let delta = api.events_page(Some(&cursor), 0, 1, None).unwrap();
+    assert_eq!(delta.events.len(), 1);
+    let preview = delta.events[0].model_preview.as_ref().unwrap();
+    assert!(!preview.open);
+    assert_eq!(preview.parts[0].name, name);
+    assert_eq!(api.fetch_model_preview_mesh(&token).unwrap(), mesh);
+    assert!(api.resolve_alias(&AssetAlias::new("gen/drafts/car-0").unwrap()).is_err());
+    assert!(api.blob_head(&BlobId::hash_of(mesh)).is_err(), "preview mesh must not enter CAS");
+    api.clear_model_preview("edit-0").unwrap();
+    assert!(api.fetch_model_preview_mesh(&token).is_err());
+    let snapshot = api.events_page(None, 0, 1, None).unwrap();
+    assert_eq!(snapshot.events.len(), 11);
+    assert!(!snapshot.events.iter().any(|e| e.model_preview.as_ref().unwrap().session == "edit-0"));
+    // The widened part cap is still bounded at32 and the alias namespace is
+    // not opened to unrelated generated or published models.
+    assert!(api.upload_model_preview_part("edit-1", &"x".repeat(33), mesh).is_err());
+    assert!(api.open_model_preview(&AssetAlias::new("gen/models/not-a-draft").unwrap(), "wrong", "").is_err());
+    let mut raw = ts.control(Some(&ts.admin_token()));
+    let denied = raw.post_json("/v1/model-previews", &jobj(vec![
+        ("op", jstr("open")), ("session", jstr("wrong")),
+        ("alias", jstr("gen/other/wrong")), ("program", jstr("")),
+    ]));
+    assert_eq!(denied.status, 400);
+    drop(raw);
+    drop(api);
+    ts.server.shutdown();
+    let root = ts.root.clone();
+    drop(ts);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn preview_subscriber_bootstraps_again_after_backpressure_retention_gap() {
+    use makepad_asset_client::{AssetClient, ApiEndpoints, CatalogSubscriberConfig, CatalogSubscriptionEvent, ClientConfig};
+    use makepad_asset_data::AssetAlias;
+    let mut ts = start_server_with("preview_resync", |cfg| cfg.event_journal_cap = 2);
+    let api = preview_api(&ts);
+    let cache = test_root("preview_resync_cache");
+    let mut config = ClientConfig::new(cache.clone());
+    config.token = Some(ts.admin_token());
+    let client = AssetClient::connect(config, ApiEndpoints { control: ts.server.control_addr(), data: ts.server.data_addr() }, Some(ts.server.server_id())).unwrap();
+    let mut sub_config = CatalogSubscriberConfig::default_v1();
+    sub_config.channel_capacity = 1;
+    sub_config.batch_limit = 1;
+    sub_config.wait_ms = 100;
+    let mut subscriber = client.subscribe_catalog(sub_config).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if subscriber.poll().iter().any(|e| matches!(e, CatalogSubscriptionEvent::Ready { .. })) { break; }
+        assert!(Instant::now() < deadline, "initial subscriber bootstrap");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    api.open_model_preview(&AssetAlias::new("gen/drafts/car").unwrap(), "edit-car", "initial").unwrap();
+    // Do not drain: a one-slot queue bounds delivery while the journal rolls
+    // over. No edits occur after this loop, so only bootstrap can restore it.
+    for id in 0..50 {
+        api.update_model_preview("edit-car", Some(&format!("state-{id}")), &[], &[]).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut gap = false;
+    let mut restored = false;
+    while !restored {
+        for event in subscriber.poll() {
+            match event {
+                CatalogSubscriptionEvent::ResyncRequired { .. } => gap = true,
+                CatalogSubscriptionEvent::Events { events, .. } if gap => {
+                    restored |= events.iter().any(|e| e.model_preview.as_ref().is_some_and(|p| p.open && p.program.as_deref() == Some("state-49")));
+                }
+                CatalogSubscriptionEvent::Retry { error, .. } => panic!("subscriber transport error: {error:?}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "gap={gap}, missing cumulative draft bootstrap");
+        if !restored { std::thread::sleep(Duration::from_millis(5)); }
+    }
+    subscriber.shutdown();
+    drop(client);
+    drop(api);
+    ts.server.shutdown();
+    let root = ts.root.clone();
+    drop(ts);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(cache).unwrap();
+}
+
 /// Publish a prop whose annotation declares `kind`, and return its ids.
 fn publish_annotated(
     control: &mut Client,

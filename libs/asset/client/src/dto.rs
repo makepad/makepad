@@ -1214,7 +1214,7 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
                         .as_str()
                         .ok_or(ClientError::Protocol { what: "event preview part name" })?;
                     if value.is_empty()
-                        || value.len() > 24
+                        || value.len() > 32
                         || !value.bytes().all(|byte| {
                             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
                         })

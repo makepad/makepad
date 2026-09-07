@@ -93,7 +93,7 @@ fn preview_session_ok(value: &str) -> bool {
 
 fn preview_part_ok(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 24
+        && value.len() <= 32
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -133,7 +133,7 @@ fn model_preview_part_put(
         let principal = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         require_cap(ctx, &principal, Capability::AssetPublish, &namespace)
     })?;
-    let max = rc.cfg.budgets.max_blob_bytes.min(16 * 1024 * 1024);
+    let max = rc.cfg.budgets.max_blob_bytes.min(256 * 1024 * 1024);
     let bytes = match super::routes::read_body(conn, head, max, rc.cfg.data_body_deadline_ms) {
         Ok(bytes) => bytes,
         Err(outcome) => return Ok(outcome),
