@@ -318,12 +318,15 @@ pub fn stem_color_killed() -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
-/// Zoom limits, seconds of audio across the full lane width.
 /// How long before the end of a record the lane starts warning, in
 /// seconds. Half a minute: long enough to find the next track and get it
 /// on a deck without hurrying, short enough that it is not lit through
-/// most of an outro.
-pub const WAVE_WARN_SECS: f64 = 30.0;
+/// most of an outro. 0.0 is the operator's off switch (see `warn_at`).
+pub const WARN_SECS_MIN: f64 = 0.0;
+pub const WARN_SECS_MAX: f64 = 90.0;
+pub const WARN_SECS_DEFAULT: f64 = 30.0;
+
+/// Zoom limits, seconds of audio across the full lane width.
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
@@ -5244,24 +5247,26 @@ impl WaveLane {
 
     /// How hard the end-of-track warning should show, 0..1.
     ///
-    /// A ramp over the last [`WAVE_WARN_SECS`], times a one-per-second
-    /// pulse that never quite reaches nothing -- a warning that blinked
-    /// fully out would be invisible exactly half the time, and the point
-    /// is to be caught out of the corner of an eye while looking at the
-    /// other deck.
+    /// A ramp over the last `warn_secs`, times a one-per-second pulse
+    /// that never quite reaches nothing -- a warning that blinked fully
+    /// out would be invisible exactly half the time, and the point is to
+    /// be caught out of the corner of an eye while looking at the other
+    /// deck. `warn_secs <= 0.0` is the operator's off switch: the ramp's
+    /// own window is then empty and never contains anything, so this
+    /// needs no separate enabled flag.
     ///
     /// Computed HERE, at draw time, from the same `now` the playhead
     /// uses. Worked out by the host at pump cadence instead, the pulse
     /// would judder against a scroll that is smooth.
-    pub fn warn_at(&self, now: f64) -> f32 {
+    pub fn warn_at(&self, now: f64, warn_secs: f64) -> f32 {
         if !self.playing || self.duration_secs <= 0.0 {
             return 0.0;
         }
         let left = self.duration_secs - self.position_at(now);
-        if !(0.0..WAVE_WARN_SECS).contains(&left) {
+        if !(0.0..warn_secs).contains(&left) {
             return 0.0;
         }
-        let ramp = (WAVE_WARN_SECS - left) / WAVE_WARN_SECS;
+        let ramp = (warn_secs - left) / warn_secs;
         let phase = now.rem_euclid(1.0);
         let pulse = 0.45 + 0.55 * (1.0 - (phase * 2.0 - 1.0).abs());
         (ramp * pulse).clamp(0.0, 1.0) as f32
@@ -5427,6 +5432,8 @@ pub struct VjWaveScroll {
     zoom_secs: f64,
     #[rust(HEAD_FRACTION_DEFAULT)]
     head_fraction: f64,
+    #[rust(WARN_SECS_DEFAULT)]
+    warn_secs: f64,
     #[rust]
     lane_rects: [Rect; 2],
     /// The viewport centre captured when a loop becomes active. The wave
@@ -5723,6 +5730,17 @@ impl VjWaveScroll {
         }
     }
 
+    /// Set once from the settings file at startup, same as the head
+    /// position: how long before the end of a record the lane starts
+    /// warning, or 0.0 to turn the warning off entirely.
+    pub fn set_warn_secs(&mut self, cx: &mut Cx, secs: f64) {
+        let secs = secs.clamp(WARN_SECS_MIN, WARN_SECS_MAX);
+        if (secs - self.warn_secs).abs() > 1e-9 {
+            self.warn_secs = secs;
+            self.area.redraw(cx);
+        }
+    }
+
     /// Drain what the pointer did since the last call.
     pub fn take_events(&mut self) -> Vec<WaveEvent> {
         std::mem::take(&mut self.events)
@@ -6009,7 +6027,7 @@ impl Widget for VjWaveScroll {
             self.draw_lane.beat_cols = beat_cols as f32;
             self.draw_lane.beat_phase = phase as f32;
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
-            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now));
+            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now, self.warn_secs));
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
@@ -9140,29 +9158,29 @@ mod tests {
 
         // Nothing to say in the middle of a record.
         lane.position_secs = 100.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         // Nor with no length known, nor stopped.
         lane.position_secs = 290.0;
         lane.duration_secs = 0.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         lane.duration_secs = 300.0;
         lane.playing = false;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         lane.playing = true;
 
         // Inside the window it shows, and it shows harder as the end
         // comes -- sampled at the same point of the pulse both times, or
         // the pulse rather than the ramp would be under test.
-        let far = lane.warn_at(100.0);
+        let far = lane.warn_at(100.0, WARN_SECS_DEFAULT);
         lane.position_secs = 299.0;
-        let near = lane.warn_at(100.0);
+        let near = lane.warn_at(100.0, WARN_SECS_DEFAULT);
         assert!(far > 0.0, "twenty seconds out is already warning");
         assert!(near > far, "{near} at one second out beats {far} at ten");
 
         // Armed, it pulses -- but never all the way to nothing, or it
         // would be invisible half of every second.
         let over_a_second: Vec<f32> =
-            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1)).collect();
+            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1, WARN_SECS_DEFAULT)).collect();
         let low = over_a_second.iter().cloned().fold(f32::MAX, f32::min);
         let high = over_a_second.iter().cloned().fold(0.0f32, f32::max);
         assert!(low > 0.0, "never fully out: {low}");
@@ -9170,7 +9188,28 @@ mod tests {
 
         // Past the end there is nothing left to warn about.
         lane.position_secs = 301.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
+    }
+
+    /// `warn_secs` of 0.0 is the operator's off switch, not a special
+    /// case in `warn_at` -- the ramp's own window (`0.0..0.0`) is empty
+    /// and never contains a real "seconds left", at any point in the
+    /// record, playing or not.
+    #[test]
+    fn a_warn_window_of_zero_never_warns() {
+        let mut lane = lane(120.0, 0.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        lane.duration_secs = 300.0;
+        lane.position_secs = 299.999;
+        assert_eq!(lane.warn_at(100.0, 0.0), 0.0);
+
+        // A smaller, non-zero window still works, just over its own
+        // shorter span -- the value is a real threshold, not a toggle
+        // that only understands its default.
+        assert_eq!(lane.warn_at(100.0, 0.0005), 0.0, "outside a half-second window");
+        lane.position_secs = 299.9999;
+        assert!(lane.warn_at(100.0, 0.0005) > 0.0, "inside it");
     }
 
     #[test]
