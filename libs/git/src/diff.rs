@@ -233,6 +233,428 @@ fn compress_edits(edits: &[Edit], _n: usize, _m: usize) -> Vec<DiffOp> {
     ops
 }
 
+// ---------------------------------------------------------------- bounded
+
+/// How a line ends in the source text: nothing (the last line of a text
+/// without a final newline), `\n`, or `\r\n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEnding {
+    None,
+    Lf,
+    CrLf,
+}
+
+impl LineEnding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LineEnding::None => "",
+            LineEnding::Lf => "\n",
+            LineEnding::CrLf => "\r\n",
+        }
+    }
+    pub fn len(self) -> usize {
+        self.as_str().len()
+    }
+}
+
+/// One line of an endpoint: the byte range of its content (without the
+/// terminator) and how it ended. Byte offsets index the exact UTF-8 text
+/// the index was built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineRecord {
+    pub start: usize,
+    pub end: usize,
+    pub ending: LineEnding,
+}
+
+impl LineRecord {
+    /// The content range, terminator excluded.
+    pub fn content(&self) -> std::ops::Range<usize> {
+        self.start..self.end
+    }
+    /// The full range, terminator included.
+    pub fn full(&self) -> std::ops::Range<usize> {
+        self.start..self.end + self.ending.len()
+    }
+}
+
+/// The exact line structure of one endpoint. Lines split where
+/// `str::lines()` splits them (at `\n`, a preceding `\r` belonging to the
+/// terminator), so line contents compare exactly as `diff_lines` compares
+/// them, but byte offsets, terminators and the final-newline state are
+/// retained so the text can be reconstructed byte for byte.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineIndex {
+    pub lines: Vec<LineRecord>,
+    /// The text length in bytes.
+    pub bytes: usize,
+    /// The text ends with a line terminator.
+    pub final_newline: bool,
+}
+
+impl LineIndex {
+    pub fn of(text: &str) -> LineIndex {
+        let bytes = text.as_bytes();
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\n' {
+                let (end, ending) = if i > start && bytes[i - 1] == b'\r' { (i - 1, LineEnding::CrLf) } else { (i, LineEnding::Lf) };
+                lines.push(LineRecord { start, end, ending });
+                start = i + 1;
+            }
+            i += 1;
+        }
+        let final_newline = !bytes.is_empty() && bytes[bytes.len() - 1] == b'\n';
+        if start < bytes.len() {
+            lines.push(LineRecord { start, end: bytes.len(), ending: LineEnding::None });
+        }
+        LineIndex { lines, bytes: bytes.len(), final_newline }
+    }
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+    /// The content of line `i` of `text` (the text this index was built from).
+    pub fn content<'a>(&self, text: &'a str, i: usize) -> &'a str {
+        let r = &self.lines[i];
+        &text[r.start..r.end]
+    }
+    /// The line holding byte `offset`, or the last line for an offset at the
+    /// end of the text; `None` for an empty text.
+    pub fn line_of(&self, offset: usize) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        match self.lines.binary_search_by(|r| r.start.cmp(&offset)) {
+            Ok(i) => Some(i),
+            Err(i) => Some(i.saturating_sub(1)),
+        }
+    }
+    /// Rebuild the text from its lines: exact when `text` is the text the
+    /// index was built from.
+    pub fn reconstruct(&self, text: &str) -> String {
+        let mut out = String::with_capacity(self.bytes);
+        for r in &self.lines {
+            out.push_str(&text[r.start..r.end]);
+            out.push_str(r.ending.as_str());
+        }
+        out
+    }
+}
+
+/// Explicit bounds on a line diff: per endpoint at most `max_bytes` and
+/// `max_lines`, at most `max_trace_bytes` of search trace and
+/// `max_frontier_ops` frontier operations (diagonal steps and snake
+/// advances) for the whole search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffLimits {
+    pub max_bytes: usize,
+    pub max_lines: usize,
+    pub max_trace_bytes: usize,
+    pub max_frontier_ops: u64,
+}
+
+impl Default for DiffLimits {
+    fn default() -> Self {
+        DiffLimits { max_bytes: 4 * 1024 * 1024, max_lines: 20_000, max_trace_bytes: 8 * 1024 * 1024, max_frontier_ops: 2_000_000 }
+    }
+}
+
+/// Why a bounded diff stopped short of a complete line correspondence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Exhaustion {
+    /// An endpoint exceeds the byte or line limit.
+    TooLarge { old_bytes: usize, new_bytes: usize, old_lines: usize, new_lines: usize },
+    /// The search trace would exceed its storage limit (bytes it reached).
+    TraceStorage { bytes: usize },
+    /// The frontier operation limit was reached.
+    FrontierOps { ops: u64 },
+    /// The caller cancelled between two fronts.
+    Cancelled,
+}
+
+impl Exhaustion {
+    /// The label shown for the hunk without a correspondence.
+    pub const LABEL: &'static str = "Line correspondence unavailable";
+}
+
+/// The one replacement hunk of an exhausted diff: old lines
+/// `old_index..old_index + old_len` and new lines `new_index..new_index +
+/// new_len` between the verified equal prefix and suffix, with no line
+/// identities claimed inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnavailableHunk {
+    pub old_index: usize,
+    pub old_len: usize,
+    pub new_index: usize,
+    pub new_len: usize,
+    pub reason: Exhaustion,
+}
+
+/// A bounded line diff: `diff_lines`' `Equal`/`Insert`/`Delete` run
+/// contract over exact UTF-8 text, the line structure of both endpoints,
+/// and, when the search was exhausted, the verified equal prefix and suffix
+/// with one explicit replacement hunk between them (`unavailable`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedDiff {
+    pub ops: Vec<DiffOp>,
+    pub old: LineIndex,
+    pub new: LineIndex,
+    /// Set when the search stopped short: the ops then hold the equal
+    /// prefix, one `Delete` and one `Insert` covering this hunk, and the
+    /// equal suffix.
+    pub unavailable: Option<UnavailableHunk>,
+    /// Frontier operations spent.
+    pub frontier_ops: u64,
+    /// Trace bytes used at most.
+    pub trace_bytes: usize,
+}
+
+impl BoundedDiff {
+    /// Every line correspondence was established.
+    pub fn is_complete(&self) -> bool {
+        self.unavailable.is_none()
+    }
+    /// The equal runs, in order.
+    pub fn equal_runs(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            DiffOp::Equal { old_index, new_index, len } => Some((*old_index, *new_index, *len)),
+            _ => None,
+        })
+    }
+    /// Every (old line, new line) pair of the equal runs, in order.
+    pub fn equal_pairs(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.equal_runs().flat_map(|(o, n, len)| (0..len).map(move |k| (o + k, n + k)))
+    }
+    /// The new line an old line maps to, when it is an equal line.
+    pub fn map_old_to_new(&self, old_line: usize) -> Option<usize> {
+        let runs: Vec<(usize, usize, usize)> = self.equal_runs().collect();
+        let i = runs.partition_point(|(o, _, _)| *o <= old_line);
+        let (o, n, len) = *runs.get(i.checked_sub(1)?)?;
+        (old_line < o + len).then_some(n + (old_line - o))
+    }
+    /// The old line a new line maps to, when it is an equal line.
+    pub fn map_new_to_old(&self, new_line: usize) -> Option<usize> {
+        let runs: Vec<(usize, usize, usize)> = self.equal_runs().collect();
+        let i = runs.partition_point(|(_, n, _)| *n <= new_line);
+        let (o, n, len) = *runs.get(i.checked_sub(1)?)?;
+        (new_line < n + len).then_some(o + (new_line - n))
+    }
+    /// The same diff seen from the other side (new → old): the stored
+    /// mapping inverted, so a traversal back uses exactly the same line
+    /// identities instead of a fresh search with its own tie-breaking.
+    pub fn inverse(&self) -> BoundedDiff {
+        let ops = self
+            .ops
+            .iter()
+            .map(|op| match *op {
+                DiffOp::Equal { old_index, new_index, len } => DiffOp::Equal { old_index: new_index, new_index: old_index, len },
+                DiffOp::Insert { new_index, len } => DiffOp::Delete { old_index: new_index, len },
+                DiffOp::Delete { old_index, len } => DiffOp::Insert { new_index: old_index, len },
+            })
+            .collect();
+        // a replacement hunk is Delete then Insert; inverted it stays in that order
+        let ops = reorder_replacements(ops);
+        BoundedDiff {
+            ops,
+            old: self.new.clone(),
+            new: self.old.clone(),
+            unavailable: self.unavailable.as_ref().map(|h| UnavailableHunk { old_index: h.new_index, old_len: h.new_len, new_index: h.old_index, new_len: h.old_len, reason: h.reason.clone() }),
+            frontier_ops: self.frontier_ops,
+            trace_bytes: self.trace_bytes,
+        }
+    }
+}
+
+/// Keep every replacement hunk as `Delete` followed by `Insert`, the order
+/// `diff_lines` emits.
+fn reorder_replacements(mut ops: Vec<DiffOp>) -> Vec<DiffOp> {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        if matches!(ops[i], DiffOp::Insert { .. }) && matches!(ops[i + 1], DiffOp::Delete { .. }) {
+            ops.swap(i, i + 1);
+        }
+        i += 1;
+    }
+    ops
+}
+
+/// `diff_lines_bounded` without cancellation.
+pub fn diff_lines_with_limits(old_text: &str, new_text: &str, limits: &DiffLimits) -> BoundedDiff {
+    diff_lines_bounded(old_text, new_text, limits, &|| false)
+}
+
+/// Myers on exact UTF-8 text with explicit bounds and cancellation.
+///
+/// The verified equal prefix and suffix are always established. Within the
+/// bounds the result is the full `Equal`/`Insert`/`Delete` run sequence of
+/// `diff_lines`; when an endpoint exceeds its size limit, the trace or
+/// frontier budget runs out, or `cancel` returns true between two fronts,
+/// the remaining middle is returned as one `Delete` + `Insert` pair and
+/// named in `unavailable` (no line identities are invented inside it).
+pub fn diff_lines_bounded(old_text: &str, new_text: &str, limits: &DiffLimits, cancel: &dyn Fn() -> bool) -> BoundedDiff {
+    let old = LineIndex::of(old_text);
+    let new = LineIndex::of(new_text);
+    let n = old.len();
+    let m = new.len();
+    let old_lines: Vec<&str> = (0..n).map(|i| old.content(old_text, i)).collect();
+    let new_lines: Vec<&str> = (0..m).map(|i| new.content(new_text, i)).collect();
+    // the verified equal prefix and suffix
+    let mut p = 0usize;
+    while p < n && p < m && old_lines[p] == new_lines[p] {
+        p += 1;
+    }
+    let mut s = 0usize;
+    while s < n - p && s < m - p && old_lines[n - 1 - s] == new_lines[m - 1 - s] {
+        s += 1;
+    }
+    let (on, nm) = (n - p - s, m - p - s);
+    let mut ops: Vec<DiffOp> = Vec::new();
+    if p > 0 {
+        ops.push(DiffOp::Equal { old_index: 0, new_index: 0, len: p });
+    }
+    let mut frontier_ops = 0u64;
+    let mut trace_bytes = 0usize;
+    let too_large = old_text.len() > limits.max_bytes || new_text.len() > limits.max_bytes || n > limits.max_lines || m > limits.max_lines;
+    let middle: Result<Vec<DiffOp>, Exhaustion> = if on == 0 && nm == 0 {
+        Ok(Vec::new())
+    } else if on == 0 {
+        Ok(vec![DiffOp::Insert { new_index: p, len: nm }])
+    } else if nm == 0 {
+        Ok(vec![DiffOp::Delete { old_index: p, len: on }])
+    } else if too_large {
+        Err(Exhaustion::TooLarge { old_bytes: old_text.len(), new_bytes: new_text.len(), old_lines: n, new_lines: m })
+    } else {
+        myers_bounded(&old_lines[p..n - s], &new_lines[p..m - s], limits, cancel, &mut frontier_ops, &mut trace_bytes).map(|edits| {
+            compress_edits(&edits, on, nm)
+                .into_iter()
+                .map(|op| match op {
+                    DiffOp::Equal { old_index, new_index, len } => DiffOp::Equal { old_index: old_index + p, new_index: new_index + p, len },
+                    DiffOp::Insert { new_index, len } => DiffOp::Insert { new_index: new_index + p, len },
+                    DiffOp::Delete { old_index, len } => DiffOp::Delete { old_index: old_index + p, len },
+                })
+                .collect()
+        })
+    };
+    let unavailable = match middle {
+        Ok(mid) => {
+            ops.extend(mid);
+            None
+        }
+        Err(reason) => {
+            ops.push(DiffOp::Delete { old_index: p, len: on });
+            ops.push(DiffOp::Insert { new_index: p, len: nm });
+            Some(UnavailableHunk { old_index: p, old_len: on, new_index: p, new_len: nm, reason })
+        }
+    };
+    if s > 0 {
+        ops.push(DiffOp::Equal { old_index: n - s, new_index: m - s, len: s });
+    }
+    BoundedDiff { ops: merge_runs(ops), old, new, unavailable, frontier_ops, trace_bytes }
+}
+
+/// Merge adjacent runs of the same kind.
+fn merge_runs(ops: Vec<DiffOp>) -> Vec<DiffOp> {
+    let mut out: Vec<DiffOp> = Vec::with_capacity(ops.len());
+    for op in ops {
+        match (out.last_mut(), op) {
+            (Some(DiffOp::Equal { old_index, new_index, len }), DiffOp::Equal { old_index: o, new_index: nw, len: l }) if *old_index + *len == o && *new_index + *len == nw => *len += l,
+            (Some(DiffOp::Insert { new_index, len }), DiffOp::Insert { new_index: nw, len: l }) if *new_index + *len == nw => *len += l,
+            (Some(DiffOp::Delete { old_index, len }), DiffOp::Delete { old_index: o, len: l }) if *old_index + *len == o => *len += l,
+            (_, op) => out.push(op),
+        }
+    }
+    out
+}
+
+/// The bounded search on a middle segment with no common prefix or suffix
+/// (both non-empty). The trace keeps only the `2d + 1` diagonals a front
+/// can reach, as `i32`, so its storage is `4·(D + 1)²` bytes for `D` edits.
+fn myers_bounded(old: &[&str], new: &[&str], limits: &DiffLimits, cancel: &dyn Fn() -> bool, frontier_ops: &mut u64, trace_bytes: &mut usize) -> Result<Vec<Edit>, Exhaustion> {
+    let n = old.len();
+    let m = new.len();
+    let max_d = n + m;
+    let offset = max_d as i64;
+    let mut v = vec![0i32; 2 * max_d + 1];
+    let mut trace: Vec<i32> = Vec::new();
+    let mut reached: Option<usize> = None;
+    'outer: for d in 0..=max_d {
+        if cancel() {
+            return Err(Exhaustion::Cancelled);
+        }
+        let slice_len = 2 * d + 1;
+        if *trace_bytes + slice_len * 4 > limits.max_trace_bytes {
+            return Err(Exhaustion::TraceStorage { bytes: *trace_bytes + slice_len * 4 });
+        }
+        for k in -(d as i64)..=(d as i64) {
+            trace.push(v[(k + offset) as usize]);
+        }
+        *trace_bytes += slice_len * 4;
+        let mut k = -(d as i64);
+        while k <= d as i64 {
+            let ki = (k + offset) as usize;
+            let mut x: i64 = if k == -(d as i64) || (k != d as i64 && v[ki - 1] < v[ki + 1]) { v[ki + 1] as i64 } else { v[ki - 1] as i64 + 1 };
+            let mut y = x - k;
+            let mut ops = 1u64;
+            while (x as usize) < n && (y as usize) < m && x >= 0 && y >= 0 && old[x as usize] == new[y as usize] {
+                x += 1;
+                y += 1;
+                ops += 1;
+            }
+            *frontier_ops += ops;
+            v[ki] = x as i32;
+            if x >= n as i64 && y >= m as i64 {
+                reached = Some(d);
+                break 'outer;
+            }
+            if *frontier_ops > limits.max_frontier_ops {
+                return Err(Exhaustion::FrontierOps { ops: *frontier_ops });
+            }
+            k += 2;
+        }
+    }
+    let Some(dmax) = reached else { return Err(Exhaustion::FrontierOps { ops: *frontier_ops }) };
+    // backtrack over the compact trace: round d's slice starts at d² and
+    // holds k = -d..=d
+    let mut x = n as i64;
+    let mut y = m as i64;
+    let mut edits: Vec<Edit> = Vec::new();
+    for d in (0..=dmax).rev() {
+        let base = d * d;
+        let at = |k: i64| -> i64 { trace[base + (k + d as i64) as usize] as i64 };
+        let k = x - y;
+        if d == 0 {
+            while x > 0 && y > 0 {
+                edits.push(Edit::Keep);
+                x -= 1;
+                y -= 1;
+            }
+            break;
+        }
+        let prev_k = if k == -(d as i64) || (k != d as i64 && at(k - 1) < at(k + 1)) { k + 1 } else { k - 1 };
+        let prev_x = at(prev_k);
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            edits.push(Edit::Keep);
+            x -= 1;
+            y -= 1;
+        }
+        if prev_k == k + 1 {
+            edits.push(Edit::Insert);
+            y -= 1;
+        } else {
+            edits.push(Edit::Delete);
+            x -= 1;
+        }
+    }
+    edits.reverse();
+    Ok(edits)
+}
+
 fn split_lines(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return vec![];
@@ -657,5 +1079,265 @@ mod tests {
     fn test_diff_both_empty() {
         let ops = diff_lines("", "");
         assert!(ops.is_empty());
+    }
+
+    // ------------------------------------------------------------ bounded
+
+    /// Rebuild both endpoints from the ops alone (equal + deleted lines make
+    /// the old text, equal + inserted the new), byte for byte.
+    fn reconstruct_both(d: &BoundedDiff, old: &str, new: &str) -> (String, String) {
+        let (mut o, mut n) = (String::new(), String::new());
+        let line = |idx: &LineIndex, text: &str, i: usize| -> String {
+            let r = idx.lines[i];
+            format!("{}{}", &text[r.start..r.end], r.ending.as_str())
+        };
+        for op in &d.ops {
+            match *op {
+                DiffOp::Equal { old_index, new_index, len } => {
+                    for k in 0..len {
+                        assert_eq!(d.old.content(old, old_index + k), d.new.content(new, new_index + k), "equal lines are byte-equal");
+                        o.push_str(&line(&d.old, old, old_index + k));
+                        n.push_str(&line(&d.new, new, new_index + k));
+                    }
+                }
+                DiffOp::Delete { old_index, len } => (0..len).for_each(|k| o.push_str(&line(&d.old, old, old_index + k))),
+                DiffOp::Insert { new_index, len } => (0..len).for_each(|k| n.push_str(&line(&d.new, new, new_index + k))),
+            }
+        }
+        (o, n)
+    }
+
+    /// The run contract: runs cover both endpoints in order, equal runs map
+    /// monotonically, the text reconstructs exactly and the inverse maps
+    /// every equal line back to itself.
+    fn assert_contract(old: &str, new: &str, d: &BoundedDiff) {
+        let (mut oi, mut ni) = (0usize, 0usize);
+        for op in &d.ops {
+            match *op {
+                DiffOp::Equal { old_index, new_index, len } => {
+                    assert_eq!((old_index, new_index), (oi, ni), "runs are contiguous: {:?}", d.ops);
+                    assert!(len > 0);
+                    oi += len;
+                    ni += len;
+                }
+                DiffOp::Delete { old_index, len } => {
+                    assert_eq!(old_index, oi);
+                    assert!(len > 0);
+                    oi += len;
+                }
+                DiffOp::Insert { new_index, len } => {
+                    assert_eq!(new_index, ni);
+                    assert!(len > 0);
+                    ni += len;
+                }
+            }
+        }
+        assert_eq!((oi, ni), (d.old.len(), d.new.len()), "runs cover both endpoints");
+        let mut last: Option<(usize, usize)> = None;
+        for (o, n) in d.equal_pairs() {
+            if let Some((lo, ln)) = last {
+                assert!(o > lo && n > ln, "equal mapping is strictly monotonic");
+            }
+            assert_eq!(d.map_old_to_new(o), Some(n));
+            assert_eq!(d.map_new_to_old(n), Some(o));
+            last = Some((o, n));
+        }
+        let (ro, rn) = reconstruct_both(d, old, new);
+        assert_eq!(ro, old, "old endpoint reconstructs exactly");
+        assert_eq!(rn, new, "new endpoint reconstructs exactly");
+        assert_eq!(d.old.reconstruct(old), old);
+        assert_eq!(d.new.reconstruct(new), new);
+        // inverse consistency: A -> B then B -> A through the inverse is the identity
+        let inv = d.inverse();
+        assert_contract_inverse(new, old, &inv);
+        for (o, n) in d.equal_pairs() {
+            assert_eq!(inv.map_old_to_new(n), Some(o));
+            assert_eq!(inv.map_new_to_old(o), Some(n));
+            assert_eq!(inv.map_old_to_new(d.map_old_to_new(o).unwrap()), Some(o));
+        }
+        assert_eq!(inv.inverse(), *d, "the inverse of the inverse is the diff itself");
+        assert_eq!(inv.is_complete(), d.is_complete());
+    }
+
+    fn assert_contract_inverse(old: &str, new: &str, d: &BoundedDiff) {
+        let (ro, rn) = reconstruct_both(d, old, new);
+        assert_eq!(ro, old);
+        assert_eq!(rn, new);
+    }
+
+    fn corpus() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("", ""),
+            ("", "a\nb\n"),
+            ("a\nb\n", ""),
+            ("a\n", "a\n"),
+            ("a\nb\nc\n", "a\nX\nc\n"),
+            ("a\nc\n", "a\nb\nc\n"),
+            ("a\nb\nc\n", "a\nc\n"),
+            // repeated lines
+            ("a\na\na\n", "a\na\na\na\n"),
+            ("x\n\n\nx\n\ny\n", "x\n\nx\n\n\ny\n"),
+            ("a\nb\na\nb\na\nb\n", "b\na\nb\na\nb\na\n"),
+            // UTF-8 and tabs
+            ("fn é() {\n\tlet ü = \"ç\";\n}\n", "fn é() {\n\tlet ü = \"ç\";\n\tlet 日本 = 1;\n}\n"),
+            ("α\nβ\nγ\n", "α\nγ\nδ\n"),
+            ("\ta\n\t\tb\n", "\ta\n    b\n"),
+            // CRLF, mixed, final newline
+            ("a\r\nb\r\n", "a\r\nb\r\nc\r\n"),
+            ("a\r\nb\n", "a\nb\r\n"),
+            ("a\nb", "a\nb\n"),
+            ("a\nb\n", "a\nb"),
+            ("\n", ""),
+            ("\n\n", "\n"),
+            // a lone carriage return is content, not a terminator
+            ("a\rb\n", "a\rb\nc\n"),
+            ("one\ntwo\nthree\nfour\nfive\n", "zero\none\nthree\nfour\nfive\nsix\n"),
+        ]
+    }
+
+    #[test]
+    fn bounded_runs_reconstruct_map_monotonically_and_invert() {
+        for (old, new) in corpus() {
+            let d = diff_lines_with_limits(old, new, &DiffLimits::default());
+            assert!(d.is_complete(), "{old:?} -> {new:?}");
+            assert_contract(old, new, &d);
+            // the same runs as the unbounded diff, whose splitter is str::lines()
+            let plain = diff_lines(old, new);
+            let plain_pairs: Vec<(usize, usize)> = {
+                let mut v = Vec::new();
+                for op in &plain {
+                    if let DiffOp::Equal { old_index, new_index, len } = *op {
+                        v.extend((0..len).map(|k| (old_index + k, new_index + k)));
+                    }
+                }
+                v
+            };
+            assert_eq!(d.equal_pairs().collect::<Vec<_>>().len(), plain_pairs.len(), "{old:?} -> {new:?}: the same number of equal lines as diff_lines");
+            assert_eq!(d.old.len(), old.lines().count());
+            assert_eq!(d.new.len(), new.lines().count());
+        }
+    }
+
+    #[test]
+    fn bounded_runs_are_the_expected_kinds() {
+        let d = diff_lines_with_limits("a\nb\nc\n", "a\nX\nc\n", &DiffLimits::default());
+        assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: 1 }, DiffOp::Delete { old_index: 1, len: 1 }, DiffOp::Insert { new_index: 1, len: 1 }, DiffOp::Equal { old_index: 2, new_index: 2, len: 1 }]);
+        let d = diff_lines_with_limits("a\nc\n", "a\nb\nc\n", &DiffLimits::default());
+        assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: 1 }, DiffOp::Insert { new_index: 1, len: 1 }, DiffOp::Equal { old_index: 1, new_index: 2, len: 1 }]);
+        let d = diff_lines_with_limits("a\nb\nc\n", "a\nc\n", &DiffLimits::default());
+        assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: 1 }, DiffOp::Delete { old_index: 1, len: 1 }, DiffOp::Equal { old_index: 2, new_index: 1, len: 1 }]);
+        // repeated lines: three equal, one inserted, monotone
+        let d = diff_lines_with_limits("a\na\na\n", "a\na\na\na\n", &DiffLimits::default());
+        assert_eq!(d.equal_pairs().count(), 3);
+        assert!(d.ops.iter().any(|op| matches!(op, DiffOp::Insert { len: 1, .. })));
+        // the inverse of an insert is a delete at the same place
+        let inv = d.inverse();
+        assert!(inv.ops.iter().any(|op| matches!(op, DiffOp::Delete { len: 1, .. })));
+        assert_eq!(inv.old, d.new);
+    }
+
+    #[test]
+    fn line_index_retains_terminators_and_final_newline_separately() {
+        let crlf = "a\r\nb\r\n";
+        let lf = "a\nb";
+        let d = diff_lines_with_limits(crlf, lf, &DiffLimits::default());
+        assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: 2 }], "content compares without terminators");
+        assert_eq!(d.old.lines.iter().map(|l| l.ending).collect::<Vec<_>>(), vec![LineEnding::CrLf, LineEnding::CrLf]);
+        assert_eq!(d.new.lines.iter().map(|l| l.ending).collect::<Vec<_>>(), vec![LineEnding::Lf, LineEnding::None]);
+        assert!(d.old.final_newline && !d.new.final_newline);
+        assert_eq!(d.old.lines[1].full(), 3..6);
+        assert_eq!(d.old.lines[1].content(), 3..4);
+        assert_eq!(d.old.reconstruct(crlf), crlf);
+        assert_eq!(d.new.reconstruct(lf), lf);
+        assert_eq!(d.old.line_of(4), Some(1));
+        assert_eq!(d.old.line_of(0), Some(0));
+        assert_eq!(LineIndex::of("").line_of(0), None);
+        // empty files
+        let e = diff_lines_with_limits("", "", &DiffLimits::default());
+        assert!(e.ops.is_empty() && e.old.is_empty() && e.new.is_empty() && e.is_complete());
+        let e = diff_lines_with_limits("", "a\n", &DiffLimits::default());
+        assert_eq!(e.ops, vec![DiffOp::Insert { new_index: 0, len: 1 }]);
+        let e = diff_lines_with_limits("\n", "", &DiffLimits::default());
+        assert_eq!(e.ops, vec![DiffOp::Delete { old_index: 0, len: 1 }]);
+        assert_eq!(LineIndex::of("\n").len(), 1, "one empty line, as str::lines()");
+        assert_eq!(LineIndex::of("a\nb").len(), 2);
+        assert_eq!(LineIndex::of("a\nb\n").len(), 2);
+    }
+
+    /// A large replacement between a shared prefix and suffix under tiny
+    /// limits: the prefix and suffix are established, the middle is one
+    /// explicit unavailable hunk, and both endpoints still reconstruct.
+    fn big_pair() -> (String, String) {
+        let prefix = "// prefix\nuse std::fmt;\n";
+        let suffix = "\nfn tail() {}\n";
+        let mut a = String::from(prefix);
+        let mut b = String::from(prefix);
+        for i in 0..400 {
+            a.push_str(&format!("let a{i} = {};\n", i * 7 % 13));
+            b.push_str(&format!("let b{i} = {};\n", i * 5 % 11));
+        }
+        a.push_str(suffix);
+        b.push_str(suffix);
+        (a, b)
+    }
+
+    #[test]
+    fn bounds_hit_returns_prefix_suffix_and_one_unavailable_hunk() {
+        let (a, b) = big_pair();
+        let full = diff_lines_with_limits(&a, &b, &DiffLimits::default());
+        assert!(full.is_complete());
+        assert_contract(&a, &b, &full);
+        for limits in [
+            DiffLimits { max_frontier_ops: 50, ..DiffLimits::default() },
+            DiffLimits { max_trace_bytes: 64, ..DiffLimits::default() },
+            DiffLimits { max_lines: 10, ..DiffLimits::default() },
+            DiffLimits { max_bytes: 100, ..DiffLimits::default() },
+        ] {
+            let d = diff_lines_with_limits(&a, &b, &limits);
+            let hunk = d.unavailable.clone().expect("exhausted");
+            assert_eq!(hunk.old_index, 2, "the two prefix lines are verified equal: {limits:?}");
+            assert_eq!(hunk.new_index, 2);
+            assert_eq!(hunk.old_len, 400);
+            assert_eq!(hunk.new_len, 400);
+            match limits {
+                l if l.max_frontier_ops == 50 => assert!(matches!(hunk.reason, Exhaustion::FrontierOps { ops } if ops >= 50)),
+                l if l.max_trace_bytes == 64 => assert!(matches!(hunk.reason, Exhaustion::TraceStorage { .. })),
+                _ => assert!(matches!(hunk.reason, Exhaustion::TooLarge { .. })),
+            }
+            assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: 2 }, DiffOp::Delete { old_index: 2, len: 400 }, DiffOp::Insert { new_index: 2, len: 400 }, DiffOp::Equal { old_index: 402, new_index: 402, len: 2 }]);
+            assert_contract(&a, &b, &d);
+            assert_eq!(d.map_old_to_new(100), None, "no identity inside the unavailable hunk");
+            assert_eq!(d.map_old_to_new(403), Some(403), "the suffix maps");
+            assert_eq!(Exhaustion::LABEL, "Line correspondence unavailable");
+        }
+        // the frontier budget is measured: a completed search reports what it spent
+        assert!(full.frontier_ops > 0 && full.trace_bytes > 0);
+        assert!(full.trace_bytes <= DiffLimits::default().max_trace_bytes);
+        // identical over-limit inputs are still exactly equal (no search needed)
+        let d = diff_lines_with_limits(&a, &a, &DiffLimits { max_lines: 1, ..DiffLimits::default() });
+        assert!(d.is_complete());
+        assert_eq!(d.ops, vec![DiffOp::Equal { old_index: 0, new_index: 0, len: d.old.len() }]);
+    }
+
+    #[test]
+    fn cancellation_is_checked_between_fronts() {
+        let (a, b) = big_pair();
+        let calls = std::cell::Cell::new(0u32);
+        let cancel = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= 3
+        };
+        let d = diff_lines_bounded(&a, &b, &DiffLimits::default(), &cancel);
+        let hunk = d.unavailable.clone().expect("cancelled");
+        assert_eq!(hunk.reason, Exhaustion::Cancelled);
+        assert_eq!(calls.get(), 3, "checked once per front until it said stop");
+        assert_contract(&a, &b, &d);
+        // never asked when nothing needs searching
+        let calls = std::cell::Cell::new(0u32);
+        let d = diff_lines_bounded("a\nb\n", "a\nb\n", &DiffLimits::default(), &|| {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert!(d.is_complete() && calls.get() == 0);
     }
 }

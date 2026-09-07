@@ -1,44 +1,13 @@
+//! End-to-end behaviour of the repository API on repositories built with the
+//! API itself: no git binary anywhere. Where the old suite asked git to
+//! confirm an object, the assertion is now the object id git assigns to the
+//! same content (computed independently of this crate's serialisers).
+use makepad_git::test_support::{
+    self, delta_copy, delta_header, delta_insert, pack_all_loose, write_pack_entries, PackEntry,
+};
 use makepad_git::*;
 use std::fs;
-use std::process::Command;
-
-fn git(dir: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .expect("failed to run git");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn make_repo() -> test_support::TempDir {
-    let dir = test_support::tempdir().unwrap();
-    git(dir.path(), &["init"]);
-    fs::write(dir.path().join("file1.txt"), "hello\n").unwrap();
-    fs::write(dir.path().join("file2.txt"), "world\n").unwrap();
-    fs::create_dir_all(dir.path().join("subdir")).unwrap();
-    fs::write(dir.path().join("subdir/nested.txt"), "nested\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "initial commit"]);
-    dir
-}
+use std::path::Path;
 
 fn test_sig() -> Signature {
     Signature {
@@ -47,6 +16,132 @@ fn test_sig() -> Signature {
         timestamp: 1700000000,
         tz_offset: "+0000".into(),
     }
+}
+
+/// `git init`: the layout a fresh repository has before its first commit.
+fn init_layout(dir: &Path) {
+    let git = dir.join(".git");
+    fs::create_dir_all(git.join("objects")).unwrap();
+    fs::create_dir_all(git.join("refs/heads")).unwrap();
+    fs::create_dir_all(git.join("refs/tags")).unwrap();
+    fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+}
+
+/// Every file under `dir` (except `.git`) as a repository-relative path.
+fn worktree_files(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".git" {
+            continue;
+        }
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        if entry.path().is_dir() {
+            worktree_files(&entry.path(), &rel, out);
+        } else {
+            out.push(rel);
+        }
+    }
+}
+
+/// `git add -A`: stage every file, drop index entries whose file is gone.
+fn add_all(repo: &mut Repository, dir: &Path) {
+    let mut files = Vec::new();
+    worktree_files(dir, "", &mut files);
+    for file in &files {
+        repo.stage_file(file).unwrap();
+    }
+    let index = repo.read_index().unwrap();
+    for entry in index.entries {
+        if !files.contains(&entry.path) {
+            repo.unstage_file(&entry.path).unwrap();
+        }
+    }
+}
+
+/// `git add -A && git commit -m <message>`.
+fn commit_all(repo: &mut Repository, dir: &Path, message: &str) -> ObjectId {
+    add_all(repo, dir);
+    repo.commit(&format!("{}\n", message), test_sig()).unwrap()
+}
+
+/// `git checkout -b <name>`.
+fn checkout_new_branch(repo: &mut Repository, name: &str) {
+    let head = repo.head_oid().unwrap();
+    repo.create_branch(name, &head).unwrap();
+    repo.checkout_branch(name).unwrap();
+}
+
+/// `git merge <branch> --no-ff -m <message>` for a branch the current branch
+/// has not diverged from: a merge commit with both parents on top of the
+/// branch's tree.
+fn merge_no_ff(repo: &mut Repository, branch: &str, message: &str) -> ObjectId {
+    let ours = repo.head_oid().unwrap();
+    let theirs = repo.resolve_ref(&format!("refs/heads/{}", branch)).unwrap();
+    let theirs_commit = repo.read_commit(&theirs).unwrap();
+    let merge = repo
+        .write_commit(&Commit {
+            tree: theirs_commit.tree,
+            parents: vec![ours, theirs],
+            author: test_sig(),
+            committer: test_sig(),
+            message: format!("{}\n", message),
+        })
+        .unwrap();
+    let current = repo.current_branch().unwrap().unwrap();
+    repo.create_branch(&current, &merge).unwrap();
+    repo.checkout_branch(&current).unwrap();
+    merge
+}
+
+/// Our `git fsck`: every object reachable from HEAD re-hashes to its id.
+fn fsck(repo: &mut Repository) {
+    fn check(repo: &mut Repository, oid: &ObjectId) -> Object {
+        let object = repo.read_object(oid).unwrap();
+        assert_eq!(
+            &makepad_git::oid::hash_object(object.kind.as_str(), &object.data),
+            oid,
+            "object {} does not hash to its id",
+            oid
+        );
+        object
+    }
+    fn check_tree(repo: &mut Repository, oid: &ObjectId) {
+        let object = check(repo, oid);
+        assert_eq!(object.kind, ObjectKind::Tree);
+        let tree = repo.read_tree(oid).unwrap();
+        for entry in tree.entries {
+            if entry.is_tree() {
+                check_tree(repo, &entry.oid);
+            } else {
+                assert_eq!(check(repo, &entry.oid).kind, ObjectKind::Blob);
+            }
+        }
+    }
+    let head = repo.head_oid().unwrap();
+    for (oid, commit) in repo.log(&head, 1000).unwrap() {
+        assert_eq!(check(repo, &oid).kind, ObjectKind::Commit);
+        check_tree(repo, &commit.tree);
+    }
+}
+
+/// `git init` + file1.txt/file2.txt/subdir/nested.txt + `git add .` +
+/// `git commit -m "initial commit"`.
+fn make_repo() -> test_support::TempDir {
+    let dir = test_support::tempdir().unwrap();
+    init_layout(dir.path());
+    fs::write(dir.path().join("file1.txt"), "hello\n").unwrap();
+    fs::write(dir.path().join("file2.txt"), "world\n").unwrap();
+    fs::create_dir_all(dir.path().join("subdir")).unwrap();
+    fs::write(dir.path().join("subdir/nested.txt"), "nested\n").unwrap();
+    let mut repo = Repository::open(dir.path()).unwrap();
+    commit_all(&mut repo, dir.path(), "initial commit");
+    dir
 }
 
 // ===== Original tests =====
@@ -63,6 +158,22 @@ fn test_open_and_read_head() {
         "unexpected branch: {}",
         branch_name
     );
+}
+
+#[test]
+fn fixture_matches_the_ids_git_assigns() {
+    // The index-built tree and the commit serialise exactly as git does: the
+    // ids were computed independently for this content and signature.
+    let dir = make_repo();
+    let mut repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_oid().unwrap();
+    assert_eq!(head.to_hex(), "18be1235587927fcf5b773fd83b97c85507d6b81");
+    let commit = repo.read_commit(&head).unwrap();
+    assert_eq!(commit.tree.to_hex(), "2882f69277885874924f338eaf1f6c801e4d7be0");
+    let tree = repo.read_tree(&commit.tree).unwrap();
+    let subdir = tree.entries.iter().find(|e| e.name == "subdir").unwrap();
+    assert_eq!(subdir.oid.to_hex(), "9dfd7d08cef435bccfc5701b5b547c3740a67404");
+    fsck(&mut repo);
 }
 
 #[test]
@@ -98,9 +209,8 @@ fn test_write_blob_and_verify() {
     let oid = repo.write_blob(data).unwrap();
     let read_data = repo.read_blob(&oid).unwrap();
     assert_eq!(read_data, data);
-
-    let output = git(dir.path(), &["cat-file", "-p", &oid.to_hex()]);
-    assert_eq!(output, "new content written by makepad-git");
+    // The id git assigns to this content.
+    assert_eq!(oid.to_hex(), "d9ebf63dec9cbf92245866d90e1f698cec04f916");
 }
 
 #[test]
@@ -150,17 +260,14 @@ fn test_create_commit_programmatically() {
         .commit("commit from makepad-git\n", test_sig())
         .unwrap();
 
-    let log_output = git(dir.path(), &["log", "--oneline", "-2"]);
-    assert!(
-        log_output.contains("commit from makepad-git"),
-        "git log: {}",
-        log_output
-    );
-    assert!(
-        log_output.contains("initial commit"),
-        "git log: {}",
-        log_output
-    );
+    let log: Vec<String> = repo
+        .log(&commit_oid, 2)
+        .unwrap()
+        .into_iter()
+        .map(|(_, c)| c.message)
+        .collect();
+    assert!(log.contains(&"commit from makepad-git\n".to_string()), "log: {:?}", log);
+    assert!(log.contains(&"initial commit\n".to_string()), "log: {:?}", log);
 
     let new_commit = repo.read_commit(&commit_oid).unwrap();
     assert_eq!(new_commit.parents.len(), 1);
@@ -176,8 +283,7 @@ fn test_log_walk() {
     let dir = make_repo();
     let mut repo = Repository::open(dir.path()).unwrap();
     fs::write(dir.path().join("file1.txt"), "updated\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "second commit"]);
+    commit_all(&mut repo, dir.path(), "second commit");
 
     let head = repo.head_oid().unwrap();
     let log = repo.log(&head, 10).unwrap();
@@ -189,7 +295,8 @@ fn test_log_walk() {
 #[test]
 fn test_read_from_packed_repo() {
     let dir = make_repo();
-    git(dir.path(), &["gc", "--aggressive"]);
+    // What `git gc` does to a small repository: every object into one pack.
+    pack_all_loose(&dir.path().join(".git")).unwrap();
 
     let mut repo = Repository::open(dir.path()).unwrap();
     let head_oid = repo.head_oid().unwrap();
@@ -273,7 +380,6 @@ fn test_status_modified_file() {
     let dir = make_repo();
     let mut repo = Repository::open(dir.path()).unwrap();
 
-    // Wait a moment so mtime changes
     fs::write(dir.path().join("file1.txt"), "modified content\n").unwrap();
 
     let status = repo.status().unwrap();
@@ -287,6 +393,15 @@ fn test_status_modified_file() {
 
 // ===== Stage/Unstage Tests =====
 
+fn status_of(repo: &mut Repository, path: &str) -> Option<FileStatus> {
+    repo.status()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|e| e.path == path)
+        .map(|e| e.status)
+}
+
 #[test]
 fn test_stage_new_file() {
     let dir = make_repo();
@@ -295,16 +410,12 @@ fn test_stage_new_file() {
     fs::write(dir.path().join("staged.txt"), "staged content\n").unwrap();
     repo.stage_file("staged.txt").unwrap();
 
-    // Verify git sees it staged
-    let git_status = git(dir.path(), &["status", "--porcelain"]);
-    assert!(
-        git_status.contains("A  staged.txt"),
-        "git status: {}",
-        git_status
-    );
-
-    // Verify git can read the index we wrote
-    assert!(git_ok(dir.path(), &["status"]));
+    // `A  staged.txt`
+    assert_eq!(status_of(&mut repo, "staged.txt"), Some(FileStatus::StagedNew));
+    // The index we wrote reads back and carries the blob we stored.
+    let index = repo.read_index().unwrap();
+    let entry = index.entries.iter().find(|e| e.path == "staged.txt").unwrap();
+    assert_eq!(repo.read_blob(&entry.oid).unwrap(), b"staged content\n");
 }
 
 #[test]
@@ -315,14 +426,9 @@ fn test_stage_modified_file() {
     fs::write(dir.path().join("file1.txt"), "changed\n").unwrap();
     repo.stage_file("file1.txt").unwrap();
 
-    // Verify git sees it staged
-    let git_status = git(dir.path(), &["status", "--porcelain"]);
-    assert!(
-        git_status.contains("M  file1.txt"),
-        "git status: {}",
-        git_status
-    );
-    assert!(git_ok(dir.path(), &["status"]));
+    // `M  file1.txt`
+    assert_eq!(status_of(&mut repo, "file1.txt"), Some(FileStatus::Staged));
+    assert!(repo.status().is_ok());
 }
 
 #[test]
@@ -338,12 +444,20 @@ fn test_unstage_file() {
         "file1.txt should be removed from index"
     );
 
-    // Git should see it as deleted from index
-    let git_status = git(dir.path(), &["status", "--porcelain"]);
+    // `D  file1.txt`: in HEAD, removed from the index (the file itself is
+    // still in the worktree and therefore also untracked).
+    let statuses: Vec<FileStatus> = repo
+        .status()
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|e| e.path == "file1.txt")
+        .map(|e| e.status)
+        .collect();
     assert!(
-        git_status.contains("D  file1.txt"),
-        "git status: {}",
-        git_status
+        statuses.contains(&FileStatus::StagedDeleted),
+        "status: {:?}",
+        statuses
     );
 }
 
@@ -360,8 +474,7 @@ fn test_diff_trees_add_delete_modify() {
     fs::write(dir.path().join("file1.txt"), "modified hello\n").unwrap();
     fs::remove_file(dir.path().join("file2.txt")).unwrap();
     fs::write(dir.path().join("file3.txt"), "new file\n").unwrap();
-    git(dir.path(), &["add", "-A"]);
-    git(dir.path(), &["commit", "-m", "changes"]);
+    commit_all(&mut repo, dir.path(), "changes");
 
     let second_head = repo.head_oid().unwrap();
 
@@ -376,21 +489,9 @@ fn test_diff_trees_add_delete_modify() {
         })
         .collect();
 
-    assert!(
-        paths.contains(&"+file3.txt".to_string()),
-        "changes: {:?}",
-        paths
-    );
-    assert!(
-        paths.contains(&"-file2.txt".to_string()),
-        "changes: {:?}",
-        paths
-    );
-    assert!(
-        paths.contains(&"Mfile1.txt".to_string()),
-        "changes: {:?}",
-        paths
-    );
+    assert!(paths.contains(&"+file3.txt".to_string()), "changes: {:?}", paths);
+    assert!(paths.contains(&"-file2.txt".to_string()), "changes: {:?}", paths);
+    assert!(paths.contains(&"Mfile1.txt".to_string()), "changes: {:?}", paths);
 }
 
 #[test]
@@ -429,27 +530,27 @@ fn test_merge_fast_forward() {
 
     // Add a commit on the current branch
     fs::write(dir.path().join("file1.txt"), "updated on main\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "update on main"]);
+    commit_all(&mut repo, dir.path(), "update on main");
 
     // Switch to feature branch (which is behind)
-    git(dir.path(), &["checkout", "feature"]);
+    repo.checkout_branch("feature").unwrap();
 
     // Now merge main into feature — this should fast-forward
     let result = repo.merge_branch(&main_branch, test_sig()).unwrap();
-    assert!(
-        !result.has_conflict(),
-        "expected fast-forward, got conflict"
-    );
+    assert!(!result.has_conflict(), "expected fast-forward, got conflict");
     assert!(
         result.content().contains("Fast-forward"),
         "result: {}",
         result.content()
     );
 
-    // Verify git is happy
-    assert!(git_ok(dir.path(), &["status"]));
-    assert!(git_ok(dir.path(), &["fsck"]));
+    // The repository is consistent afterwards.
+    assert!(repo.status().is_ok());
+    fsck(&mut repo);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("file1.txt")).unwrap(),
+        "updated on main\n"
+    );
 }
 
 #[test]
@@ -460,29 +561,20 @@ fn test_merge_base_of_diverged_branches() {
     let base_oid = repo.head_oid().unwrap();
 
     // Create branch and commit on it
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::write(dir.path().join("feature.txt"), "feature work\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "feature commit"]);
-    let feature_oid = ObjectId::from_hex(&git(dir.path(), &["rev-parse", "HEAD"])).unwrap();
+    let feature_oid = commit_all(&mut repo, dir.path(), "feature commit");
+    assert_eq!(repo.head_oid().unwrap(), feature_oid);
 
     // Go back to main and commit
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("main.txt"), "main work\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "main commit"]);
+    commit_all(&mut repo, dir.path(), "main commit");
     let main_oid = repo.head_oid().unwrap();
 
     // Find merge base using our API
     let mb = repo.merge_base(&main_oid, &feature_oid).unwrap();
     assert_eq!(mb, Some(base_oid));
-
-    // Cross-check with git merge-base
-    let git_mb = git(
-        dir.path(),
-        &["merge-base", &main_oid.to_hex(), &feature_oid.to_hex()],
-    );
-    assert_eq!(mb.unwrap().to_hex(), git_mb);
 }
 
 #[test]
@@ -491,16 +583,14 @@ fn test_merge_clean_no_conflict() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Create feature branch
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::write(dir.path().join("feature.txt"), "feature content\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add feature.txt"]);
+    commit_all(&mut repo, dir.path(), "add feature.txt");
 
     // Go back to main and make a different change
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("main.txt"), "main content\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add main.txt"]);
+    commit_all(&mut repo, dir.path(), "add main.txt");
 
     // Merge feature into main using our API
     let result = repo.merge_branch("feature", test_sig()).unwrap();
@@ -510,22 +600,18 @@ fn test_merge_clean_no_conflict() {
         result.content()
     );
 
-    // Verify git is happy with the result
-    assert!(git_ok(dir.path(), &["fsck"]), "git fsck failed");
-    assert!(git_ok(dir.path(), &["status"]), "git status failed");
+    // The result is consistent
+    fsck(&mut repo);
+    assert!(repo.status().is_ok());
 
     // Verify merge commit has two parents
     let head = repo.head_oid().unwrap();
     let merge_commit = repo.read_commit(&head).unwrap();
-    assert_eq!(
-        merge_commit.parents.len(),
-        2,
-        "merge commit should have 2 parents"
-    );
+    assert_eq!(merge_commit.parents.len(), 2, "merge commit should have 2 parents");
 
-    // Verify both files exist
-    let log_output = git(dir.path(), &["log", "--oneline", "-5"]);
-    assert!(log_output.contains("Merge branch"), "log: {}", log_output);
+    // The log shows the merge
+    let log: Vec<String> = repo.log(&head, 5).unwrap().into_iter().map(|(_, c)| c.message).collect();
+    assert!(log.iter().any(|m| m.contains("Merge branch")), "log: {:?}", log);
 
     // Verify the worktree has both files
     assert!(dir.path().join("feature.txt").exists());
@@ -538,16 +624,14 @@ fn test_merge_conflict_same_file() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Create feature branch and modify file1.txt
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::write(dir.path().join("file1.txt"), "feature version\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "feature: modify file1"]);
+    commit_all(&mut repo, dir.path(), "feature: modify file1");
 
     // Go back to main and make a conflicting change to file1.txt
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("file1.txt"), "main version\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "main: modify file1"]);
+    commit_all(&mut repo, dir.path(), "main: modify file1");
 
     // Merge feature into main using our API — should conflict
     let result = repo.merge_branch("feature", test_sig()).unwrap();
@@ -565,21 +649,9 @@ fn test_merge_conflict_same_file() {
 
     // Verify the file has conflict markers
     let content = fs::read_to_string(dir.path().join("file1.txt")).unwrap();
-    assert!(
-        content.contains("<<<<<<<"),
-        "should have conflict markers: {}",
-        content
-    );
-    assert!(
-        content.contains("======="),
-        "should have conflict markers: {}",
-        content
-    );
-    assert!(
-        content.contains(">>>>>>>"),
-        "should have conflict markers: {}",
-        content
-    );
+    assert!(content.contains("<<<<<<<"), "should have conflict markers: {}", content);
+    assert!(content.contains("======="), "should have conflict markers: {}", content);
+    assert!(content.contains(">>>>>>>"), "should have conflict markers: {}", content);
 
     // Verify the index has conflict entries (stages 1-3)
     let index = repo.read_index().unwrap();
@@ -588,10 +660,7 @@ fn test_merge_conflict_same_file() {
         .iter()
         .filter(|e| e.path == "file1.txt" && e.stage() > 0)
         .collect();
-    assert!(
-        !conflict_entries.is_empty(),
-        "should have conflict stages in index"
-    );
+    assert!(!conflict_entries.is_empty(), "should have conflict stages in index");
 }
 
 // ===== Branch Checkout Tests =====
@@ -605,10 +674,9 @@ fn test_checkout_branch_switches_files() {
     // Create a feature branch with a new file
     let head = repo.head_oid().unwrap();
     repo.create_branch("feature", &head).unwrap();
-    git(dir.path(), &["checkout", "feature"]);
+    repo.checkout_branch("feature").unwrap();
     fs::write(dir.path().join("feature_only.txt"), "feature\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add feature_only.txt"]);
+    commit_all(&mut repo, dir.path(), "add feature_only.txt");
 
     // File should exist
     assert!(dir.path().join("feature_only.txt").exists());
@@ -626,9 +694,9 @@ fn test_checkout_branch_switches_files() {
     let current = repo.current_branch().unwrap().unwrap();
     assert_eq!(current, main_branch);
 
-    // Verify git is happy
-    assert!(git_ok(dir.path(), &["status"]));
-    assert!(git_ok(dir.path(), &["fsck"]));
+    // Consistent afterwards
+    assert!(repo.status().is_ok());
+    fsck(&mut repo);
 }
 
 #[test]
@@ -638,22 +706,18 @@ fn test_checkout_branch_restores_content() {
     let main_branch = repo.current_branch().unwrap().unwrap();
 
     // Modify file on a new branch
-    git(dir.path(), &["checkout", "-b", "modify"]);
+    checkout_new_branch(&mut repo, "modify");
     fs::write(dir.path().join("file1.txt"), "modified on branch\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "modify file1"]);
+    commit_all(&mut repo, dir.path(), "modify file1");
 
     // Checkout back to main via our API
     repo.checkout_branch(&main_branch).unwrap();
 
     // File should have original content
     let content = fs::read_to_string(dir.path().join("file1.txt")).unwrap();
-    assert_eq!(
-        content, "hello\n",
-        "file1.txt should be restored to original"
-    );
+    assert_eq!(content, "hello\n", "file1.txt should be restored to original");
 
-    assert!(git_ok(dir.path(), &["status"]));
+    assert!(repo.status().is_ok());
 }
 
 // ===== Packed Refs Tests =====
@@ -664,28 +728,27 @@ fn test_packed_refs_branches() {
     let repo = Repository::open(dir.path()).unwrap();
     let head = repo.head_oid().unwrap();
 
-    // Create branches and pack them
+    // Create branches and pack them (`git pack-refs --all`)
     repo.create_branch("packed-a", &head).unwrap();
     repo.create_branch("packed-b", &head).unwrap();
-    git(dir.path(), &["pack-refs", "--all"]);
+    let git_dir = dir.path().join(".git");
+    let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted\n");
+    for name in ["main", "packed-a", "packed-b"] {
+        packed.push_str(&format!("{} refs/heads/{}\n", head.to_hex(), name));
+        fs::remove_file(git_dir.join("refs/heads").join(name)).unwrap();
+    }
+    fs::write(git_dir.join("packed-refs"), packed).unwrap();
 
     // Our API should still find them
     let branches = repo.list_branches().unwrap();
     let names: Vec<&str> = branches.iter().map(|r| r.name.as_str()).collect();
-    assert!(
-        names.contains(&"refs/heads/packed-a"),
-        "branches: {:?}",
-        names
-    );
-    assert!(
-        names.contains(&"refs/heads/packed-b"),
-        "branches: {:?}",
-        names
-    );
+    assert!(names.contains(&"refs/heads/packed-a"), "branches: {:?}", names);
+    assert!(names.contains(&"refs/heads/packed-b"), "branches: {:?}", names);
 
     // Resolve should work too
     let resolved = repo.resolve_ref("refs/heads/packed-a").unwrap();
     assert_eq!(resolved, head);
+    assert_eq!(repo.head_oid().unwrap(), head);
 }
 
 // ===== Multiple Commits + History =====
@@ -698,8 +761,7 @@ fn test_long_history_walk() {
     // Create 10 additional commits
     for i in 1..=10 {
         fs::write(dir.path().join("file1.txt"), format!("version {}\n", i)).unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-m", &format!("commit {}", i)]);
+        commit_all(&mut repo, dir.path(), &format!("commit {}", i));
     }
 
     let head = repo.head_oid().unwrap();
@@ -715,47 +777,37 @@ fn test_diverged_history_walk() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Create feature branch with commits
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     for i in 1..=3 {
         fs::write(dir.path().join("feature.txt"), format!("v{}\n", i)).unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-m", &format!("feature {}", i)]);
+        commit_all(&mut repo, dir.path(), &format!("feature {}", i));
     }
 
     // Merge back to main
-    git(dir.path(), &["checkout", "-"]);
-    git(
-        dir.path(),
-        &["merge", "feature", "--no-ff", "-m", "merge feature"],
-    );
+    repo.checkout_branch("main").unwrap();
+    merge_no_ff(&mut repo, "feature", "merge feature");
 
     // Walk the merge commit
     let head = repo.head_oid().unwrap();
     let log = repo.log(&head, 100).unwrap();
     // Should see: merge commit, feature 3, feature 2, feature 1, initial (+ any main commits)
-    assert!(
-        log.len() >= 5,
-        "log should have at least 5 commits, got {}",
-        log.len()
-    );
+    assert!(log.len() >= 5, "log should have at least 5 commits, got {}", log.len());
     assert_eq!(log[0].1.message, "merge feature\n");
-    assert_eq!(
-        log[0].1.parents.len(),
-        2,
-        "merge commit should have 2 parents"
-    );
+    assert_eq!(log[0].1.parents.len(), 2, "merge commit should have 2 parents");
 }
 
-// ===== Write Objects and Verify with Git =====
+// ===== Write Objects and Verify Against Git's Ids =====
 
 #[test]
 fn test_write_tree_matches_git() {
     let dir = make_repo();
-    let repo = Repository::open(dir.path()).unwrap();
+    let mut repo = Repository::open(dir.path()).unwrap();
 
     // Write some blobs
     let blob_a = repo.write_blob(b"aaa\n").unwrap();
     let blob_b = repo.write_blob(b"bbb\n").unwrap();
+    assert_eq!(blob_a.to_hex(), "72943a16fb2c8f38f9dde202b7a70ccc19c52f34");
+    assert_eq!(blob_b.to_hex(), "f761ec192d9f0dca3329044b96ebdb12839dbff6");
 
     // Build a tree
     let tree = Tree {
@@ -774,14 +826,14 @@ fn test_write_tree_matches_git() {
     };
     let tree_oid = repo.write_tree(&tree).unwrap();
 
-    // Verify git can read it
-    let git_output = git(dir.path(), &["cat-file", "-p", &tree_oid.to_hex()]);
-    assert!(git_output.contains("a.txt"), "git cat-file: {}", git_output);
-    assert!(git_output.contains("b.txt"), "git cat-file: {}", git_output);
+    // The id git assigns to this tree
+    assert_eq!(tree_oid.to_hex(), "65b70c81bbedd324eb1d79c90a72ea2bddae82b4");
+    let read = repo.read_tree(&tree_oid).unwrap();
+    let names: Vec<&str> = read.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["a.txt", "b.txt"]);
 
     // Verify type
-    let type_output = git(dir.path(), &["cat-file", "-t", &tree_oid.to_hex()]);
-    assert_eq!(type_output, "tree");
+    assert_eq!(repo.read_object(&tree_oid).unwrap().kind, ObjectKind::Tree);
 }
 
 #[test]
@@ -802,11 +854,11 @@ fn test_write_commit_matches_git() {
     };
     let commit_oid = repo.write_commit(&commit).unwrap();
 
-    // Verify git can read it
-    let type_output = git(dir.path(), &["cat-file", "-t", &commit_oid.to_hex()]);
-    assert_eq!(type_output, "commit");
+    // The id git assigns to this commit
+    assert_eq!(commit_oid.to_hex(), "368f791a90001930f1762af7326aa54555e25254");
+    assert_eq!(repo.read_object(&commit_oid).unwrap().kind, ObjectKind::Commit);
 
-    let content = git(dir.path(), &["cat-file", "-p", &commit_oid.to_hex()]);
+    let content = String::from_utf8(repo.read_object(&commit_oid).unwrap().data).unwrap();
     assert!(content.contains("test commit via API"));
     assert!(content.contains(&head.to_hex()));
 }
@@ -814,20 +866,26 @@ fn test_write_commit_matches_git() {
 // ===== Index Round-Trip Tests =====
 
 #[test]
-fn test_index_roundtrip_with_git() {
+fn test_index_roundtrip() {
     let dir = make_repo();
-    let repo = Repository::open(dir.path()).unwrap();
+    let mut repo = Repository::open(dir.path()).unwrap();
 
-    // Read, write, and verify git can still use it
+    // Read, write, and read again
     let index = repo.read_index().unwrap();
     repo.write_index(&index).unwrap();
-
-    // Git should be able to read our index
-    let _status = git(dir.path(), &["status", "--porcelain"]);
-    // There might be some stat-cache differences, but no errors
-    assert!(git_ok(dir.path(), &["status"]));
-    // diff --cached may show stat-cache differences, that's fine
-    let _ = git_ok(dir.path(), &["diff", "--cached", "--exit-code"]);
+    let again = repo.read_index().unwrap();
+    assert_eq!(again.entries.len(), index.entries.len());
+    for (a, b) in index.entries.iter().zip(again.entries.iter()) {
+        assert_eq!(a.path, b.path);
+        assert_eq!(a.oid, b.oid);
+        assert_eq!(a.mode, b.mode);
+    }
+    // The rewritten index still describes a clean tree.
+    let status = repo.status().unwrap();
+    assert!(!status.entries.iter().any(|e| matches!(
+        e.status,
+        FileStatus::StagedNew | FileStatus::StagedDeleted | FileStatus::Untracked
+    )));
 }
 
 #[test]
@@ -839,16 +897,15 @@ fn test_index_after_staging() {
     fs::write(dir.path().join("new.txt"), "new content\n").unwrap();
     repo.stage_file("new.txt").unwrap();
 
-    // Now create a commit using git CLI to verify our index is valid
-    assert!(git_ok(
-        dir.path(),
-        &["commit", "-m", "commit with our index"]
-    ));
-    assert!(git_ok(dir.path(), &["fsck"]));
+    // Commit from that index
+    repo.commit("commit with our index\n", test_sig()).unwrap();
+    fsck(&mut repo);
 
     // Verify the commit has the new file
-    let tree_output = git(dir.path(), &["ls-tree", "HEAD"]);
-    assert!(tree_output.contains("new.txt"), "ls-tree: {}", tree_output);
+    let head = repo.head_oid().unwrap();
+    let head_tree = repo.read_commit(&head).unwrap().tree;
+    let tree = repo.read_tree(&head_tree).unwrap();
+    assert!(tree.entries.iter().any(|e| e.name == "new.txt"), "tree: {:?}", tree.entries);
 }
 
 // ===== Deep Nested Directory Tests =====
@@ -862,8 +919,7 @@ fn test_deeply_nested_directories() {
     let deep_dir = dir.path().join("a/b/c/d/e");
     fs::create_dir_all(&deep_dir).unwrap();
     fs::write(deep_dir.join("deep.txt"), "deep content\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add deep file"]);
+    commit_all(&mut repo, dir.path(), "add deep file");
 
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
@@ -882,7 +938,7 @@ fn test_deeply_nested_directories() {
     );
 }
 
-// ===== Git Fsck After All Our Writes =====
+// ===== Consistency After All Our Writes =====
 
 #[test]
 fn test_extensive_writes_pass_fsck() {
@@ -899,50 +955,99 @@ fn test_extensive_writes_pass_fsck() {
     for i in 0..5 {
         fs::write(dir.path().join("file1.txt"), format!("iteration {}\n", i)).unwrap();
         repo.stage_file("file1.txt").unwrap();
-        repo.commit(&format!("automated commit {}\n", i), test_sig())
-            .unwrap();
+        repo.commit(&format!("automated commit {}\n", i), test_sig()).unwrap();
     }
 
-    // Verify git can validate everything
-    assert!(
-        git_ok(dir.path(), &["fsck"]),
-        "git fsck failed after our writes"
-    );
-    assert!(git_ok(dir.path(), &["log", "--oneline"]));
-    let log = git(dir.path(), &["log", "--oneline"]);
-    assert!(log.contains("automated commit 4"), "log: {}", log);
+    // Everything reachable hashes to its id
+    fsck(&mut repo);
+    let head = repo.head_oid().unwrap();
+    let log: Vec<String> = repo.log(&head, 100).unwrap().into_iter().map(|(_, c)| c.message).collect();
+    assert!(log.contains(&"automated commit 4\n".to_string()), "log: {:?}", log);
 }
 
-// ===== Read Objects Written by Git After GC =====
+// ===== Read Deltified Objects =====
+
+const COMMON_PREFIX: &str = "This is a file with some common content.\n\
+             Line 2 is the same in every file.\n\
+             Line 3 too.\n\
+             But line 4 varies: iteration ";
+const COMMON_SUFFIX: &str = "\nLine 5 is common again.\n";
+
+fn similar_file(i: usize) -> Vec<u8> {
+    format!("{}{}{}", COMMON_PREFIX, i, COMMON_SUFFIX).into_bytes()
+}
 
 #[test]
 fn test_read_deltified_objects() {
     let dir = make_repo();
+    let git_dir = dir.path().join(".git");
 
-    // Create many similar files (will be deltified by gc)
-    for i in 0..20 {
-        let content = format!(
-            "This is a file with some common content.\n\
-             Line 2 is the same in every file.\n\
-             Line 3 too.\n\
-             But line 4 varies: iteration {}\n\
-             Line 5 is common again.\n",
-            i
-        );
-        fs::write(dir.path().join(format!("file_{}.txt", i)), &content).unwrap();
+    // Twenty similar files: the first stored whole, the others as deltas
+    // against it (ref-deltas and ofs-deltas alternately), the way a packer
+    // stores near-duplicates.
+    let base = similar_file(0);
+    let base_oid = makepad_git::oid::hash_object("blob", &base);
+    let mut entries = vec![PackEntry::Full(ObjectKind::Blob, base.clone())];
+    for i in 1..20 {
+        let result = similar_file(i);
+        let varying = format!("{}", i);
+        let mut delta = delta_header(base.len(), result.len());
+        delta.extend(delta_copy(0, COMMON_PREFIX.len() as u32));
+        delta.extend(delta_insert(varying.as_bytes()));
+        delta.extend(delta_copy(
+            (COMMON_PREFIX.len() + 1) as u32,
+            COMMON_SUFFIX.len() as u32,
+        ));
+        entries.push(if i % 2 == 1 {
+            PackEntry::RefDelta {
+                kind: ObjectKind::Blob,
+                base: base_oid,
+                delta,
+                result,
+            }
+        } else {
+            PackEntry::OfsDelta {
+                kind: ObjectKind::Blob,
+                base_index: 0,
+                delta,
+                result,
+            }
+        });
     }
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "many similar files"]);
+    let ids = write_pack_entries(&git_dir, &entries).unwrap();
 
-    // GC to force delta compression
-    git(dir.path(), &["gc", "--aggressive"]);
+    // A commit whose tree names every packed file
+    let repo = Repository::open(dir.path()).unwrap();
+    let mut tree_entries: Vec<TreeEntry> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, oid)| TreeEntry {
+            mode: 0o100644,
+            name: format!("file_{}.txt", i),
+            oid: *oid,
+        })
+        .collect();
+    tree_entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let tree = repo.write_tree(&Tree { entries: tree_entries }).unwrap();
+    let head = repo.head_oid().unwrap();
+    let commit = repo
+        .write_commit(&Commit {
+            tree,
+            parents: vec![head],
+            author: test_sig(),
+            committer: test_sig(),
+            message: "many similar files\n".into(),
+        })
+        .unwrap();
+    repo.create_branch("main", &commit).unwrap();
 
-    // Verify we can read all files through pack
+    // Verify we can read all files through the pack
     let mut repo = Repository::open(dir.path()).unwrap();
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
     let tree = repo.read_tree(&commit.tree).unwrap();
 
+    let mut seen = 0;
     for entry in &tree.entries {
         if entry.name.starts_with("file_") && entry.is_blob() {
             let data = repo.read_blob(&entry.oid).unwrap();
@@ -952,8 +1057,12 @@ fn test_read_deltified_objects() {
                 "file {} should contain common content",
                 entry.name
             );
+            let i: usize = entry.name["file_".len()..entry.name.len() - 4].parse().unwrap();
+            assert_eq!(text.as_bytes(), similar_file(i).as_slice(), "file {}", entry.name);
+            seen += 1;
         }
     }
+    assert_eq!(seen, 20);
 }
 
 // ===== Complex Merge Scenarios =====
@@ -964,16 +1073,14 @@ fn test_merge_with_added_files_both_sides() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Feature branch: add feature.txt
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add feature.txt"]);
+    commit_all(&mut repo, dir.path(), "add feature.txt");
 
     // Main: add main.txt
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("main.txt"), "main\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add main.txt"]);
+    commit_all(&mut repo, dir.path(), "add main.txt");
 
     // Merge via our API
     let result = repo.merge_branch("feature", test_sig()).unwrap();
@@ -983,13 +1090,13 @@ fn test_merge_with_added_files_both_sides() {
     assert!(dir.path().join("feature.txt").exists());
     assert!(dir.path().join("main.txt").exists());
 
-    // Git should accept our merge
-    assert!(git_ok(dir.path(), &["fsck"]));
-    assert!(git_ok(dir.path(), &["log", "--oneline"]));
+    // The merge is consistent
+    fsck(&mut repo);
 
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
     assert_eq!(commit.parents.len(), 2);
+    assert!(repo.log(&head, 10).unwrap().len() >= 4);
 }
 
 #[test]
@@ -998,109 +1105,108 @@ fn test_merge_delete_on_one_side() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Feature branch: delete file2.txt
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::remove_file(dir.path().join("file2.txt")).unwrap();
-    git(dir.path(), &["add", "-A"]);
-    git(dir.path(), &["commit", "-m", "delete file2.txt"]);
+    commit_all(&mut repo, dir.path(), "delete file2.txt");
 
     // Main: add main.txt (don't touch file2.txt)
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("main.txt"), "main\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add main.txt"]);
+    commit_all(&mut repo, dir.path(), "add main.txt");
 
     // Merge — file2.txt was deleted by feature, untouched by main → clean delete
     let result = repo.merge_branch("feature", test_sig()).unwrap();
-    assert!(
-        !result.has_conflict(),
-        "expected clean merge: {}",
-        result.content()
-    );
-    assert!(git_ok(dir.path(), &["fsck"]));
+    assert!(!result.has_conflict(), "expected clean merge: {}", result.content());
+    fsck(&mut repo);
+    // The merged tree no longer carries file2.txt.
+    let head = repo.head_oid().unwrap();
+    let head_tree = repo.read_commit(&head).unwrap().tree;
+    let tree = repo.read_tree(&head_tree).unwrap();
+    assert!(!tree.entries.iter().any(|e| e.name == "file2.txt"), "tree: {:?}", tree.entries);
 }
 
-// ===== Interoperability: Our Commits, Git's Reads =====
+// ===== Our Commits Read Back Through Log, Diff and Show =====
 
 #[test]
-fn test_our_commits_git_can_log_diff_show() {
+fn test_our_commits_log_diff_show() {
     let dir = make_repo();
     let mut repo = Repository::open(dir.path()).unwrap();
 
     // Make several commits through our API
+    let mut commits = Vec::new();
     for i in 0..3 {
         let content = format!("version {}\n", i);
         fs::write(dir.path().join("file1.txt"), &content).unwrap();
         repo.stage_file("file1.txt").unwrap();
-        repo.commit(&format!("API commit {}\n", i), test_sig())
-            .unwrap();
+        commits.push(repo.commit(&format!("API commit {}\n", i), test_sig()).unwrap());
     }
 
-    // Git should be able to: log, diff, show
-    let log_out = git(dir.path(), &["log", "--oneline"]);
-    assert!(log_out.contains("API commit 0"), "log: {}", log_out);
-    assert!(log_out.contains("API commit 2"), "log: {}", log_out);
+    // log
+    let head = repo.head_oid().unwrap();
+    let log: Vec<String> = repo.log(&head, 10).unwrap().into_iter().map(|(_, c)| c.message).collect();
+    assert!(log.contains(&"API commit 0\n".to_string()), "log: {:?}", log);
+    assert!(log.contains(&"API commit 2\n".to_string()), "log: {:?}", log);
+    assert!(log.len() >= 3);
 
-    // git diff between first and last API commit
-    let commits: Vec<_> = log_out.lines().collect();
-    assert!(commits.len() >= 3);
+    // diff between first and last API commit
+    let changes = repo.diff_commits(&commits[0], &commits[2]).unwrap();
+    assert!(
+        changes.iter().any(|c| matches!(c, TreeChange::Modified { path, .. } if path == "file1.txt")),
+        "changes: {:?}",
+        changes
+    );
 
-    // git show should work on HEAD
-    let show_out = git(dir.path(), &["show", "--stat", "HEAD"]);
-    assert!(show_out.contains("file1.txt"), "show: {}", show_out);
+    // show HEAD
+    let head_tree = repo.read_commit(&head).unwrap().tree;
+    let tree = repo.read_tree(&head_tree).unwrap();
+    let file1 = tree.entries.iter().find(|e| e.name == "file1.txt").unwrap();
+    assert_eq!(repo.read_blob(&file1.oid).unwrap(), b"version 2\n");
 
-    // fsck
-    assert!(git_ok(dir.path(), &["fsck"]));
+    fsck(&mut repo);
 }
 
-// ===== Read Repos Created Entirely by Git =====
+// ===== Tags and Merge Commits =====
 
 #[test]
 fn test_read_repo_with_tags() {
     let dir = make_repo();
-    git(dir.path(), &["tag", "v1.0"]);
+    let mut repo = Repository::open(dir.path()).unwrap();
+    let first = repo.head_oid().unwrap();
+    refs::write_ref(&repo.git_dir, "refs/tags/v1.0", &first).unwrap();
 
     fs::write(dir.path().join("file1.txt"), "v2\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "version 2"]);
-    git(dir.path(), &["tag", "v2.0"]);
+    let second = commit_all(&mut repo, dir.path(), "version 2");
+    refs::write_ref(&repo.git_dir, "refs/tags/v2.0", &second).unwrap();
 
     let repo = Repository::open(dir.path()).unwrap();
     let tags = repo.list_tags().unwrap();
     let tag_names: Vec<&str> = tags.iter().map(|r| r.name.as_str()).collect();
-    assert!(
-        tag_names.contains(&"refs/tags/v1.0"),
-        "tags: {:?}",
-        tag_names
-    );
-    assert!(
-        tag_names.contains(&"refs/tags/v2.0"),
-        "tags: {:?}",
-        tag_names
-    );
+    assert!(tag_names.contains(&"refs/tags/v1.0"), "tags: {:?}", tag_names);
+    assert!(tag_names.contains(&"refs/tags/v2.0"), "tags: {:?}", tag_names);
+    assert_eq!(repo.resolve_ref("refs/tags/v1.0").unwrap(), first);
 }
 
 #[test]
 fn test_read_repo_with_merge_commit() {
     let dir = make_repo();
+    let mut repo = Repository::open(dir.path()).unwrap();
 
-    // Create a merge using git
-    git(dir.path(), &["checkout", "-b", "feature"]);
+    checkout_new_branch(&mut repo, "feature");
     fs::write(dir.path().join("f.txt"), "feature\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "feature"]);
+    commit_all(&mut repo, dir.path(), "feature");
 
-    git(dir.path(), &["checkout", "-"]);
+    repo.checkout_branch("main").unwrap();
     fs::write(dir.path().join("m.txt"), "main\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "main"]);
-    git(dir.path(), &["merge", "feature", "--no-ff", "-m", "merge"]);
+    commit_all(&mut repo, dir.path(), "main");
+    let result = repo.merge_branch("feature", test_sig()).unwrap();
+    assert!(!result.has_conflict());
 
     // Read with our API
     let mut repo = Repository::open(dir.path()).unwrap();
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
     assert_eq!(commit.parents.len(), 2);
-    assert_eq!(commit.message, "merge\n");
+    assert_eq!(commit.message, "Merge branch 'feature'\n");
 
     // Walk full history
     let log = repo.log(&head, 100).unwrap();
@@ -1115,8 +1221,7 @@ fn test_empty_file() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     fs::write(dir.path().join("empty.txt"), "").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "empty file"]);
+    commit_all(&mut repo, dir.path(), "empty file");
 
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
@@ -1124,6 +1229,8 @@ fn test_empty_file() {
     let empty = tree.entries.iter().find(|e| e.name == "empty.txt").unwrap();
     let data = repo.read_blob(&empty.oid).unwrap();
     assert!(data.is_empty(), "empty file should have no content");
+    // git's id for the empty blob
+    assert_eq!(empty.oid.to_hex(), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
 }
 
 #[test]
@@ -1134,17 +1241,12 @@ fn test_binary_content() {
     // Write binary content
     let binary_data: Vec<u8> = (0..256).map(|i| i as u8).collect();
     fs::write(dir.path().join("binary.bin"), &binary_data).unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "add binary"]);
+    commit_all(&mut repo, dir.path(), "add binary");
 
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
     let tree = repo.read_tree(&commit.tree).unwrap();
-    let bin_entry = tree
-        .entries
-        .iter()
-        .find(|e| e.name == "binary.bin")
-        .unwrap();
+    let bin_entry = tree.entries.iter().find(|e| e.name == "binary.bin").unwrap();
     let data = repo.read_blob(&bin_entry.oid).unwrap();
     assert_eq!(data, binary_data);
 }
@@ -1161,11 +1263,11 @@ fn test_large_file() {
     assert_eq!(read_back.len(), 1_000_000);
     assert_eq!(read_back, large_data);
 
-    // Verify git can read it
-    let type_out = git(dir.path(), &["cat-file", "-t", &oid.to_hex()]);
-    assert_eq!(type_out, "blob");
-    let size_out = git(dir.path(), &["cat-file", "-s", &oid.to_hex()]);
-    assert_eq!(size_out, "1000000");
+    // The id git assigns to this content, and the object header it stores
+    assert_eq!(oid.to_hex(), "d6c2598c203a786efb82ca9b0a785e23e4909cb9");
+    let object = repo.read_object(&oid).unwrap();
+    assert_eq!(object.kind, ObjectKind::Blob);
+    assert_eq!(object.data.len(), 1_000_000);
 }
 
 #[test]
@@ -1174,8 +1276,7 @@ fn test_unicode_filenames() {
     let mut repo = Repository::open(dir.path()).unwrap();
 
     fs::write(dir.path().join("café.txt"), "unicode name\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-m", "unicode filename"]);
+    commit_all(&mut repo, dir.path(), "unicode filename");
 
     let head = repo.head_oid().unwrap();
     let commit = repo.read_commit(&head).unwrap();
@@ -1203,8 +1304,12 @@ fn test_commit_with_unicode_message() {
     };
     let oid = repo.write_commit(&commit).unwrap();
 
-    // Verify git reads it correctly
-    let show = git(dir.path(), &["cat-file", "-p", &oid.to_hex()]);
-    assert!(show.contains("Ñoño García"), "show: {}", show);
-    assert!(show.contains("日本語"), "show: {}", show);
+    // The id git assigns to this commit, and the fields read back intact
+    assert_eq!(oid.to_hex(), "aae6f37e9a7cd218fb6c9c6d2c53cadab52ba322");
+    let read = repo.read_commit(&oid).unwrap();
+    assert_eq!(read.author.name, "Ñoño García");
+    assert_eq!(read.message, "Añadir funcionalidad 日本語\n");
+    let raw = String::from_utf8(repo.read_object(&oid).unwrap().data).unwrap();
+    assert!(raw.contains("Ñoño García"), "raw: {}", raw);
+    assert!(raw.contains("日本語"), "raw: {}", raw);
 }
