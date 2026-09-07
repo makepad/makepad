@@ -16,7 +16,7 @@
 //!   answers. So responses may block an HTTP thread, never the UI thread.
 //! - Input is injected through `Cx::dispatch_studio_msg`, the same function the
 //!   studio remote bridge uses, so `Hits`, capture and gestures behave exactly
-//!   as they do for real events.
+//!   as they do for real events. File drops use the native drag/drop event path.
 //! - Grabs piggyback on the existing studio screenshot pipeline
 //!   (`Cx::capture_next_frame_to_file` / `screenshot_requests`), extended here
 //!   with per-window targeting.
@@ -209,6 +209,7 @@ mod imp {
             mods: RemoteKeyModifiers,
         },
         Text(String),
+        DropFile { path: String, x: f64, y: f64 },
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -673,6 +674,7 @@ mod imp {
                     }
                 };
                 let time = cx.seconds_since_app_start();
+                let mut input_result = None;
                 for input in inputs {
                     // Hardware-faithful injection: the same platform path
                     // (and pointer-pin transform) physical events take.
@@ -812,6 +814,25 @@ mod imp {
                             was_paste: false,
                             ..Default::default()
                         }),
+                        Input::DropFile { path, x, y } => {
+                            let size = cx.windows[window_id].window_geom.inner_size;
+                            if x >= size.x || y >= size.y {
+                                let _ = tx.send(Reply::Err("drop coordinates are outside the window".into()));
+                                return;
+                            }
+                            let (handled, response) = inject_file_drop(cx, path, x, y);
+                            let response = match response {
+                                crate::event::DragResponse::None => "none",
+                                crate::event::DragResponse::Copy => "copy",
+                                crate::event::DragResponse::Link => "link",
+                                crate::event::DragResponse::Move => "move",
+                            };
+                            input_result = Some(format!(
+                                "{{\"ok\":1,\"drop_handled\":{handled},\"drag_response\":\"{response}\"}}"
+                            ));
+                            cx.redraw_all();
+                            continue;
+                        }
                     };
                     cx.dispatch_studio_msg(msg, window_id, dvec2(0.0, 0.0));
                 }
@@ -819,9 +840,9 @@ mod imp {
                     frame_waiters()
                         .lock()
                         .unwrap()
-                        .push((cx.repaint_id + 1, tx, None));
+                        .push((cx.repaint_id + 1, tx, input_result));
                 } else {
-                    let _ = tx.send(Reply::Ok);
+                    let _ = tx.send(input_result.map_or(Reply::Ok, Reply::Text));
                 }
             }
             Cmd::Grab {
@@ -1112,6 +1133,37 @@ mod imp {
         };
     }
 
+    /// Called only while applying UI commands. These event markers never
+    /// cross the HTTP command channel; only the path and coordinates do.
+    fn inject_file_drop(cx: &mut Cx, path: String, x: f64, y: f64) -> (bool, crate::event::DragResponse) {
+        use crate::event::{DragEvent, DragItem, DragResponse, DropEvent, Event};
+        use crate::thread::lock_from_ui;
+        use std::sync::Arc;
+
+        let items = Arc::new(vec![DragItem::FilePath { path, internal_id: None }]);
+        let response = Arc::new(Mutex::new(DragResponse::None));
+        cx.call_event_handler(&Event::Drag(DragEvent {
+            modifiers: Default::default(),
+            handled: Arc::new(Mutex::new(false)),
+            abs: dvec2(x, y),
+            items: items.clone(),
+            response: response.clone(),
+        }));
+        cx.drag_drop.cycle_drag();
+        let handled = Arc::new(Mutex::new(false));
+        cx.call_event_handler(&Event::Drop(DropEvent {
+            modifiers: Default::default(),
+            handled: handled.clone(),
+            abs: dvec2(x, y),
+            items,
+        }));
+        cx.drag_drop.cycle_drag();
+        cx.call_event_handler(&Event::DragEnd);
+        cx.drag_drop.cycle_drag();
+        let result = (*lock_from_ui(&handled), *lock_from_ui(&response));
+        result
+    }
+
     fn find_head_end(buf: &[u8]) -> Option<usize> {
         buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
@@ -1167,6 +1219,7 @@ mod imp {
             "/click" => route_mouse(p, Some("click")),
             "/k" | "/key" => route_key(p),
             "/t" | "/text" => route_text(p),
+            "/drop" => route_drop(p),
             "/log" => route_log(p),
             "/trace" => route_trace(p),
             "/d" | "/dump" => match ask(|tx| Cmd::Dump(tx), 4) {
@@ -1326,6 +1379,7 @@ mod imp {
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
+             /drop?path=&x=&y= drop one absolute file path through Drag/Drop/DragEnd; optional w= and wait=1; app validates/loads it\n\
              /log?n=50         {{\"n\":lastseq,\"l\":[lines]}}; /log?since=N for everything after seq N\n\
              /trace             get topics; ?topics=gpu.pass,wm sets them; ?off=1 clears them\n\
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
@@ -1581,6 +1635,50 @@ mod imp {
             },
             timeout,
         ))
+    }
+
+    fn parse_drop(p: &Params) -> Result<(Option<usize>, Input, bool), &'static str> {
+        // Unlike permissive mouse aliases, file input must not silently
+        // ignore a typo or choose between duplicate parameters.
+        let mut seen = Vec::new();
+        for (key, _) in &p.0 {
+            let key = match key.as_str() {
+                "path" | "x" | "y" | "wait" => key.as_str(),
+                "w" | "window" => "w",
+                _ => return Err("unknown drop parameter"),
+            };
+            if seen.contains(&key) { return Err("duplicate drop parameter"); }
+            seen.push(key);
+        }
+        let path = p.get(&["path"]).ok_or("drop requires path=")?;
+        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control)
+            || !std::path::Path::new(path).is_absolute() {
+            return Err("drop path must be absolute, at most 4096 bytes, with no control characters");
+        }
+        let coordinate = |key| p.get(&[key]).and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or("drop requires finite, nonnegative x= and y=");
+        let x = coordinate("x")?;
+        let y = coordinate("y")?;
+        let window = p.get(&["w", "window"]).map(|value| {
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("drop window must be a nonnegative integer");
+            }
+            value.parse::<usize>().map_err(|_| "drop window is out of range")
+        }).transpose()?;
+        let wait = match p.get(&["wait"]) {
+            None | Some("0" | "false") => false,
+            Some("1" | "true") => true,
+            _ => return Err("drop wait must be 0 or 1"),
+        };
+        Ok((window, Input::DropFile { path: path.to_string(), x, y }, wait))
+    }
+
+    fn route_drop(p: &Params) -> Out {
+        match parse_drop(p) {
+            Ok((window, input, wait)) => send_input(window, vec![input], wait),
+            Err(message) => Out::Json(400, format!("{{\"err\":{}}}", json_str(message))),
+        }
     }
 
     fn route_log(p: &Params) -> Out {
@@ -2169,6 +2267,73 @@ mod imp {
             assert_eq!(p.f64(&["x"], 0.0), 100.0);
             assert_eq!(p.f64(&["y"], 0.0), -3.5);
             assert_eq!(p.get(&["t", "text"]), Some("a\"b"));
+        }
+
+        #[test]
+        fn file_drop_requires_unambiguous_path_coordinates_and_options() {
+            let path = std::env::temp_dir().join("reference car.png").to_string_lossy().into_owned();
+            let fields = vec![("path".into(), path.clone()), ("x".into(), "12.5".into()), ("y".into(), "20".into())];
+            let mut valid = fields.clone();
+            valid.extend([("w".into(), "2".into()), ("wait".into(), "1".into())]);
+            assert!(matches!(parse_drop(&Params(valid)), Ok((Some(2), Input::DropFile { path: p, x: 12.5, y: 20.0 }, true)) if p == path));
+            for (key, value) in [
+                ("path", "relative.png"), ("path", ""), ("path", "/tmp/invalid\0.png"),
+                ("x", "NaN"), ("x", "inf"), ("x", "-1"), ("y", ""),
+                ("w", "two"), ("w", "-1"), ("wait", "sometimes"), ("paths", "ignored.png"),
+            ] {
+                let mut invalid = fields.clone();
+                invalid.retain(|(name, _)| name != key);
+                invalid.push((key.into(), value.into()));
+                assert!(parse_drop(&Params(invalid)).is_err(), "{key} accepted invalid value");
+            }
+            let mut duplicate = fields.clone();
+            duplicate.push(("path".into(), path.clone()));
+            assert!(parse_drop(&Params(duplicate)).is_err());
+            let mut aliases = fields.clone();
+            aliases.extend([("w".into(), "1".into()), ("window".into(), "2".into())]);
+            assert!(parse_drop(&Params(aliases)).is_err());
+            let mut long_path = fields;
+            long_path[0].1 = format!("{path}{}", "a".repeat(4096));
+            assert!(parse_drop(&Params(long_path)).is_err());
+        }
+
+        #[test]
+        fn file_drop_dispatches_native_sequence_and_clears_drag_area() {
+            use crate::area::{Area, RectArea};
+            use crate::draw_list::{CxRectArea, DrawList};
+            use crate::event::{DragHit, DragItem, DragResponse, DragState, Event};
+            use crate::makepad_math::Rect;
+            use crate::thread::lock_from_ui;
+            use std::{cell::{Cell, RefCell}, rc::Rc};
+
+            let area = Rc::new(Cell::new(Area::Empty));
+            let target = area.clone();
+            let sequence = Rc::new(RefCell::new(Vec::new()));
+            let seen = sequence.clone();
+            let mut cx = Cx::new(Box::new(move |cx, event| {
+                seen.borrow_mut().push(event.name());
+                match event.drag_hits(cx, target.get()) {
+                    DragHit::Drag(hit) => {
+                        assert_eq!(hit.state, DragState::In, "previous drop left stale drag state");
+                        assert!(matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == "/not-read-by-platform/reference.png"));
+                        *lock_from_ui(&hit.response) = DragResponse::Copy;
+                    }
+                    DragHit::Drop(hit) => assert_eq!(hit.abs, dvec2(20.0, 30.0)),
+                    DragHit::DragEnd | DragHit::NoHit => assert!(matches!(event, Event::DragEnd)),
+                }
+            }));
+            let draw_list = DrawList::new(&mut cx);
+            let list = &mut cx.draw_lists[draw_list.id()];
+            list.rect_areas.push(CxRectArea {
+                rect: Rect { pos: dvec2(10.0, 10.0), size: dvec2(100.0, 100.0) },
+                draw_clip: (dvec2(0.0, 0.0), dvec2(200.0, 200.0)),
+            });
+            area.set(Area::Rect(RectArea { draw_list_id: draw_list.id(), rect_id: 0, redraw_id: list.redraw_id }));
+            for _ in 0..2 {
+                assert_eq!(inject_file_drop(&mut cx, "/not-read-by-platform/reference.png".into(), 20.0, 30.0),
+                    (true, DragResponse::Copy));
+            }
+            assert_eq!(sequence.borrow().as_slice(), ["Drag", "Drop", "DragEnd", "Drag", "Drop", "DragEnd"]);
         }
 
         #[test]

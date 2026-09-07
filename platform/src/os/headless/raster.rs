@@ -817,7 +817,7 @@ impl Cx {
     /// reads — a 2400x1520 window is 73 MB of colour plus depth, and building
     /// that mapping fresh every frame cost more in page faults than clearing it
     /// does.
-    pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
+    pub fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
         let frame_start = std::time::Instant::now();
         let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
 
@@ -922,6 +922,10 @@ impl Cx {
         self.headless_prune_render_targets(&mut render_targets, profile_enabled);
         self.os.render_targets = render_targets;
 
+        if !passes_todo.is_empty() {
+            let serial = self.textures.1.serials.submit();
+            self.textures.1.serials.complete(serial);
+        }
         let elapsed = frame_start.elapsed();
         if profile_enabled {
             crate::log!(
@@ -1316,6 +1320,7 @@ impl Cx {
 
             let shader_id = draw_call.draw_shader_id;
             let depth_write = draw_call.options.depth_write;
+            let alpha_blend = draw_call.options.alpha_blend;
             let sh = &self.draw_shaders.shaders[shader_id.index];
             let color_format = sh.mapping.color_format;
             let os_shader_id = match sh.os_shader_id {
@@ -1603,10 +1608,11 @@ impl Cx {
             // Same pipeline state the GPU backends build from the shader: the
             // data-pass colour formats disable blending (their alpha channel is
             // payload — an SDF byte, a depth — and a premultiplied over blend
-            // can only ever grow it), and `depth_write: false` shaders must not
-            // touch the depth buffer.
+            // can only ever grow it), a draw call with `alpha_blend: false`
+            // replaces the destination outright, and `depth_write: false`
+            // shaders must not touch the depth buffer.
             let state = RasterState {
-                blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm),
+                blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm) && alpha_blend,
                 depth_write,
                 unorm8: pass_raster.unorm8,
                 has_depth: pass_raster.has_depth,
@@ -1816,4 +1822,55 @@ pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, 
         .encode(&mut out)
         .map_err(|err| format!("headless png encode failed: {err:?}"))?;
     Ok(out)
+}
+
+impl crate::os::headless::CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        None
+    }
+}
+
+impl Cx {
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        let completed = self
+            .textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.textures
+            .1
+            .retired
+            .retain(|retired| retired.serial > completed);
+    }
+
+    pub(crate) fn release_texture_allocation(&mut self, id: crate::texture::TextureId) {
+        self.os.render_targets.framebuffers.remove(&id.0);
+        self.os.render_targets.last_used.remove(&id.0);
+        self.os.render_targets.warned_cube_faces.remove(&id.0);
+        self.os.texture_conversions.remove(&id.0);
+        self.textures[id].reset_allocation();
+    }
+
+    pub(crate) fn texture_allocation_bytes(&self, id: crate::texture::TextureId) -> Option<u64> {
+        let framebuffer = self
+            .os
+            .render_targets
+            .framebuffers
+            .get(&id.0)
+            .map(|fb| (fb.color.capacity() * 16 + fb.depth.capacity() * 4) as u64);
+        let conversion = self
+            .os
+            .texture_conversions
+            .get(&id.0)
+            .map(|cache| (cache.rgba.capacity() * 4) as u64);
+        match (framebuffer, conversion) {
+            (None, None) => None,
+            (framebuffer, conversion) => Some(
+                framebuffer
+                    .unwrap_or(0)
+                    .saturating_add(conversion.unwrap_or(0)),
+            ),
+        }
+    }
 }

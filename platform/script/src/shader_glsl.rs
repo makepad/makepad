@@ -973,7 +973,7 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             TextureType::Texture3dArray => "sampler3D",
             TextureType::TextureCube => "samplerCube",
             TextureType::TextureCubeArray => "samplerCubeArray",
-            TextureType::TextureDepth => "sampler2D",
+            TextureType::TextureDepth => "sampler2DShadow",
             TextureType::TextureDepthArray => "sampler2DArray",
             TextureType::TextureVideo => {
                 // Android SurfaceTexture and Linux DMA-Buf NV12 planes use EXTERNAL_OES.

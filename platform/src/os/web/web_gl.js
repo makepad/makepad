@@ -2208,6 +2208,12 @@ export class WasmWebGL extends WasmWebBrowser {
     try {
       gl.useProgram(shader.program);
       gl.depthMask(!!args.depth_write);
+      // Blending is the pass default (FromWasmSetDefaultDepthAndBlendMode);
+      // only an alpha_blend=false call turns it off, and restores it in the
+      // finally block, so the default path issues no extra GL calls.
+      if (!args.alpha_blend) {
+        gl.disable(gl.BLEND);
+      }
       if (args.backface_culling) {
         gl.enable(gl.CULL_FACE);
         gl.cullFace(gl.BACK);
@@ -2271,6 +2277,12 @@ export class WasmWebGL extends WasmWebBrowser {
           : gl.TEXTURE_2D;
         gl.activeTexture(gl.TEXTURE0 + i);
         gl.bindTexture(target, preflight.sampler_textures[i]);
+        if (tex_loc.ty === "sampler2DShadow") {
+          gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+          gl.texParameteri(target, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        }
         gl.uniform1i(tex_loc.loc, i);
       }
 
@@ -2330,6 +2342,12 @@ export class WasmWebGL extends WasmWebBrowser {
       try {
         gl.depthMask(true);
       } catch (_error) {
+      }
+      if (!args.alpha_blend) {
+        try {
+          gl.enable(gl.BLEND);
+        } catch (_error) {
+        }
       }
     }
   }

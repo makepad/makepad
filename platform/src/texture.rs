@@ -3,7 +3,13 @@ use {
         cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*,
         os::CxOsTexture, script::vm::*,
     },
-    std::rc::Rc,
+    std::{
+        rc::Rc,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+    },
 };
 
 /// Upload decoded images as mipmapped textures (`VecMipBGRAu8_32`) so minifying them on low-DPI
@@ -17,11 +23,59 @@ pub fn image_cache_use_mipmaps() -> bool {
     cfg!(all(target_os = "linux", not(use_vulkan)))
 }
 
+/// A shared, reusable texture handle. GPU storage is allocated lazily by rendering.
+///
+/// [`Texture::release`] retires the current allocation, including through every
+/// clone of this handle. The handle and its format/CPU pixels remain valid; the
+/// next upload or render allocates fresh storage. Render contents are lost and
+/// `InitWith` clears again. Release after removing retained readers/producers:
+/// a retained pass that still uses this handle may allocate it again.
+///
+/// Lifetime serials belong to one `Cx`, start at zero, and count submitted GPU
+/// command buffers (Metal), render passes (GL/D3D11/WebGL), or software frames
+/// (headless), not Draw events. Recording a pass is not submitting it. Sample
+/// `Cx::frame_submission_serial` after rendering, then acknowledge only serials
+/// at or below `Cx::frame_completion_serial`. Completion of N covers every
+/// submission <= N on the renderer's ordered queue. These are completion, not
+/// successful-rendering, guarantees; a device error can discard work.
+///
+/// Metal uses command-buffer completion handlers. GL uses zero-timeout sync
+/// fences and D3D11 uses EVENT queries. No backend guesses a frame delay.
+/// Poll completion while work is pending, including when no redraw is needed:
+/// it inserts at most one outstanding fence and reclaims retired allocations.
+/// Unavailable/failed fences leave the completed serial unchanged. Headless
+/// completes synchronously. WebGL deletion safely delegates in-flight ownership
+/// to the browser/driver, but this Rust bridge cannot report GPU completion or
+/// actual allocation sizes: its completion serial stays zero and allocated
+/// bytes return `None` (pool totals omit these unknown allocations). Do not use
+/// WebGL pool totals for admission. Vulkan/OHOS/direct-DRM support is not implemented.
+///
+/// Byte counts describe allocated texture storage, including mip levels, cube
+/// faces and known backend capacity, not CPU source pixels, upload staging,
+/// driver metadata or total VRAM residency. Metal reports `allocatedSize`;
+/// GL/D3D report texel storage (opaque driver padding is not queryable).
+/// Headless reports its actual float raster/conversion buffers. Pool totals
+/// include reusable free slots, previous resources and pending retirements.
+/// Call completion polling before measuring to collect finished retirements.
+/// GL measurements require this renderer's context to be current; otherwise
+/// they return `None`. Release before changing dimensions to keep the old
+/// allocation charged during reallocation. Command-buffer-only copies created
+/// by ordinary implicit reallocations are not separately counted by the pool.
+/// Native retirement conservatively covers the latest queue buffer, including
+/// a Metal batch still being encoded, which can be later than the last reader.
+/// Shared/video/external formats are managed by their owners and release is a
+/// no-op for those formats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Texture(Rc<PoolId>);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
+
+impl TextureId {
+    pub(crate) fn from_pool_slot(index: usize, generation: u64) -> Self {
+        Self(index, generation)
+    }
+}
 
 impl Default for TextureId {
     /// Returns a sentinel `TextureId` that does not correspond to any allocated texture.
@@ -38,7 +92,61 @@ impl Texture {
 }
 
 #[derive(Default)]
-pub struct CxTexturePool(pub(crate) IdPool<CxTexture>);
+pub struct CxTexturePool(pub(crate) IdPool<CxTexture>, pub(crate) TextureLifetime);
+
+#[derive(Default)]
+pub(crate) struct FrameSerials {
+    pub(crate) submitted: AtomicU64,
+    pub(crate) completed: AtomicU64,
+    #[cfg(all(
+        not(headless),
+        any(target_os = "macos", target_os = "ios", target_os = "tvos")
+    ))]
+    pub(crate) encoded: AtomicU64,
+}
+
+impl FrameSerials {
+    #[cfg(any(
+        test,
+        headless,
+        not(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
+    ))]
+    pub(crate) fn submit(&self) -> u64 {
+        // Submission has one writer (the renderer/UI thread); only completion
+        // callbacks write concurrently, to the separate completed atomic.
+        let serial = self.submitted.load(Ordering::Relaxed).saturating_add(1);
+        self.submitted.store(serial, Ordering::Release);
+        serial
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub(crate) fn complete(&self, serial: u64) {
+        self.completed.fetch_max(
+            serial.min(self.submitted.load(Ordering::Acquire)),
+            Ordering::Release,
+        );
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TextureLifetime {
+    pub(crate) serials: Arc<FrameSerials>,
+    pub(crate) retired: Vec<RetiredTexture>,
+    #[cfg(all(
+        not(headless),
+        not(any(use_vulkan, linux_direct, target_env = "ohos")),
+        any(target_os = "linux", target_os = "android")
+    ))]
+    pub(crate) gl: crate::os::linux::opengl::TextureFence,
+    #[cfg(all(not(headless), target_os = "windows"))]
+    pub(crate) d3d: Option<(u64, windows::Win32::Graphics::Direct3D11::ID3D11Query)>,
+}
+
+pub(crate) struct RetiredTexture {
+    pub(crate) serial: u64,
+    pub(crate) bytes: u64,
+    pub(crate) os: CxOsTexture,
+}
 
 impl CxTexturePool {
     #[cfg(target_arch = "wasm32")]
@@ -198,6 +306,12 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    /// Depth attachment retained for later comparison sampling. Ordinary UI
+    /// depth stays attachment-only; use texture_depth().sample_compare in Splash.
+    DepthD32Sampled {
+        size: TextureSize,
+        initial: bool,
+    },
     RenderBGRAu8 {
         size: TextureSize,
         initial: bool,
@@ -282,6 +396,9 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::DepthD32 { size, .. } => {
                 write!(f, "TextureFormat::DepthD32(size:{:?})", size)
             }
+            TextureFormat::DepthD32Sampled { size, .. } => {
+                write!(f, "TextureFormat::DepthD32Sampled(size:{:?})", size)
+            }
             TextureFormat::RenderBGRAu8 { size, .. } => {
                 write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size)
             }
@@ -348,6 +465,7 @@ pub enum TextureCategory {
     Render,
     RenderCube,
     DepthBuffer,
+    DepthBufferSampled,
     Shared,
     Video,
 }
@@ -355,6 +473,7 @@ pub enum TextureCategory {
 impl PartialEq for TextureCategory {
     fn eq(&self, other: &TextureCategory) -> bool {
         match self {
+            Self::DepthBufferSampled => matches!(other, Self::DepthBufferSampled),
             Self::Vec { .. } => {
                 if let Self::Vec { .. } = other {
                     true
@@ -479,6 +598,15 @@ pub(crate) enum TexturePixel {
 }
 
 impl CxTexture {
+    pub(crate) fn reset_allocation(&mut self) {
+        self.alloc = None;
+        if self.format.is_vec() {
+            self.set_updated(TextureUpdated::Full);
+        } else if self.format.is_render() || self.format.is_depth() {
+            self.set_initial(true);
+        }
+    }
+
     #[allow(unused)]
     pub(crate) fn updated(&self) -> TextureUpdated {
         match self.format {
@@ -497,7 +625,7 @@ impl CxTexture {
     #[allow(unused)]
     pub(crate) fn initial(&mut self) -> bool {
         match self.format {
-            TextureFormat::DepthD32 { initial, .. } => initial,
+            TextureFormat::DepthD32 { initial, .. } | TextureFormat::DepthD32Sampled { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
@@ -525,7 +653,7 @@ impl CxTexture {
 
     pub fn set_initial(&mut self, initial: bool) {
         *match &mut self.format {
-            TextureFormat::DepthD32 { initial, .. } => initial,
+            TextureFormat::DepthD32 { initial, .. } | TextureFormat::DepthD32Sampled { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
@@ -628,14 +756,14 @@ impl TextureFormat {
         match self {
             TextureFormat::VecBGRAu8_32 { data, .. }
             | TextureFormat::VecCubeBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. } => {
-                data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4))
-            }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. } => data
+                .as_ref()
+                .map_or(0, |data| data.capacity().saturating_mul(4)),
             TextureFormat::VecMipRGBAf32 { data, .. }
             | TextureFormat::VecRGBAf32 { data, .. }
-            | TextureFormat::VecRf32 { data, .. } => {
-                data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4))
-            }
+            | TextureFormat::VecRf32 { data, .. } => data
+                .as_ref()
+                .map_or(0, |data| data.capacity().saturating_mul(4)),
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
@@ -676,9 +804,13 @@ impl TextureFormat {
 
     pub fn is_depth(&self) -> bool {
         match self {
-            Self::DepthD32 { .. } => true,
+            Self::DepthD32 { .. } | Self::DepthD32Sampled { .. } => true,
             _ => false,
         }
+    }
+
+    pub fn is_sampled_depth(&self) -> bool {
+        matches!(self, Self::DepthD32Sampled { .. })
     }
 
     pub fn is_video(&self) -> bool {
@@ -728,9 +860,10 @@ impl TextureFormat {
     /// Fixed target.
     pub fn render_fixed_width_height(&self) -> Option<(usize, usize)> {
         match self {
-            Self::RenderBGRAu8 { size: TextureSize::Fixed { width, height }, .. } => {
-                Some((*width, *height))
-            }
+            Self::RenderBGRAu8 {
+                size: TextureSize::Fixed { width, height },
+                ..
+            } => Some((*width, *height)),
             _ => None,
         }
     }
@@ -844,13 +977,13 @@ impl TextureFormat {
     #[allow(unused)]
     pub(crate) fn as_depth_alloc(&self, width: usize, height: usize) -> Option<TextureAlloc> {
         match self {
-            Self::DepthD32 { size, .. } => {
+            Self::DepthD32 { size, .. } | Self::DepthD32Sampled { size, .. } => {
                 let (width, height) = size.width_height(width, height);
                 Some(TextureAlloc {
                     width,
                     height,
                     pixel: TexturePixel::D32,
-                    category: TextureCategory::DepthBuffer,
+                    category: if self.is_sampled_depth() { TextureCategory::DepthBufferSampled } else { TextureCategory::DepthBuffer },
                 })
             }
             _ => None,
@@ -924,6 +1057,20 @@ impl ScriptNew for Texture {
 impl Texture {
     pub fn new(cx: &mut Cx) -> Self {
         cx.null_texture()
+    }
+
+    /// Retire GPU storage without invalidating this handle. See [`Texture`].
+    /// This does not submit recorded passes or request a redraw. Reclamation is
+    /// nonblocking and is collected by `Cx::frame_completion_serial` polling.
+    pub fn release(&self, cx: &mut Cx) {
+        cx.release_texture_allocation(self.texture_id());
+    }
+
+    /// Bytes in the current backend allocation, or `None` when unallocated or
+    /// externally managed/unsupported. Pending retirements are charged only to
+    /// `Cx::texture_pool_bytes`, not to this handle's new allocation.
+    pub fn allocated_bytes(&self, cx: &Cx) -> Option<u64> {
+        cx.texture_allocation_bytes(self.texture_id())
     }
 
     pub fn new_with_format(cx: &mut Cx, format: TextureFormat) -> Self {
@@ -1067,6 +1214,28 @@ mod tests {
     use super::{TextureFormat, TextureUpdated, TextureWrap};
 
     #[test]
+    fn frame_serials_are_monotonic_and_completion_is_bounded() {
+        use super::FrameSerials;
+        use std::sync::atomic::Ordering;
+        let serials = FrameSerials::default();
+        assert_eq!(serials.submitted.load(Ordering::Acquire), 0);
+        serials.complete(100);
+        assert_eq!(serials.completed.load(Ordering::Acquire), 0);
+        assert_eq!(serials.submit(), 1);
+        assert_eq!(serials.submit(), 2);
+        serials.complete(2);
+        serials.complete(1); // A late callback cannot move the frontier back.
+        assert_eq!(serials.completed.load(Ordering::Acquire), 2);
+        assert_eq!(serials.submit(), 3);
+        serials.complete(u64::MAX);
+        assert_eq!(serials.completed.load(Ordering::Acquire), 3);
+        serials.submitted.store(u64::MAX, Ordering::Release);
+        assert_eq!(serials.submit(), u64::MAX);
+        serials.complete(u64::MAX);
+        assert_eq!(serials.completed.load(Ordering::Acquire), u64::MAX);
+    }
+
+    #[test]
     fn mip_format_reports_wrap() {
         let clamp = TextureFormat::VecMipBGRAu8_32 {
             width: 4,
@@ -1096,5 +1265,76 @@ mod tests {
             .wrap(),
             TextureWrap::ClampToEdge
         );
+    }
+}
+
+#[cfg(all(
+    not(headless),
+    not(target_arch = "wasm32"),
+    not(any(use_vulkan, linux_direct, target_env = "ohos")),
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows"
+    )
+))]
+impl Cx {
+    pub(crate) fn texture_allocation_bytes(&self, id: TextureId) -> Option<u64> {
+        let texture = &self.textures[id];
+        if !(texture.format.is_render() || texture.format.is_vec() || texture.format.is_depth()) {
+            return None;
+        }
+        texture.os.allocated_bytes(self)
+    }
+
+    pub(crate) fn release_texture_allocation(&mut self, id: TextureId) {
+        if !(self.textures[id].format.is_render()
+            || self.textures[id].format.is_vec()
+            || self.textures[id].format.is_depth())
+        {
+            return;
+        }
+        if self.textures[id].alloc.is_none()
+            && self.textures[id].previous_platform_resource.is_none()
+        {
+            self.textures[id].reset_allocation();
+            return;
+        }
+        self.poll_texture_lifetimes();
+        self.detach_released_texture(id);
+        let serial = self.frame_submission_serial();
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+        let serial = serial.max(self.textures.1.serials.encoded.load(Ordering::Acquire));
+        let texture = &mut self.textures[id];
+        let os = std::mem::take(&mut texture.os);
+        let previous = texture.previous_platform_resource.take();
+        texture.reset_allocation();
+        for os in Some(os).into_iter().chain(previous) {
+            let bytes = os.allocated_bytes(self).unwrap_or(0);
+            self.textures
+                .1
+                .retired
+                .push(RetiredTexture { serial, bytes, os });
+        }
+        self.poll_texture_lifetimes();
+    }
+}
+
+// Renderer backends outside the supported lifetime matrix fail closed.
+#[cfg(all(not(headless), any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl Cx {
+    pub(crate) fn poll_texture_lifetimes(&mut self) {}
+    pub(crate) fn release_texture_allocation(&mut self, _id: TextureId) {}
+    pub(crate) fn texture_allocation_bytes(&self, _id: TextureId) -> Option<u64> {
+        None
+    }
+}
+#[cfg(all(not(headless), any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        None
     }
 }

@@ -36,13 +36,13 @@ use crate::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
-                    D3D_SRV_DIMENSION_TEXTURECUBE,
+                    D3D_SRV_DIMENSION, D3D_SRV_DIMENSION_TEXTURECUBE,
                 },
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
                     ID3D11DepthStencilView, ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11InputLayout,
                     ID3D11PixelShader, ID3D11Query, ID3D11RasterizerState, ID3D11RenderTargetView,
-                    ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+                    ID3D11Resource, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
                     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_FLAG,
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
@@ -52,16 +52,16 @@ use crate::{
                     D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC,
                     D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_STENCIL_VIEW_DESC,
                     D3D11_DEPTH_WRITE_MASK_ALL, D3D11_DEPTH_WRITE_MASK_ZERO,
-                    D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
+                    D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC,
                     D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
                     D3D11_MAP, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
                     D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
                     D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
-                    D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SDK_VERSION,
+                    D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
                     D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
-                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
+                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV, D3D11_TEX2D_SRV,
+                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_MODE, D3D11_USAGE, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
@@ -99,11 +99,8 @@ use crate::{
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
-            System::{
-                Com::CoTaskMemFree,
-                Threading::WaitForSingleObject,
-            },
-            UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+            System::{Com::CoTaskMemFree, Threading::WaitForSingleObject},
+            UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
         },
     },
 };
@@ -312,6 +309,8 @@ impl Cx {
                 unsafe {
                     d3d11_cx.context.VSSetShader(&shp.vertex_shader, None);
                     d3d11_cx.context.PSSetShader(&shp.pixel_shader, None);
+                    d3d11_cx.context.PSSetSamplers(0, Some(&shp.samplers));
+                    d3d11_cx.context.VSSetSamplers(0, Some(&shp.samplers));
                     d3d11_cx
                         .context
                         .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -329,6 +328,17 @@ impl Cx {
                         d3d11_cx
                             .context
                             .OMSetDepthStencilState(depth_stencil_state, 0);
+                    }
+                    let blend_state = if draw_call.options.alpha_blend {
+                        self.passes[pass_id].os.blend_state.as_ref()
+                    } else {
+                        self.passes[pass_id].os.blend_state_no_blend.as_ref()
+                    };
+                    if let Some(blend_state) = blend_state {
+                        let blend_factor = [0., 0., 0., 0.];
+                        d3d11_cx
+                            .context
+                            .OMSetBlendState(blend_state, Some(&blend_factor), 0xffffffff);
                     }
                     let raster_state = if draw_call.options.backface_culling {
                         self.passes[pass_id].os.raster_state_backface_cull.as_ref()
@@ -362,7 +372,10 @@ impl Cx {
                     let inst_slots = sh.mapping.instances.total_slots;
                     let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
                     let offsets = [0u32, 0u32];
-                    let buffers = [Some(geom_vbuf.clone()), draw_item.os.inst_vbuf.buffer.clone()];
+                    let buffers = [
+                        Some(geom_vbuf.clone()),
+                        draw_item.os.inst_vbuf.buffer.clone(),
+                    ];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
                         2,
@@ -755,6 +768,7 @@ impl Cx {
             let zbias_step = self.passes[pass_id].zbias_step;
 
             self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
+            self.textures.1.serials.submit();
             // Read the frame back BEFORE it flips: the chain is FLIP_DISCARD, so
             // the back buffer's contents are undefined the moment `Present` takes
             // it. Cheap when nothing asked for a capture (one Vec check).
@@ -815,6 +829,7 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, &d3d11_cx);
+        self.textures.1.serials.submit();
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
@@ -2058,6 +2073,7 @@ impl CxOsPass {
     fn forget_gpu_objects(&mut self) {
         self.pass_uniforms = D3d11Buffer::default();
         self.blend_state = None;
+        self.blend_state_no_blend = None;
         self.raster_state_no_cull = None;
         self.raster_state_backface_cull = None;
         self.depth_stencil_state_write = None;
@@ -2882,7 +2898,8 @@ impl CxTexture {
             let format;
             match alloc.pixel {
                 TexturePixel::D32 => {
-                    format = DXGI_FORMAT_D32_FLOAT;
+                    // DXGI_FORMAT_R32_TYPELESS (the trimmed bindings omit this alias).
+                    format = if self.format.is_sampled_depth() { DXGI_FORMAT(39) } else { DXGI_FORMAT_D32_FLOAT };
                 }
                 _ => {
                     panic!("Wrong format for update_depth_stencil");
@@ -2899,7 +2916,8 @@ impl CxTexture {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32, // | D3D11_BIND_SHADER_RESOURCE,
+                BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32
+                    | if self.format.is_sampled_depth() { D3D11_BIND_SHADER_RESOURCE.0 as u32 } else { 0 },
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
             };
@@ -2935,7 +2953,17 @@ impl CxTexture {
 
             self.os.depth_stencil_view = depth_stencil_view;
             self.os.texture = texture;
-            self.os.shader_resource_view = None; //Some(shader_resource_view);
+            self.os.shader_resource_view = None;
+            if self.format.is_sampled_depth() {
+                let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_FLOAT,
+                    ViewDimension: D3D_SRV_DIMENSION(4), // TEXTURE2D
+                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1 },
+                    },
+                };
+                unsafe { d3d11_cx.device.CreateShaderResourceView(&resource, Some(&desc), Some(&mut self.os.shader_resource_view)).unwrap(); }
+            }
         }
     }
 
@@ -3114,6 +3142,32 @@ impl CxOsPass {
             }
             self.blend_state = blend_state;
         }
+        if self.blend_state_no_blend.is_none() {
+            // The `alpha_blend: false` variant: a fragment replaces the
+            // destination, alpha included.
+            let mut blend_desc: D3D11_BLEND_DESC = Default::default();
+            blend_desc.AlphaToCoverageEnable = FALSE;
+            blend_desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+                // The factors are ignored while BlendEnable is FALSE; keep the
+                // enabled state's values so the two descriptors differ in one flag.
+                BlendEnable: FALSE,
+                SrcBlend: D3D11_BLEND_ONE,
+                SrcBlendAlpha: D3D11_BLEND_ONE,
+                DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+                DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+                BlendOp: D3D11_BLEND_OP_ADD,
+                BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+            };
+            let mut blend_state = None;
+            unsafe {
+                d3d11_cx
+                    .device
+                    .CreateBlendState(&blend_desc, Some(&mut blend_state))
+                    .unwrap()
+            }
+            self.blend_state_no_blend = blend_state;
+        }
 
         if self.raster_state_no_cull.is_none() || self.raster_state_backface_cull.is_none() {
             let make_raster_state = |cull_mode| {
@@ -3201,6 +3255,7 @@ impl CxOsPass {
 pub struct CxOsPass {
     pass_uniforms: D3d11Buffer,
     blend_state: Option<ID3D11BlendState>,
+    blend_state_no_blend: Option<ID3D11BlendState>,
     raster_state_no_cull: Option<ID3D11RasterizerState>,
     raster_state_backface_cull: Option<ID3D11RasterizerState>,
     depth_stencil_state_write: Option<ID3D11DepthStencilState>,
@@ -3688,6 +3743,7 @@ impl AsyncHlslCompile {
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
+    pub samplers: Vec<Option<ID3D11SamplerState>>,
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
     pub scope_uniforms: D3d11Buffer,
@@ -4004,7 +4060,39 @@ impl CxOsDrawShader {
             .collect();
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u32);
 
+        let mut samplers = Vec::new();
+        for sampler in &mapping.samplers {
+            use crate::makepad_script::shader::{SamplerAddress, SamplerFilter};
+            let address = D3D11_TEXTURE_ADDRESS_MODE(match sampler.address {
+                SamplerAddress::Repeat => 1,
+                SamplerAddress::MirroredRepeat => 2,
+                SamplerAddress::ClampToEdge => 3,
+                SamplerAddress::ClampToZero => 4,
+            });
+            let filter = match sampler.filter {
+                SamplerFilter::Nearest => 0,
+                SamplerFilter::Linear => 0x15,
+            };
+            let desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER(filter | if sampler.compare { 0x80 } else { 0 }),
+                AddressU: address,
+                AddressV: address,
+                AddressW: address,
+                ComparisonFunc: D3D11_COMPARISON_LESS_EQUAL,
+                MaxAnisotropy: 1,
+                MaxLOD: f32::MAX,
+                ..Default::default()
+            };
+            let mut state = None;
+            if let Err(error) = unsafe { d3d11_cx.device.CreateSamplerState(&desc, Some(&mut state)) } {
+                d3d11_cx.note_error("CreateSamplerState(shadow)", &error);
+                return None;
+            }
+            samplers.push(Some(state?));
+        }
+
         Some(Self {
+            samplers,
             const_table_uniforms,
             live_uniforms,
             scope_uniforms,
@@ -4057,5 +4145,112 @@ mod shader_cache_tests {
         assert!(!is_complete_dxbc(b"DXBC"));
         assert!(!is_complete_dxbc(&[0u8; 64]));
         assert!(!is_complete_dxbc(&dxbc(48, 16)[..31]));
+    }
+}
+
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        let texture = self.texture.as_ref()?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+        // These aliases are absent from the trimmed Windows bindings.
+        const DXGI_FORMAT_R32_TYPELESS: DXGI_FORMAT = DXGI_FORMAT(39);
+        const DXGI_FORMAT_R16G16B16A16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(10);
+        let bpp = match desc.Format {
+            DXGI_FORMAT_B8G8R8A8_UNORM
+            | DXGI_FORMAT_R8G8B8A8_UNORM
+            | DXGI_FORMAT_R32_FLOAT
+            | DXGI_FORMAT_D32_FLOAT
+            | DXGI_FORMAT_R32_TYPELESS => 4u64,
+            DXGI_FORMAT_R16G16B16A16_FLOAT => 8,
+            DXGI_FORMAT_R32G32B32A32_FLOAT => 16,
+            DXGI_FORMAT_R8_UNORM => 1,
+            DXGI_FORMAT_R8G8_UNORM | DXGI_FORMAT_R16_FLOAT => 2,
+            _ => return None,
+        };
+        let mut bytes = 0u64;
+        for level in 0..desc.MipLevels.min(32) {
+            bytes = bytes.saturating_add(
+                ((desc.Width >> level).max(1) as u64)
+                    * ((desc.Height >> level).max(1) as u64)
+                    * bpp
+                    * desc.ArraySize as u64
+                    * desc.SampleDesc.Count as u64,
+            );
+        }
+        Some(bytes)
+    }
+}
+impl Cx {
+    pub(crate) fn detach_released_texture(&mut self, _id: TextureId) {
+        let Some(device) = self.os.d3d11_device.as_ref() else {
+            return;
+        };
+        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
+            return;
+        };
+        // Immediate-context binding slots own COM references independently of
+        // the pool. Every following render pass establishes its own bindings.
+        let empty: [Option<ID3D11ShaderResourceView>; 128] = std::array::from_fn(|_| None);
+        unsafe {
+            context.PSSetShaderResources(0, Some(&empty));
+            context.VSSetShaderResources(0, Some(&empty));
+            context.OMSetRenderTargets(None, None);
+        }
+    }
+
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        let Some(device) = self.os.d3d11_device.as_ref() else {
+            return;
+        };
+        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
+            return;
+        };
+        let state = &mut self.textures.1;
+        unsafe {
+            if let Some((serial, query)) = &state.d3d {
+                let mut done = 0u32;
+                // GetData's S_FALSE is also an HRESULT success: inspect the
+                // BOOL payload, not Result::is_ok alone.
+                if context
+                    .GetData(query, Some((&mut done as *mut u32).cast()), 4, 1)
+                    .is_ok()
+                    && done != 0
+                {
+                    state.serials.complete(*serial);
+                    state.d3d = None;
+                }
+            }
+            let submitted = state
+                .serials
+                .submitted
+                .load(std::sync::atomic::Ordering::Acquire);
+            let completed = state
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire);
+            if state.d3d.is_none() && submitted > completed {
+                let mut query = None;
+                if device
+                    .CreateQuery(
+                        &D3D11_QUERY_DESC {
+                            Query: D3D11_QUERY_EVENT,
+                            MiscFlags: 0,
+                        },
+                        Some(&mut query),
+                    )
+                    .is_ok()
+                {
+                    if let Some(query) = query {
+                        context.End(&query);
+                        context.Flush();
+                        state.d3d = Some((submitted, query));
+                    }
+                }
+            }
+            state.retired.retain(|retired| retired.serial > completed);
+        }
     }
 }

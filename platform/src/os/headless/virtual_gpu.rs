@@ -727,6 +727,52 @@ mod tests {
         fb
     }
 
+    /// `alpha_blend: false` is a raw write, alpha included, exactly like the
+    /// no-blend pipeline variant the GPU backends bind; `true` composites the
+    /// premultiplied fragment over what is there. Two overlapping fragments on
+    /// one pixel prove both, and that the second fully overwrites the first
+    /// only when blending is off.
+    #[test]
+    fn alpha_blend_off_replaces_the_destination() {
+        let (w, h) = (16, 16);
+        let pos = vec![
+            [-1.0, -1.0, 0.5, 1.0],
+            [1.0, -1.0, 0.5, 1.0],
+            [-1.0, 1.0, 0.5, 1.0],
+            [1.0, 1.0, 0.5, 1.0],
+        ];
+        let tri = setup_triangle(w, h, (w, h), &pos, 0, 1, 2).expect("triangle is visible");
+        let vary = varyings(1);
+        let draw = |blend: bool| -> [f32; 4] {
+            let mut fb = Framebuffer::new(w, h);
+            // First fragment: opaque red, then a half-transparent green over it.
+            fb.clear([1.0, 0.0, 0.0, 1.0], 1.0);
+            let state = RasterState {
+                blend,
+                depth_write: false,
+                ..RasterState::default()
+            };
+            let mut scratch = RasterScratch::default();
+            let mut frag = |_v: &[f32], _d: &TriangleDerivatives, _lx: u32, _ly: u32, _x: i32, _y: i32| {
+                Some([0.0, 0.5, 0.0, 0.5])
+            };
+            rasterize_setup_rows(
+                &tri, w, state, 0, h, &mut fb.color, &mut fb.depth, &vary, 1, 0, false,
+                &mut scratch, &mut frag,
+            );
+            // Bottom-left pixel: well inside the lower-left triangle.
+            fb.color[(h - 3) * w + 2]
+        };
+        // Blending on: red * (1 - 0.5) + premultiplied green.
+        let blended = draw(true);
+        assert!((blended[0] - 0.5).abs() < 0.01 && (blended[1] - 0.5).abs() < 0.01, "{blended:?}");
+        assert!((blended[3] - 1.0).abs() < 0.01, "{blended:?}");
+        // Blending off: the fragment replaces red outright, alpha included.
+        let raw = draw(false);
+        assert!(raw[0].abs() < 0.01 && (raw[1] - 0.5).abs() < 0.01, "{raw:?}");
+        assert!((raw[3] - 0.5).abs() < 0.01, "{raw:?}");
+    }
+
     /// Splitting the rows across bands is the whole basis of the threaded path:
     /// it may not change a single pixel.
     #[test]

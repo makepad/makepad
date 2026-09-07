@@ -326,7 +326,11 @@ impl Cx {
                     let () = msg_send![encoder, setCullMode: cull_mode];
                 }
 
-                let render_pipeline_state = shp.render_pipeline_state.as_id();
+                let render_pipeline_state = if draw_call.options.alpha_blend {
+                    shp.render_pipeline_state.as_id()
+                } else {
+                    shp.render_pipeline_state_no_blend.as_id()
+                };
                 unsafe {
                     let () = msg_send![encoder, setRenderPipelineState: render_pipeline_state];
                 }
@@ -665,6 +669,9 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) -> bool {
+        if metal_cx.cb_seq == 0 {
+            metal_cx.lifetime_serials = self.textures.1.serials.clone();
+        }
         // PerfMonitor "draw" channel: CPU-side pass encode (all passes of a
         // frame sum), separate from the nextDrawable wait timed by the caller.
         let perf_t0 = self
@@ -1690,6 +1697,7 @@ pub struct MetalCx {
     /// CPU-written resource learns "the GPU is done with the last thing
     /// that read me" without a stall.
     cb_seq: u64,
+    lifetime_serials: Arc<crate::texture::FrameSerials>,
     /// The id of the command buffer the pass being encoded goes into.
     current_cb_seq: u64,
     /// Free-list of Shared staging buffers for Vec-texture uploads
@@ -1723,6 +1731,7 @@ static METAL_CB_COMPLETED: AtomicU64 = AtomicU64::new(0);
 /// stamped at commit, and removed by the buffer's completion handler.
 struct InFlightCb {
     seq: u64,
+    lifetime_serials: Arc<crate::texture::FrameSerials>,
     /// The MTLCommandBuffer, compared only as an address (commit sites find
     /// their entry by it; Metal retains the object until it completes, so
     /// the address cannot be reused while the entry lives).
@@ -1774,6 +1783,10 @@ pub(crate) fn metal_cb_committed(buffer: ObjcId) {
         .find(|entry| entry.buffer == buffer as usize)
     {
         entry.committed_at = Some(now);
+        entry
+            .lifetime_serials
+            .submitted
+            .fetch_max(entry.seq, Ordering::Release);
     }
 }
 
@@ -2090,20 +2103,24 @@ impl MetalCx {
     fn new_command_buffer(&mut self) -> ObjcId {
         metal_hang_watchdog_start();
         let buffer: ObjcId = unsafe { msg_send![self.command_queue, commandBuffer] };
-        self.cb_seq += 1;
+        self.cb_seq = self.cb_seq.saturating_add(1);
         let seq = self.cb_seq;
+        self.lifetime_serials.encoded.store(seq, Ordering::Release);
         self.current_cb_seq = seq;
         metal_in_flight().push_back(InFlightCb {
             seq,
+            lifetime_serials: self.lifetime_serials.clone(),
             buffer: buffer as usize,
             committed_at: None,
             passes: Vec::new(),
         });
+        let serials = self.lifetime_serials.clone();
         let () = unsafe {
             msg_send![
                 buffer,
                 addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                     METAL_CB_COMPLETED.fetch_max(seq, Ordering::AcqRel);
+                    serials.complete(seq);
                     let entry = {
                         let mut queue = metal_in_flight();
                         queue
@@ -2352,6 +2369,7 @@ impl MetalCx {
             frame_command_buffer: None,
             frame_command_buffer_seq: 0,
             cb_seq: 0,
+            lifetime_serials: Default::default(),
             current_cb_seq: 0,
             staging_pool: Arc::new(Mutex::new(Vec::new())),
             pass_shaders: RefCell::new(Vec::new()),
@@ -2381,6 +2399,12 @@ impl Drop for MetalCx {
 pub struct CxOsDrawShader {
     _library: RcObjcId,
     render_pipeline_state: RcObjcId,
+    /// The same pipeline with colour blending disabled: bound for draw calls
+    /// whose `CxDrawShaderOptions::alpha_blend` is false, so a fragment
+    /// replaces the destination instead of compositing over it. For the
+    /// data-pass colour formats blending is already off and this is the
+    /// same object as `render_pipeline_state`.
+    render_pipeline_state_no_blend: RcObjcId,
     draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
@@ -2713,10 +2737,34 @@ impl CxOsDrawShader {
             let mut error: ObjcId = nil;
             msg_send![
                 metal_cx.device,
-                newRenderPipelineStateWithDescriptor: descriptor
+                newRenderPipelineStateWithDescriptor: descriptor.as_id()
                 error: &mut error
             ]
         }).unwrap());
+
+        // The per-call `alpha_blend: false` variant. Metal bakes blending
+        // into the pipeline state, so a shader carries two: the descriptor is
+        // copied at creation, so flipping the flag and creating again is the
+        // whole cost. Formats that never blend reuse the one object.
+        let render_pipeline_state_no_blend = match mapping.color_format {
+            crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => RcObjcId::from_owned(
+                NonNull::new(unsafe {
+                    let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
+                    let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];
+                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
+                    let mut error: ObjcId = nil;
+                    msg_send![
+                        metal_cx.device,
+                        newRenderPipelineStateWithDescriptor: descriptor.as_id()
+                        error: &mut error
+                    ]
+                })
+                .unwrap(),
+            ),
+            _ => RcObjcId::from_owned(
+                NonNull::new(unsafe { msg_send![render_pipeline_state.as_id(), retain] }).unwrap(),
+            ),
+        };
 
         // Opt-in: shader compile timing is only interesting when someone is
         // measuring it, and every boot compiles dozens of shaders.
@@ -2753,6 +2801,7 @@ impl CxOsDrawShader {
         return Some(Self {
             _library: library,
             render_pipeline_state,
+            render_pipeline_state_no_blend,
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
@@ -3408,23 +3457,24 @@ impl CxTexture {
         }
 
         let blit = enc.blit();
-        let copy = |offset: usize, w: usize, h: usize, slice: usize, level: usize, x: usize, y: usize| {
-            let bytes_per_row = (w * bpp) as u64;
-            let () = unsafe {
-                msg_send![
-                    blit,
-                    copyFromBuffer: staging.buffer
-                    sourceOffset: offset as u64
-                    sourceBytesPerRow: bytes_per_row
-                    sourceBytesPerImage: bytes_per_row * (h as u64)
-                    sourceSize: MTLSize { width: w as u64, height: h as u64, depth: 1 }
-                    toTexture: texture
-                    destinationSlice: slice as u64
-                    destinationLevel: level as u64
-                    destinationOrigin: MTLOrigin { x: x as u64, y: y as u64, z: 0 }
-                ]
+        let copy =
+            |offset: usize, w: usize, h: usize, slice: usize, level: usize, x: usize, y: usize| {
+                let bytes_per_row = (w * bpp) as u64;
+                let () = unsafe {
+                    msg_send![
+                        blit,
+                        copyFromBuffer: staging.buffer
+                        sourceOffset: offset as u64
+                        sourceBytesPerRow: bytes_per_row
+                        sourceBytesPerImage: bytes_per_row * (h as u64)
+                        sourceSize: MTLSize { width: w as u64, height: h as u64, depth: 1 }
+                        toTexture: texture
+                        destinationSlice: slice as u64
+                        destinationLevel: level as u64
+                        destinationOrigin: MTLOrigin { x: x as u64, y: y as u64, z: 0 }
+                    ]
+                };
             };
-        };
         match layout {
             VecLayout::Plain => match rect {
                 None => copy(0, width, height, 0, 0, 0, 0),
@@ -3733,8 +3783,9 @@ impl CxTexture {
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
+            let usage = MTLTextureUsage::RenderTarget as u64
+                | if self.format.is_sampled_depth() { MTLTextureUsage::ShaderRead as u64 } else { 0 };
+            let _: () = unsafe { msg_send![descriptor.as_id(), setUsage: usage] };
             let _: () = unsafe {
                 msg_send![
                     descriptor.as_id(),
@@ -4392,7 +4443,6 @@ mod vec_upload_tests {
     }
 }
 
-
 /// The `present` topic reports once a second how many drawables were presented
 /// and the worst gap between two of them — the number the eye sees, below
 /// every app-side clock. Costs one env check when off.
@@ -4494,4 +4544,25 @@ fn present_pulse() {
             since.set(now);
         }
     });
+}
+
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        let texture = self.texture.as_ref()?;
+        Some(unsafe { msg_send![texture.as_id(), allocatedSize] })
+    }
+}
+
+impl Cx {
+    pub(crate) fn detach_released_texture(&mut self, _id: crate::texture::TextureId) {}
+
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        let completed = self.textures.1.serials.completed.load(Ordering::Acquire);
+        // The ordered queue's latest submission covers every earlier texture
+        // reader/writer. Keep native owners until its completion is published.
+        self.textures
+            .1
+            .retired
+            .retain(|retired| retired.serial > completed);
+    }
 }
