@@ -7871,6 +7871,11 @@ pub struct App {
     /// the playhead.
     #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
     wave_zoom_secs: f64,
+    /// Where the playhead sits across the zoomed lane, 0..1. Set once at
+    /// startup from the settings file -- a preference decided once, not a
+    /// live gesture like zoom.
+    #[rust(crate::music_view::HEAD_FRACTION_DEFAULT)]
+    wave_head_fraction: f64,
     /// Pushed into the widget once, when the surface first has one. Not
     /// every frame: the wheel moves the widget first and reports after,
     /// so re-asserting the stored value each pass would undo the notch
@@ -20506,12 +20511,13 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\nwave_head {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
             self.key_notation.index(),
             self.wave_zoom_secs,
+            self.wave_head_fraction,
             self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
@@ -20545,6 +20551,16 @@ p2 {}
                             .clamp(
                                 crate::music_view::ZOOM_MIN_SECS,
                                 crate::music_view::ZOOM_MAX_SECS,
+                            )
+                    }
+                    "wave_head" => {
+                        self.wave_head_fraction = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::HEAD_FRACTION_DEFAULT)
+                            .clamp(
+                                crate::music_view::HEAD_FRACTION_MIN,
+                                crate::music_view::HEAD_FRACTION_MAX,
                             )
                     }
                     _ => self.console.apply_line(key, value),
@@ -24882,6 +24898,7 @@ p2 {}
                 if !self.wave_zoom_applied {
                     self.wave_zoom_applied = true;
                     scroll.set_zoom(cx, self.wave_zoom_secs);
+                    scroll.set_head_fraction(cx, self.wave_head_fraction);
                 }
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);

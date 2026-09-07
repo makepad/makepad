@@ -327,6 +327,13 @@ pub const WAVE_WARN_SECS: f64 = 30.0;
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
+
+/// Where the playhead sits across the lane's width. Kept well off both
+/// edges -- a head pinned at 0 or 1 would show only history or only
+/// lookahead, which is a scroll, not a deck.
+pub const HEAD_FRACTION_MIN: f64 = 0.15;
+pub const HEAD_FRACTION_MAX: f64 = 0.85;
+pub const HEAD_FRACTION_DEFAULT: f64 = 0.5;
 /// A pointer that has not moved for this long is holding the record still.
 const SCRATCH_IDLE_SECS: f64 = 0.045;
 
@@ -732,7 +739,7 @@ script_mod! {
 
         pixel: fn() {
             let px = self.pos.x * self.rect_size.x
-            let column = self.centre_col + (px - self.rect_size.x * 0.5) * self.cols_per_px
+            let column = self.centre_col + (px - self.rect_size.x * self.head_fraction) * self.cols_per_px
             let bg = self.color_bg
             // No track: a quiet centre rule where the waveform will be.
             if self.cols < 1.0 {
@@ -4821,9 +4828,14 @@ pub struct DrawWaveLane {
     pub hi_scale: f32,
     #[live]
     pub lod_blend: f32,
-    /// The tile column under the centre playhead.
+    /// The tile column under the playhead.
     #[live]
     pub centre_col: f32,
+    /// Where the playhead sits across the lane's width, 0..1. 0.5 is the
+    /// centre and shows equal history and lookahead; lower moves it left
+    /// and trades history for a longer look at what is coming.
+    #[live(0.5)]
+    pub head_fraction: f32,
     /// Zoom: tile columns per screen pixel.
     #[live(1.0)]
     pub cols_per_px: f32,
@@ -5413,6 +5425,8 @@ pub struct VjWaveScroll {
     lanes: [WaveLane; 2],
     #[rust(ZOOM_DEFAULT_SECS)]
     zoom_secs: f64,
+    #[rust(HEAD_FRACTION_DEFAULT)]
+    head_fraction: f64,
     #[rust]
     lane_rects: [Rect; 2],
     /// The viewport centre captured when a loop becomes active. The wave
@@ -5698,6 +5712,17 @@ impl VjWaveScroll {
         }
     }
 
+    /// Set once from the settings file at startup, not a live gesture: an
+    /// operator's preferred balance of history against lookahead is a
+    /// thing decided once, not dragged mid-set the way zoom is.
+    pub fn set_head_fraction(&mut self, cx: &mut Cx, fraction: f64) {
+        let fraction = fraction.clamp(HEAD_FRACTION_MIN, HEAD_FRACTION_MAX);
+        if (fraction - self.head_fraction).abs() > 1e-9 {
+            self.head_fraction = fraction;
+            self.area.redraw(cx);
+        }
+    }
+
     /// Drain what the pointer did since the last call.
     pub fn take_events(&mut self) -> Vec<WaveEvent> {
         std::mem::take(&mut self.events)
@@ -5974,6 +5999,7 @@ impl Widget for VjWaveScroll {
             };
             self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = lane_cols;
+            self.draw_lane.head_fraction = self.head_fraction as f32;
             self.draw_lane.head_col = head as f32;
             self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
             set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
@@ -6014,7 +6040,7 @@ impl Widget for VjWaveScroll {
                 .unwrap_or_else(|| self.lanes[index].head_column_at(now));
             let lane_rect = self.lane_rects[index];
             let (chip_w, chip_h) = (9.0f64, 11.0f64);
-            let middle_x = rect.pos.x + rect.size.x * 0.5;
+            let middle_x = rect.pos.x + rect.size.x * self.head_fraction;
             let x_of = |secs: f64| WaveLane::mark_x(secs, centre, lane_cols, middle_x);
             // Off the lane is SKIPPED, never clamped: a chip parked at the
             // edge would claim a mark is there when it is seconds away.
@@ -6088,9 +6114,9 @@ impl Widget for VjWaveScroll {
             let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
             let Some((start, end)) = lane.loop_columns() else { continue };
             let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
-            let start_x = rect.pos.x + rect.size.x * 0.5
+            let start_x = rect.pos.x + rect.size.x * self.head_fraction
                 + (start - centre) / lane_cols.max(1e-4) as f64;
-            let end_x = rect.pos.x + rect.size.x * 0.5
+            let end_x = rect.pos.x + rect.size.x * self.head_fraction
                 + (end - centre) / lane_cols.max(1e-4) as f64;
             let lane_rect = self.lane_rects[index];
             if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
@@ -6134,7 +6160,7 @@ impl Widget for VjWaveScroll {
                 while bar <= last as i64 {
                     if bar >= 0 && bar % stride == 0 {
                         let col = phase + bar as f64 * bar_cols;
-                        let x = rect.pos.x + rect.size.x * 0.5
+                        let x = rect.pos.x + rect.size.x * self.head_fraction
                             + (col - centre) / lane_cols.max(1e-4) as f64;
                         if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
                             draw_outlined_text(
@@ -6176,7 +6202,7 @@ impl Widget for VjWaveScroll {
             self.draw_head.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
+                    pos: dvec2(rect.pos.x + rect.size.x * self.head_fraction - 6.0, rect.pos.y),
                     size: dvec2(12.0, rect.size.y),
                 },
             );
@@ -6189,7 +6215,7 @@ impl Widget for VjWaveScroll {
                 self.draw_head.draw_abs(
                     cx,
                     Rect {
-                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * 0.5 - 6.0, lane_rect.pos.y),
+                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * self.head_fraction - 6.0, lane_rect.pos.y),
                         size: dvec2(12.0, lane_rect.size.y),
                     },
                 );
@@ -9023,6 +9049,17 @@ mod tests {
         // with the waveform under it.
         let wider = WaveLane::mark_x(13.0, centre, cols * 2.0, middle);
         assert!(wider < ahead && wider > middle, "{wider} against {ahead}");
+    }
+
+    /// The default has to be the exact value that used to be hardcoded
+    /// (`rect.size.x * 0.5`) -- this is a config knob added to existing,
+    /// working behaviour, not a change to it, and every session before
+    /// this one gets the identical picture it always had.
+    #[test]
+    fn the_head_fraction_default_is_dead_centre() {
+        assert_eq!(HEAD_FRACTION_DEFAULT, 0.5);
+        assert!(HEAD_FRACTION_MIN < HEAD_FRACTION_DEFAULT);
+        assert!(HEAD_FRACTION_DEFAULT < HEAD_FRACTION_MAX);
     }
 
     #[test]
