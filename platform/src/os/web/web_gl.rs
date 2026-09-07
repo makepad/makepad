@@ -513,6 +513,7 @@ impl Cx {
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
+                    alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     pass_uniforms_gen_lo: pass_uniforms_gen as u32,
@@ -645,6 +646,7 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.textures.1.serials.submit();
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
@@ -745,6 +747,7 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        self.textures.1.serials.submit();
     }
 
     fn webgl_collect_draw_list_shaders(
@@ -902,6 +905,7 @@ impl CxOsDrawShader {
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -918,6 +922,7 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -1014,4 +1019,75 @@ pub fn spawn_process_command(
     _current_dir: &str,
 ) -> Result<Child, std::io::Error> {
     Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
+}
+
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        None
+    }
+}
+impl Cx {
+    pub(crate) fn texture_allocation_bytes(&self, _id: crate::texture::TextureId) -> Option<u64> {
+        // JS can reject uploads and scale render targets to hardware/safety
+        // limits. Rust TextureAlloc is a request, not an allocation receipt.
+        // Reporting it as actual bytes would let consumers under-budget.
+        None
+    }
+
+    pub(crate) fn release_texture_allocation(&mut self, id: crate::texture::TextureId) {
+        if !(self.textures[id].format.is_render()
+            || self.textures[id].format.is_vec()
+            || self.textures[id].format.is_depth())
+        {
+            return;
+        }
+        let framebuffer_ids = self
+            .passes
+            .0
+            .pool
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let pass = &slot.item;
+                (pass
+                    .color_textures
+                    .iter()
+                    .any(|color| color.texture.texture_id() == id)
+                    || pass
+                        .depth_texture
+                        .as_ref()
+                        .is_some_and(|depth| depth.texture_id() == id))
+                .then_some(index)
+            })
+            .collect();
+        // WebGL deletion releases the table name now; the driver retains the
+        // actual object until previously queued commands are done. Delete all
+        // FBO references too. Future use creates a new WebGL object at this id.
+        self.os.from_wasm(FromWasmFreeWebGLResources {
+            texture_ids: vec![id.0],
+            framebuffer_ids,
+            array_buffer_ids: Vec::new(),
+            index_buffer_ids: Vec::new(),
+            vao_ids: Vec::new(),
+        });
+        self.textures[id].reset_allocation();
+        self.textures[id].os = Default::default();
+        self.textures[id].previous_platform_resource = None;
+    }
+
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // The allowed Rust bridge has no completion message. A fixed number
+        // of animation frames is NOT a GPU completion guarantee. Leave the
+        // frontier at zero; callers must not acknowledge unconfirmed work.
+        let completed = self
+            .textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.textures
+            .1
+            .retired
+            .retain(|retired| retired.serial > completed);
+    }
 }

@@ -980,6 +980,21 @@ impl Texture2D {
         coord.sample_texture(self, SampleMode::DEFAULT)
     }
 
+    pub fn sample_compare(&self, uv: Vec2f, reference: f32) -> f32 {
+        let w = self.width.max(1) as f32;
+        let h = self.height.max(1) as f32;
+        let x = uv.x * w - 0.5;
+        let y = uv.y * h - 0.5;
+        let fx = x - x.floor();
+        let fy = y - y.floor();
+        let tap = |dx: f32, dy: f32| {
+            let z = self.sample_nearest(vec2((x.floor() + dx + 0.5) / w, (y.floor() + dy + 0.5) / h)).x;
+            if reference <= z { 1.0 } else { 0.0 }
+        };
+        (tap(0.0, 0.0) * (1.0-fx) + tap(1.0, 0.0) * fx) * (1.0-fy)
+            + (tap(0.0, 1.0) * (1.0-fx) + tap(1.0, 1.0) * fx) * fy
+    }
+
     /// Exact texel fetch, clamp-to-edge (`sample_nearest`).
     pub fn sample_nearest<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
         coord.sample_texture(self, SampleMode::NEAREST)

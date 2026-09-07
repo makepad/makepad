@@ -523,6 +523,10 @@ impl Widget for XrPeerSync {
         } else {
             self.node.local_transform()
         };
+        // One batch carries opaque peers and translucent previews (raw-peer
+        // ghosts at 0.42, descriptor cells at 0.16-0.40, anchor fades), so
+        // the batch blends; opaque colours are unchanged under source-over.
+        self.draw_cube.draw_vars.options.alpha_blend = true;
         self.draw_cube.begin_many_instances(cx);
         self.draw_pending_sync_anchor_preview(cx, &world);
         self.draw_recent_anchor_confirmation(cx, &world);

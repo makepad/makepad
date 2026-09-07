@@ -27,6 +27,17 @@ pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
     pub depth_write: bool,
+    /// Premultiplied source-over blending for this draw call. `false` makes a
+    /// fragment replace the destination, alpha included. Honoured per draw
+    /// call by every backend: Metal binds a second pipeline state with
+    /// blending disabled (BGRA8 window targets only; data formats keep their
+    /// never-blending pipeline), D3D11 binds a blend state with BlendEnable
+    /// off, Vulkan keys its pipeline on the flag, GL and WebGL toggle
+    /// GL_BLEND around the call, and the headless rasteriser blends only
+    /// when the target is BGRA8 AND the flag is set. With `true`, GL, WebGL,
+    /// D3D11 and Vulkan blend into any target format the pass gives them;
+    /// only Metal's data formats stay unblended. Shaders declared with
+    /// `alpha_blend: false` must output alpha 1.0 or intend a raw write.
     pub alpha_blend: bool,
     pub backface_culling: bool,
 }

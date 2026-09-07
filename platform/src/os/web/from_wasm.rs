@@ -220,6 +220,7 @@ pub struct WTextureInput {
 impl DrawShaderTextureInput {
     pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
         let ty = match self.tex_type {
+            TextureType::TextureDepth => "sampler2DShadow",
             TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
             _ => "sampler2D",
         };
@@ -428,6 +429,7 @@ pub struct FromWasmDrawCall {
     pub shader_id: usize,
     pub index_width: u32,
     pub depth_write: bool,
+    pub alpha_blend: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub pass_uniforms_gen_lo: u32,

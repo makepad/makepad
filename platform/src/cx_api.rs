@@ -25,8 +25,8 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::{CxWindow, WindowId},
         window::WindowVisuals,
+        window::{CxWindow, WindowId},
     },
     std::{
         any::{Any, TypeId},
@@ -893,6 +893,16 @@ impl Cx {
     }
     pub fn gpu_info(&self) -> &GpuInfo {
         &self.gpu_info
+    }
+
+    /// GL maps clip-space z/w from [-1, 1] to window depth [0, 1].
+    /// Metal, Vulkan and D3D use [0, 1] clip depth directly.
+    pub fn clip_depth_scale_bias(&self) -> (f32, f32) {
+        if cfg!(all(not(headless), not(use_vulkan), any(target_arch = "wasm32", target_os = "linux", target_os = "android", target_env = "ohos"))) {
+            (0.5, 0.5)
+        } else {
+            (1.0, 0.0)
+        }
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
@@ -2262,5 +2272,56 @@ mod tests {
         assert!(matches!(first, CxOsOp::CreateWindow(_)));
         assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
         assert!(platform_ops.is_empty());
+    }
+}
+
+impl Cx {
+    /// Last submitted renderer serial. Recording a Draw event does not advance
+    /// this value. See `Texture` for backend units and ordering guarantees.
+    pub fn frame_submission_serial(&self) -> u64 {
+        self.textures
+            .1
+            .serials
+            .submitted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Poll without waiting, collect finished texture retirements, and return
+    /// the greatest serial whose entire prefix has completed. Call again while
+    /// pending, even when the application does not need to repaint.
+    pub fn frame_completion_serial(&mut self) -> u64 {
+        self.poll_texture_lifetimes();
+        self.textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Allocated texture bytes, including free pool slots and pending releases.
+    /// Unknown externally owned allocations are omitted. This is an on-demand
+    /// O(pool size) measurement; ordinary rendering does not scan the pool.
+    pub fn texture_pool_bytes(&self) -> u64 {
+        self.textures.0.pool.iter().enumerate().fold(
+            self.textures.1.retired.iter().fold(0u64, |sum, retired| {
+                sum.saturating_add(retired.os.allocated_bytes(self).unwrap_or(retired.bytes))
+            }),
+            |sum, (index, slot)| {
+                sum.saturating_add(
+                    self.texture_allocation_bytes(TextureId::from_pool_slot(
+                        index,
+                        slot.generation,
+                    ))
+                    .unwrap_or(0),
+                )
+                .saturating_add(
+                    slot.item
+                        .previous_platform_resource
+                        .as_ref()
+                        .and_then(|os| os.allocated_bytes(self))
+                        .unwrap_or(0),
+                )
+            },
+        )
     }
 }

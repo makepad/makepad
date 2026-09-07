@@ -2990,7 +2990,8 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_depth_target(target_width, target_height, format)?;
+            let resource = self.create_depth_target_layers_usage(target_width, target_height, format, 1,
+                cx.textures[texture_id].format.is_sampled_depth())?;
             self.textures.insert(texture_key, resource);
         }
         Ok(())
@@ -3155,6 +3156,7 @@ impl CxVulkan {
             format: vk::Format,
             old_layout: vk::ImageLayout,
             should_clear: bool,
+            sampled: bool,
         }
 
         let pass_dont_clear = cx.passes[draw_pass_id].dont_clear;
@@ -3279,6 +3281,7 @@ impl CxVulkan {
                 format: resource.format,
                 old_layout: resource.layout,
                 should_clear,
+                sampled: cx.textures[texture_id].format.is_sampled_depth(),
             })
         } else {
             None
@@ -3344,7 +3347,7 @@ impl CxVulkan {
                     } else {
                         vk::AttachmentLoadOp::LOAD
                     })
-                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .store_op(if depth.sampled { vk::AttachmentStoreOp::STORE } else { vk::AttachmentStoreOp::DONT_CARE })
                     .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                     .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                     .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -3470,6 +3473,11 @@ impl CxVulkan {
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
+        if let Some(depth) = depth_attachment.filter(|depth| depth.sampled) {
+            self.transition_image_layout(depth.image, vk::ImageAspectFlags::DEPTH, 1,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        }
         for attachment in &color_attachments {
             self.transition_image_layout(
                 attachment.image,
@@ -3507,7 +3515,8 @@ impl CxVulkan {
         }
         if let Some(depth) = depth_attachment {
             if let Some(resource) = self.textures.get_mut(&Self::texture_key(depth.texture_id)) {
-                resource.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                resource.layout = if depth.sampled { vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL }
+                    else { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
             }
         }
 
@@ -4206,6 +4215,12 @@ impl CxVulkan {
         format: vk::Format,
         layers: u32,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_depth_target_layers_usage(width, height, format, layers, false)
+    }
+
+    fn create_depth_target_layers_usage(
+        &self, width: u32, height: u32, format: vk::Format, layers: u32, sampled: bool,
+    ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -4218,7 +4233,8 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                | if sampled { vk::ImageUsageFlags::SAMPLED } else { vk::ImageUsageFlags::empty() })
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -5239,7 +5255,7 @@ impl CxVulkan {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::TRANSFER_WRITE,
             ),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL | vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::VERTEX_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
@@ -6381,7 +6397,8 @@ impl CxVulkan {
                 .address_mode_w(address_mode)
                 .border_color(border_color)
                 .unnormalized_coordinates(false)
-                .compare_enable(false)
+                .compare_enable(sampler_desc.compare)
+                .compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .min_lod(0.0)
                 .max_lod(vk::LOD_CLAMP_NONE);
             if sampler_desc.coord == crate::makepad_script::shader::SamplerCoord::Pixel {

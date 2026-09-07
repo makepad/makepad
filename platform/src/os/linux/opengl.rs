@@ -359,6 +359,17 @@ impl Cx {
 
     pub(crate) fn render_view(
         &mut self,
+        pass: DrawPassId,
+        list: DrawListId,
+        zbias: &mut f32,
+        step: f32,
+    ) {
+        self.render_view_inner(pass, list, zbias, step);
+        self.textures.1.serials.submit();
+    }
+
+    fn render_view_inner(
+        &mut self,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
@@ -409,10 +420,10 @@ impl Cx {
                 // list reported. See `CxDrawList::zbias_hold`.
                 if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
                     let mut held = *child_zbias;
-                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    self.render_view_inner(draw_pass_id, sub_list_id, &mut held, 0.0);
                     *child_zbias += steps as f32 * zbias_step;
                 } else {
-                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                    self.render_view_inner(draw_pass_id, sub_list_id, child_zbias, zbias_step);
                 }
             } else {
                 let gl = self.os.gl();
@@ -714,6 +725,13 @@ impl Cx {
                     } else {
                         0 as gl_sys::GLboolean
                     });
+                    // Blending is the pass default (`set_default_depth_and_blend_mode`);
+                    // only an `alpha_blend: false` call touches the state, and it
+                    // restores it after its draw below, so the default path issues
+                    // no extra GL calls.
+                    if !draw_call.options.alpha_blend {
+                        (gl.glDisable)(gl_sys::BLEND);
+                    }
                     if draw_call.options.backface_culling {
                         (gl.glEnable)(gl_sys::CULL_FACE);
                         (gl.glCullFace)(gl_sys::BACK);
@@ -863,10 +881,17 @@ impl Cx {
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
                     (gl.glDepthMask)(gl_sys::TRUE);
+                    if !draw_call.options.alpha_blend {
+                        (gl.glEnable)(gl_sys::BLEND);
+                    }
                 }
             }
         }
         for event in to_dispatch.iter() {
+            // Video-handle callbacks can call release/poll reentrantly. Give
+            // commands already emitted a serial before handing control out;
+            // the outer pass's later commands get the next submission serial.
+            self.textures.1.serials.submit();
             self.call_event_handler(&event);
         }
     }
@@ -1040,6 +1065,13 @@ impl Cx {
                     cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
                     clear_depth = _clear_depth;
                     clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
+                }
+            }
+            let depth = &self.textures[depth_texture.texture_id()];
+            if depth.format.is_sampled_depth() {
+                unsafe {
+                    (gl.glFramebufferTexture2D)(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT,
+                        gl_sys::TEXTURE_2D, depth.os.gl_texture.unwrap_or(0), 0);
                 }
             }
         } else {
@@ -2289,6 +2321,7 @@ impl CxOsDrawShader {
         // shader hits this on ES-only hosts.
         let sampler_precision = "
             precision highp sampler2D;
+            precision highp sampler2DShadow;
             precision highp sampler2DArray;
             precision highp samplerCube;
             ";
@@ -2495,6 +2528,7 @@ pub const OES_ST_IDENTITY: [f32; 16] = [
 
 #[derive(Clone)]
 pub struct CxOsTexture {
+    allocation_target: u32,
     pub gl_texture: Option<u32>,
     /// This texture was last rendered by a Y-inverted offscreen pass, so
     /// its rows are stored TOP-LEFT (Metal/D3D order) — readback must not
@@ -2526,6 +2560,7 @@ pub struct CxOsTexture {
 impl Default for CxOsTexture {
     fn default() -> Self {
         Self {
+            allocation_target: gl_sys::TEXTURE_2D,
             gl_texture: None,
             rendered_top_left: false,
             gl_texture_owned: true,
@@ -2600,6 +2635,12 @@ impl CxTexture {
             needs_realloc = true;
         }
 
+        self.os.allocation_target = if matches!(self.format, TextureFormat::VecCubeBGRAu8_32 { .. })
+        {
+            gl_sys::TEXTURE_CUBE_MAP
+        } else {
+            gl_sys::TEXTURE_2D
+        };
         if let TextureFormat::VecCubeBGRAu8_32 {
             width,
             height,
@@ -3199,6 +3240,7 @@ impl CxTexture {
             } else {
                 gl_sys::TEXTURE_2D
             };
+            self.os.allocation_target = texture_target;
             unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
                 TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
@@ -3323,6 +3365,27 @@ impl CxTexture {
     fn update_depth_stencil(&mut self, gl: &LibGl, width: usize, height: usize) {
         if self.alloc_depth(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
+            if self.format.is_sampled_depth() {
+                unsafe {
+                    if self.os.gl_texture.is_none() {
+                        let mut texture = 0;
+                        (gl.glGenTextures)(1, &mut texture);
+                        self.os.gl_texture = Some(texture);
+                    }
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                    (gl.glTexImage2D)(gl_sys::TEXTURE_2D, 0, gl_sys::DEPTH_COMPONENT32F as i32,
+                        alloc.width as i32, alloc.height as i32, 0, 0x1902, gl_sys::FLOAT, std::ptr::null());
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+                    // GL_TEXTURE_COMPARE_MODE / GL_COMPARE_REF_TO_TEXTURE / GL_TEXTURE_COMPARE_FUNC.
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884c, 0x884e);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884d, gl_sys::LEQUAL as i32);
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                }
+                return;
+            }
             match &alloc.pixel {
                 TexturePixel::D32 => unsafe {
                     if self.os.gl_renderbuffer.is_none() {
@@ -3526,5 +3589,250 @@ impl EglRenderBridge {
 
     pub fn egl_context(&self) -> *mut std::ffi::c_void {
         self.egl_context
+    }
+}
+
+// Resolved only for clients using the lifetime API; LibGl's ordinary draw path
+// gains no queries, scans, or fence calls. A zero timeout never waits for GPU work.
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+type GlSync = *mut std::ffi::c_void;
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[derive(Default)]
+pub(crate) struct TextureFence {
+    functions: Option<TextureFenceFunctions>,
+    pending: Option<(u64, GlSync)>,
+    framebuffers: Vec<u32>,
+}
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+struct TextureFenceFunctions {
+    create: unsafe extern "C" fn(u32, u32) -> GlSync,
+    poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+    delete: unsafe extern "C" fn(GlSync),
+    current: unsafe extern "C" fn() -> GlSync,
+}
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, cx: &Cx) -> Option<u64> {
+        if self.gl_texture.is_none() && self.gl_renderbuffer.is_none() {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        let display = cx.os.opengl_cx.as_ref()?;
+        #[cfg(target_os = "android")]
+        let display = cx.os.display.as_ref()?;
+        let get_proc = display.libegl.eglGetProcAddress?;
+        let gl = &display.libgl;
+        unsafe {
+            let current = get_proc(c"eglGetCurrentContext".as_ptr());
+            if current.is_null() {
+                return None;
+            }
+            let current = std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn() -> GlSync,
+            >(current);
+            if current() != display.egl_context {
+                return None;
+            }
+            let get_integer = get_proc(c"glGetIntegerv".as_ptr());
+            if get_integer.is_null() {
+                return None;
+            }
+            let get_integer = std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn(u32, *mut i32),
+            >(get_integer);
+            let mut total = 0u64;
+            let mut allocated = false;
+            if let Some(texture) = self.gl_texture.filter(|_| self.gl_texture_owned) {
+                let cube = self.allocation_target == gl_sys::TEXTURE_CUBE_MAP;
+                let mut previous = 0;
+                get_integer(if cube { 0x8514 } else { 0x8069 }, &mut previous);
+                (gl.glBindTexture)(self.allocation_target, texture);
+                let mut bound = 0;
+                get_integer(if cube { 0x8514 } else { 0x8069 }, &mut bound);
+                if bound as u32 != texture {
+                    (gl.glBindTexture)(self.allocation_target, previous as u32);
+                    return None;
+                }
+                for face in 0..if cube { 6 } else { 1 } {
+                    let target = if cube {
+                        gl_sys::TEXTURE_CUBE_MAP_POSITIVE_X + face
+                    } else {
+                        gl_sys::TEXTURE_2D
+                    };
+                    for level in 0..32 {
+                        let mut width = 0;
+                        let mut height = 0;
+                        (gl.glGetTexLevelParameteriv)(target, level, 0x1000, &mut width);
+                        (gl.glGetTexLevelParameteriv)(target, level, 0x1001, &mut height);
+                        if width <= 0 || height <= 0 {
+                            break;
+                        }
+                        allocated = true;
+                        // Actual component widths include conversion of unsized
+                        // formats. Missing channels report zero, including depth.
+                        let mut bits = 0u64;
+                        for parameter in [0x805c, 0x805d, 0x805e, 0x805f, 0x884a, 0x88f1] {
+                            let mut size = 0;
+                            (gl.glGetTexLevelParameteriv)(target, level, parameter, &mut size);
+                            bits += size.max(0) as u64;
+                        }
+                        total =
+                            total.saturating_add(width as u64 * height as u64 * bits.div_ceil(8));
+                        if width == 1 && height == 1 {
+                            break;
+                        }
+                    }
+                }
+                (gl.glBindTexture)(self.allocation_target, previous as u32);
+            }
+            if let Some(buffer) = self.gl_renderbuffer {
+                let query = get_proc(c"glGetRenderbufferParameteriv".as_ptr());
+                if query.is_null() {
+                    return None;
+                }
+                let query = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, u32, *mut i32),
+                >(query);
+                let mut previous = 0;
+                get_integer(0x8ca7, &mut previous); // RENDERBUFFER_BINDING
+                (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, buffer);
+                let mut width = 0;
+                let mut height = 0;
+                query(gl_sys::RENDERBUFFER, 0x8d42, &mut width);
+                query(gl_sys::RENDERBUFFER, 0x8d43, &mut height);
+                let mut bits = 0u64;
+                for parameter in 0x8d50..=0x8d55 {
+                    let mut size = 0;
+                    query(gl_sys::RENDERBUFFER, parameter, &mut size);
+                    bits += size.max(0) as u64;
+                }
+                (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, previous as u32);
+                if width > 0 && height > 0 {
+                    allocated = true;
+                    total = total.saturating_add(width as u64 * height as u64 * bits.div_ceil(8));
+                }
+            }
+            allocated.then_some(total)
+        }
+    }
+    fn destroy_released(&mut self, gl: &LibGl) {
+        if self.gl_texture_owned {
+            if let Some(texture) = self.gl_texture.take() {
+                unsafe {
+                    (gl.glDeleteTextures)(1, &texture);
+                }
+            }
+        }
+        if let Some(buffer) = self.gl_renderbuffer.take() {
+            unsafe {
+                (gl.glDeleteRenderbuffers)(1, &buffer);
+            }
+        }
+    }
+}
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl Cx {
+    pub(crate) fn detach_released_texture(&mut self, id: crate::texture::TextureId) {
+        for slot in &mut self.passes.0.pool {
+            let pass = &mut slot.item;
+            if pass
+                .color_textures
+                .iter()
+                .any(|color| color.texture.texture_id() == id)
+                || pass
+                    .depth_texture
+                    .as_ref()
+                    .is_some_and(|depth| depth.texture_id() == id)
+            {
+                if let Some(framebuffer) = pass.os.gl_framebuffer.take() {
+                    self.textures.1.gl.framebuffers.push(framebuffer);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        #[cfg(target_os = "linux")]
+        let Some(display) = self.os.opengl_cx.as_ref() else {
+            return;
+        };
+        #[cfg(target_os = "android")]
+        let Some(display) = self.os.display.as_ref() else {
+            return;
+        };
+        let Some(get_proc) = display.libegl.eglGetProcAddress else {
+            return;
+        };
+        let state = &mut self.textures.1;
+        if state.gl.functions.is_none() {
+            unsafe {
+                let create = get_proc(c"glFenceSync".as_ptr());
+                let poll = get_proc(c"glClientWaitSync".as_ptr());
+                let delete = get_proc(c"glDeleteSync".as_ptr());
+                let current = get_proc(c"eglGetCurrentContext".as_ptr());
+                if create.is_null() || poll.is_null() || delete.is_null() || current.is_null() {
+                    return;
+                }
+                state.gl.functions = Some(TextureFenceFunctions {
+                    create: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(u32, u32) -> GlSync,
+                    >(create),
+                    poll: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+                    >(poll),
+                    delete: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(GlSync),
+                    >(delete),
+                    current: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn() -> GlSync,
+                    >(current),
+                });
+            }
+        }
+        let functions = state.gl.functions.as_ref().unwrap();
+        unsafe {
+            if (functions.current)() != display.egl_context {
+                return;
+            }
+            for framebuffer in state.gl.framebuffers.drain(..) {
+                (display.libgl.glDeleteFramebuffers)(1, &framebuffer);
+            }
+            if let Some((serial, fence)) = state.gl.pending {
+                if matches!((functions.poll)(fence, 0, 0), 0x911a | 0x911c) {
+                    (functions.delete)(fence);
+                    state.gl.pending = None;
+                    state.serials.complete(serial);
+                }
+            }
+            let submitted = state
+                .serials
+                .submitted
+                .load(std::sync::atomic::Ordering::Acquire);
+            let completed = state
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire);
+            if state.gl.pending.is_none() && submitted > completed {
+                let fence = (functions.create)(0x9117, 0); // SYNC_GPU_COMMANDS_COMPLETE
+                if !fence.is_null() {
+                    state.gl.pending = Some((submitted, fence));
+                    (display.libgl.glFlush)();
+                }
+            }
+            state.retired.retain_mut(|retired| {
+                if retired.serial > completed {
+                    return true;
+                }
+                retired.os.destroy_released(&display.libgl);
+                false
+            });
+        }
     }
 }

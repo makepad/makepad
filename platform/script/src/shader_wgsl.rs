@@ -611,8 +611,9 @@ fn build_draw_shader_wgsl(
         }
         writeln!(
             out,
-            "@group(0) @binding({}) var {}: sampler;",
-            next_binding, sampler_name
+            "@group(0) @binding({}) var {}: {};",
+            next_binding, sampler_name,
+            if output.samplers[sampler_index].compare { "sampler_comparison" } else { "sampler" }
         )
         .ok();
         next_binding += 1;
