@@ -1046,8 +1046,7 @@ impl AutoPilot {
     ) {
         let o = obs.deck(out);
         let wall = ((fire_at_src - o.position_secs) / o.rate.max(0.05)).max(0.0);
-        let secs = wall.round() as u64;
-        self.status = format!("→{} {}:{:02}", letter(incoming), secs / 60, secs % 60);
+        self.status = format!("→{} {}", letter(incoming), crate::clock::countdown(wall));
     }
 }
 

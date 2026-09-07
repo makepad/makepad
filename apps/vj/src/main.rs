@@ -5410,12 +5410,6 @@ fn side_channel_refs_of(files: &[makepad_asset_data::AssetFile]) -> TrackSideCha
     }
 }
 
-fn format_time(secs: f64) -> String {
-    let secs = secs.max(0.0);
-    let minutes = (secs / 60.0).floor() as u64;
-    format!("{minutes}:{:04.1}", secs - minutes as f64 * 60.0)
-}
-
 // ---------------------------------------------------------------------------
 // system-audio capture + beat-quantized scheduling
 // ---------------------------------------------------------------------------
@@ -9137,7 +9131,7 @@ impl App {
             };
             let fraction = if dur > 0.0 { (pos / dur).clamp(0.0, 1.0) } else { 0.0 };
             let position = if dur > 0.0 {
-                format!("{}:{:04.1}", (pos / 60.0) as u32, pos % 60.0)
+                crate::clock::playhead(pos)
             } else {
                 "—".to_string()
             };
@@ -24691,8 +24685,8 @@ p2 {}
                 &refs.time,
                 &format!(
                     "{} / -{}",
-                    format_time(position),
-                    format_time((duration - position).max(0.0))
+                    crate::clock::playhead(position),
+                    crate::clock::playhead((duration - position).max(0.0))
                 ),
             );
             // This deck's QUANT chip mirrors the engine every pass

@@ -1679,13 +1679,7 @@ pub fn human_bytes(bytes: u64) -> String {
 }
 
 pub fn human_secs(secs: f64) -> String {
-    let total = secs.max(0.0).round() as u64;
-    let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
+    crate::clock::length(secs)
 }
 
 #[cfg(test)]
@@ -1799,6 +1793,20 @@ mod tests {
         assert_eq!(human_bytes(61878609), "59.0 MB");
         assert_eq!(human_secs(596.5), "9:57");
         assert_eq!(human_secs(3601.0), "1:00:01");
+        // The arithmetic moved into the clock module; this is the rule it
+        // used to carry, checked across the range rather than at two
+        // points, so the move is provably a move and not a change.
+        for tenths in (0..40_000).step_by(37) {
+            let secs = tenths as f64 / 10.0;
+            let total = secs.round() as u64;
+            let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
+            let was = if h > 0 {
+                format!("{h}:{m:02}:{s:02}")
+            } else {
+                format!("{m}:{s:02}")
+            };
+            assert_eq!(human_secs(secs), was, "at {secs}s");
+        }
     }
 
     #[test]
