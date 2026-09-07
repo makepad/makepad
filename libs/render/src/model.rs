@@ -10,8 +10,10 @@
 //! `Textures/colormap.png` shared by the entire pack. That is the reason a
 //! whole pack draws in a single batch: same texture, so no state change.
 
-use crate::skin::{mat4_mul_dir, mat4_mul_point, oct_encode, trs_to_mat4, Accessors, JsonParser, NodeTrs, Val};
+use crate::skin::soft_deform::affine_normal;
+use crate::skin::{ mat4_mul_point, oct_encode, trs_to_mat4, Accessors, JsonParser, NodeTrs, Val};
 use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f};
+use makepad_gltf::VisualWheelMotion;
 use std::collections::BTreeMap;
 
 /// Floats per packed vertex — matches `geom.GameMeshVertex` and the skinned
@@ -111,6 +113,7 @@ pub struct StaticDrawLayer {
 /// is what actually routes a model onto the specular shader.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PbrMaterial {
+    pub surface: Option<std::sync::Arc<crate::material_surface::MaterialSurface>>,
     /// glTF `pbrMetallicRoughness.metallicFactor`.
     pub metallic: f32,
     /// glTF `pbrMetallicRoughness.roughnessFactor`.
@@ -123,7 +126,7 @@ pub struct PbrMaterial {
 
 impl Default for PbrMaterial {
     fn default() -> Self {
-        Self { metallic: 1.0, roughness: 1.0, orm_png: None }
+        Self { metallic: 1.0, roughness: 1.0, orm_png: None, surface: None }
     }
 }
 
@@ -145,7 +148,7 @@ impl PbrMaterial {
     /// So: a map, or a roughness the file actually narrowed. Everything else
     /// keeps the existing diffuse shader, unchanged.
     pub fn is_shiny(&self) -> bool {
-        self.orm_png.is_some() || self.roughness < 0.99
+        self.surface.is_some() || self.orm_png.is_some() || self.roughness < 0.99
     }
 }
 
@@ -160,6 +163,7 @@ impl PbrMaterial {
 /// between them, which is what the sampled form does too.
 #[derive(Clone, Default)]
 pub struct RigidClip {
+    pub hierarchy:Option<std::sync::Arc<crate::asset_rigid::RigidHierarchy>>,
     /// Key times in seconds, ascending. Empty = no clip (part never moves).
     pub times: Vec<f32>,
     /// One absolute local TRS per entry in `times`.
@@ -173,7 +177,7 @@ impl RigidClip {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.keys.is_empty()&&self.hierarchy.is_none()
     }
 
     /// The pose at `t`, clamped to the clip's ends. Translation and scale
@@ -307,6 +311,7 @@ impl AnimPart {
 
     /// The part's model-space matrix at clip time `t`.
     pub fn transform_at(&self, t: f32) -> Mat4f {
+        if let Some(hierarchy)=&self.clip.hierarchy{return hierarchy.transform(Some(t))}
         let trs = if self.clip.is_empty() {
             self.rest
         } else {
@@ -317,6 +322,7 @@ impl AnimPart {
 
     /// The authored rest pose's model-space matrix.
     pub fn rest_transform(&self) -> Mat4f {
+        if let Some(hierarchy)=&self.clip.hierarchy{return hierarchy.transform(None)}
         Mat4f::mul(&self.parent, &trs_to_mat4(&self.rest))
     }
 
@@ -344,6 +350,7 @@ impl AnimPart {
 /// * `pivot`: rotation centre in the marked node's local coordinates,
 /// * `anchor`: the same centre in model coordinates,
 /// * positive `radius` and `width`, in model units.
+/// * optional `visual` steering gain/angle and model-space travel limits.
 ///
 /// Where those values came from is an asset-import concern. Runtime code only
 /// consumes this generic contract and supplies a complete model-space pose.
@@ -353,6 +360,8 @@ pub struct DrivenPart {
     pub anchor: Vec3f,
     pub radius: f32,
     pub width: f32,
+    /// Optional display pose limits, independent of physical wheel behavior.
+    pub visual: Option<VisualWheelMotion>,
     /// Model-space matrix of everything above the marked node.
     pub parent: Mat4f,
     /// Authored local pose of the marked node.
@@ -972,6 +981,8 @@ impl StaticModel {
 
         // Node rest transforms, then parents from the children lists.
         let node_vals = json.get("nodes").map(|n| n.arr()).unwrap_or(&[]);
+        let active_nodes=crate::asset_morph::active_nodes(&json)?;
+        let has_morphs=crate::asset_morph::has_morphs(&json);
         let mut rests: Vec<NodeTrs> = Vec::with_capacity(node_vals.len());
         let mut parents: Vec<Option<usize>> = vec![None; node_vals.len()];
         for n in node_vals {
@@ -1116,11 +1127,14 @@ impl StaticModel {
         let mut raw_pos: Vec<Vec3f> = Vec::new();
         let mut raw_nrm: Vec<Vec3f> = Vec::new();
         let mut raw_tint: Vec<[f32; 3]> = Vec::new();
+        let mut raw_alpha: Vec<f32> = Vec::new();
+        let mut raw_source:Vec<usize>=Vec::new();
         let mut raw_uv: Vec<[f32; 2]> = Vec::new();
         // (image, detail_image, detail_scale, v0, v1, i0, i1)
         let mut prim_spans: Vec<PrimSpan> = Vec::new();
 
         for (node_index, n) in node_vals.iter().enumerate() {
+            if !active_nodes[node_index]{continue}
             let Some(mesh_index) = n.get("mesh").and_then(Val::usize) else {
                 continue;
             };
@@ -1137,7 +1151,8 @@ impl StaticModel {
                 .get("meshes")
                 .and_then(|m| m.idx(mesh_index))
                 .ok_or("bad mesh index")?;
-            for prim in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]) {
+            for (primitive_index,prim) in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]).iter().enumerate() {
+                let source_offset=if has_morphs{crate::asset_morph::vertex_offset(&json,node_index,primitive_index)}else{0};
                 let attrs = prim
                     .get("attributes")
                     .ok_or("primitive without attributes")?;
@@ -1196,11 +1211,8 @@ impl StaticModel {
                 let prim_pbr = gltf_prim_pbr(&json, prim);
                 let prim_v0 = vert_total;
                 let prim_i0 = indices.len();
-                // Mirrored node (negative determinant): a plain direction
-                // transform flips the authored normal INTO the solid, and
-                // the winding flips too. Lighting half-hid it (dark kits);
-                // the AO baker aimed hemispheres inside-out from it. Correct
-                // both here so every consumer sees honest outward data.
+                // Reflection reverses winding. Authored normals follow the
+                // inverse transpose; an extra sign flip would turn them inward.
                 let mirrored = {
                     let m = &world.v;
                     let det = m[0] * (m[5] * m[10] - m[6] * m[9])
@@ -1226,7 +1238,7 @@ impl StaticModel {
                             z: pos[i * 3 + 2],
                         },
                     );
-                    let mut nrm = mat4_mul_dir(
+                    let mut nrm = affine_normal(
                         &world,
                         Vec3f {
                             x: g(&normal, 3, 0, 0.0),
@@ -1239,9 +1251,6 @@ impl StaticModel {
                         nrm.x /= len;
                         nrm.y /= len;
                         nrm.z /= len;
-                    }
-                    if mirrored {
-                        nrm = Vec3f { x: -nrm.x, y: -nrm.y, z: -nrm.z };
                     }
                     min.x = min.x.min(p.x);
                     min.y = min.y.min(p.y);
@@ -1265,8 +1274,11 @@ impl StaticModel {
                         None => [tint[0], tint[1], tint[2]],
                     };
                     raw_pos.push(p);
+                    raw_source.push(source_offset+i);
                     raw_nrm.push(nrm);
                     raw_tint.push(vt);
+                    let surface=prim.get("material").and_then(Val::usize).is_some_and(|i|gltf_material_is_surface(&json,i));
+                    raw_alpha.push(if surface { vcolor.as_ref().and_then(|(values,lanes)|(*lanes==4).then(||values.get(i*lanes+3).copied()).flatten()).unwrap_or(1.0) }else{1.0});
                     raw_uv.push([g(&uv, 2, 0, 0.0), g(&uv, 2, 1, 0.0)]);
                     vertices.extend_from_slice(&[
                         p.x,
@@ -1279,7 +1291,7 @@ impl StaticModel {
                         // been read. The material's own alpha was already
                         // discarded by the shader (it returns opaque), so the
                         // lane costs nothing to repurpose.
-                        makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], 1.0),
+                        makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], vcolor.as_ref().filter(|(_,lanes)|*lanes==4).and_then(|(v,_)|v.get(i*4+3)).copied().unwrap_or(1.0)),
                     ]);
                 }
                 if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
@@ -1306,6 +1318,7 @@ impl StaticModel {
                 if count > 0 {
                     parts.push((pmin, pmax));
                     prim_spans.push(PrimSpan {
+                        material: prim.get("material").and_then(Val::usize),
                         image: prim_image,
                         detail_image,
                         detail_scale,
@@ -1466,8 +1479,8 @@ impl StaticModel {
                 p.z,
                 makepad_draw::pack_pair_f16(ox, oy),
                 makepad_draw::pack_pair_f16(raw_uv[i][0], raw_uv[i][1]),
-                makepad_draw::pack_unorm8x4(t[0], t[1], t[2], vertex_ao[i]),
-                pack_ao_uv(ao_uv[i][0], ao_uv[i][1]),
+                makepad_draw::pack_unorm8x4(t[0], t[1], t[2], if !baked_ao {raw_alpha[i]}else{vertex_ao[i]}),
+                if has_morphs&&!baked_ao{raw_source[i]as f32}else{pack_ao_uv(ao_uv[i][0], ao_uv[i][1])},
             ]);
         }
 
@@ -1534,6 +1547,7 @@ impl StaticModel {
 
 #[derive(Clone)]
 struct PrimSpan {
+    material: Option<usize>,
     image: usize,
     detail_image: Option<usize>,
     detail_scale: [f32; 2],
@@ -1549,11 +1563,42 @@ struct PrimSpan {
     i1: usize,
 }
 
+pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
+    let Some(material)=json.get("materials").and_then(|m|m.idx(index))else{return false};
+    material.get("normalTexture").is_some()||material.get("occlusionTexture").is_some()
+        ||material.get("emissiveTexture").is_some()
+        ||material.get("emissiveFactor").is_some_and(|v|v.arr().iter().any(|v|v.f64().unwrap_or(0.0)>0.0))
+        ||matches!(material.get("alphaMode").and_then(Val::str),Some("MASK"|"BLEND"))
+        ||matches!(material.get("doubleSided"),Some(Val::Bool(true)))
+        ||material.get("extras").is_some_and(|e|e.get("makepadMips").is_some()||matches!(e.get("makepadSurface"),Some(Val::Bool(true))))
+}
+
+pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<crate::material_surface::MaterialSurface> {
+    if !gltf_material_is_surface(json,index){return None}
+    let material=json.get("materials")?.idx(index)?;
+    let image=|field:&str|material.get(field).and_then(|t|t.get("index")).and_then(Val::usize)
+        .and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
+    let value=|object:Option<&Val>,key:&str,default:f32|object.and_then(|o|o.get(key)).and_then(Val::f64).unwrap_or(default as f64)as f32;
+    let strength=material.get("extensions").and_then(|e|e.get("KHR_materials_emissive_strength"));
+    let emissive_strength=value(strength,"emissiveStrength",1.0);
+    let emissive=std::array::from_fn(|i|material.get("emissiveFactor").and_then(|e|e.idx(i)).and_then(Val::f64).unwrap_or(0.0)as f32*emissive_strength);
+    let alpha=material.get("pbrMetallicRoughness").and_then(|p|p.get("baseColorFactor")).and_then(|f|f.idx(3)).and_then(Val::f64).unwrap_or(1.0)as f32;
+    Some(crate::material_surface::MaterialSurface {
+        normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
+        occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
+        emissive_png:image("emissiveTexture"),emissive,
+        alpha_mode:match material.get("alphaMode").and_then(Val::str){Some("MASK")=>1,Some("BLEND")=>2,_=>0},
+        alpha_cutoff:value(Some(material),"alphaCutoff",0.5),base_alpha:alpha,
+        double_sided:matches!(material.get("doubleSided"),Some(Val::Bool(true))),
+    })
+}
+
 impl PrimSpan {
     /// Resolve this span's material, pulling the ORM bytes out of the BIN
     /// chunk once (see [`PbrMaterial`]).
     fn pbr(&self, json: &Val, bin: &[u8]) -> PbrMaterial {
         PbrMaterial {
+            surface: self.material.and_then(|i|gltf_material_surface(json,bin,i)).map(std::sync::Arc::new),
             metallic: self.metallic,
             roughness: self.roughness,
             orm_png: self.orm_image.and_then(|i| gltf_embedded_png(json, bin, i)),
@@ -1620,6 +1665,7 @@ fn model_level_pbr(spans: &[PrimSpan], json: &Val, bin: &[u8]) -> PbrMaterial {
         return PbrMaterial::default();
     };
     PbrMaterial {
+        surface: gltf_material_surface(json,bin,0).map(std::sync::Arc::new),
         metallic: (pbr.get("metallicFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
             .clamp(0.0, 1.0),
         roughness: (pbr.get("roughnessFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
@@ -1659,6 +1705,7 @@ struct DrivenNodeDef {
     anchor: Vec3f,
     radius: f32,
     width: f32,
+    visual: Option<VisualWheelMotion>,
 }
 
 /// A node's model-space matrix from the rest transforms alone.
@@ -1808,7 +1855,7 @@ fn sampled_node_clip(
                 trs
             })
             .collect();
-        return Ok(Some(RigidClip { times, keys }));
+        return Ok(Some(RigidClip { times, keys,hierarchy:None }));
     }
     Ok(None)
 }
@@ -1879,6 +1926,12 @@ fn collect_anim_nodes(
             clip,
         });
     }
+    let existing=out.iter().map(|def|def.node).collect::<Vec<_>>();
+    for(node,hierarchy)in crate::asset_rigid::automatic_clips(json,acc,rests,&existing)?{
+        let name=node_vals[node].get("name").and_then(Val::str).map(str::to_string).unwrap_or_else(||format!("node_{node}"));
+        out.push(AnimNodeDef{node,name,states:vec!["start".into(),"end".into()],default:0,kind:Some("asset-animation".into()),numbers:BTreeMap::new(),strings:BTreeMap::new(),
+            clip:RigidClip{times:hierarchy.times.clone(),keys:Vec::new(),hierarchy:Some(hierarchy)}});
+    }
     Ok(out)
 }
 
@@ -1932,6 +1985,20 @@ fn collect_driven_nodes(node_vals: &[Val]) -> Result<Vec<DrivenNodeDef>, String>
         if !finite || radius <= 0.0 || width <= 0.0 {
             return Err(format!("vehicle wheel {connection} has invalid dimensions"));
         }
+        let visual = extras.get("visual").map(|value| {
+            let number = |name| value.get(name).and_then(Val::f64)
+                .ok_or_else(|| format!("vehicle wheel {connection} has invalid visual {name}"));
+            let visual = VisualWheelMotion {
+                steer_gain: number("steer_gain")?,
+                steer_max: number("steer_max")?,
+                compression: number("compression")?,
+                droop: number("droop")?,
+            };
+            if !visual.is_valid() {
+                return Err(format!("vehicle wheel {connection} has out-of-range visual motion limits"));
+            }
+            Ok(visual)
+        }).transpose()?;
         out.push(DrivenNodeDef {
             node,
             connection,
@@ -1939,6 +2006,7 @@ fn collect_driven_nodes(node_vals: &[Val]) -> Result<Vec<DrivenNodeDef>, String>
             anchor,
             radius,
             width,
+            visual,
         });
     }
     Ok(out)
@@ -2012,6 +2080,8 @@ fn pack_node_stream(
     mirrored: bool,
     out: &mut PartStream,
 ) -> Result<(), String> {
+    let node_index=json.get("nodes").map(Val::arr).unwrap_or(&[]).iter().position(|n|std::ptr::eq(n,node)).unwrap_or(0);
+    if !crate::asset_morph::active_nodes(json)?.get(node_index).copied().unwrap_or(false){return Ok(())}
     let Some(mesh_index) = node.get("mesh").and_then(Val::usize) else {
         return Ok(());
     };
@@ -2019,7 +2089,10 @@ fn pack_node_stream(
         .get("meshes")
         .and_then(|m| m.idx(mesh_index))
         .ok_or("bad mesh index")?;
-    for prim in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]) {
+    let node_index=json.get("nodes").map(Val::arr).unwrap_or(&[]).iter().position(|n|std::ptr::eq(n,node)).unwrap_or(0);
+    let has_morphs=crate::asset_morph::has_morphs(json);
+    for (primitive_index,prim) in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]).iter().enumerate() {
+        let source_offset=if has_morphs{crate::asset_morph::vertex_offset(json,node_index,primitive_index)}else{0};
         let attrs = prim
             .get("attributes")
             .ok_or("primitive without attributes")?;
@@ -2077,7 +2150,7 @@ fn pack_node_stream(
                     z: pos[i * 3 + 2],
                 },
             );
-            let mut nrm = mat4_mul_dir(
+            let mut nrm = affine_normal(
                 place,
                 Vec3f {
                     x: g(&normal, 3, 0, 0.0),
@@ -2090,9 +2163,6 @@ fn pack_node_stream(
                 nrm.x /= len;
                 nrm.y /= len;
                 nrm.z /= len;
-            }
-            if mirrored {
-                nrm = Vec3f { x: -nrm.x, y: -nrm.y, z: -nrm.z };
             }
             out.min.x = out.min.x.min(p.x);
             out.min.y = out.min.y.min(p.y);
@@ -2119,8 +2189,8 @@ fn pack_node_stream(
                 makepad_draw::pack_pair_f16(tex_uv[0], tex_uv[1]),
                 // AO lane neutral: this geometry moves or is unlit, so a
                 // baked occlusion term could never stay true.
-                makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], 1.0),
-                pack_ao_uv(0.0, 0.0),
+                makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], vcolor.as_ref().filter(|(_,lanes)|*lanes==4).and_then(|(v,_)|v.get(i*4+3)).copied().unwrap_or(1.0)),
+                if has_morphs{(source_offset+i)as f32}else{pack_ao_uv(0.0, 0.0)},
             ]);
         }
         if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
@@ -2149,6 +2219,7 @@ fn pack_node_stream(
             let (detail_image, detail_scale) = gltf_prim_detail(json, prim);
             let (metallic, roughness, orm_image) = gltf_prim_pbr(json, prim);
             out.spans.push(PrimSpan {
+                material: prim.get("material").and_then(Val::usize),
                 image: gltf_prim_image_index(json, prim),
                 detail_image,
                 detail_scale,
@@ -2165,9 +2236,8 @@ fn pack_node_stream(
     Ok(())
 }
 
-/// Is this node's handedness mirrored in its rest pose? Winding and normal
-/// direction are properties of the WHOLE chain, so both are read from the
-/// node's world matrix, exactly as the static path reads them.
+/// Whole-chain handedness determines winding, independently of the inverse
+/// transpose used for authored normals.
 fn node_is_mirrored(node: usize, parents: &[Option<usize>], rests: &[NodeTrs]) -> bool {
     let m = node_world(node, parents, rests).v;
     let det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9])
@@ -2410,6 +2480,7 @@ fn build_driven_parts(
             anchor: def.anchor,
             radius: def.radius,
             width: def.width,
+            visual: def.visual,
             parent: parents[def.node]
                 .map(|p| node_world(p, parents, rests))
                 .unwrap_or_else(Mat4f::identity),
@@ -2547,7 +2618,7 @@ pub fn embedded_base_color_png(glb: &[u8]) -> Option<Vec<u8>> {
     gltf_embedded_png(&json, bin_chunk, image)
 }
 
-fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
+pub(crate) fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
     let image = json.get("images").and_then(|i| i.idx(image_index))?;
     let bv = image.get("bufferView").and_then(Val::usize)?;
     let view = json.get("bufferViews").and_then(|v| v.idx(bv))?;
@@ -2566,6 +2637,7 @@ fn split_draw_layers(
 ) -> Vec<StaticDrawLayer> {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct LayerKey {
+        surface: Option<usize>,
         image: usize,
         detail: i32,
         sx: u32,
@@ -2579,6 +2651,7 @@ fn split_draw_layers(
         pbr: Option<(u32, u32, usize)>,
     }
     let key_of = |s: &PrimSpan| LayerKey {
+        surface: s.material.filter(|i| gltf_material_is_surface(json,*i)),
         image: s.image,
         detail: s.detail_image.map(|i| i as i32).unwrap_or(-1),
         sx: s.detail_scale[0].to_bits(),
@@ -3075,6 +3148,31 @@ mod sidecar_tests {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn driven_wheel_visual_metadata_is_optional_and_validated() {
+        let node = |visual: &str| JsonParser::parse(format!(
+            r#"{{"extras":{{"kind":"vehicle_wheel","connection":"wheel_front_left","pivot":[0,0,0],"anchor":[1,0,2],"radius":0.35,"width":0.24{visual}}}}}"#
+        ).as_bytes()).unwrap();
+        let legacy = collect_driven_nodes(&[node("")]).unwrap();
+        assert!(legacy[0].visual.is_none());
+        let valid = collect_driven_nodes(&[node(r#", "visual":{"steer_gain":0.55,"steer_max":0.32,"compression":0.08,"droop":0.10}"#)]).unwrap();
+        assert_eq!(valid[0].visual.unwrap().pose(0.8,-0.4),(0.32,-0.10));
+        assert_eq!(legacy[0].anchor,valid[0].anchor);
+        assert_eq!(legacy[0].radius,valid[0].radius);
+        for visual in [
+            "null", "{}",
+            r#"{"steer_gain":0.55,"steer_max":0.32,"compression":0.08}"#,
+            r#"{"steer_gain":2,"steer_max":0.32,"compression":0.08,"droop":0.10}"#,
+            r#"{"steer_gain":0.55,"steer_max":-0.32,"compression":0.08,"droop":0.10}"#,
+            r#"{"steer_gain":0.55,"steer_max":1.3,"compression":0.08,"droop":0.10}"#,
+            r#"{"steer_gain":0.55,"steer_max":0.32,"compression":-0.08,"droop":0.10}"#,
+            r#"{"steer_gain":0.55,"steer_max":0.32,"compression":0.08,"droop":6}"#,
+        ] {
+            let result = collect_driven_nodes(&[node(&format!(",\"visual\":{visual}"))]);
+            assert!(result.is_err(),"accepted invalid visual metadata {visual}");
+        }
+    }
+
     /// A single-triangle GLB built in code, so the parser is covered without
     /// requiring the downloaded catalogue.
     fn tiny_glb(with_node_translation: bool) -> Vec<u8> {
@@ -3268,44 +3366,32 @@ pub(crate) mod tests {
         assert!(boxes.iter().all(|(lo, hi)| hi.x > lo.x && hi.y > lo.y));
     }
 
-    /// PARITY. Extras the parser has no contract for, and an animation whose
-    /// name matches no node, must leave a model bit-for-bit as it was.
+    /// Generic glTF clips target node IDs and remain playable without a
+    /// game-specific node/name convention; unknown extras are ignored.
     #[test]
-    fn unknown_extras_and_clips_leave_the_stream_untouched() {
+    fn unknown_extras_do_not_hide_a_generic_node_clip() {
         let plain = StaticModel::parse_glb(&rooms_and_door_glb(Door::Plain)).unwrap();
-        let decoy = StaticModel::parse_glb(&rooms_and_door_glb(Door::Unknown)).unwrap();
+        let animated = StaticModel::parse_glb(&rooms_and_door_glb(Door::Unknown)).unwrap();
         assert!(plain.anim_parts.is_empty());
-        assert!(decoy.anim_parts.is_empty(), "an unnamed clip owns nothing");
-        assert_eq!(plain.vertex_count(), 9, "the door flattens in as geometry");
-        let bits = |m: &StaticModel| -> Vec<u32> {
-            m.vertices.iter().map(|f| f.to_bits()).collect()
-        };
-        assert_eq!(bits(&plain), bits(&decoy), "vertex streams differ");
-        assert_eq!(plain.indices, decoy.indices, "index streams differ");
-        assert_eq!(plain.parts.len(), decoy.parts.len());
-        assert_eq!(plain.min.y.to_bits(), decoy.min.y.to_bits());
-        assert_eq!(plain.max.y.to_bits(), decoy.max.y.to_bits());
-        // And the collider derivations that read those streams agree too.
-        assert_eq!(
-            plain.voxel_collider_boxes().len(),
-            decoy.voxel_collider_boxes().len()
-        );
+        assert_eq!(animated.anim_parts.len(),1);
+        let part=&animated.anim_parts[0];
+        assert_eq!(part.kind.as_deref(),Some("asset-animation"));
+        assert_eq!(animated.indices.len()+part.indices.len(),plain.indices.len());
+        assert!((part.transform_at(0.5).v[13]-1.5).abs()<1e-6);
+        assert_eq!(animated.min.y,plain.min.y);
+        assert_eq!(animated.max.y,plain.max.y);
     }
 
-    /// Half a contract is not a contract: states with no clip to move along
-    /// stay ordinary level geometry, so a mismatched importer under-delivers
-    /// a door rather than producing one that can never open.
+    /// Unmatched game states do not claim a generic glTF animation. The
+    /// ordinary node-targeted clip remains independently playable.
     #[test]
-    fn states_without_a_matching_clip_stay_static() {
-        let plain = StaticModel::parse_glb(&rooms_and_door_glb(Door::Plain)).unwrap();
-        let half = StaticModel::parse_glb(&rooms_and_door_glb(Door::StatesNoClip)).unwrap();
-        assert!(half.anim_parts.is_empty());
-        assert_eq!(half.vertex_count(), 9);
-        let bits = |m: &StaticModel| -> Vec<u32> {
-            m.vertices.iter().map(|f| f.to_bits()).collect()
-        };
-        assert_eq!(bits(&plain), bits(&half));
-        assert_eq!(plain.indices, half.indices);
+    fn unmatched_states_fall_back_to_the_generic_node_clip() {
+        let animated = StaticModel::parse_glb(&rooms_and_door_glb(Door::StatesNoClip)).unwrap();
+        assert_eq!(animated.anim_parts.len(),1);
+        let part=&animated.anim_parts[0];
+        assert_eq!(part.kind.as_deref(),Some("asset-animation"));
+        assert!(part.clip.hierarchy.is_some());
+        assert!((part.transform_at(1.0).v[13]-3.0).abs()<1e-6);
     }
 
     /// A room plus a `sky` node, the shape the classic-map importer exports.

@@ -236,7 +236,7 @@ impl<'a> JsonParser<'a> {
 
 // ------------------------------------------------------------------ model
 
-#[derive(Clone, Copy)]
+# [derive(Clone, Copy,Debug)]
 pub struct NodeTrs {
     pub t: Vec3f,
     pub r: Quat,
@@ -308,6 +308,7 @@ enum ChannelPath {
 }
 
 struct Channel {
+    step:bool,
     node: usize,
     path: ChannelPath,
     times: Vec<f32>,
@@ -330,6 +331,7 @@ impl Channel {
                 (k - 1, k, if span > 0.0 { (t - t0) / span } else { 0.0 })
             }
         };
+        let f=if self.step{0.0}else{f};
         match self.path {
             ChannelPath::Translation | ChannelPath::Scale => {
                 let a = &self.values[k0 * 3..k0 * 3 + 3];
@@ -362,6 +364,7 @@ pub struct AnimClip {
 
 /// One skinned vertex, model space rest pose.
 struct SkinVertex {
+    color: [f32;4],
     pos: Vec3f,
     normal: Vec3f,
     uv: [f32; 2],
@@ -369,7 +372,22 @@ struct SkinVertex {
     weights: [f32; 4],
 }
 
+struct SkinPrimitive { vertices:std::ops::Range<usize>,indices:std::ops::Range<usize>,material:Option<usize> }
+
+pub struct PreparedSkinPart {
+    pub vertices:Vec<f32>,pub indices:Vec<u32>,
+    pub base:crate::material_surface::PreparedTexture,
+    pub orm:crate::material_surface::PreparedTexture,
+    pub metallic:f32,pub roughness:f32,
+    pub surface:crate::material_surface::PreparedSurface,
+}
+impl PreparedSkinPart { pub fn upload_bytes(&self)->usize{(self.vertices.len()+self.indices.len())*4+self.base.bytes()+self.orm.bytes()+self.surface.bytes()} }
+
+#[path = "skin_soft.rs"]
+pub(crate) mod soft_deform;
+
 pub struct SkinnedModel {
+    primitives: Vec<SkinPrimitive>,
     /// Memoized [`Self::rest_hash`] — the FNV over the whole vertex buffer
     /// was being recomputed per avatar PER FRAME by a draw-path filter
     /// (measured hot). Rest data never changes after load.
@@ -392,6 +410,7 @@ pub struct SkinnedModel {
     /// blended vertex stays inside the union of its joints' spheres.
     joint_bounds: Vec<(Vec3f, f32)>,
     ragdoll: Option<RagdollRig>,
+    soft_body: Option<std::sync::Arc<makepad_gltf::SoftBodyMetadata>>,
 }
 
 /// Pre-render deformation audit over animation samples. This observes the
@@ -607,7 +626,10 @@ impl<'a> Accessors<'a> {
             .unwrap_or(lanes * csize);
         let acc_off = acc.get("byteOffset").and_then(Val::usize).unwrap_or(0);
         let base = view_off + acc_off;
-        let mut out = Vec::with_capacity(count * lanes);
+        let floats=count.checked_mul(lanes).ok_or("accessor size overflow")?;
+        let end=if count==0{base}else{base.checked_add((count-1).checked_mul(stride).ok_or("accessor stride overflow")?).and_then(|n|n.checked_add(lanes*csize)).ok_or("accessor range overflow")?};
+        if floats>32*1024*1024||end>self.bin.len()||stride<lanes*csize{return Err("accessor exceeds source or128MiB decoded budget".into())}
+        let mut out = Vec::with_capacity(floats);
         for i in 0..count {
             let elem = base + i * stride;
             for lane in 0..lanes {
@@ -738,7 +760,6 @@ fn ragdoll_vec3(value: Option<&Val>) -> Option<Vec3f> {
 }
 
 fn parse_ragdoll(
-    json: &Val,
     node_vals: &[Val],
     nodes: &[Node],
     joint_nodes: &[usize],
@@ -850,18 +871,8 @@ fn parse_ragdoll(
         return Err("ragdoll rig must have exactly one root".into());
     }
 
-    // Every skin in a multi-mesh character must use the same joint set. A
-    // body rig bound to the torso skin but not the head skin is a partial rig,
-    // not something runtime can safely guess around.
-    for skin in json.get("skins").map(Val::arr).unwrap_or(&[]) {
-        let joints: Vec<usize> = skin
-            .get("joints")
-            .map(|value| value.arr().iter().filter_map(Val::usize).collect())
-            .unwrap_or_default();
-        if joints != joint_nodes {
-            return Err("ragdoll character skins use incompatible joint sets".into());
-        }
-    }
+    // Active mesh palettes were checked by the loader before reaching this
+    // rig. Unreferenced skin definitions do not constrain the active rig.
 
     let mut bodies = Vec::with_capacity(raw.len());
     for body in &raw {
@@ -934,6 +945,123 @@ impl SkinnedModel {
         Self::parse_glb_inner(bytes, true)
     }
 
+    /// Worker-only generated-content admission. Bake each primitive's opaque
+    /// base color and image into one bounded atlas before packing skin UVs.
+    /// The legacy pack parser retains its externally supplied atlas contract.
+    pub fn parse_glb_atlased(bytes: &[u8]) -> Result<(Self, makepad_draw::ImageBuffer), String> {
+        let mut model = Self::parse_glb_validated(bytes)?;
+        // Material factors are baked into this path's atlas.
+        for vertex in &mut model.vertices {vertex.color=[1.0;4];}
+        let loaded = makepad_gltf::load_gltf_from_bytes(bytes, None).map_err(|e| e.to_string())?;
+        let doc = &loaded.document;
+        struct Tile { image: makepad_draw::ImageBuffer, textured: bool, x: usize, y: usize }
+        let mut tiles: Vec<Tile> = Vec::new();
+        let mut material_tiles = std::collections::BTreeMap::new();
+        let mut ranges = Vec::new();
+        let mut remaining_texture_bytes = 64usize * 1024 * 1024;
+        let mut start = 0usize;
+        let (raw_json,_)=crate::asset_morph::chunks(bytes)?;let active=crate::asset_morph::active_nodes(&raw_json)?;
+        for (_,node) in doc.nodes_slice().iter().enumerate().filter(|(i,node)| active[*i]&&node.skin.is_some()) {
+            let mesh = doc.meshes_slice().get(node.mesh.ok_or("skin node has no mesh")?).ok_or("bad skin mesh")?;
+            for prim in &mesh.primitives {
+                if prim.attributes.contains_key("COLOR_0") { return Err("generated skin vertex colors require material baking before export".into()); }
+                let count = doc.accessors_slice().get(*prim.attributes.get("POSITION").ok_or("skin has no positions")?).ok_or("bad skin position accessor")?.count;
+                let tile = if let Some(&tile) = material_tiles.get(&prim.material) { tile } else {
+                    if tiles.len() >= 512 { return Err("generated skin exceeds 512 material atlas tiles".into()); }
+                    let material = prim.material.and_then(|m| doc.materials_slice().get(m));
+                    if prim.material.is_some() && material.is_none() { return Err("bad skin material".into()); }
+                    if material.and_then(|m| m.alpha_mode.as_deref()).is_some_and(|mode| mode != "OPAQUE") {
+                        return Err("generated skin atlas supports opaque materials only".into());
+                    }
+                    let pbr = material.and_then(|m| m.pbr_metallic_roughness.as_ref());
+                    let factor = pbr.and_then(|p| p.base_color_factor).unwrap_or([1.0; 4]);
+                    if factor.iter().any(|v| !v.is_finite() || *v < 0.0 || *v > 1.0) || factor[3] != 1.0 {
+                        return Err("generated skin requires finite opaque material color".into());
+                    }
+                    let texture = pbr.and_then(|p| p.base_color_texture.as_ref());
+                    let mut image = if let Some(texture) = texture {
+                        if texture.tex_coord.unwrap_or(0) != 0 { return Err("generated skin atlas requires TEXCOORD_0".into()); }
+                        let tex = doc.textures_slice().get(texture.index).ok_or("bad skin texture")?;
+                        let image_index = tex.source.ok_or("skin texture has no image")?;
+                        let image = doc.images_slice().get(image_index).ok_or("bad skin image")?;
+                        if image.uri.as_deref().is_some_and(|uri| !uri.starts_with("data:")) { return Err("generated skin images must be embedded".into()); }
+                        let data = makepad_gltf::load_image_bytes(&loaded, image_index).map_err(|e| e.to_string())?;
+                        let image = crate::renderer::decode_generated_png(&data, 2048, remaining_texture_bytes)?;
+                        remaining_texture_bytes -= image.data.len() * 4;
+                        if image.width == 0 || image.height == 0 || image.width > 2048 || image.height > 2048 { return Err("generated skin image exceeds atlas bounds".into()); }
+                        image
+                    } else {
+                        let mut image = makepad_draw::ImageBuffer::default();
+                        image.width = 1; image.height = 1; image.data = vec![0xffff_ffff]; image
+                    };
+                    for pixel in &mut image.data {
+                        if *pixel >> 24 != 255 { return Err("generated skin atlas requires opaque image pixels".into()); }
+                        let mut out = 0xff00_0000;
+                        // ImageBuffer uses BGRA words; factors are linear RGB.
+                        for (shift, factor) in [(16, factor[0]), (8, factor[1]), (0, factor[2])] {
+                            let encoded = ((*pixel >> shift) & 255) as f32 / 255.0;
+                            let linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
+                            let tinted = linear * factor;
+                            let encoded = if tinted <= 0.0031308 { tinted * 12.92 } else { 1.055 * tinted.powf(1.0 / 2.4) - 0.055 };
+                            out |= ((encoded.clamp(0.0, 1.0) * 255.0).round() as u32) << shift;
+                        }
+                        *pixel = out;
+                    }
+                    let index = tiles.len();
+                    let textured = texture.is_some() && (image.width > 1 || image.height > 1);
+                    tiles.push(Tile { image, textured, x: 0, y: 0 });
+                    material_tiles.insert(prim.material, index); index
+                };
+                let end = start.checked_add(count).ok_or("skin vertex range overflow")?;
+                if end > model.vertices.len() { return Err("skin material vertex ranges disagree with parser".into()); }
+                ranges.push((start, end, tile)); start = end;
+            }
+        }
+        if start != model.vertices.len() { return Err("skin material vertex count mismatch".into()); }
+        // Portable generated GLBs already carry one shared material atlas.
+        // Preserve its exact UVs and image instead of packing a second border
+        // around a full atlas or duplicating it for every primitive.
+        if tiles.len() == 1 {
+            model.rest_hash_cache = std::sync::OnceLock::new();
+            return Ok((model, tiles.remove(0).image));
+        }
+        for &(start, end, tile) in &ranges {
+                if tiles[tile].textured && model.vertices[start..end].iter().any(|vertex| vertex.uv.iter().any(|v| !v.is_finite() || *v < 0.0 || *v > 1.0)) {
+                    return Err("generated textured skin UVs outside 0..1 require tiled atlas export".into());
+                }
+        }
+        let (mut x, mut y, mut row_height, mut width) = (0usize, 0usize, 0usize, 0usize);
+        for tile in &mut tiles {
+            let (w, h) = (tile.image.width + 2, tile.image.height + 2);
+            if x + w > 4096 { x = 0; y += row_height; row_height = 0; }
+            if y + h > 4096 { return Err("generated skin exceeds 4096 square material atlas budget".into()); }
+            tile.x = x + 1; tile.y = y + 1;
+            x += w; row_height = row_height.max(h); width = width.max(x);
+        }
+        let mut atlas = makepad_draw::ImageBuffer::default();
+        atlas.width = width.max(1); atlas.height = (y + row_height).max(1);
+        atlas.data = vec![0xffff_ffff; atlas.width * atlas.height];
+        for tile in &tiles {
+            for dy in 0..tile.image.height + 2 {
+                for dx in 0..tile.image.width + 2 {
+                    let sx = dx.saturating_sub(1).min(tile.image.width - 1);
+                    let sy = dy.saturating_sub(1).min(tile.image.height - 1);
+                    atlas.data[(tile.y + dy - 1) * atlas.width + tile.x + dx - 1] = tile.image.data[sy * tile.image.width + sx];
+                }
+            }
+        }
+        for (start, end, tile) in ranges {
+            let tile = &tiles[tile];
+            for vertex in &mut model.vertices[start..end] {
+                let uv = if tile.textured { vertex.uv } else { [0.5, 0.5] };
+                vertex.uv = [(tile.x as f32 + 0.5 + uv[0] * tile.image.width.saturating_sub(1) as f32) / atlas.width as f32,
+                    (tile.y as f32 + 0.5 + uv[1] * tile.image.height.saturating_sub(1) as f32) / atlas.height as f32];
+            }
+        }
+        model.rest_hash_cache = std::sync::OnceLock::new();
+        Ok((model, atlas))
+    }
+
     fn parse_glb_inner(bytes: &[u8], strict: bool) -> Result<SkinnedModel, String> {
         if bytes.len() < 12 || &bytes[0..4] != b"glTF" {
             return Err("not a GLB (magic mismatch)".into());
@@ -962,6 +1090,11 @@ impl SkinnedModel {
 
         // Nodes: rest TRS now, parents in a second pass over children lists.
         let node_vals = json.get("nodes").map(|n| n.arr()).unwrap_or(&[]);
+        let has_soft_body=node_vals.iter().any(|node|node.get("extras").and_then(|v|v.get(makepad_gltf::SOFT_BODY_EXTRAS_KEY)).is_some());
+        // Optional executable metadata never inherits the legacy permissive
+        // skeleton repair path. Invalid soft assets fail as a whole.
+        let strict=strict||has_soft_body;
+        let active_nodes=crate::asset_morph::active_nodes(&json)?;
         let mut nodes: Vec<Node> = node_vals
             .iter()
             .map(|n| {
@@ -1026,54 +1159,70 @@ impl SkinnedModel {
             }
         }
 
-        // Skin 0: joints + inverse bind matrices.
-        let skin = json
-            .get("skins")
-            .and_then(|s| s.idx(0))
-            .ok_or("no skins in GLB")?;
-        let joint_nodes: Vec<usize> = skin
-            .get("joints")
-            .map(|j| j.arr().iter().filter_map(Val::usize).collect())
-            .unwrap_or_default();
-        if joint_nodes.is_empty() {
-            return Err("skin has no joints".into());
+        // A single runtime palette can serve several glTF skin records when
+        // their joint order and decoded inverse binds are identical. Normal
+        // library characters export separate body/head skins this way.
+        let mut active_skins=std::collections::BTreeSet::new();
+        for (i,node) in node_vals.iter().enumerate().filter(|(i,node)|active_nodes[*i]&&node.get("mesh").is_some()) {
+            let Some(skin)=node.get("skin") else{continue};
+            let index=skin.f64().filter(|v|v.is_finite()&&*v>=0.&&v.fract()==0.&&*v<=usize::MAX as f64)
+                .ok_or_else(||format!("node {i}: invalid skin index"))? as usize;
+            active_skins.insert(index);
         }
-        if strict && joint_nodes.iter().any(|&joint| joint >= nodes.len()) {
-            return Err("skin joint references a missing node".into());
-        }
-        let inverse_bind: Vec<Mat4f> = match skin.get("inverseBindMatrices").and_then(Val::usize) {
-            Some(ibm_acc) => {
-                let (floats, lanes) = acc.read_f32(ibm_acc)?;
-                if strict && (lanes != 16 || floats.len() != joint_nodes.len() * 16
-                    || floats.iter().any(|n| !n.is_finite())) {
-                    return Err("invalid inverse bind matrices".into());
+        let primary_skin=*active_skins.first().ok_or("no active skinned mesh in GLB")?;
+        let read_palette=|index:usize|->Result<(Vec<usize>,Vec<Mat4f>),String>{
+            let skin=json.get("skins").and_then(|s|s.idx(index)).ok_or("skin index outside definitions")?;
+            let entries=skin.get("joints").map(Val::arr).unwrap_or(&[]);
+            let joint_nodes=entries.iter().map(|joint|joint.f64()
+                .filter(|v|v.is_finite()&&*v>=0.&&v.fract()==0.&&*v<nodes.len() as f64)
+                .map(|v|v as usize).ok_or("skin joint references a missing node".to_string()))
+                .collect::<Result<Vec<_>,_>>()?;
+            if joint_nodes.is_empty(){return Err("skin has no joints".into());}
+            if strict&&joint_nodes.iter().collect::<std::collections::BTreeSet<_>>().len()!=joint_nodes.len(){return Err("skin repeats a joint node".into());}
+            let inverse_bind=match skin.get("inverseBindMatrices") {
+                Some(index)=>{
+                    let index=index.f64().filter(|v|v.is_finite()&&*v>=0.&&v.fract()==0.&&*v<=usize::MAX as f64).ok_or("invalid inverse bind accessor index")? as usize;
+                    let(floats,lanes)=acc.read_f32(index)?;
+                    if lanes!=16||floats.len()!=joint_nodes.len()*16||floats.iter().any(|v|!v.is_finite()){return Err("invalid inverse bind matrices".into());}
+                    floats.chunks_exact(16).map(|c|Mat4f{v:c.try_into().unwrap()}).collect()
                 }
-                floats
-                    .chunks_exact(16)
-                    .map(|c| Mat4f {
-                        v: c.try_into().unwrap(),
-                    })
-                    .collect()
-            }
-            None => vec![Mat4f::identity(); joint_nodes.len()],
+                None=>vec![Mat4f::identity();joint_nodes.len()],
+            };
+            Ok((joint_nodes,inverse_bind))
         };
-        let ragdoll = parse_ragdoll(&json, node_vals, &nodes, &joint_nodes)?;
+        let(joint_nodes,inverse_bind)=read_palette(primary_skin)?;
+        for index in active_skins.into_iter().filter(|index|*index!=primary_skin){
+            let(joints,binds)=read_palette(index)?;
+            if joints!=joint_nodes||binds.len()!=inverse_bind.len()||binds.iter().zip(&inverse_bind).any(|(a,b)|a.v!=b.v){
+                return Err(format!("active skin {index} has a different joint palette from skin {primary_skin}"));
+            }
+        }
+        let ragdoll = parse_ragdoll(node_vals, &nodes, &joint_nodes)?;
+        let soft_body=if has_soft_body {
+            if ragdoll.is_some(){return Err("a skin cannot combine rigid ragdoll and soft-body ownership".into());}
+            for (index,node) in node_vals.iter().enumerate(){
+                if node.get("extras").and_then(|v|v.get(makepad_gltf::SOFT_BODY_EXTRAS_KEY)).is_some()
+                    && (!active_nodes[index]||node.get("skin").and_then(Val::usize)!=Some(primary_skin)) {
+                    return Err("soft-body metadata must belong to the active skin node".into());
+                }
+            }
+            makepad_gltf::parse_soft_body_metadata_json(json_chunk.unwrap(),joint_nodes.len())?.map(std::sync::Arc::new)
+        }else{None};
 
-        // All skinned mesh primitives, concatenated (they share skin 0).
+        // All active skinned mesh primitives share the validated palette.
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut skipped_unskinned = 0;
+        let mut primitives=Vec::new();
         let mut mesh_node = 0;
         for (node_index, n) in node_vals.iter().enumerate() {
+            if !active_nodes[node_index]{continue}
             let (Some(mesh_index), Some(_)) =
                 (n.get("mesh").and_then(Val::usize), n.get("skin"))
             else {
                 continue;
             };
             mesh_node = node_index;
-            if strict && n.get("skin").and_then(Val::usize) != Some(0) {
-                return Err("runtime supports only skin 0".into());
-            }
             let mesh = json
                 .get("meshes")
                 .and_then(|m| m.idx(mesh_index))
@@ -1136,6 +1285,10 @@ impl SkinnedModel {
                     .transpose()?
                     .map(|(v, _)| v);
                 let base = vertices.len() as u32;
+                let index_start=indices.len();
+                let vertex_colors=attrs.get("COLOR_0").and_then(Val::usize).map(|i|acc.read_f32(i)).transpose()?;
+                let material_index=prim.get("material").and_then(Val::usize);
+                let factor=material_index.and_then(|i|json.get("materials")?.idx(i)?.get("pbrMetallicRoughness")?.get("baseColorFactor"));
                 let count = pos.len() / 3;
                 for i in 0..count {
                     let g = |src: &Option<Vec<f32>>, lanes: usize, lane: usize, dflt: f32| {
@@ -1155,7 +1308,12 @@ impl SkinnedModel {
                             *wv /= total;
                         }
                     }
+                    let color=std::array::from_fn(|lane| {
+                        let vertex=vertex_colors.as_ref().and_then(|(v,lanes)|(lane<*lanes).then(||v.get(i*lanes+lane).copied()).flatten()).unwrap_or(1.0);
+                        vertex*if lane<3{factor.and_then(|f|f.idx(lane)).and_then(Val::f64).unwrap_or(1.0)as f32}else{1.0}
+                    });
                     vertices.push(SkinVertex {
+                        color,
                         pos: Vec3f {
                             x: pos[i * 3],
                             y: pos[i * 3 + 1],
@@ -1186,6 +1344,7 @@ impl SkinnedModel {
                 } else {
                     indices.extend((0..count as u32).map(|i| base + i));
                 }
+                primitives.push(SkinPrimitive{vertices:base as usize..vertices.len(),indices:index_start..indices.len(),material:material_index});
             }
         }
         if vertices.is_empty() {
@@ -1209,6 +1368,7 @@ impl SkinnedModel {
             let samplers = a.get("samplers").map(|s| s.arr()).unwrap_or(&[]);
             let mut channels = Vec::new();
             let mut duration = 0.0f32;
+            let mut has_morph_channels=false;
             for ch in a.get("channels").map(|c| c.arr()).unwrap_or(&[]) {
                 let Some(sampler) = ch.get("sampler").and_then(Val::usize) else {
                     continue;
@@ -1217,6 +1377,11 @@ impl SkinnedModel {
                 let Some(node) = target.get("node").and_then(Val::usize) else {
                     continue;
                 };
+                if target.get("path").and_then(Val::str)==Some("weights"){
+                    let input=samplers.get(sampler).and_then(|s|s.get("input")).and_then(Val::usize).ok_or("morph animation times")?;
+                    let(times,lanes)=acc.read_f32(input)?;if lanes!=1||times.is_empty()||times.iter().any(|v|!v.is_finite()||*v<0.0){return Err("invalid morph animation times".into())}
+                    duration=duration.max(*times.last().unwrap());has_morph_channels=true;continue;
+                }
                 let path = match target.get("path").and_then(Val::str) {
                     Some("translation") => ChannelPath::Translation,
                     Some("rotation") => ChannelPath::Rotation,
@@ -1248,13 +1413,14 @@ impl SkinnedModel {
                     duration = duration.max(*last);
                 }
                 channels.push(Channel {
+                    step:s.get("interpolation").and_then(Val::str)==Some("STEP"),
                     node,
                     path,
                     times,
                     values,
                 });
             }
-            if strict && channels.is_empty() {
+            if strict && channels.is_empty() && !has_morph_channels {
                 return Err(format!("clip {name}: no runtime-supported animation channels"));
             }
             clips.push(AnimClip {
@@ -1286,7 +1452,8 @@ impl SkinnedModel {
             }
         }
 
-        Ok(SkinnedModel {
+        let model=SkinnedModel {
+            primitives,
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes,
             joint_nodes,
@@ -1298,11 +1465,104 @@ impl SkinnedModel {
             skipped_unskinned,
             joint_bounds,
             ragdoll,
-        })
+            soft_body,
+        };
+        model.validate_soft_body_skin()?;
+        Ok(model)
+    }
+
+    /// The metadata palette is an executable asset contract. Reject a GLB
+    /// whose ordinary skin/rest transforms no longer match its cage before
+    /// publishing the immutable model to the UI or simulation worker.
+    fn validate_soft_body_skin(&self) -> Result<(),String> {
+        let Some(m)=self.soft_body() else{return Ok(())};
+        let root=self.joint_nodes[m.root_joint as usize];
+        let physical_nodes=m.tet_joints.iter().copied().chain(m.attachments.iter().map(|a|a.joint)).map(|joint|self.joint_nodes[joint as usize]).collect::<std::collections::BTreeSet<_>>();
+        if self.clips.iter().flat_map(|clip|&clip.channels).any(|channel|physical_nodes.contains(&channel.node)) {
+            return Err("soft-body physical frames cannot carry authored animation channels; animate their children".into());
+        }
+        let identity=|matrix:&Mat4f| matrix.v.iter().zip(Mat4f::identity().v).all(|(a,b)|(*a-b).abs()<2e-5);
+        let unit=|rest:&NodeTrs| rest.r.x.abs()<1e-6&&rest.r.y.abs()<1e-6&&rest.r.z.abs()<1e-6
+            &&(rest.r.w.abs()-1.).abs()<1e-6&&(rest.s.x-1.).abs()<1e-6&&(rest.s.y-1.).abs()<1e-6&&(rest.s.z-1.).abs()<1e-6;
+        if !unit(&self.nodes[root].rest){return Err("soft-body root rest rotation/scale is unsupported".into());}
+        let pose=self.nodes.iter().map(|node|node.rest).collect();let mut palette=Vec::new();self.palette(&pose,&mut palette);
+        for &joint in &m.tet_joints {
+            let node=&self.nodes[self.joint_nodes[joint as usize]];
+            if node.parent!=Some(root)||!unit(&node.rest)||!identity(&self.inverse_bind[joint as usize])||!identity(&palette[joint as usize]) {
+                return Err("soft-body affine joint does not match its rest-model skin frame".into());
+            }
+        }
+        for attachment in &m.attachments {
+            let joint=attachment.joint as usize;let node=&self.nodes[self.joint_nodes[joint]];
+            let inverse=&self.inverse_bind[joint];
+            let mut expected=Mat4f::identity();for axis in 0..3{expected.v[12+axis]=-attachment.rest_pivot[axis];}
+            if node.parent!=Some(root)||node.name!=attachment.name||!unit(&node.rest)||!identity(&palette[joint])
+                ||inverse.v.iter().zip(expected.v).any(|(a,b)|(*a-b).abs()>2e-5){return Err("soft-body rigid attachment rest frame does not match metadata".into());}
+        }
+        let cage=makepad_game_sim::soft_body::SoftBodyDefinition {rest_positions:m.rest_positions.clone(),tetrahedra:m.tetrahedra.clone(),
+            surface_samples:m.surface_samples.iter().map(|b|makepad_game_sim::soft_body::SoftBodyBinding{tetrahedron:b.tetrahedron,weights:b.weights}).collect(),anchors:m.anchors.clone()};
+        cage.validate()?;
+        for vertex in &self.vertices {
+            let affine=vertex.joints.iter().zip(vertex.weights).filter(|(_,weight)|*weight>0.).find_map(|(joint,_)|m.tet_joints.iter().position(|j|j==joint));
+            if let Some(tet)=affine {
+                let influences=vertex.weights.iter().filter(|weight|**weight>0.).count();
+                if influences!=1||!vertex.weights.iter().any(|weight|(*weight-1.).abs()<1e-6){return Err("soft-body affine vertex has blended skin weights".into());}
+                let binding=cage.bind_point([vertex.pos.x,vertex.pos.y,vertex.pos.z])?;
+                if binding.tetrahedron as usize!=tet {return Err("soft-body affine vertex uses the wrong enclosing cell".into());}
+            }
+        }
+        Ok(())
     }
 
     pub fn joint_count(&self) -> usize {
         self.joint_nodes.len()
+    }
+
+    pub fn soft_body(&self) -> Option<&makepad_gltf::SoftBodyMetadata> { self.soft_body.as_deref() }
+    /// Cheap immutable handoff to the retained deformation worker.
+    pub fn soft_body_shared(&self) -> Option<std::sync::Arc<makepad_gltf::SoftBodyMetadata>> { self.soft_body.clone() }
+
+    /// First joint of the active runtime palette, which need not be skins[0].
+    pub fn root_joint_node(&self) -> Option<usize> {
+        self.joint_nodes.first().copied()
+    }
+
+    /// Preserve material slots and UV0 for rich PBR skins. This creates only
+    /// worker upload data; each part reuses the rig's one instance palette.
+    pub fn prepare_material_parts(&self,bytes:&[u8],rest:&SkinRestGpu,mut budget:usize)->Result<Vec<PreparedSkinPart>,String>{
+        use crate::material_surface::{PreparedTexture,PreparedSurface,MaterialSurface,PixelSemantic};
+        if self.primitives.len()>2048{return Err("skin exceeds 2048 material primitives".into())}
+        let mut at=12usize;let mut json=None;let mut bin=&[][..];
+        while at+8<=bytes.len(){
+            let len=u32::from_le_bytes(bytes[at..at+4].try_into().unwrap())as usize;
+            let end=at.checked_add(8).and_then(|v|v.checked_add(len)).filter(|end|*end<=bytes.len()).ok_or("invalid material GLB chunk")?;
+            match &bytes[at+4..at+8]{b"JSON"=>json=Some(JsonParser::parse(&bytes[at+8..end])?),b"BIN\0"=>bin=&bytes[at+8..end],_=>{}}
+            at=end;
+        }
+        let json=json.ok_or("missing material GLB JSON")?;
+        let mut out=Vec::new();
+        for primitive in &self.primitives {
+            let material=primitive.material.and_then(|i|json.get("materials")?.idx(i));
+            let pbr=material.and_then(|m|m.get("pbrMetallicRoughness"));
+            let texture=|field:&str|pbr.and_then(|m|m.get(field))?.get("index")?.usize()
+                .and_then(|index|json.get("textures")?.idx(index)?.get("source")?.usize())
+                .and_then(|index|crate::model::gltf_embedded_png(&json,bin,index));
+            let mut image=|bytes:Option<Vec<u8>>,semantic|->Result<PreparedTexture,String>{
+                let image=if let Some(bytes)=bytes{crate::renderer::decode_generated_png(&bytes,4096,budget)?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
+                let texture=PreparedTexture::prepare(image,semantic);budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
+            };
+            let base=image(texture("baseColorTexture"),PixelSemantic::Color)?;
+            let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
+            let definition=primitive.material.and_then(|i|crate::model::gltf_material_surface(&json,bin,i)).unwrap_or_else(MaterialSurface::default);
+            let surface=PreparedSurface::prepare(definition,&mut budget)?;
+            let metallic=pbr.and_then(|m|m.get("metallicFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;
+            let roughness=pbr.and_then(|m|m.get("roughnessFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;
+            let vertices=rest.vertices.get(primitive.vertices.start*SKIN_GPU_VERTEX_FLOATS..primitive.vertices.end*SKIN_GPU_VERTEX_FLOATS).ok_or("skin material/rest vertex mismatch")?.to_vec();
+            let indices=self.indices[primitive.indices.clone()].iter().map(|index|index-primitive.vertices.start as u32).collect::<Vec<_>>();
+            budget=budget.checked_sub((vertices.len()+indices.len())*4).ok_or("skin material geometry exceeds upload budget")?;
+            out.push(PreparedSkinPart{vertices,indices,base,orm,metallic,roughness,surface});
+        }
+        Ok(out)
     }
 
     pub fn ragdoll_rig(&self) -> Option<&RagdollRig> {
@@ -1500,6 +1760,7 @@ impl SkinnedModel {
     pub fn from_nodes(nodes: Vec<(String, Option<usize>, NodeTrs)>, mesh_node: usize) -> SkinnedModel {
         let joint_nodes = (0..nodes.len()).collect();
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes: nodes
                 .into_iter()
@@ -1514,6 +1775,7 @@ impl SkinnedModel {
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
             ragdoll: None,
+            soft_body: None,
         }
     }
 
@@ -2450,6 +2712,21 @@ impl SkinnedModel {
         ))
     }
 
+    /// Runtime display fallback for generated rigs without locomotion. The
+    /// neutral clip is internal derived state, never serialized as authored
+    /// animation metadata or advertised as a walking capability.
+    pub fn display_gait_clips(&mut self) -> (usize, usize) {
+        let idle = self.clip_index_any(GAIT_IDLE_CLIPS);
+        let walk = self.clip_index_any(GAIT_WALK_CLIPS);
+        if let (Some(idle), Some(walk)) = (idle, walk) { return (idle, walk); }
+        let rest = if let Some(rest) = self.clip_index("__makepad_display_rest") { rest } else {
+            let rest = self.clips.len();
+            self.clips.push(AnimClip { name: "__makepad_display_rest".into(), duration: 1.0, channels: Vec::new() });
+            rest
+        };
+        (idle.unwrap_or(rest), walk.unwrap_or(rest))
+    }
+
     /// This rig's clip for one gameplay [`ClipRole`], resolved through the
     /// shared vocabulary and the role's fallback chain. `None` means the
     /// rig has nothing for it — a rigid GLB with no clips answers `None`
@@ -2820,7 +3097,7 @@ impl SkinnedModel {
                     continue;
                 };
                 let p = mat4_mul_point(m, v.pos);
-                let n = mat4_mul_dir(m, v.normal);
+                let n = soft_deform::affine_normal(m, v.normal);
                 pos.x += p.x * w;
                 pos.y += p.y * w;
                 pos.z += p.z * w;
@@ -2973,6 +3250,8 @@ impl SkinnedModel {
                 // unorm16x2, NOT an f16 pair: f16 spacing near 1.0 is a full
                 // texel of the atlas (see model::pack_ao_uv).
                 crate::model::pack_ao_uv(baked.ao_uv[i][0], baked.ao_uv[i][1]),
+                makepad_draw::pack_unorm8x4(v.color[0],v.color[1],v.color[2],v.color[3]),
+                *src as f32,
             ]);
         }
         SkinRestGpu {
@@ -3001,7 +3280,7 @@ impl SkinnedModel {
     pub fn rest_gpu_flat(&self) -> SkinRestGpu {
         assert!(self.joint_nodes.len() <= 256, "rig exceeds u8 joint indices");
         let mut out = Vec::with_capacity(self.vertices.len() * SKIN_GPU_VERTEX_FLOATS);
-        for v in &self.vertices {
+        for (source_vertex,v) in self.vertices.iter().enumerate() {
             // Same compensated weight quantization as rest_gpu: the largest
             // weight absorbs the rounding so the four u8s sum to 255.
             let mut q = [0u32; 4];
@@ -3035,6 +3314,8 @@ impl SkinnedModel {
                 ),
                 // Every vertex samples the middle of the open atlas.
                 crate::model::pack_ao_uv(0.5, 0.5),
+                makepad_draw::pack_unorm8x4(v.color[0],v.color[1],v.color[2],v.color[3]),
+                source_vertex as f32,
             ]);
         }
         SkinRestGpu {
@@ -3052,6 +3333,15 @@ impl SkinnedModel {
     /// frustum culling uses now that no posed vertices exist on the CPU: it
     /// never under-covers — a blended vertex is a convex combination of
     /// per-joint rigid images, each inside its joint's sphere.
+    pub fn include_lod_bounds(&mut self,other:&SkinnedModel)->Result<(),String>{
+        if self.joint_nodes!=other.joint_nodes||self.nodes.len()!=other.nodes.len()||self.mesh_node!=other.mesh_node
+            ||self.nodes.iter().zip(&other.nodes).any(|(a,b)|a.name!=b.name||a.parent!=b.parent)
+            ||self.inverse_bind.len()!=other.inverse_bind.len()||self.inverse_bind.iter().zip(&other.inverse_bind).any(|(a,b)|a.v.iter().zip(b.v).any(|(a,b)|(a-b).abs()>1e-5))
+            ||self.joint_bounds.len()!=other.joint_bounds.len(){return Err("LOD skin hierarchy/inverse-bind map differs".into())}
+        for((center,radius),(other_center,other_radius))in self.joint_bounds.iter_mut().zip(&other.joint_bounds){*radius=radius.max(*other_radius+(*center-*other_center).length());}Ok(())
+    }
+    pub fn include_morph_extent(&mut self,extent:f32){if extent.is_finite()&&extent>=0.0{for(_,radius)in &mut self.joint_bounds{*radius+=extent;}}}
+
     pub fn posed_bounds(&self, palette: &[Mat4f]) -> Option<(Vec3f, Vec3f)> {
         let mut min = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
         let mut max = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
@@ -3059,18 +3349,18 @@ impl SkinnedModel {
         for (j, (bind, radius)) in self.joint_bounds.iter().enumerate() {
             let Some(m) = palette.get(j) else { continue };
             let p = mat4_mul_point(m, *bind);
-            // Largest basis-column length: the palette is rigid for these
-            // rigs, but a scaling clip must still cull conservatively.
-            let col = |a: usize| {
-                (m.v[a] * m.v[a] + m.v[a + 1] * m.v[a + 1] + m.v[a + 2] * m.v[a + 2]).sqrt()
-            };
-            let r = radius * col(0).max(col(4)).max(col(8));
-            min.x = min.x.min(p.x - r);
-            min.y = min.y.min(p.y - r);
-            min.z = min.z.min(p.z - r);
-            max.x = max.x.max(p.x + r);
-            max.y = max.y.max(p.y + r);
-            max.z = max.z.max(p.z + r);
+            // A sphere under an affine map becomes an ellipsoid. Each
+            // coordinate extent is its row length; max-column length can
+            // under-bound a sheared soft cell and incorrectly cull it.
+            let extent = |row: usize| radius *
+                (m.v[row].powi(2)+m.v[row+4].powi(2)+m.v[row+8].powi(2)).sqrt();
+            let (rx,ry,rz)=(extent(0),extent(1),extent(2));
+            min.x = min.x.min(p.x - rx);
+            min.y = min.y.min(p.y - ry);
+            min.z = min.z.min(p.z - rz);
+            max.x = max.x.max(p.x + rx);
+            max.y = max.y.max(p.y + ry);
+            max.z = max.z.max(p.z + rz);
             any = true;
         }
         any.then_some((min, max))
@@ -3213,7 +3503,7 @@ pub const SKIN_VERTEX_FLOATS: usize = 7;
 
 /// Floats per vertex in the packed GPU-skinning rest stream
 /// ([`SkinnedModel::rest_gpu`], `geom.GameMeshVertexSkin`).
-pub const SKIN_GPU_VERTEX_FLOATS: usize = 8;
+pub const SKIN_GPU_VERTEX_FLOATS: usize = 10;
 
 /// AO atlas edge for one rig, texels. 128^2 holds a 1-4k-vert character's
 /// charts at crease resolution; `fill` mode scales charts up to spend
@@ -3223,7 +3513,7 @@ pub const SKIN_AO_ATLAS: usize = 128;
 /// Magic + version for the [`SkinRestGpu`] disk sidecar. Bumped whenever the
 /// vertex layout or atlas semantics change, so a stale cache is IGNORED
 /// rather than drawn with the wrong stride.
-const SKIN_REST_MAGIC: &[u8; 8] = b"SKINAO\x01\x00";
+const SKIN_REST_MAGIC: &[u8; 8] = b"SKINAO\x02\x00";
 
 /// One rig's GPU rest bundle: chart-split packed vertices, topology, and the
 /// rest-pose AO atlas the `ao_uv` lane indexes. Built by
@@ -3278,9 +3568,9 @@ impl SkinRestGpu {
             *at += n;
             Some(s)
         };
-        if take(&mut at, 8)? != SKIN_REST_MAGIC {
-            return None;
-        }
+        let magic=take(&mut at,8)?;
+        let legacy=magic==b"SKINAO\x01\x00";
+        if magic!=SKIN_REST_MAGIC && !legacy{return None}
         let source_hash = u64::from_le_bytes(take(&mut at, 8)?.try_into().ok()?);
         let nverts = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
         let nidx = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
@@ -3288,9 +3578,18 @@ impl SkinRestGpu {
         if ao_size == 0 || ao_size > 4096 || nverts > 4_000_000 {
             return None;
         }
+        // Validate the entire encoded length before trusting count fields to
+        // allocate vectors. A truncated network sidecar must stay cheap.
+        let encoded_stride = if legacy { 8usize } else { SKIN_GPU_VERTEX_FLOATS };
+        let payload = nverts.checked_mul(encoded_stride.checked_mul(4)?)?
+            .checked_add(nidx.checked_mul(4)?)?
+            .checked_add(nverts.checked_mul(4)?)?
+            .checked_add(ao_size.checked_mul(ao_size)?)?;
+        if at.checked_add(payload)? != bytes.len() { return None; }
         let mut vertices = Vec::with_capacity(nverts * SKIN_GPU_VERTEX_FLOATS);
-        for _ in 0..nverts * SKIN_GPU_VERTEX_FLOATS {
-            vertices.push(f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?));
+        for _ in 0..nverts {
+            for _ in 0..if legacy{8}else{SKIN_GPU_VERTEX_FLOATS}{vertices.push(f32::from_le_bytes(take(&mut at,4)?.try_into().ok()?));}
+            if legacy{vertices.extend_from_slice(&[f32::from_bits(0xffff_ffff),0.0]);}
         }
         let read_u32s = |at: &mut usize, n: usize| -> Option<Vec<u32>> {
             let mut v = Vec::with_capacity(n);
@@ -3301,6 +3600,7 @@ impl SkinRestGpu {
         };
         let indices = read_u32s(&mut at, nidx)?;
         let source = read_u32s(&mut at, nverts)?;
+        if legacy{for(i,source)in source.iter().enumerate(){vertices[i*SKIN_GPU_VERTEX_FLOATS+9]=*source as f32;}}
         let ao_pixels = take(&mut at, ao_size * ao_size)?.to_vec();
         if at != bytes.len() {
             return None;
@@ -3412,6 +3712,7 @@ mod tests {
     /// role vocabulary looks at.
     fn clip_named_model(names: &[&str]) -> SkinnedModel {
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![Node { name: "mesh".into(), parent: None, rest: NodeTrs::default() }],
             joint_nodes: Vec::new(),
@@ -3430,6 +3731,7 @@ mod tests {
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
             ragdoll: None,
+            soft_body: None,
         }
     }
 
@@ -3526,6 +3828,7 @@ mod tests {
             Mat4f::mul(&mesh_inv, &torso_global).invert(),
         ];
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes,
             joint_nodes: vec![0, 1],
@@ -3536,6 +3839,7 @@ mod tests {
             clips: Vec::new(),
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            soft_body: None,
             ragdoll: Some(RagdollRig {
                 bodies: vec![
                     RagdollBody {
@@ -3846,6 +4150,7 @@ mod tests {
             vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, s45, c45]
         };
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![
                 node("root", None),
@@ -3866,18 +4171,21 @@ mod tests {
                 channels: vec![
                     // Authored but outside the upper-body mask.
                     Channel {
+                        step:false,
                         node: 0,
                         path: ChannelPath::Translation,
                         times: vec![0.0, 1.0],
                         values: vec![100.0, 101.0, 102.0, 200.0, 201.0, 202.0],
                     },
                     Channel {
+                        step:false,
                         node: 1,
                         path: ChannelPath::Rotation,
                         times: vec![0.0, 1.0],
                         values: rotation_keys,
                     },
                     Channel {
+                        step:false,
                         node: 2,
                         path: ChannelPath::Translation,
                         times: vec![0.0, 1.0],
@@ -3885,6 +4193,7 @@ mod tests {
                     },
                     // Authored but outside the upper-body mask.
                     Channel {
+                        step:false,
                         node: 4,
                         path: ChannelPath::Scale,
                         times: vec![0.0, 1.0],
@@ -3895,11 +4204,13 @@ mod tests {
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
             ragdoll: None,
+            soft_body: None,
         }
     }
 
     fn quality_vertex(pos: [f32; 3], joint: u16) -> SkinVertex {
         SkinVertex {
+            color: [1.0;4],
             pos: Vec3f {
                 x: pos[0],
                 y: pos[1],
@@ -3923,6 +4234,7 @@ mod tests {
             rest: NodeTrs::default(),
         };
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![node("arm"), node("leg"), node("torso"), node("mesh")],
             joint_nodes: vec![0, 1, 2],
@@ -3940,6 +4252,7 @@ mod tests {
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
             ragdoll: None,
+            soft_body: None,
         }
     }
 
@@ -3950,6 +4263,7 @@ mod tests {
             rest: NodeTrs::default(),
         };
         SkinnedModel {
+            primitives: Vec::new(),
             rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![
                 node("root", None),
@@ -3971,6 +4285,7 @@ mod tests {
                 name: "terminal_bridge".to_string(),
                 duration: 1.0,
                 channels: vec![Channel {
+                    step:false,
                     node: 1,
                     path: ChannelPath::Translation,
                     times: vec![0.0, 1.0],
@@ -3987,6 +4302,7 @@ mod tests {
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
             ragdoll: None,
+            soft_body: None,
         }
     }
 
@@ -4079,6 +4395,49 @@ mod tests {
         assert!((model.clips[0].duration - 1.0).abs() < 1.0e-6);
         assert_eq!(model.clip_index("SPIN"), Some(0));
         assert_eq!(model.skipped_unskinned, 0);
+    }
+
+    fn rewrite_palette_fixture(edit:impl FnOnce(String)->String)->Vec<u8>{
+        let original=build_test_glb();let length=u32::from_le_bytes(original[12..16].try_into().unwrap())as usize;
+        let mut json=edit(String::from_utf8(original[20..20+length].to_vec()).unwrap()).into_bytes();
+        while json.len()%4!=0{json.push(b' ')}let mut bytes=original[..12].to_vec();
+        bytes.extend_from_slice(&(json.len()as u32).to_le_bytes());bytes.extend_from_slice(b"JSON");bytes.extend(json);bytes.extend_from_slice(&original[20+length..]);
+        let size=bytes.len()as u32;bytes[8..12].copy_from_slice(&size.to_le_bytes());bytes
+    }
+    fn with_second_skin(json:String,skin:&str,active:bool)->String{
+        let json=json.replace(r#""skins":[{"joints":[0,1],"inverseBindMatrices":6}]"#,&format!(r#""skins":[{{"joints":[0,1],"inverseBindMatrices":6}},{skin}]"#));
+        let json=json.replace(r#"{"name":"handslot.r","translation":[0.25,0.5,0]}]"#,r#"{"name":"handslot.r","translation":[0.25,0.5,0]},{"name":"head","mesh":0,"skin":1}]"#);
+        if active{json.replace(r#""children":[1,2]"#,r#""children":[1,2,4]"#)}else{json}
+    }
+    #[test]
+    fn equivalent_active_skin_records_keep_both_meshes_and_their_animation(){
+        let bytes=rewrite_palette_fixture(|json|with_second_skin(json,r#"{"joints":[0,1]}"#,true));
+        let model=SkinnedModel::parse_glb_validated(&bytes).unwrap();
+        assert_eq!(model.joint_count(),2);assert_eq!(model.vertex_count(),8);assert_eq!(model.indices().len(),12);assert_eq!(model.primitives.len(),2);
+        let mut pose=model.rest_pose();model.sample_clip(0,0.5,&mut pose);
+        let mut palette=Vec::new();model.palette(&pose,&mut palette);
+        let mut packed=Vec::new();model.skin_to_packed(&palette,&mut packed);
+        assert_eq!(packed[..packed.len()/2].iter().map(|v|v.to_bits()).collect::<Vec<_>>(),packed[packed.len()/2..].iter().map(|v|v.to_bits()).collect::<Vec<_>>(),"both equivalent palettes must skin their own mesh identically, including packed color bits");
+        let (atlased,texture)=SkinnedModel::parse_glb_atlased(&bytes).unwrap();assert_eq!(atlased.vertex_count(),8);assert!(texture.width>0);
+    }
+    #[test]
+    fn nonzero_active_skin_is_selected_and_unreferenced_skins_are_ignored(){
+        let bytes=rewrite_palette_fixture(|json|json.replace(r#""skins":[{"joints":[0,1],"inverseBindMatrices":6}]"#,r#""skins":[{"joints":[999]},{"joints":[0,1],"inverseBindMatrices":6}]"#).replace(r#""skin":0"#,r#""skin":1"#));
+        let model=SkinnedModel::parse_glb_validated(&bytes).unwrap();assert_eq!(model.vertex_count(),4);assert_eq!(model.root_joint_node(),Some(0));
+        let hidden=rewrite_palette_fixture(|json|with_second_skin(json,r#"{"joints":[999]}"#,false));
+        assert_eq!(SkinnedModel::parse_glb_validated(&hidden).unwrap().vertex_count(),4);
+    }
+    #[test]
+    fn different_joint_order_or_inverse_bind_palettes_still_refuse(){
+        let reordered=rewrite_palette_fixture(|json|with_second_skin(json,r#"{"joints":[1,0]}"#,true));
+        assert!(SkinnedModel::parse_glb_validated(&reordered).err().unwrap().contains("different joint palette"));
+        let mut changed=rewrite_palette_fixture(|json|with_second_skin(json,r#"{"joints":[0,1]}"#,true));
+        let length=u32::from_le_bytes(changed[12..16].try_into().unwrap())as usize;
+        let json=JsonParser::parse(&changed[20..20+length]).unwrap();
+        let offset=json.get("bufferViews").unwrap().idx(6).unwrap().get("byteOffset").unwrap().usize().unwrap()+28+length;
+        changed[offset..offset+4].copy_from_slice(&2f32.to_le_bytes());
+        assert!(SkinnedModel::parse_glb_validated(&changed).err().unwrap().contains("different joint palette"));
+        assert!(SkinnedModel::parse_glb(&changed).is_err(),"legacy normalization must not combine incompatible rigs");
     }
 
     #[test]
@@ -4771,5 +5130,103 @@ mod tests {
                 assert!(a >= lo - 1.0e-3 && a <= hi + 1.0e-3, "{a} outside {lo}..{hi}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generated_material_atlas_tests {
+    use super::*;
+    use makepad_gltf::{GlbTexturedPart, GlbSkinJoint, GlbPrimitiveSkin};
+
+    fn skin(png: &[u8], outside_uv: bool) -> Vec<u8> {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let uvs = [[0.0, 0.0], [if outside_uv { 2.0 } else { 1.0 }, 0.0], [0.0, 1.0]];
+        let indices = [0, 1, 2];
+        let part = |color| GlbTexturedPart {
+            positions: &positions, uvs: &uvs, indices: &indices, base_color_png: png,
+            normals: None, base_color_factor: Some(color), colors: None,
+            lightmap_png: None, lightmap_uvs: None, detail_png: None, detail_scale: [1.0, 1.0],
+        };
+        let glb = makepad_gltf::write_glb_mesh_textured_parts(&[part([0.25, 0.0, 0.0, 1.0]), part([0.0, 0.5, 0.0, 1.0])], false);
+        makepad_gltf::augment_glb_skin(&glb,
+            &[GlbSkinJoint { name: "root".into(), parent: None, global_translation: [0.0; 3] }],
+            &[GlbPrimitiveSkin { node: 0, primitive: 0, weights: vec![1.0; 3] },
+              GlbPrimitiveSkin { node: 0, primitive: 1, weights: vec![1.0; 3] }]).unwrap()
+    }
+
+    #[test]
+    fn material_atlas_keeps_primitive_colors_and_linear_factors() {
+        let png = makepad_draw::Cx::encode_rgba_as_png(1, 1, &[255; 4]).unwrap();
+        let glb = skin(&png, true); // A constant material is independent of UV wrap.
+        let (model, atlas) = SkinnedModel::parse_glb_atlased(&glb).unwrap();
+        assert_eq!(model.vertices.len(), 6);
+        let color = |vertex: usize| {
+            let uv = model.vertices[vertex].uv;
+            atlas.data[(uv[1] * atlas.height as f32) as usize * atlas.width + (uv[0] * atlas.width as f32) as usize]
+        };
+        assert_eq!(color(0), 0xff89_0000); // linear .25 -> sRGB 137
+        assert_eq!(color(3), 0xff00_bc00); // linear .5 -> sRGB 188
+        assert_ne!(model.vertices[0].uv, model.vertices[3].uv);
+        assert!(atlas.width <= 1024 && atlas.height <= 1024);
+        assert_eq!(model.rest_gpu_flat().indices.len(), 6);
+    }
+
+    #[test]
+    fn single_material_preserves_a_full_atlas_and_repeated_uvs() {
+        let png = makepad_draw::Cx::encode_rgba_as_png(1024, 1, &vec![255; 1024 * 4]).unwrap();
+        let uvs = [[0.0, 0.0], [2.0, 0.0], [-1.0, 1.0]];
+        let glb = makepad_gltf::write_glb_mesh_skinned(&makepad_gltf::GlbSkinnedMesh {
+            positions: &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: None, uvs: Some(&uvs), indices: &[0, 1, 2], joints_0: &[[0; 4]; 3],
+            weights_0: &[[1.0, 0.0, 0.0, 0.0]; 3],
+            joints: &[makepad_gltf::GlbJoint::at("root", None, [0.0; 3], [0.0; 3])],
+            clips: &[], base_color_png: Some(&png),
+        });
+        let (model, atlas) = SkinnedModel::parse_glb_atlased(&glb).unwrap();
+        assert_eq!((atlas.width, atlas.height), (1024, 1));
+        assert_eq!(model.vertices.iter().map(|v| v.uv).collect::<Vec<_>>(), uvs);
+    }
+
+    #[test]
+    fn textured_atlas_rejects_out_of_range_uvs_without_seam_corruption() {
+        let png = makepad_draw::Cx::encode_rgba_as_png(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        assert!(SkinnedModel::parse_glb_atlased(&skin(&png, true)).is_err());
+        let (model, atlas) = SkinnedModel::parse_glb_atlased(&skin(&png, false)).unwrap();
+        assert!(model.vertices.iter().all(|vertex| vertex.uv.iter().all(|v| (0.0..=1.0).contains(v))));
+        assert!(atlas.width * atlas.height <= 1024 * 1024);
+    }
+
+    #[test]
+    fn generated_rigs_with_no_gait_get_only_an_internal_neutral_display_clip() {
+        let png = makepad_draw::Cx::encode_rgba_as_png(1, 1, &[255; 4]).unwrap();
+        for authored in [false, true] {
+            let (mut model, _) = SkinnedModel::parse_glb_atlased(&skin(&png, false)).unwrap();
+            if authored { model.clips.push(AnimClip { name: "wave".into(), duration: 2.0, channels: Vec::new() }); }
+            let authored_count = model.clips.len();
+            let (idle, walk) = model.display_gait_clips();
+            assert_eq!((idle, walk), (authored_count, authored_count));
+            assert_eq!(model.clips.len(), authored_count + 1);
+            assert!(model.clips[idle].channels.is_empty());
+            assert_eq!(model.display_gait_clips(), (idle, walk));
+            assert_eq!(model.clips.len(), authored_count + 1);
+            assert!(model.gait_clips().is_none());
+            if authored { assert_eq!(model.clips[0].name, "wave"); }
+            let mut pose = model.rest_pose();
+            model.sample_clip(walk, 0.5, &mut pose);
+        }
+    }
+
+    #[test]
+    fn supplied_robot_fixture_uses_real_material_atlas_and_wave_clip() {
+        let Some(path) = std::env::var_os("MAKEPAD_GENERATED_ROBOT_GLB") else { return };
+        let bytes = std::fs::read(path).unwrap();
+        let (mut model, atlas) = SkinnedModel::parse_glb_atlased(&bytes).unwrap();
+        assert!(model.joint_count() > 0);
+        assert!(model.clip_index("wave").is_some());
+        let colors: std::collections::BTreeSet<_> = atlas.data.iter().copied().collect();
+        assert!(colors.len() >= 3, "robot's distinct materials must survive its runtime parser");
+        let (idle, walk) = model.display_gait_clips();
+        assert!(idle < model.clips.len() && walk < model.clips.len());
+        assert!(!model.rest_gpu_flat().indices.is_empty());
     }
 }

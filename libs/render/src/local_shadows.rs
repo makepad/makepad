@@ -11,6 +11,16 @@ use makepad_draw::*;
 const COLUMNS: usize = 4;
 const MAX_FACES: usize = 16;
 
+/// Shader layout and atlas format must agree for the lifetime of the app.
+pub(crate) fn hardware_shadow_maps() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MAKEPAD_LOCAL_SHADOWS").as_deref() != Ok("legacy")
+            && std::env::var("MAKEPAD_CLUSTERED").as_deref() != Ok("off")
+            && !std::env::var("MAKEPAD").unwrap_or_default().split(',').any(|v| v == "headless")
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalShadowConfig {
     pub max_faces: usize,
@@ -113,6 +123,7 @@ pub(crate) struct LocalShadows {
     metadata: Option<Texture>,
     metadata_height: usize,
     depth: Option<Texture>,
+    allocation_size: (usize, usize),
     pass: Option<DrawPass>,
     list: Option<DrawList>,
     rigid: Option<DrawLmLampDepth>,
@@ -133,6 +144,7 @@ impl Default for LocalShadows {
             metadata: None,
             metadata_height: 0,
             depth: None,
+            allocation_size: (0, 0),
             pass: None,
             list: None,
             rigid: None,
@@ -209,6 +221,8 @@ impl LocalShadows {
         }
     }
     pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, fallback: &Texture) {
+        let (scale, bias) = cx.clip_depth_scale_bias();
+        vars.set_uniform(cx, live_id!(local_shadow_depth_range), &[scale, bias]);
         vars.set_uniform(cx,live_id!(local_shadow_soft),&[if self.soft_filter{1.0}else{0.0}]);
         vars.set_uniform(cx,live_id!(local_shadow_source_radius),&[self.source_radius]);
         let requested = self.records.iter().any(|r| r.count != 0);
@@ -236,7 +250,8 @@ impl LocalShadows {
                 ),
                 (
                     live_id!(local_shadow_map),
-                    self.texture.as_ref().unwrap_or(fallback),
+                    if hardware_shadow_maps() { self.depth.as_ref().unwrap_or(fallback) }
+                    else { self.texture.as_ref().unwrap_or(fallback) },
                 ),
             ] {
                 if let Some(slot) = cx.draw_shaders[id.index]
@@ -345,7 +360,7 @@ impl LocalShadows {
     ) {
         let start = Cx::monotonic_now();
         self.prepare(lights, active, eye);
-        if self.faces.is_empty() {
+        if self.faces.is_empty() && (!hardware_shadow_maps() || self.depth.is_some()) {
             self.upload_metadata(cx.cx);
             return;
         }
@@ -370,8 +385,11 @@ impl LocalShadows {
             self.rigid = Some(rigid);
             self.skinned = Some(skinned);
         }
-        let (width, height) = self.size();
-        if self.texture.is_none() {
+        // An initialized one-texel depth binding is still required when the
+        // shader has no active shadow lights. Do not allocate a full atlas.
+        let (width, height) = if self.faces.is_empty() { (1, 1) } else { self.size() };
+        if self.texture.is_none() || self.allocation_size != (width, height) {
+            self.allocation_size = (width, height);
             self.texture = Some(Texture::new_with_format(
                 cx.cx,
                 TextureFormat::RenderRf32 {
@@ -381,10 +399,13 @@ impl LocalShadows {
             ));
             self.depth = Some(Texture::new_with_format(
                 cx.cx,
-                TextureFormat::DepthD32 {
+                if hardware_shadow_maps() { TextureFormat::DepthD32Sampled {
                     size: TextureSize::Fixed { width, height },
                     initial: true,
-                },
+                }} else { TextureFormat::DepthD32 {
+                    size: TextureSize::Fixed { width, height },
+                    initial: true,
+                }},
             ));
         }
         let pass = self.pass.get_or_insert_with(|| DrawPass::new(cx.cx));
@@ -627,6 +648,89 @@ pub(crate) mod sampling {
                 }
                 return self.local_shadow_compare(uv,lo,hi,depth)
             }
+        }
+    }
+}
+
+// Hardware PCF variant: same atlas/caster geometry, no per-pixel blocker search.
+// The legacy module above remains available with MAKEPAD_LOCAL_SHADOWS=legacy.
+pub(crate) mod hardware_sampling {
+    use makepad_draw::*;
+    script_mod! {
+        use mod.prelude.widgets_internal.*
+        mod.draw.LocalShadowSampling.local_shadow_map = texture_depth(float)
+        mod.draw.LocalShadowSampling.local_shadow_depth_range = uniform(vec2(1.0, 0.0))
+        mod.draw.LocalShadowSampling.local_shadow_pcf = fn(uv: vec2, lo: vec2, hi: vec2, depth: float) -> float {
+            // A separable 1:2:1 kernel, regrouped into two bilinear samples
+            // per axis. Hardware compares before interpolation.
+            let texel = self.local_shadow_tex.zw
+            let grid = uv / texel + vec2(0.5, 0.5)
+            let phase = fract(grid)
+            let origin = (floor(grid) - vec2(0.5, 0.5)) * texel
+            let left = vec2(3.0, 3.0) - 2.0 * phase
+            let right = vec2(1.0, 1.0) + 2.0 * phase
+            let a = (vec2(2.0, 2.0) - phase) / left - vec2(1.0, 1.0)
+            let b = phase / right + vec2(1.0, 1.0)
+            let p00 = clamp(origin + vec2(a.x, a.y) * texel, lo, hi)
+            let p10 = clamp(origin + vec2(b.x, a.y) * texel, lo, hi)
+            let p01 = clamp(origin + vec2(a.x, b.y) * texel, lo, hi)
+            let p11 = clamp(origin + vec2(b.x, b.y) * texel, lo, hi)
+            return (
+                self.local_shadow_map.sample_compare(p00, depth) * left.x * left.y
+                + self.local_shadow_map.sample_compare(p10, depth) * right.x * left.y
+                + self.local_shadow_map.sample_compare(p01, depth) * left.x * right.y
+                + self.local_shadow_map.sample_compare(p11, depth) * right.x * right.y
+            ) / 16.0
+        }
+        mod.draw.LocalShadowSampling.local_shadow_visibility = fn(index: float, wp: vec3, normal: vec3, light_pos: vec3, radius: float) -> float {
+                if self.local_shadow_on<0.5 {return 1.0}
+                let record=self.local_shadow_fetch(index)
+                if record.x<0.0 {return 0.0}
+                if record.x<0.5 {return 1.0}
+                let delta=wp-light_pos
+                // Choose a cubemap face AFTER normal bias: the offset can
+                // cross a face boundary, particularly on horizontal ground.
+                let receiver=wp+normal*max(0.01,length(delta)*record.w*1.5)
+                let shadow_delta=receiver-light_pos
+                var face=0.0
+                if record.x>1.5 {
+                    let a=abs(shadow_delta)
+                    if a.x>=a.y && a.x>=a.z {
+                        if shadow_delta.x<0.0 {face=1.0}
+                    } else if a.y>=a.z {
+                        face=2.0
+                        if shadow_delta.y<0.0 {face=3.0}
+                    } else {
+                        face=4.0
+                        if shadow_delta.z<0.0 {face=5.0}
+                    }
+                }
+                let at=record.z+face*4.0
+                let p=vec4(receiver.x,receiver.y,receiver.z,1.0)
+                let z=dot(self.local_shadow_fetch(at+2.0),p)
+                if z<=record.y {return 1.0}
+                let q=vec2(dot(self.local_shadow_fetch(at),p)/z,dot(self.local_shadow_fetch(at+1.0),p)/z)
+                if abs(q.x)>1.0 || abs(q.y)>1.0 {return 0.0}
+                let tile=self.local_shadow_fetch(at+3.0)
+                let uv=tile.xy+vec2(q.x*0.5+0.5,0.5-q.y*0.5)*tile.zw
+                let texel=self.local_shadow_tex.zw
+                let lo=tile.xy+texel*0.5
+                let hi=tile.xy+tile.zw-texel*0.5
+                // Depth slack must scale with a shadow texel's world size
+                // and the filter footprint, not just distance. The old
+                // 0.002*z allowance left neighboring floor/wall samples
+                // falsely occluding each other: a crawling sawtooth seam.
+                // Keep the four-tap footprint smaller to avoid unnecessary
+                // contact detachment on the low-cost path.
+                let world_texel=max(z*record.w,0.00001)
+
+                let slope = 1.0 + 2.0 * (1.0 - clamp(dot(normal, delta * (-1.0) / max(length(delta), 0.0001)), 0.0, 1.0))
+                let biased_z = max(z - max(0.015, world_texel * 2.0) * slope, record.y)
+                // Match the rasterized projective depth, not the linear R32F
+                // legacy color output. GL has an additional viewport remap.
+                let projected = radius * (biased_z - record.y) / max(biased_z * (radius - record.y), 0.000001)
+                let depth = projected * self.local_shadow_depth_range.x + self.local_shadow_depth_range.y
+                return self.local_shadow_pcf(uv, lo, hi, depth)
         }
     }
 }

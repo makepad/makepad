@@ -32,6 +32,8 @@ use crate::particles::ParticleInstance;
 use crate::shaders::DrawSceneFirework;
 use crate::sun::SunLight;
 use crate::thermometer::{Quality, Thermometer};
+#[path = "fast_gi/scene.rs"]
+mod gi_scene;
 
 /// The host widget's themed draw structs, lent to the renderer per frame.
 /// They stay `#[live]` fields on the widget so script-side styling applies.
@@ -113,6 +115,9 @@ pub struct ScreenInstance {
 /// Per-frame render counters, handed back for the host's profiler.
 #[derive(Default, Clone, Copy)]
 pub struct RenderStats {
+    pub gi: crate::fast_gi::GiStats,
+    /// Device-local clustered light assignment/upload cost and overflow.
+    pub clustered: crate::clustered::ClusterStats,
     pub slab_rebuilds: u64,
     pub slab_us: u64,
     pub static_instances: u64,
@@ -193,6 +198,8 @@ pub struct RenderStats {
 pub struct Renderer {
     // PERF: unit shape geometries, built once (index = Shape::index()).
     shape_geometries: [Option<Geometry>; 5],
+    /// Primitive positions in the shadow shader's packed mesh layout.
+    shadow_shape_geometries: [Option<Geometry>; 5],
     // PERF: packed static instance data per shape (opaque / alpha passes),
     // valid while slab_rev == world.render_rev.
     static_chunks: Vec<SlabChunk>,
@@ -222,7 +229,11 @@ pub struct Renderer {
     /// ([`Self::upload_skin_rig`]). Skinning happens in the vertex shader
     /// against the frame's joint-palette texture, so a character's per-frame
     /// upload is its palette, not its vertices (see skin.rs).
-    skin_rig_geometries: Vec<(u64, Geometry, Texture)>,
+    skin_rig_geometries: Vec<(u64, std::rc::Rc<Geometry>, Texture)>,
+    skin_material_draws: std::collections::HashMap<u64,Vec<UploadedSkinMaterial>>,
+    skin_lods:std::collections::HashMap<u64,Vec<(f32,UploadedSkinRig)>>,
+    skin_morphs:std::collections::HashMap<u64,crate::asset_morph::UploadedMorph>,
+    skin_prepared_sdf: std::collections::HashMap<u64,Option<(Texture,SdfMeta)>>,
     /// Every character's joint palette for this frame, packed into one
     /// RGBA32F texture ([`crate::skin::palette_texels`]); instances carry
     /// their first texel as `joint_base`. Kept at power-of-two height so
@@ -239,6 +250,8 @@ pub struct Renderer {
     /// vertices never change, so its per-frame cost is one instance. See
     /// model.rs.
     static_models: Vec<(String, LoadedModel)>,
+    preview_originals: std::collections::HashMap<String, (LoadedModel, Option<String>)>,
+    preview_new: std::collections::HashSet<String>,
     /// The map-sky shader, built lazily from its script type default (the
     /// baker owns its passes the same way). Owned rather than lent through
     /// [`SceneDraws`] because a map's sky has nothing for a host to theme,
@@ -399,6 +412,10 @@ pub struct Renderer {
     /// Host-supplied transient lights ([`Self::add_frame_lights`]), drained
     /// into `frame_lights` each frame.
     host_lights: Vec<crate::lightmap::LmLight>,
+    host_asset_lights:Vec<crate::lightmap::LmLight>,
+    /// Cars whose installed exterior supplies its own punctual fixtures.
+    model_headlight_owners: Vec<u64>,
+    asset_light_error:Option<String>,
     /// Cached [`Self::harvest_lamps`] output — the harvest walks strings, so
     /// it reruns only when the placed-prop list changes.
     lamp_cache: Vec<crate::lightmap::LmLight>,
@@ -409,6 +426,10 @@ pub struct Renderer {
     /// Rebuilt with `lamp_cache` — never on the hot path. Runtime selection
     /// is a cell lookup + copy, independent of how many lights exist.
     light_grid: LightGrid,
+    clustered: crate::clustered::ClusteredLights,
+    gi: crate::fast_gi::FastGi,
+    clustered_enabled: bool,
+    clustered_frames: u64,
     /// Scratch for the transient merge / world selection; reused per frame.
     light_rank: Vec<(f32, usize)>,
     light_sel: Vec<usize>,
@@ -518,6 +539,9 @@ pub struct SkinnedDraw {
     /// Walk-cycle phase, 0..1 through the clip — picks the pose-phase atlas
     /// row pair so the shadow breathes with the stride.
     pub gait_phase: f32,
+    pub morph_clip:Option<String>,
+    pub morph_time:f32,
+    pub morph_looping:bool,
     /// 0 = idle stance, 1 = full walk; mixes the idle row toward the
     /// phase rows exactly the way the pose blend does.
     pub gait_blend: f32,
@@ -542,11 +566,13 @@ impl SkinnedDraw {
             palette: Vec::new(),
             bounds: None,
             gait_phase: 0.0,
+            morph_clip:None,morph_time:0.0,morph_looping:true,
             gait_blend: 0.0,
             sdf_sidecar: None,
         }
     }
 
+    pub fn with_morph_time(mut self,clip:Option<String>,time:f32,looping:bool)->Self{self.morph_clip=clip;self.morph_time=time;self.morph_looping=looping;self}
     pub fn with_tint(mut self, tint: Vec4f) -> Self {
         self.tint = tint;
         self
@@ -825,6 +851,7 @@ fn sdf_quad_ground(anchor: Vec3f, receiver: &Receiver, gx: f32, gz: f32, len: f3
 /// diffuse lobe and render black.
 #[derive(Clone)]
 struct LayerMaterial {
+    surface: Option<crate::material_surface::UploadedSurface>,
     metallic: f32,
     roughness: f32,
     /// The metallicRoughness map, or a white 1x1 when the material is
@@ -864,19 +891,272 @@ impl ModelDraw<'_> {
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.
-    fn set_material(&mut self, m: &LayerMaterial) {
+    fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) {
         if let ModelDraw::Pbr(d) = self {
             d.metallic = m.metallic;
             d.roughness = m.roughness;
             d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
-            // Texture slots are DECLARATION order. DrawSceneSkinned's
-            // inherited set ends at elem_map (6) and ssao_map (7); orm_map
-            // is DrawScenePbr's own declaration after the spread, slot 8.
-            // (This was still binding 6 from before elem_map existed, which
-            // parked the ORM texture over the element lookup and left
-            // orm_map on the fallback.)
-            d.skinned.draw_vars.set_texture(8, &m.orm);
+            d.surface_on=if m.surface.is_some(){1.0}else{0.0};
+            d.material_alpha=1.0;d.alpha_mode=0.0;d.alpha_cutoff=0.5;d.normal_scale=0.0;d.occlusion_strength=0.0;d.emissive=vec3f(0.0,0.0,0.0);d.double_sided=0.0;
+            d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
+            if let Some(surface)=&m.surface {
+                let definition=&surface.definition;
+                d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
+                d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
+            }
+            if let Some(id)=d.skinned.draw_vars.draw_shader_id {
+                for (name,texture) in [(live_id!(normal_map),m.surface.as_ref().map(|s|&s.normal)),(live_id!(occlusion_map),m.surface.as_ref().map(|s|&s.occlusion)),(live_id!(emissive_map),m.surface.as_ref().map(|s|&s.emissive))] {
+                    if let Some(slot)=cx.draw_shaders[id.index].mapping.textures.iter().position(|t|t.id==name){d.skinned.draw_vars.set_texture(slot,texture.unwrap_or(&m.orm));}
+                }
+            }
+
+            // Derived materials follow the shared lighting texture set.
+            // Resolve their own binding by name, not a fragile slot number.
+            if let Some(id) = d.skinned.draw_vars.draw_shader_id {
+                if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == live_id!(orm_map)) {
+                    d.skinned.draw_vars.set_texture(slot, &m.orm);
+                }
+            }
         }
+    }
+}
+
+/// Decode generated PNG pixels with limits enforced by the decoder before
+/// allocation. Animated PNGs are decoded as a single frame in this lane.
+pub fn decode_generated_png(bytes: &[u8], dimension: usize, byte_limit: usize) -> Result<ImageBuffer, String> {
+    use makepad_draw::makepad_zune_png::{PngDecoder, makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions}};
+    let options = DecoderOptions::default().set_max_width(dimension).set_max_height(dimension)
+        .set_strict_mode(true).png_set_confirm_crc(true).png_set_strip_to_8bit(true).png_set_decode_animated(false);
+    let mut decoder = PngDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder.decode_headers().map_err(|e| format!("generated PNG header: {e:?}"))?;
+    let (width, height) = decoder.dimensions().ok_or("generated PNG has no dimensions")?;
+    let output_bytes = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)).ok_or("generated PNG dimensions overflow")?;
+    if output_bytes > byte_limit { return Err("generated PNG exceeds decoded pixel budget".into()); }
+    let pixels = decoder.decode_raw().map_err(|e| format!("generated PNG pixels: {e:?}"))?;
+    ImageBuffer::new(&pixels, width, height).map_err(|e| format!("generated PNG pixels: {e:?}"))
+}
+
+/// Upload a prepared generated atlas with repeat addressing and one level.
+/// This never builds CPU mips, including when image-cache mipmaps are enabled.
+pub fn upload_generated_texture(cx: &mut Cx, image: ImageBuffer) -> Texture {
+    Texture::new_with_format(cx, TextureFormat::VecMipBGRAu8_32 {
+        width: image.width, height: image.height, data: Some(image.data),
+        max_level: Some(0), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full,
+    })
+}
+
+/// Worker-prepared generated mesh, decoded material layers and rigid animated
+/// parts. All fields are private so upload receives only validated products.
+/// Clone on a worker when separate transient views need independent buffers.
+#[derive(Clone)]
+pub struct PreparedStaticPreview {
+    lods:Vec<(f32,PreparedStaticPreview)>,
+    morph:Option<crate::asset_morph::AssetMorph>,
+    ao: Option<ImageBuffer>,
+    lm_source: Option<std::sync::Arc<crate::lightmap::LmMeshSource>>,
+    bake_stream: Option<(Vec<u32>,Vec<f32>)>,
+    sdf: Option<crate::shadow_sdf::ShadowSdfAtlas>,
+    emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,
+    main: PreparedStaticLayer,
+    extra: Vec<PreparedStaticLayer>,
+    positions: std::sync::Arc<Vec<Vec3f>>,
+    mesh_indices: std::sync::Arc<Vec<u32>>,
+    authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
+    collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    anim_parts: Vec<PreparedAnimPreview>,
+    driven_parts: Vec<PreparedDrivenPreview>,
+    sky: Option<PreparedSky>,
+    min: Vec3f, max: Vec3f, prelit: bool,
+}
+
+impl PreparedStaticPreview {
+    pub fn lod_distances(&self)->impl Iterator<Item=f32>+'_ {self.lods.iter().map(|(distance,_)|*distance)}
+    pub fn triangles_at_distance(&self,distance:f32)->usize{
+        let n=if distance.is_finite()&&distance>=0.{self.lods.partition_point(|(d,_)|*d<=distance)}else{0};
+        let m=if n==0{self}else{&self.lods[n-1].1};
+        (m.main.indices.len()+m.extra.iter().map(|p|p.indices.len()).sum::<usize>()+m.anim_parts.iter().flat_map(|p|&p.draws).chain(m.driven_parts.iter().flat_map(|p|&p.draws)).map(|p|p.indices.len()).sum::<usize>())/3
+    }
+    pub fn with_lods(mut self,lods:Vec<(f32,Self)>)->Result<Self,String>{
+        crate::asset_lod::validate_distances(lods.iter().map(|(d,_)|*d))?;
+        if lods.iter().any(|(_,m)|!m.lods.is_empty()){return Err("nested prepared LODs are unsupported".into());}
+        for(_,m)in &lods{self.min=vec3f(self.min.x.min(m.min.x),self.min.y.min(m.min.y),self.min.z.min(m.min.z));self.max=vec3f(self.max.x.max(m.max.x),self.max.y.max(m.max.y),self.max.z.max(m.max.z));}
+        self.lods=lods;Ok(self)
+    }
+    pub fn with_morph(mut self,morph:Option<crate::asset_morph::AssetMorph>)->Self{if let Some(m)=&morph{let extent=m.extent*8.0*m.targets as f32;self.min=self.min-vec3f(extent,extent,extent);self.max=self.max+vec3f(extent,extent,extent);}self.morph=morph;self}
+    pub fn with_collision_metadata(mut self, collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>) -> Self { self.authored_collisions = collisions; self }
+    pub fn with_emitters(mut self, emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>) -> Self { self.emitters = emitters; self }
+    /// All parsing, bounded image decoding and collision extraction is worker
+    /// work. The corresponding upload only consumes validated vectors.
+    pub fn prepare(model: StaticModel) -> Result<Self, String> { Self::prepare_with_sidecars(model,None,None) }
+    pub fn prepare_with_sidecars(mut model:StaticModel,ao_png:Option<&[u8]>,sdf_bytes:Option<&[u8]>)->Result<Self,String>{
+        let ao=ao_png.map(|bytes|decode_generated_png(bytes,4096,32*1024*1024)).transpose()?;
+        let sdf=sdf_bytes.and_then(|bytes|crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v|v.0));
+        if model.texture_uri.is_some() && model.texture_png.is_none() { return Err("model references an external texture without supplied pixels".into()); }
+        let stride = crate::model::MODEL_VERTEX_FLOATS;
+        let check = |vertices: &[f32], indices: &[u32]| -> Result<(),String> {
+            if vertices.len()%stride != 0 || indices.len()%3 != 0 || indices.iter().any(|&i|i as usize >= vertices.len()/stride)
+                || vertices.chunks_exact(stride).any(|v|v[..3].iter().any(|x|!x.is_finite())) { return Err("prepared model has invalid geometry".into()); }
+            Ok(())
+        };
+        check(&model.vertices,&model.indices)?;
+        if model.indices.len()<3 && model.anim_parts.is_empty() && model.driven_parts.is_empty() { return Err("prepared model has no triangles".into()); }
+        let positions:Vec<Vec3f> = model.vertices.chunks_exact(stride).map(|v|vec3f(v[0],v[1],v[2])).collect();
+        let mesh_indices = std::sync::Arc::new(model.indices.clone());
+        let lm_source=ao.as_ref().map(|image|std::sync::Arc::new(crate::lightmap::LmMeshSource{
+            caster:crate::ao::MeshRaycaster::new(positions.clone(),model.indices.clone(),model.min,model.max),
+            ao_uv:model.vertices.chunks_exact(stride).map(|v|crate::model::unpack_ao_uv(v[6])).collect(),
+            albedo:model.vertices.chunks_exact(stride).map(|v|{let b=v[5].to_bits();vec3f((b&255)as f32/255.0,((b>>8)&255)as f32/255.0,((b>>16)&255)as f32/255.0)}).collect(),
+            ao_w:image.width,ao_h:image.height,
+        }));
+        let bake_stream=ao.as_ref().map(|_|{
+            let mut vertices=Vec::with_capacity(model.indices.len()*stride);let mut indices=Vec::with_capacity(model.indices.len());
+            for tri in model.indices.chunks_exact(3){let a=positions[tri[0]as usize];let b=positions[tri[1]as usize];let c=positions[tri[2]as usize];
+                let n=Vec3f::cross(b-a,c-a);let length=n.length();let n=if length>1e-12{n*(1.0/length)}else{vec3f(0.0,1.0,0.0)};
+                let (x,y)=crate::skin::oct_encode(n);let normal=makepad_draw::pack_pair_f16(x,y);
+                for index in tri{let offset=*index as usize*stride;indices.push((vertices.len()/stride)as u32);vertices.extend_from_slice(&model.vertices[offset..offset+stride]);let at=vertices.len()-stride+3;vertices[at]=normal;}
+            }(indices,vertices)
+        });
+        let occluder_parts = model.collider_parts();
+        let collider_parts = { let boxes=model.voxel_collider_boxes(); if boxes.is_empty(){occluder_parts.clone()}else{boxes} };
+        let remaining = std::cell::Cell::new(128usize*1024*1024);
+        let image = |bytes:Option<&[u8]>,fallback:u32| -> Result<ImageBuffer,String> {
+            if let Some(bytes)=bytes { let image=decode_generated_png(bytes,4096,remaining.get())?; remaining.set(remaining.get()-image.data.len()*4); Ok(image) }
+            else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];Ok(image) }
+        };
+        let layer = |vertices:Vec<f32>,indices:Vec<u32>,png:Option<Vec<u8>>,detail:Option<Vec<u8>>,detail_scale:[f32;2],mut pbr:crate::model::PbrMaterial| -> Result<PreparedStaticLayer,String> {
+            check(&vertices,&indices)?;
+            let texture=image(png.as_deref(),0xffff_ffff)?;
+            let detail_on=detail.is_some();let detail=image(detail.as_deref(),0xff80_8080)?;
+            let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff)?;
+            let surface=pbr.surface.as_ref().map(|surface|{let mut budget=remaining.get();let prepared=crate::material_surface::PreparedSurface::prepare(surface.as_ref().clone(),&mut budget)?;remaining.set(budget);Ok::<_,String>(prepared)}).transpose()?;
+            let texture=crate::material_surface::PreparedTexture::prepare(texture,crate::material_surface::PixelSemantic::Color);
+            let detail=crate::material_surface::PreparedTexture::prepare(detail,crate::material_surface::PixelSemantic::Color);
+            let orm=crate::material_surface::PreparedTexture::prepare(orm,crate::material_surface::PixelSemantic::Data);
+            pbr.orm_png=None;
+            Ok(PreparedStaticLayer { vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr })
+        };
+        let mut layers=std::mem::take(&mut model.draw_layers).into_iter();
+        let main = if let Some(first)=layers.next(){ layer(first.vertices,first.indices,first.texture_png,first.detail_png,first.detail_scale,first.pbr)? }
+            else {layer(std::mem::take(&mut model.vertices),std::mem::take(&mut model.indices),model.texture_png.take(),model.detail_png.take(),model.detail_scale,model.pbr.clone())?};
+        let mut extra=Vec::new();
+        for value in layers {extra.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
+        let mut anim_parts=Vec::new();
+        for mut def in std::mem::take(&mut model.anim_parts) {
+            let collider=std::sync::Arc::new(def.collider_boxes());
+            let mut draws=Vec::new();
+            for value in std::mem::take(&mut def.layers) {draws.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
+            if draws.is_empty(){draws.push(layer(std::mem::take(&mut def.vertices),std::mem::take(&mut def.indices),None,None,[0.0,0.0],Default::default())?);}
+            def.vertices.clear();
+            anim_parts.push(PreparedAnimPreview{def:std::sync::Arc::new(def),draws,collider});
+        }
+        let mut driven_parts=Vec::new();
+        for mut def in std::mem::take(&mut model.driven_parts) {
+            let mut draws=Vec::new();
+            for value in std::mem::take(&mut def.layers){draws.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
+            driven_parts.push(PreparedDrivenPreview{def:std::sync::Arc::new(def),draws});
+        }
+        let sky=if let Some(mut part)=model.sky.take(){
+            check(&part.vertices,&part.indices)?;
+            let positions=std::sync::Arc::new(part.vertices.chunks_exact(stride).map(|v|vec3f(v[0],v[1],v[2])).collect());
+            let mesh_indices=std::sync::Arc::new(part.indices.clone());
+            let tex0=image(part.images.first().map(Vec::as_slice),0xffff_ffff)?;
+            let tex1=image(part.images.get(1).map(Vec::as_slice),0)?;
+            let vertices=std::mem::take(&mut part.vertices);let indices=std::mem::take(&mut part.indices);part.images.clear();
+            Some(PreparedSky{part:std::sync::Arc::new(part),vertices,indices,positions,mesh_indices,tex0,tex1})
+        }else{None};
+        Ok(Self{lods:Vec::new(),morph:None,ao,lm_source,bake_stream,sdf,emitters:Default::default(),main,extra,positions:std::sync::Arc::new(positions),mesh_indices,
+            authored_collisions:Default::default(),collider_parts:std::sync::Arc::new(collider_parts),occluder_parts:std::sync::Arc::new(occluder_parts),anim_parts,driven_parts,sky,
+            min:model.min,max:model.max,prelit:model.prelit})
+    }
+    pub fn upload_bytes(&self)->usize {
+        self.lods.iter().map(|(_,m)|m.upload_bytes()).sum::<usize>()+self.morph.as_ref().map_or(0,|m|m.pixels.len()*4)+self.ao.as_ref().map_or(0,|v|v.data.len()*4)+self.sdf.as_ref().map_or(0,|v|v.pixels.len())+self.bake_stream.as_ref().map_or(0,|(i,v)|(i.len()+v.len())*4)+self.main.bytes()+self.extra.iter().map(PreparedStaticLayer::bytes).sum::<usize>()
+            +self.anim_parts.iter().flat_map(|p|&p.draws).map(PreparedStaticLayer::bytes).sum::<usize>()
+            +self.driven_parts.iter().flat_map(|p|&p.draws).map(PreparedStaticLayer::bytes).sum::<usize>()
+            +self.sky.as_ref().map_or(0,|s|(s.vertices.len()+s.indices.len()+s.tex0.data.len()+s.tex1.data.len())*4)
+    }
+}
+#[derive(Clone)]
+struct PreparedStaticLayer {
+    vertices:Vec<f32>,indices:Vec<u32>,texture:crate::material_surface::PreparedTexture,detail:crate::material_surface::PreparedTexture,detail_scale:[f32;2],
+    orm:crate::material_surface::PreparedTexture,orm_on:bool,surface:Option<crate::material_surface::PreparedSurface>,pbr:crate::model::PbrMaterial,
+}
+impl PreparedStaticLayer {fn bytes(&self)->usize{(self.vertices.len()+self.indices.len()+self.texture.data.len()+self.detail.data.len()+self.orm.data.len())*4+self.surface.as_ref().map_or(0,|s|s.bytes())}}
+#[derive(Clone)]
+struct PreparedAnimPreview {def:std::sync::Arc<crate::model::AnimPart>,draws:Vec<PreparedStaticLayer>,collider:std::sync::Arc<Vec<(Vec3f,Vec3f)>>}
+#[derive(Clone)]
+struct PreparedDrivenPreview {def:std::sync::Arc<crate::model::DrivenPart>,draws:Vec<PreparedStaticLayer>}
+#[derive(Clone)]
+struct PreparedSky {part:std::sync::Arc<crate::model::SkyPart>,vertices:Vec<f32>,indices:Vec<u32>,positions:std::sync::Arc<Vec<Vec3f>>,mesh_indices:std::sync::Arc<Vec<u32>>,tex0:ImageBuffer,tex1:ImageBuffer}
+
+/// UI-owned uploaded handles and immutable CPU metadata, reusable in any
+/// renderer without re-parsing or copying the mesh on the UI thread.
+#[derive(Clone)]
+pub struct UploadedStaticPreview {
+    lods:Vec<(f32,UploadedStaticPreview)>,
+    morph:Option<crate::asset_morph::UploadedMorph>,
+    ao:Option<Texture>,lm_source:Option<std::sync::Arc<crate::lightmap::LmMeshSource>>,bake_geometry:Option<std::rc::Rc<Geometry>>,sdf:Option<(Texture,SdfMeta)>,
+    emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,
+    extra_draws: Vec<(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2], LayerMaterial)>,
+    geometry: std::rc::Rc<Geometry>,
+    texture: Texture,
+    detail: Texture,
+    detail_scale: [f32;2],
+    material: LayerMaterial,
+    wants_pbr: bool,
+    prelit: bool,
+    triangles: usize,
+    min: Vec3f,
+    max: Vec3f,
+    authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
+    collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    positions: std::sync::Arc<Vec<Vec3f>>,
+    indices: std::sync::Arc<Vec<u32>>,
+    anim_parts: Vec<LoadedAnimPart>,
+    driven_parts: Vec<LoadedDrivenPart>,
+    sky: Option<LoadedSky>,
+}
+
+#[derive(Clone)]
+struct UploadedSkinMaterial {
+    geometry:std::rc::Rc<Geometry>,base:Texture,orm:Texture,metallic:f32,roughness:f32,surface:crate::material_surface::UploadedSurface,
+}
+
+#[derive(Clone)]
+pub struct UploadedSkinRig {
+    lods:Vec<(f32,UploadedSkinRig)>,
+    base_texture:Option<Texture>,
+    morph:Option<crate::asset_morph::UploadedMorph>,
+    sdf:Option<Option<(Texture,SdfMeta)>>,
+    materials: Vec<UploadedSkinMaterial>,
+    geometry: std::rc::Rc<Geometry>,
+    ao_map: Texture,
+}
+
+impl UploadedSkinRig {
+    /// Consumes worker-validated buffers; no geometry copying or decoding.
+    pub fn with_lods(mut self,cx:&mut Cx,lods:Vec<crate::asset_lod::PreparedSkinLod>)->Self{
+        self.lods=lods.into_iter().map(|lod|{let mut rig=Self::upload_with_materials(cx,lod.rest,lod.materials).with_morph(cx,lod.morph);rig.base_texture=Some(upload_generated_texture(cx,lod.texture));(lod.distance,rig)}).collect();self
+    }
+    pub fn with_morph(mut self,cx:&mut Cx,morph:Option<crate::asset_morph::AssetMorph>)->Self{self.morph=morph.map(|m|m.upload(cx));self}
+    pub fn with_prepared_sdf(mut self,cx:&mut Cx,sdf:Option<crate::shadow_sdf::ShadowSdfAtlas>)->Self{self.sdf=Some(sdf.map(|atlas|Renderer::upload_sdf_atlas(cx,atlas)));self}
+    pub fn upload_with_materials(cx:&mut Cx,rest:crate::skin::SkinRestGpu,parts:Vec<crate::skin::PreparedSkinPart>)->Self {
+        let mut uploaded=Self::upload(cx,rest);
+        uploaded.materials=parts.into_iter().map(|part| {
+            let geometry=Geometry::new(cx);geometry.update(cx,part.indices,part.vertices);
+            UploadedSkinMaterial{geometry:std::rc::Rc::new(geometry),base:part.base.upload(cx),orm:part.orm.upload(cx),metallic:part.metallic,roughness:part.roughness,surface:part.surface.upload(cx)}
+        }).collect();uploaded
+    }
+    pub fn upload(cx: &mut Cx, rest: crate::skin::SkinRestGpu) -> Self {
+        let geometry = Geometry::new(cx);
+        geometry.update(cx, rest.indices, rest.vertices);
+        let ao_map = Texture::new_with_format(cx, TextureFormat::VecRu8 {
+            width: rest.ao_size, height: rest.ao_size, data: Some(rest.ao_pixels),
+            unpack_row_length: None, updated: TextureUpdated::Full,
+        });
+        Self { lods:Vec::new(),base_texture:None,morph:None,sdf:None,geometry: std::rc::Rc::new(geometry), ao_map, materials:Vec::new() }
     }
 }
 
@@ -884,13 +1164,17 @@ impl ModelDraw<'_> {
 /// atlas it samples. Thousands of models share a few dozen atlases, which is
 /// what keeps a whole pack's worth of props cheap to draw.
 struct LoadedModel {
-    geometry: Geometry,
+    lods:Vec<(f32,LoadedModel)>,
+    morph:Option<crate::asset_morph::UploadedMorph>,
+    prepared_sdf:Option<Option<(Texture,SdfMeta)>>,
+    emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,
+    geometry: std::rc::Rc<Geometry>,
     texture: Texture,
     detail: Texture,
     detail_scale: [f32; 2],
     /// Extra (geometry, albedo, detail, scale, material) draws for world GLBs
     /// that embed one PNG per tile. The first layer is `geometry`/`texture`.
-    extra_draws: Vec<(Geometry, Texture, Texture, [f32; 2], LayerMaterial)>,
+    extra_draws: Vec<(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2], LayerMaterial)>,
     /// Layer 0's material (the merged stream's, for a single-layer model).
     material: LayerMaterial,
     /// Draw this model through [`DrawScenePbr`] instead of
@@ -912,12 +1196,13 @@ struct LoadedModel {
     max: Vec3f,
     /// Physics collider boxes in model space — triangle-derived voxel boxes
     /// (model.rs voxel_collider_boxes): legs, decks, braces, openings.
-    collider_parts: Vec<(Vec3f, Vec3f)>,
+    authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
+    collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
     /// Light-bake occluder boxes — the OLD curated primitive parts: few and
     /// face-aligned. Voxel boxes as occluders smeared streaks over every
     /// sloped roof (a stepped AABB pokes through the surface) and tripled
     /// the bake; physics and light need DIFFERENT simplifications.
-    occluder_parts: Vec<(Vec3f, Vec3f)>,
+    occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
     /// The light baker's view of this model — triangles + grid + chart uvs —
     /// present only when the model has its OWN AO layout (the layout is what
     /// gives every placed copy a lightmap parameterisation for free).
@@ -939,8 +1224,8 @@ struct LoadedModel {
     /// against re-parsing a 100 MB GLB to answer "what did the player walk
     /// into". Anim parts are deliberately absent: they move, and a BVH built
     /// over them would be wrong the moment a door opened.
-    mesh_positions: Vec<Vec3f>,
-    mesh_indices: Vec<u32>,
+    mesh_positions: std::sync::Arc<Vec<Vec3f>>,
+    mesh_indices: std::sync::Arc<Vec<u32>>,
     /// The GPU light bake's variant of `geometry`: identical positions and
     /// chart uvs, but the normal lane holds the FLAT WINDING face normal.
     /// The CPU bake's `sun_bit` classified every texel against the winding
@@ -948,23 +1233,25 @@ struct LoadedModel {
     /// kept twin was authored inward carries a vertex normal OPPOSITE its
     /// winding — the crypt's paver-floor sheets), so the gather must see the
     /// winding, not the shading normal. Present iff `lm_source` is.
-    bake_geometry: Option<Geometry>,
+    bake_geometry: Option<std::rc::Rc<Geometry>>,
 }
 
 /// One resident [`crate::model::AnimPart`]: its definition (states, clip,
 /// bounds) plus the uploaded geometry it draws through.
+#[derive(Clone)]
 struct LoadedAnimPart {
-    def: crate::model::AnimPart,
+    def: std::sync::Arc<crate::model::AnimPart>,
     /// (geometry, albedo, detail, detail scale) per texture, mirroring the
     /// static model's own layer list so a part draws through the same code.
-    draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
+    draws: Vec<(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2],LayerMaterial)>,
     /// Node-local collider boxes, derived once at load.
-    collider: Vec<(Vec3f, Vec3f)>,
+    collider: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
 }
 
+#[derive(Clone)]
 struct LoadedDrivenPart {
-    def: crate::model::DrivenPart,
-    draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
+    def: std::sync::Arc<crate::model::DrivenPart>,
+    draws: Vec<(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2],LayerMaterial)>,
 }
 
 /// Whether a sky projection's layer images get a mip chain.
@@ -997,9 +1284,10 @@ fn sky_trace_enabled() -> bool {
 }
 
 /// A resident [`crate::model::SkyPart`]: the faces plus their layer images.
+#[derive(Clone)]
 struct LoadedSky {
-    part: crate::model::SkyPart,
-    geometry: Geometry,
+    part: std::sync::Arc<crate::model::SkyPart>,
+    geometry: std::rc::Rc<Geometry>,
     /// Layer 0 and layer 1 textures. Layer 1 is a 1x1 transparent stand-in
     /// unless the map is a two-layer Quake sky, so the shader samples
     /// unconditionally and every projection stays one draw.
@@ -1011,8 +1299,8 @@ struct LoadedSky {
     /// Model-space triangles, kept for the same reason `mesh_positions` is:
     /// a sky face is still a WALL to a walker (Doom's sky brushes are
     /// solid), even though it is never lit or shadowed.
-    positions: Vec<Vec3f>,
-    indices: Vec<u32>,
+    positions: std::sync::Arc<Vec<Vec3f>>,
+    indices: std::sync::Arc<Vec<u32>>,
 }
 
 /// Which placed geometry a model-state command addresses.
@@ -1026,6 +1314,7 @@ pub enum ModelTarget {
     Model(String),
     /// One slot in the [`Renderer::set_models`] list.
     Instance(usize),
+    Attachment(usize),
 }
 
 impl From<&str> for ModelTarget {
@@ -1066,8 +1355,11 @@ struct AnimPartRuntime {
 /// Deliberately free of GPU state: a door's motion is a clock over a clip,
 /// and keeping it separable is what lets the whole reversible state machine
 /// be tested without a device.
+#[derive(Clone)]
+struct ModelClipPlayback{name:Option<String>,time:f32,looping:bool,weight:f32}
 #[derive(Default)]
 struct ModelStates {
+    clips:std::collections::BTreeMap<ModelTarget,ModelClipPlayback>,
     map: std::collections::BTreeMap<(ModelTarget, String), AnimPartRuntime>,
     /// Engine presentation clock for model-authored `localgen-*` idle clips.
     /// It is independent from level script state: placing the GLB is enough
@@ -1076,6 +1368,18 @@ struct ModelStates {
 }
 
 impl ModelStates {
+    fn morph_weights(&self,target:&ModelTarget,id:&str,morph:&crate::asset_morph::AssetMorph)->[f32;32]{
+        if let Some(playback)=self.clip(target,id){
+            if let Some(name)=&playback.name{let mut sampled=morph.sample_playback(Some(name),playback.time,playback.looping);for(i,value)in sampled.iter_mut().enumerate(){*value=morph.defaults[i]+(*value-morph.defaults[i])*playback.weight;}sampled}else{morph.defaults}
+        }else{morph.sample(None,self.idle_time)}
+    }
+    fn clip(&self,target:&ModelTarget,id:&str)->Option<&ModelClipPlayback>{self.clips.get(target).or_else(||self.clips.get(&ModelTarget::Model(id.into())))}
+    fn transform(&self,target:&ModelTarget,id:&str,def:&crate::model::AnimPart)->Mat4f{
+        if let (Some(playback),Some(hierarchy))=(self.clip(target,id),def.clip.hierarchy.as_ref()){
+            return hierarchy.transform_named_weighted(playback.name.as_deref(),playback.name.as_ref().map(|_|playback.time),playback.looping,playback.weight);
+        }
+        let(_,time,_)=self.clock(target,id,def);def.transform_at(time)
+    }
     /// Aim `def` at `state`. False (and no change) when the part has no such
     /// state. `blend_secs` times THIS move: the speed is fixed here, from the
     /// distance still to cover, so an interrupted move reverses at a
@@ -1133,9 +1437,11 @@ impl ModelStates {
     /// Drop every clock addressed at `id`, plus the listed placed slots —
     /// what a model going away means for its doors.
     fn forget_model(&mut self, id: &str, slots: &[usize]) {
+        self.clips.retain(|target,_|match target{ModelTarget::Model(model)=>model!=id,ModelTarget::Instance(i)=>!slots.contains(i),ModelTarget::Attachment(_)=>false});
         self.map.retain(|(target, _), _| match target {
             ModelTarget::Model(m) => m != id,
             ModelTarget::Instance(i) => !slots.contains(i),
+            ModelTarget::Attachment(_) => false,
         });
     }
 
@@ -1144,6 +1450,7 @@ impl ModelStates {
     /// commands with it; per-MODEL commands (how an imported level addresses
     /// its own doors) survive.
     fn forget_slots(&mut self) {
+        self.clips.retain(|target,_|matches!(target,ModelTarget::Model(_)));
         self.map
             .retain(|(target, _), _| matches!(target, ModelTarget::Model(_)));
     }
@@ -1157,7 +1464,7 @@ impl ModelStates {
         model_id: &str,
         def: &crate::model::AnimPart,
     ) -> (usize, f32, f32) {
-        let by_slot = matches!(target, ModelTarget::Instance(_))
+        let by_slot = matches!(target, ModelTarget::Instance(_)|ModelTarget::Attachment(_))
             .then(|| self.map.get(&(target.clone(), def.name.clone())))
             .flatten();
         let run = by_slot.or_else(|| {
@@ -1167,7 +1474,7 @@ impl ModelStates {
         match run {
             Some(r) => (r.state, r.time, r.target),
             None => {
-                if def.kind.as_deref().is_some_and(|kind| kind.starts_with("localgen-"))
+                if def.kind.as_deref().is_some_and(|kind| kind.starts_with("localgen-")||kind=="asset-animation")
                     && def.duration() > 0.0
                 {
                     let t = self.idle_time.rem_euclid(def.duration());
@@ -1265,6 +1572,8 @@ pub struct DrivenPartInfo {
     pub anchor: Vec3f,
     pub radius: f32,
     pub width: f32,
+    /// Display-only motion limits; never use these to configure physics.
+    pub visual: Option<makepad_gltf::VisualWheelMotion>,
     pub rest_transform: Mat4f,
 }
 
@@ -1860,6 +2169,19 @@ fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
     }
 }
 
+/// A dynamic cube instance whose colour carries fractional alpha. The opaque
+/// cube batch replaces the destination (its shader does not blend), so such
+/// instances are held back here and drawn in the alpha pass of the same
+/// shape through `DrawSceneAlpha`, after all opaque geometry, where blending
+/// sees depth. All-opaque batches are unaffected: nothing is deferred.
+struct DeferredAlphaCube {
+    transform: Mat4f,
+    size: Vec3f,
+    color: Vec4f,
+    glow: f32,
+    color_adjust_ctl: Vec4f,
+}
+
 /// Settle delay before the world-settle work (receiver refresh + lightmap
 /// kick) runs after an edit. A burst of mutations (a game spawning
 /// platforms, a dragged kinematic) pays ONE refresh once the world has been
@@ -1922,6 +2244,7 @@ struct TerrainTile {
     min: Vec3f,
     max: Vec3f,
     geometry: Geometry,
+    shadow_geometry: Option<Geometry>,
 }
 
 /// One uploaded voxel chunk mesh. The vertex layout is the terrain tiles'
@@ -1933,6 +2256,7 @@ struct VoxelTile {
     min: Vec3f,
     max: Vec3f,
     geometry: Geometry,
+    shadow_geometry: Option<Geometry>,
 }
 
 /// One `game.water` volume's flat sheet grid plus its packed wave uniforms.
@@ -2197,6 +2521,7 @@ impl Default for Renderer {
     fn default() -> Self {
         Self {
             shape_geometries: Default::default(),
+            shadow_shape_geometries: Default::default(),
             static_chunks: Vec::new(),
             chunk_visible: Vec::new(),
             slab_key: None,
@@ -2207,10 +2532,16 @@ impl Default for Renderer {
             water_tiles: Vec::new(),
             water_rev: None,
             skin_rig_geometries: Vec::new(),
+            skin_material_draws: Default::default(),
+            skin_lods:Default::default(),
+            skin_morphs: Default::default(),
+            skin_prepared_sdf: Default::default(),
             skin_palette_tex: None,
             skin_palette_texels: 0,
             skin_joint_bases: Vec::new(),
             static_models: Vec::new(),
+            preview_originals: std::collections::HashMap::new(),
+            preview_new: std::collections::HashSet::new(),
             sky_draw: None,
             decal_draw: None,
             sky_draw_wait_logged: false,
@@ -2271,9 +2602,15 @@ impl Default for Renderer {
             frame_lights: Vec::new(),
             frame_baked_count: 0,
             host_lights: Vec::new(),
+            host_asset_lights:Vec::new(),asset_light_error:None,
+            model_headlight_owners: Vec::new(),
             lamp_cache: Vec::new(),
             lamp_cache_rev: None,
             light_grid: LightGrid::default(),
+            clustered: crate::clustered::ClusteredLights::default(),
+            gi: crate::fast_gi::FastGi::default(),
+            clustered_enabled: !matches!(std::env::var("MAKEPAD_CLUSTERED").as_deref(), Ok("0" | "off")),
+            clustered_frames: 0,
             light_rank: Vec::new(),
             light_sel: Vec::new(),
             light_block_scratch: [0.0; LIGHT_BLOCK_FLOATS],
@@ -2453,11 +2790,24 @@ impl Renderer {
         self.lm_lights.clear();
         self.frame_lights.clear();
         self.frame_baked_count = 0;
-        self.host_lights.clear();
+        self.host_lights.clear();self.host_asset_lights.clear();self.asset_light_error=None;
         self.lamp_cache.clear();
         self.lamp_cache_rev = None;
         self.light_grid = LightGrid::default();
+        let cluster_config = self.clustered.config();
+        let shadow_config = self.clustered.shadows.config();
+        let soft_filter = self.clustered.shadows.soft_filter;
+        let shadow_source_radius = self.clustered.shadows.source_radius;
+        self.clustered = crate::clustered::ClusteredLights::default();
+        self.clustered.set_config(cluster_config);
+        self.clustered.shadows.set_config(shadow_config);
+        self.clustered.shadows.soft_filter=soft_filter;
+        self.clustered.shadows.source_radius=shadow_source_radius;
+        self.clustered_frames = 0;
         self.light_rank.clear();
+        self.gi.reset();
+        // A fixed volume belongs to the departing world, not device quality.
+        self.gi.set_config(crate::GiConfig{anchor:None,..self.gi.config()});
         self.light_sel.clear();
         self.light_block_scratch.fill(0.0);
         self.light_cell_memory.clear();
@@ -2704,9 +3054,8 @@ impl Renderer {
 
     /// Rebuild the static half of Realtime's CSM caster list.
     ///
-    /// Models with a lightmap source already become `BakeState` meshes when
-    /// their atlas is realized. The list here is the complementary case:
-    /// uncharted static geometry, including every material layer. Keeping it
+    /// With a world atlas, charted models already become `BakeState` meshes;
+    /// without one this list owns those casters too, including every layer. Keeping it
     /// next to placed-scene identity makes a scene upload the registration
     /// boundary instead of turning static architecture into a per-frame
     /// "mover" merely to get a shadow.
@@ -2720,11 +3069,12 @@ impl Renderer {
             else {
                 continue;
             };
-            if model.lm_source.is_some() {
+            if model.morph.is_some(){continue;}
+            if model.lm_source.is_some() && self.world_atlas_required() {
                 continue;
             }
             let (min, max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
-            if !casts_as_caster_only(
+            if model.lm_source.is_none() && !casts_as_caster_only(
                 self.model_casts_shadow.get(&inst.model).copied(),
                 model.prelit,
                 min,
@@ -2732,8 +3082,9 @@ impl Renderer {
             ) {
                 continue;
             }
-            for geometry in std::iter::once(&model.geometry)
-                .chain(model.extra_draws.iter().map(|(geometry, ..)| geometry))
+            if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
+            for geometry in std::iter::once(model.geometry.as_ref())
+                .chain(model.extra_draws.iter().map(|(geometry, ..)| geometry.as_ref()))
             {
                 self.csm_static_casters.push(crate::gpu_lightmap::GpuBakeMesh {
                     geometry: geometry.geometry_id(),
@@ -2750,6 +3101,17 @@ impl Renderer {
     /// remaps are indexed by placed slot. Producers should therefore keep a
     /// stable order so a harmless reorder does not request a new bake.
     pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
+        if let Err(error)=self.try_set_models(instances){self.report_asset_light_error(error);}
+    }
+    pub fn asset_light_error(&self)->Option<&str>{self.asset_light_error.as_deref()}
+    fn report_asset_light_error(&mut self,error:String){if self.asset_light_error.as_ref()!=Some(&error){log!("asset light admission refused: {error}");}self.asset_light_error=Some(error);}
+    fn model_light_count(&self,instances:&[ModelInstance])->usize{instances.iter().map(|instance|self.static_models.iter().find(|(id,_)|id==&instance.model).map_or(0,|(_,model)|model.emitters.len())).sum()}
+    pub fn check_asset_light_count(&self,count:usize)->Result<(),String>{
+        if count>crate::asset_lights::MAX_ASSET_FRAME_LIGHTS{return Err(format!("{count} authored lights exceed the256-light scene budget"))}
+        if count>0&&!self.clustered_enabled{return Err("authored punctual lights require the clustered renderer".into())}Ok(())
+    }
+    pub fn try_set_models(&mut self, instances: Vec<ModelInstance>)->Result<(),String> {
+        self.check_asset_light_count(self.model_light_count(&instances)+self.model_light_count(&self.world_attachments)+self.host_asset_lights.len())?;
         let signature = placed_scene_signature(&instances);
         let scene_changed = self.placed_scene_signature != Some(signature);
         // Statics are cached against a key; any meaningful placed-scene
@@ -2771,6 +3133,7 @@ impl Renderer {
         if scene_changed {
             self.rebuild_csm_static_casters();
         }
+        Ok(())
     }
 
     /// Install only a successfully frontend-compiled material. Failure keeps
@@ -2816,6 +3179,8 @@ impl Renderer {
     /// [`ModelInstance::dynamic`] value; that flag remains meaningful only
     /// in the placed-model lane.
     pub fn set_world_attachments(&mut self, instances: Vec<ModelInstance>) {
+        if let Err(error)=self.check_asset_light_count(self.model_light_count(&instances)+self.model_light_count(&self.placed_models)+self.host_asset_lights.len()){self.report_asset_light_error(error);return}
+        self.model_anim_state.clips.retain(|target,_|!matches!(target,ModelTarget::Attachment(_)));
         self.world_attachments = instances;
     }
 
@@ -2972,7 +3337,7 @@ impl Renderer {
                 if !indices.is_empty() {
                     let geometry = Geometry::new(cx);
                     geometry.update(cx, indices, vertices);
-                    self.terrain_tiles.push(TerrainTile { min, max, geometry });
+                    self.terrain_tiles.push(TerrainTile { min, max, geometry, shadow_geometry: None });
                 }
                 gx0 = gx1;
             }
@@ -3044,6 +3409,7 @@ impl Renderer {
                         min: mesh.min,
                         max: mesh.max,
                         geometry,
+                        shadow_geometry: None,
                     });
                 }
             }
@@ -3462,19 +3828,114 @@ impl Renderer {
         self.load_model_parsed(cx, id, model, png, ao_png)
     }
 
-    /// The GPU half of [`load_model_with_ao`], over a model somebody ELSE
-    /// parsed.
+    /// Install a complete generated preview. Geometry/colliders were prepared
+    /// off-thread; this path does no parsing, decoding, disk lookup, lightmap
+    /// preparation or mesh cloning. The old model stays visible until here.
+    pub fn install_static_preview(
+        &mut self, cx: &mut Cx, id: &str, prepared: PreparedStaticPreview, transient: bool,
+    ) -> Option<usize> {
+        let at = self.static_models.iter().position(|(key, _)| key == id);
+        let uploaded = self.upload_static_preview(cx, prepared);
+        let triangles = uploaded.triangles;
+        self.model_sdf_tex.remove(id);
+        let ao=uploaded.ao.clone();
+        let model = Self::uploaded_static_model(uploaded);
+        let previous = if let Some(at) = at { Some(std::mem::replace(&mut self.static_models[at].1, model)) }
+            else { self.static_models.push((id.to_string(), model)); if transient { self.preview_new.insert(id.to_string()); } None };
+        let old_ao_key = self.model_pack.iter().find(|(key, _)| key == id).map(|(_, key)| key.clone());
+        self.model_pack.retain(|(key, _)| key != id);
+        if let Some(ao)=ao{self.ao_textures.retain(|(key,_)|key!=id);self.ao_textures.push((id.to_string(),ao));self.model_pack.push((id.to_string(),id.to_string()));}
+        if transient {
+            if !self.preview_new.contains(id) {
+                if let Some(previous) = previous { self.preview_originals.entry(id.to_string()).or_insert((previous, old_ao_key)); }
+            }
+        } else {
+            self.preview_originals.remove(id);
+        }
+        self.rebuild_csm_static_casters();
+        Some(triangles)
+    }
+
+    pub fn upload_static_preview(&mut self, cx:&mut Cx, prepared:PreparedStaticPreview)->UploadedStaticPreview {
+        let mut upload=|layer:PreparedStaticLayer| {
+            let geometry=Geometry::new(cx);geometry.update(cx,layer.indices,layer.vertices);
+            let shiny=layer.orm_on||layer.pbr.is_shiny();
+            let material=LayerMaterial{surface:layer.surface.map(|surface|surface.upload(cx)),metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
+                orm:layer.orm.upload(cx),orm_on:layer.orm_on};
+            (std::rc::Rc::new(geometry),layer.texture.upload(cx),layer.detail.upload(cx),layer.detail_scale,material)
+        };
+        let wants_pbr=!prepared.prelit&&(prepared.main.orm_on||prepared.main.pbr.is_shiny()||prepared.extra.iter().any(|l|l.orm_on||l.pbr.is_shiny())||prepared.anim_parts.iter().flat_map(|p|&p.draws).chain(prepared.driven_parts.iter().flat_map(|p|&p.draws)).any(|l|l.orm_on||l.pbr.is_shiny()));
+        let (geometry,texture,detail,detail_scale,material)=upload(prepared.main);
+        let extra_draws=prepared.extra.into_iter().map(&mut upload).collect();
+        let anim_parts=prepared.anim_parts.into_iter().map(|part|LoadedAnimPart{def:part.def,collider:part.collider,
+            draws:part.draws.into_iter().map(&mut upload).collect()}).collect();
+        let driven_parts=prepared.driven_parts.into_iter().map(|part|LoadedDrivenPart{def:part.def,
+            draws:part.draws.into_iter().map(&mut upload).collect()}).collect();
+        drop(upload);
+        let sky=prepared.sky.map(|part|{let geometry=Geometry::new(cx);geometry.update(cx,part.indices,part.vertices);
+            LoadedSky{part:part.part,geometry:std::rc::Rc::new(geometry),tex0:upload_generated_texture(cx,part.tex0),tex1:upload_generated_texture(cx,part.tex1),
+                draw_trace:0,positions:part.positions,indices:part.mesh_indices}});
+        let ao=prepared.ao.map(|image|upload_generated_texture(cx,image));
+        let sdf=prepared.sdf.map(|atlas|Self::upload_sdf_atlas(cx,atlas));
+        let bake_geometry=prepared.bake_stream.map(|(indices,vertices)|{let g=Geometry::new(cx);g.update(cx,indices,vertices);std::rc::Rc::new(g)});
+        let morph=prepared.morph.map(|m|m.upload(cx));
+        let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview(cx,model))).collect();
+        UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
+            prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,
+            authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
+            extra_draws,anim_parts,driven_parts,sky}
+    }
+    fn uploaded_static_model(uploaded:UploadedStaticPreview)->LoadedModel {
+        LoadedModel{lods:uploaded.lods.into_iter().map(|(distance,model)|(distance,Self::uploaded_static_model(model))).collect(),morph:uploaded.morph,prepared_sdf:Some(uploaded.sdf),emitters:uploaded.emitters,geometry:uploaded.geometry,texture:uploaded.texture,detail:uploaded.detail,detail_scale:uploaded.detail_scale,
+            extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
+            min:uploaded.min,max:uploaded.max,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
+            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
+            lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
+    }
+
+    /// Register pre-uploaded generated geometry. Payload clones contain only
+    /// shared handles, immutable Arc buffers and the bounded part list.
+    pub fn install_uploaded_static(&mut self, id: &str, uploaded: UploadedStaticPreview) -> usize {
+        let triangles = uploaded.triangles;
+        self.model_sdf_tex.remove(id);
+        let ao=uploaded.ao.clone();
+        let model = Self::uploaded_static_model(uploaded);
+        if let Some((_, old)) = self.static_models.iter_mut().find(|(key, _)| key == id) { *old = model; }
+        else { self.static_models.push((id.to_string(), model)); }
+        self.model_pack.retain(|(key, _)| key != id);
+        if let Some(ao)=ao{self.ao_textures.retain(|(key,_)|key!=id);self.ao_textures.push((id.to_string(),ao));self.model_pack.push((id.to_string(),id.to_string()));}
+        self.preview_originals.remove(id);
+        self.preview_new.remove(id);
+        self.rebuild_csm_static_casters();
+        triangles
+    }
+
+    pub fn restore_all_static_previews(&mut self) {
+        let mut aliases: Vec<_> = self.preview_originals.keys().cloned().collect();
+        aliases.extend(self.preview_new.iter().cloned());
+        for alias in aliases { self.restore_static_preview(&alias); }
+    }
+
+    /// A cleared or unsupported draft restores its resident durable model
+    /// without any synchronous network read or GLB/skin parse.
+    pub fn restore_static_preview(&mut self, id: &str) {
+        if self.preview_new.remove(id) { self.static_models.retain(|(key, _)| key != id); self.rebuild_csm_static_casters(); }
+        if let Some((original, ao_key)) = self.preview_originals.remove(id) {
+            if let Some((_, model)) = self.static_models.iter_mut().find(|(key, _)| key == id) {
+                *model = original;
+                if let Some(key) = ao_key { self.model_pack.push((id.to_string(), key)); }
+                self.rebuild_csm_static_casters();
+            }
+        }
+    }
+
+    /// Legacy static installation over an already parsed model. Collider and
+    /// lightmap preparation still run here; asynchronous generated previews
+    /// must use `PreparedStaticPreview` and `install_static_preview` instead.
     ///
-    /// Parsing is the expensive half and it needs no `Cx`: a Doom E1M1 GLB
-    /// measured 29.6ms of parse against 3.4ms of upload, and on the UI
-    /// thread that is two dropped frames every time a world is cued. A
-    /// caller with a worker thread (`apps/vj`) runs
-    /// [`StaticModel::parse_glb`] there and hands the result here, so only
-    /// the buffer/texture creation — which genuinely cannot happen off the
-    /// UI thread — is paid in the frame.
-    ///
-    /// Identical in every other respect to [`load_model_with_ao`], including
-    /// the resident-id early return, so the two paths cannot drift.
+    /// Existing callers retain baked/textured/animated-world support here.
+    /// Parsing elsewhere does not make this legacy method an upload-only
+    /// API: collider derivation, texture decode and disk AO remain below.
     pub fn load_model_parsed(
         &mut self,
         cx: &mut Cx,
@@ -3654,7 +4115,7 @@ impl Renderer {
                 );
                 let g = Geometry::new(cx);
                 g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                extra.push((g, tex, det, dscale, mat));
+                extra.push((std::rc::Rc::new(g), tex, det, dscale, mat));
             }
             extra
         } else {
@@ -3722,13 +4183,14 @@ impl Renderer {
                         self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
                     let g = Geometry::new(cx);
                     g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                    draws.push((g, tex, det, dscale));
+                    let material=self.upload_material(cx,&layer.pbr);
+                    draws.push((std::rc::Rc::new(g), tex, det, dscale,material));
                 }
                 if draws.is_empty() {
                     continue;
                 }
                 let collider = def.collider_boxes();
-                out.push(LoadedAnimPart { def, draws, collider });
+                out.push(LoadedAnimPart { def: std::sync::Arc::new(def), draws, collider: std::sync::Arc::new(collider) });
             }
             out
         };
@@ -3778,10 +4240,11 @@ impl Renderer {
                         self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
                     let g = Geometry::new(cx);
                     g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                    draws.push((g, tex, det, dscale));
+                    let material=self.upload_material(cx,&layer.pbr);
+                    draws.push((std::rc::Rc::new(g), tex, det, dscale,material));
                 }
                 if !draws.is_empty() {
-                    out.push(LoadedDrivenPart { def, draws });
+                    out.push(LoadedDrivenPart { def:std::sync::Arc::new(def), draws });
                 }
             }
             out
@@ -3867,10 +4330,10 @@ impl Renderer {
                     tex0,
                     tex1,
                     draw_trace: 0,
-                    geometry: g,
-                    part,
-                    positions,
-                    indices,
+                    geometry: std::rc::Rc::new(g),
+                    part: std::sync::Arc::new(part),
+                    positions: std::sync::Arc::new(positions),
+                    indices: std::sync::Arc::new(indices),
                 })
             }
             None => None,
@@ -3936,13 +4399,17 @@ impl Renderer {
         let bake_geometry = lm_source.is_some().then(|| {
             let g = Geometry::new(cx);
             g.update(cx, bake_stream.0, bake_stream.1);
-            g
+            std::rc::Rc::new(g)
         });
 
         self.static_models.push((
             id.to_string(),
             LoadedModel {
-                geometry,
+                lods:Vec::new(),
+                morph:None,
+                prepared_sdf:None,
+                emitters: Default::default(),
+                geometry: std::rc::Rc::new(geometry),
                 texture,
                 detail: main_detail,
                 detail_scale: main_detail_scale,
@@ -3953,13 +4420,14 @@ impl Renderer {
                 triangles,
                 min,
                 max,
-                collider_parts,
-                occluder_parts,
+                authored_collisions: Default::default(),
+                collider_parts: std::sync::Arc::new(collider_parts),
+                occluder_parts: std::sync::Arc::new(occluder_parts),
                 anim_parts,
                 driven_parts,
                 sky,
-                mesh_positions: lm_positions,
-                mesh_indices: lm_indices,
+                mesh_positions: std::sync::Arc::new(lm_positions),
+                mesh_indices: std::sync::Arc::new(lm_indices),
                 lm_source,
                 bake_geometry,
             },
@@ -3986,6 +4454,7 @@ impl Renderer {
     ///
     /// Returns whether `id` was actually resident.
     pub fn unload_model(&mut self, id: &str) -> bool {
+        self.preview_originals.remove(id);
         let had = if let Some(at) = self.static_models.iter().position(|(k, _)| k == id) {
             self.static_models.remove(at);
             true
@@ -4099,6 +4568,7 @@ impl Renderer {
                 // it was painting on the roof BESIDE its own head.
                 dir: vec3f(0.0, -1.0, 0.0),
                 spot: 1.0,
+                ..Default::default()
             });
         }
         out
@@ -4118,7 +4588,14 @@ impl Renderer {
         } else {
             self.lm_lights.clone()
         };
-        Self::rail_lamp_pools(&mut lights, sun);
+        if self.clustered_enabled {
+            // Preserve authored day/night dimming, but there is no 8-bit
+            // lamp atlas whose saturation should cap a realtime light.
+            let day = Self::lamp_daylight_scale(sun);
+            for light in &mut lights { light.color = light.color * day; }
+        } else {
+            Self::rail_lamp_pools(&mut lights, sun);
+        }
         lights
     }
 
@@ -4188,6 +4665,11 @@ impl Renderer {
     /// muzzle flashes, spell impacts, anything that lives a few frames.
     /// Consumed by the next `draw_scene` call; never baked, so statics
     /// receive these analytically too.
+    pub fn add_asset_frame_lights(&mut self,lights:Vec<crate::lightmap::LmLight>)->Result<(),String>{
+        let count=self.model_light_count(&self.placed_models)+self.model_light_count(&self.world_attachments)+self.host_asset_lights.len()+lights.len();
+        if let Err(error)=self.check_asset_light_count(count){self.report_asset_light_error(error.clone());return Err(error)}
+        self.host_asset_lights.extend(lights);Ok(())
+    }
     pub fn add_frame_lights(&mut self, lights: Vec<crate::lightmap::LmLight>) {
         self.host_lights.extend(lights);
     }
@@ -4209,7 +4691,9 @@ impl Renderer {
             // The static-light selection grid lives and dies with the lamp
             // set — rebuilt HERE, on the settle path, never per frame. This
             // is what keeps runtime selection O(1) at any light count.
-            self.light_grid = LightGrid::build(&self.lamp_cache, LIGHT_GRID_CELL);
+            if !self.clustered_enabled {
+                self.light_grid = LightGrid::build(&self.lamp_cache, LIGHT_GRID_CELL);
+            }
             self.light_cell_memory.clear();
         }
         self.frame_lights.clear();
@@ -4220,6 +4704,22 @@ impl Renderer {
                 self.frame_lights.push(l);
             }
         }
+        // Authored emitters are analytic lights even on static geometry;
+        // their glTF intensity is not part of the legacy AO bake.
+        let authored_count=self.model_light_count(&self.placed_models)+self.model_light_count(&self.world_attachments)+self.host_asset_lights.len();
+        let admitted=self.check_asset_light_count(authored_count);
+        if let Err(error)=&admitted{self.report_asset_light_error(error.clone());}
+        if admitted.is_ok(){
+        for(target,instance)in self.placed_models.iter().enumerate().map(|(i,m)|(ModelTarget::Instance(i),m)).chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))){
+            if let Some((_, model)) = self.static_models.iter().find(|(id,_)|id == &instance.model) {
+                for emitter in model.emitters.iter() {
+                    let node=emitter.animation.as_ref().and_then(|hierarchy|self.model_anim_state.clip(&target,&instance.model).map(|playback|hierarchy.transform_named_weighted(playback.name.as_deref(),playback.name.as_ref().map(|_|playback.time),playback.looping,playback.weight)));
+                    self.frame_lights.push(emitter.placed_at(&instance.transform,node,self.model_anim_state.idle_time));
+                }
+            }
+        }
+        self.frame_lights.append(&mut self.host_asset_lights);
+        }else{self.host_asset_lights.clear();}
         self.frame_lights.append(&mut self.host_lights);
     }
 
@@ -4233,6 +4733,7 @@ impl Renderer {
         sun: &SunLight,
         trigger: crate::gpu_lightmap::BakeTrigger,
     ) {
+        if !self.world_atlas_required() { return; }
         let mut meshes = Vec::new();
         let mut mesh_map = Vec::new();
         let mut mesh_geometry = Vec::new();
@@ -4245,6 +4746,7 @@ impl Renderer {
             else {
                 continue;
             };
+            if self.static_models[at].1.morph.is_some() { continue; }
             let Some(src) = &self.static_models[at].1.lm_source else {
                 // No AO layout, no region — but it still casts: sun-depth
                 // passes take its render geometry at its transform.
@@ -4413,7 +4915,9 @@ impl Renderer {
             self.lm_top = None;
             return;
         }
-        let lights = self.static_lights_for(sun);
+        // Clustered lights are evaluated at the receiving fragment. The
+        // optional OnChange atlas stores SUN visibility only, never lamps.
+        let lights = if self.clustered_enabled { Vec::new() } else { self.static_lights_for(sun) };
         let scene = crate::lightmap::LmScene {
             meshes,
             planars,
@@ -4451,6 +4955,12 @@ impl Renderer {
             }
             Err(e) => log!("star map: png decode failed: {e:?}"),
         }
+    }
+
+    /// Install a worker-prepared panorama with its complete mip chain.
+    pub fn set_star_map_texture(&mut self, texture: Texture) {
+        self.star_map = Some(ImageBuffer::default());
+        self.star_texture = Some(texture);
     }
 
     /// Find and load the star panorama by the standard search order:
@@ -4530,8 +5040,66 @@ impl Renderer {
         if self.gpu_baker.mode() != mode {
             self.shadow_gate = ShadowRebuildGate::default();
             self.lm_kick_sun = None;
+            if self.clustered_enabled { self.clear_world_atlas(); }
         }
         self.gpu_baker.set_mode(mode);
+        self.rebuild_csm_static_casters();
+    }
+
+    /// Runtime A/B switch; clustering is on by default. The old eight-light
+    /// path and lamp atlas remain available with MAKEPAD_CLUSTERED=off.
+    pub fn set_clustered_lighting(&mut self, enabled: bool) {
+        if self.clustered_enabled == enabled { return; }
+        self.clustered_enabled = enabled;
+        self.gi.reset();
+        self.clear_world_atlas();
+        self.lamp_cache_rev = None;
+        self.clustered_frames = 0;
+        self.rebuild_csm_static_casters();
+    }
+
+    pub fn clustered_lighting(&self) -> bool { self.clustered_enabled }
+    pub fn gi_mode(&self)->crate::GiMode{self.gi.mode()}
+    pub fn gi_debug(&self)->crate::GiDebug{self.gi.debug()}
+    pub fn set_gi_debug(&mut self,debug:crate::GiDebug){self.gi.set_debug(debug);}
+    pub fn gi_config(&self)->crate::GiConfig{self.gi.config()}
+    pub fn set_gi_mode(&mut self,mode:crate::GiMode){self.gi.set_mode(mode);}
+    pub fn set_gi_config(&mut self,config:crate::GiConfig){self.gi.set_config(config);}
+    pub fn gi_stats(&self)->crate::GiStats{self.gi.stats}
+    pub fn set_cluster_config(&mut self, config: crate::clustered::ClusterConfig) {
+        self.clustered.set_config(config);
+    }
+    pub fn cluster_stats(&self) -> crate::clustered::ClusterStats {
+        if self.clustered_enabled { self.clustered.stats() } else { Default::default() }
+    }
+
+    pub fn set_local_shadow_config(&mut self, config: crate::local_shadows::LocalShadowConfig) {
+        self.clustered.shadows.set_config(config);
+    }
+    /// Optional wider PCF. Kept independent of GI for fair lighting A/Bs.
+    pub fn set_soft_local_shadows(&mut self,enabled:bool){self.clustered.shadows.soft_filter=enabled;}
+    /// Apparent emitter radius in world units. Only the optional soft filter
+    /// uses it; individual light energy/range and the Quest baseline are unchanged.
+    pub fn set_local_shadow_source_radius(&mut self,radius:f32){
+        self.clustered.shadows.source_radius=if radius.is_finite(){radius.clamp(0.0,2.0)}else{0.4};
+    }
+
+    fn world_atlas_required(&self) -> bool {
+        !self.clustered_enabled || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
+    }
+
+    fn clear_world_atlas(&mut self) {
+        self.gpu_baker.enter_realm();
+        // The old CPU sun/probe colours must not survive a mode switch:
+        // clustered realtime uses CSM for visibility, not a second sun bake.
+        self.bake.enter_realm();
+        self.lightmap = None;
+        self.lm_remaps.clear();
+        self.lm_ground = None;
+        self.lm_top = None;
+        self.lm_kick_key = None;
+        self.lm_kick_sun = None;
+        self.shadow_gate = ShadowRebuildGate::default();
     }
 
     pub fn gpu_lightmap_mode(&self) -> crate::gpu_lightmap::GpuLightmapMode {
@@ -4608,6 +5176,97 @@ impl Renderer {
         self.ssao = ssao;
     }
 
+    /// Local lights must see all opaque architecture, not just the subset
+    /// owned by CSM when a world atlas is present. Reuse resident geometry;
+    /// terrain/voxel conversions are cached with each tile's revision.
+    fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &GameWorld) -> Vec<crate::gpu_lightmap::GpuBakeMesh> {
+        use crate::gpu_lightmap::GpuBakeMesh;
+        let mut out = Vec::new();
+        for inst in self.placed_models.iter().filter(|i| !i.dynamic) {
+            if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
+            let Some((_,model)) = self.static_models.iter().find(|(id,_)|id == &inst.model) else {continue;};
+            if model.morph.is_some(){continue;}
+            let (min,max) = crate::lightmap::world_bounds(&inst.transform,(model.min,model.max));
+            for geometry in std::iter::once(model.geometry.as_ref()).chain(model.extra_draws.iter().map(|(g,..)|g.as_ref())) {
+                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max});
+            }
+        }
+        fn shadow_geometry(cx:&mut Cx,source:&Geometry,cached:&mut Option<Geometry>)->Option<GeometryId> {
+            if cached.is_none() {
+                let (indices,vertices)=source.cpu_buffers(cx);
+                let vertices=vertices.as_f32()?;
+                let indices=indices.as_u32()?.to_vec();
+                let mut packed=Vec::with_capacity(vertices.len()/16*crate::model::MODEL_VERTEX_FLOATS);
+                for v in vertices.chunks_exact(16) {
+                    packed.extend_from_slice(&v[..3]);
+                    packed.resize(packed.len()+crate::model::MODEL_VERTEX_FLOATS-3,0.0);
+                }
+                let geometry=Geometry::new(cx); geometry.update(cx,indices,packed); *cached=Some(geometry);
+            }
+            cached.as_ref().map(Geometry::geometry_id)
+        }
+        if self.stage.shows_environment() {
+            if let Some(terrain)=world.terrain.as_ref() {
+                self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_ref());
+                for tile in &mut self.terrain_tiles {
+                    if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
+                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max});
+                    }
+                }
+            }
+            self.ensure_voxel_tiles(cx,world.voxel.as_deref());
+            for tile in &mut self.voxel_tiles {
+                if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
+                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max});
+                }
+            }
+        }
+        out
+    }
+
+    /// World primitives used to enter CSM through the realized atlas. Keep
+    /// them as ordinary caster instances when clustered lighting skips it.
+    fn append_unbaked_world_casters(
+        &mut self, cx: &mut Cx, world: &GameWorld,
+        out: &mut Vec<crate::gpu_lightmap::GpuLmMover>,
+    ) {
+        for e in &world.entities {
+            if e.kind != BodyKind::Static || e.hidden || primitive_bucket(e) != Some(PrimitiveBucket::Opaque) { continue; }
+            let size = vec3f(e.half.x*2.0*e.scale.x,e.half.y*2.0*e.scale.y,e.half.z*2.0*e.scale.z);
+            let transform = Self::rigid_transform(e);
+            self.append_primitive_caster(cx, e.shape, transform, size, out);
+        }
+        for p in &world.parts {
+            let Some(owner) = entity_index_sorted(&world.entities,p.owner).map(|i|&world.entities[i]) else { continue; };
+            if owner.hidden || p.color.w < 0.999 { continue; }
+            let size=vec3f(p.half.x*2.0*owner.scale.x,p.half.y*2.0*owner.scale.y,p.half.z*2.0*owner.scale.z);
+            self.append_primitive_caster(cx,p.shape,Self::part_transform(owner,p),size,out);
+        }
+    }
+
+    fn append_primitive_caster(
+        &mut self,cx:&mut Cx,shape:Shape,mut transform:Mat4f,size:Vec3f,
+        out:&mut Vec<crate::gpu_lightmap::GpuLmMover>,
+    ) {
+        let slot=shape.index();
+        if self.shadow_shape_geometries[slot].is_none() {
+            let (source,indices)=shape_geometry_data(shape);
+            let mut vertices=Vec::with_capacity(source.len()/12*crate::model::MODEL_VERTEX_FLOATS);
+            for p in source.chunks_exact(12) {
+                vertices.extend_from_slice(&p[..3]);
+                vertices.resize(vertices.len()+crate::model::MODEL_VERTEX_FLOATS-3,0.0);
+            }
+            let geometry=Geometry::new(cx);
+            geometry.update(cx,indices,vertices);
+            self.shadow_shape_geometries[slot]=Some(geometry);
+        }
+        for j in 0..3 { transform.v[j]*=size.x; transform.v[4+j]*=size.y; transform.v[8+j]*=size.z; }
+        out.push(crate::gpu_lightmap::GpuLmMover {
+            geometry:self.shadow_shape_geometries[slot].as_ref().unwrap().geometry_id(),
+            transform,min:vec3f(-0.5,-0.5,-0.5),max:vec3f(0.5,0.5,0.5),skin:None,morph:None,
+        });
+    }
+
     /// The bake's stand-in geometry for primitive ENTITY casters: one unit
     /// box in the packed-mesh layout (position lanes only — the depth
     /// shaders read nothing else), built once.
@@ -4657,30 +5316,36 @@ impl Renderer {
     fn collect_lm_movers(
         &self,
         world: &GameWorld,
+        eye:Vec3f,
         skinned_items: Option<&[SkinnedDraw]>,
     ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
         let mut out = Vec::new();
-        for (slot, inst) in self.placed_models.iter().enumerate() {
+        for (target,inst) in self.placed_models.iter().enumerate().map(|(i,m)|(ModelTarget::Instance(i),m))
+            .chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))) {
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model)
             else {
                 continue;
             };
-            let m = &self.static_models[at].1;
+            if self.model_casts_shadow.get(&inst.model)==Some(&false){continue;}
+            let root=&self.static_models[at].1;
+            let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
+            let lod=root.lods.partition_point(|(threshold,_)|*threshold<=distance);
+            let m=if lod==0{root}else{&root.lods[lod-1].1};
+            let morph=m.morph.as_ref().map(|m|m.depth(self.model_anim_state.morph_weights(&target,&inst.model,&m.source)));
             // Anim parts cast as MOVERS even when their level is static: the
             // static atlas was baked without them (they are not in its
             // stream), so a door's shadow can only come from the cascades —
             // and it has to follow the door, which is what a mover is.
             for part in &m.anim_parts {
-                let (_, time, _) =
-                    self.model_anim_state.clock(&ModelTarget::Instance(slot), &inst.model, &part.def);
-                let pose = Mat4f::mul(&inst.transform, &part.def.transform_at(time));
-                for (g, _, _, _) in &part.draws {
+                let pose = Mat4f::mul(&inst.transform, &self.model_anim_state.transform(&target,&inst.model,&part.def));
+                for (g, ..) in &part.draws {
                     out.push(crate::gpu_lightmap::GpuLmMover {
                         geometry: g.geometry_id(),
                         transform: pose,
                         min: part.def.min,
                         max: part.def.max,
                         skin: None,
+                        morph:morph.clone(),
                     });
                 }
             }
@@ -4692,24 +5357,25 @@ impl Renderer {
                     .map(|pose| pose.transform)
                     .unwrap_or_else(|| part.def.rest_transform());
                 let pose = Mat4f::mul(&inst.transform, &local);
-                for (g, _, _, _) in &part.draws {
+                for (g, ..) in &part.draws {
                     out.push(crate::gpu_lightmap::GpuLmMover {
                         geometry: g.geometry_id(),
                         transform: pose,
                         min: part.def.min,
                         max: part.def.max,
                         skin: None,
+                        morph:morph.clone(),
                     });
                 }
             }
-            if !inst.dynamic {
+            if !inst.dynamic && !matches!(target,ModelTarget::Attachment(_)) && morph.is_none() {
                 continue;
             }
             // A multi-material GLB owns one resident geometry per layer.
             // The main geometry alone would make only layer zero cast; walk
             // every visible layer so "dynamic model" means the whole model.
-            for geometry in std::iter::once(&m.geometry)
-                .chain(m.extra_draws.iter().map(|(geometry, ..)| geometry))
+            for geometry in std::iter::once(m.geometry.as_ref())
+                .chain(m.extra_draws.iter().map(|(geometry, ..)| geometry.as_ref()))
             {
                 out.push(crate::gpu_lightmap::GpuLmMover {
                     geometry: geometry.geometry_id(),
@@ -4717,6 +5383,7 @@ impl Renderer {
                     min: m.min,
                     max: m.max,
                     skin: None,
+                    morph:morph.clone(),
                 });
             }
         }
@@ -4739,11 +5406,16 @@ impl Renderer {
                 let (min, max) = item
                     .bounds
                     .unwrap_or((vec3f(-1.0, 0.0, -1.0), vec3f(1.0, 2.2, 1.0)));
+                let distance=crate::asset_lod::instance_distance(&item.transform,eye);
+                let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=distance);n.checked_sub(1).map(|i|&levels[i].1)});
+                let morph=if let Some(lod)=lod{lod.morph.as_ref()}else{self.skin_morphs.get(&item.rig)};
+                let morph=morph.map(|m|m.depth(m.source.sample_playback(item.morph_clip.as_deref(),item.morph_time,item.morph_looping)));
                 out.push(crate::gpu_lightmap::GpuLmMover {
-                    geometry: self.skin_rig_geometries[at].1.geometry_id(),
+                    geometry: lod.map_or_else(||self.skin_rig_geometries[at].1.geometry_id(),|lod|lod.geometry.geometry_id()),
                     transform: item.transform,
                     min,
                     max,
+                    morph,
                     skin: Some(crate::gpu_lightmap::GpuLmSkin {
                         joint_tex: palette_tex.clone(),
                         joint_base: base,
@@ -4753,7 +5425,7 @@ impl Renderer {
         }
         if let Some(box_geom) = &self.lm_box_geometry {
             for e in world.entities.iter() {
-                if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
+                if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid | BodyKind::Kinematic)
                     || e.sensor
                     || e.hidden
                     || e.attached_to != 0
@@ -4788,6 +5460,7 @@ impl Renderer {
                     min: vec3f(-0.5, -0.5, -0.5),
                     max: vec3f(0.5, 0.5, 0.5),
                     skin: None,
+                    morph:None,
                 });
             }
         }
@@ -4937,7 +5610,21 @@ impl Renderer {
                 SETTLED_FRAMES.store(0, Ordering::Relaxed);
             }
         }
-        let csm_scene_bounds = self.csm_scene_bounds;
+        let csm_scene_bounds = self.csm_scene_bounds.or_else(|| {
+            if self.world_atlas_required() { return None; }
+            // An atlas no longer supplies the world bound. Include every
+            // caster (and the eye) so elevated/offscreen sun casters cannot
+            // disappear from the cascades' light-space depth window.
+            let mut min = eye;
+            let mut max = eye;
+            for (lo, hi) in self.csm_static_casters.iter().map(|m| (m.min, m.max))
+                .chain(movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))))
+            {
+                min = vec3f(min.x.min(lo.x), min.y.min(lo.y), min.z.min(lo.z));
+                max = vec3f(max.x.max(hi.x), max.y.max(hi.y), max.z.max(hi.z));
+            }
+            Some((min, max))
+        });
         if let Some(d) = self.gpu_baker.run_frame(
             cx,
             sun.dir,
@@ -5079,6 +5766,7 @@ impl Renderer {
     fn upload_material(&mut self, cx: &mut Cx, pbr: &crate::model::PbrMaterial) -> LayerMaterial {
         if !pbr.is_shiny() {
             return LayerMaterial {
+                surface: None,
                 metallic: 0.0,
                 roughness: 1.0,
                 orm: self.orm_neutral(cx),
@@ -5092,12 +5780,14 @@ impl Renderer {
             .map(|buf| buf.into_new_mip_repeat_texture(cx));
         match orm {
             Some(tex) => LayerMaterial {
+                surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,
                 orm: tex,
                 orm_on: true,
             },
             None => LayerMaterial {
+                surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,
                 orm: self.orm_neutral(cx),
@@ -5217,6 +5907,20 @@ impl Renderer {
             .map(|(_, m)| m.occluder_parts.as_slice())
     }
 
+    pub fn model_authored_collisions(&self, id: &str) -> Option<&std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>> {
+        self.static_models.iter().find(|(key, _)| key == id).map(|(_, model)| &model.authored_collisions).filter(|values| !values.is_empty())
+    }
+
+    pub fn model_has_authored_lights(&self, id: &str) -> bool {
+        self.static_models.iter().any(|(key, model)| key == id && !model.emitters.is_empty())
+    }
+
+    /// Replace the live ownership set so removing/swapping an exterior
+    /// restores ordinary vehicle headlights without mutating authored state.
+    pub fn set_model_headlight_owners(&mut self, owners: Vec<u64>) {
+        self.model_headlight_owners = owners;
+    }
+
     pub fn model_collider_parts(&self, id: &str) -> Option<&[(Vec3f, Vec3f)]> {
         self.static_models
             .iter()
@@ -5248,6 +5952,7 @@ impl Renderer {
                         anchor: part.def.anchor,
                         radius: part.def.radius,
                         width: part.def.width,
+                        visual: part.def.visual,
                         rest_transform: part.def.rest_transform(),
                     })
                     .collect()
@@ -5282,7 +5987,7 @@ impl Renderer {
             .iter()
             .find(|(k, _)| k == id)
             .and_then(|(_, m)| m.sky.as_ref())
-            .map(|s| &s.part)
+            .map(|s| s.part.as_ref())
     }
 
     /// The sky faces' triangles in MODEL space.
@@ -5341,7 +6046,7 @@ impl Renderer {
             .iter()
             .find(|(k, _)| k == id)
             .and_then(|(_, m)| m.anim_parts.iter().find(|p| p.def.name == part))
-            .map(|p| &p.def)
+            .map(|p| p.def.as_ref())
     }
 
     /// Every part name a loaded model exposes, in file order.
@@ -5366,6 +6071,22 @@ impl Renderer {
     /// has no such part, or the part has no such state; the caller has asked
     /// for something that does not exist, and silently doing nothing would
     /// hide an importer/contract mismatch.
+    /// Select an imported clip at an explicit simulation time. None stops
+    /// the clip in its authored rest pose; remove_model_clip restores autoplay.
+    pub fn set_model_clip(&mut self,target:impl Into<ModelTarget>,name:Option<String>,time:f32,looping:bool)->Result<(),String>{
+        self.set_model_clip_weighted(target,name,time,looping,1.0)
+    }
+    pub fn set_model_clip_weighted(&mut self,target:impl Into<ModelTarget>,name:Option<String>,time:f32,looping:bool,weight:f32)->Result<(),String>{
+        if !time.is_finite()||time<0.0{return Err("model clip time must be finite and nonnegative".into())}
+        if !weight.is_finite()||!(0.0..=1.0).contains(&weight){return Err("model clip weight must be finite and within0..1".into())}
+        let target=target.into();let id=self.target_model_id(&target).ok_or("model clip target is not resident")?;
+        let model=self.static_models.iter().find(|(key,_)|key==&id).map(|(_,m)|m).ok_or("model clip target is not resident")?;
+        if let Some(name)=&name{if !model.anim_parts.iter().any(|p|p.def.clip.hierarchy.as_ref().is_some_and(|h|h.has_clip(name)))&&!model.morph.as_ref().is_some_and(|m|m.source.clips.iter().any(|c|&c.name==name)){return Err(format!("model has no imported clip '{name}'"))}}
+        if !self.model_anim_state.clips.contains_key(&target)&&self.model_anim_state.clips.len()>=1024{return Err("model clip bindings exceed1024".into())}
+        self.model_anim_state.clips.insert(target,ModelClipPlayback{name,time,looping,weight});Ok(())
+    }
+    pub fn remove_model_clip(&mut self,target:impl Into<ModelTarget>){self.model_anim_state.clips.remove(&target.into());}
+
     pub fn set_model_state(
         &mut self,
         target: impl Into<ModelTarget>,
@@ -5384,7 +6105,7 @@ impl Renderer {
             .iter()
             .find(|(k, _)| *k == model_id)
             .and_then(|(_, m)| m.anim_parts.iter().find(|p| p.def.name == part))
-            .map(|p| &p.def)
+            .map(|p| p.def.as_ref())
         else {
             return false;
         };
@@ -5440,6 +6161,7 @@ impl Renderer {
         match target {
             ModelTarget::Model(id) => Some(id.clone()),
             ModelTarget::Instance(i) => self.placed_models.get(*i).map(|m| m.model.clone()),
+            ModelTarget::Attachment(i) => self.world_attachments.get(*i).map(|m|m.model.clone()),
         }
     }
 
@@ -5458,9 +6180,9 @@ impl Renderer {
                 continue;
             };
             for part in &loaded.anim_parts {
-                let (state, time, _) =
+                let (state, _, _) =
                     self.model_anim_state.clock(&ModelTarget::Instance(slot), &inst.model, &part.def);
-                let m = Mat4f::mul(&inst.transform, &part.def.transform_at(time));
+                let m = Mat4f::mul(&inst.transform, &self.model_anim_state.transform(&ModelTarget::Instance(slot),&inst.model,&part.def));
                 let (boxes, min, max) = world_boxes(&m, &part.collider);
                 out.push(AnimPartBox {
                     instance: slot,
@@ -5487,14 +6209,14 @@ impl Renderer {
     ) -> Option<Vec<(Vec3f, Vec3f)>> {
         let target = target.into();
         let slot = match &target {
-            ModelTarget::Instance(i) => *i,
+            ModelTarget::Instance(i)|ModelTarget::Attachment(i) => *i,
             ModelTarget::Model(id) => self.placed_models.iter().position(|m| m.model == *id)?,
         };
-        let inst = self.placed_models.get(slot)?;
+        let inst = if matches!(target,ModelTarget::Attachment(_)){self.world_attachments.get(slot)?}else{self.placed_models.get(slot)?};
         let (_, loaded) = self.static_models.iter().find(|(k, _)| *k == inst.model)?;
         let found = loaded.anim_parts.iter().find(|p| p.def.name == part)?;
-        let (_, time, _) = self.model_anim_state.clock(&target, &inst.model, &found.def);
-        let m = Mat4f::mul(&inst.transform, &found.def.transform_at(time));
+        let (_, _, _) = self.model_anim_state.clock(&target, &inst.model, &found.def);
+        let m = Mat4f::mul(&inst.transform, &self.model_anim_state.transform(&target,&inst.model,&found.def));
         Some(world_boxes(&m, &found.collider).0)
     }
 
@@ -5528,6 +6250,8 @@ impl Renderer {
             return;
         }
         let pbr_lane = draw.is_pbr();
+        self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
+        self.gi.bind(cx.cx, &mut draw.base().draw_vars);
         let custom_name = match &draw {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
@@ -5628,14 +6352,14 @@ impl Renderer {
         );
         let empty_block = LightBlock::default();
         let mut static_block = [0.0f32; LIGHT_BLOCK_FLOATS];
-        let static_split = merge_transients_into_block(
+        let static_split = if self.clustered_enabled { 0 } else { merge_transients_into_block(
             &empty_block,
             &self.frame_lights,
             self.frame_baked_count..self.frame_lights.len(),
             anchor_all,
             &mut self.light_rank,
             &mut static_block,
-        );
+        ) };
         // Which block the draw_vars currently carry; statics rewrite only
         // after a dynamic instance changed it.
         let mut dynamic_block_active = true;
@@ -5644,19 +6368,22 @@ impl Renderer {
         // into a single draw item.
         let mut order: Vec<usize> = (0..instances.len()).collect();
         order.sort_by(|a, b| instances[*a].model.cmp(&instances[*b].model));
-        let mut last: Option<String> = None;
+        let mut last: Option<(String,usize)> = None;
         for i in order {
             let inst = &instances[i];
             let dynamic = lane.is_dynamic(inst);
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model) else {
                 continue;
             };
-            let loaded = &self.static_models[at];
+            let root = &self.static_models[at].1;
+            let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
+            let lod_index=root.lods.partition_point(|(threshold,_)|*threshold<=distance);
+            let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
             // Lane filter. Both passes walk the same instance list — indices
             // address `lm_remaps` / `model_ground` / the light-cell key, so
             // they must not be renumbered — and each takes only the models
             // its shader owns.
-            let uses_pbr_lane = self.pbr_materials_enabled && loaded.1.wants_pbr;
+            let uses_pbr_lane = self.pbr_materials_enabled && loaded.wants_pbr;
             let wanted_custom = inst.custom_material.as_ref().filter(|m| {
                 custom_name.as_deref() == Some(m.name.as_str())
                     || self.custom_draws.get(&m.name).is_some_and(|d| d.draw_vars.can_instance())
@@ -5671,13 +6398,31 @@ impl Renderer {
             }
             // Hoisted: `loaded` borrows self, and the per-instance light
             // block below needs `&mut self` (cell hysteresis).
-            let tri_count = loaded.1.triangles;
+            draw.base().morph_ctl=Vec4f::default();
+            if let Some(morph)=&loaded.morph{
+                let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
+                let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
+                draw.base().morph_ctl=vec4(morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32);
+                draw.base().morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
+                draw.base().morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
+                draw.base().morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
+                draw.base().morph_weights3=vec4(weights[12],weights[13],weights[14],weights[15]);
+                draw.base().morph_weights4=vec4(weights[16],weights[17],weights[18],weights[19]);
+                draw.base().morph_weights5=vec4(weights[20],weights[21],weights[22],weights[23]);
+                draw.base().morph_weights6=vec4(weights[24],weights[25],weights[26],weights[27]);
+                draw.base().morph_weights7=vec4(weights[28],weights[29],weights[30],weights[31]);
+                if let Some(shader)=draw.base().draw_vars.draw_shader_id{if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==live_id!(morph_map)){draw.base().draw_vars.set_texture(slot,&morph.texture);}}
+            }
+            let tri_count = loaded.triangles;
             // Offscreen copies are skipped BEFORE packing, and a model whose
             // copies all fall outside never opens a draw item at all. The
             // shadow a prop casts is not affected: prop shadows live in the
             // merged static shadow mesh, which is drawn whole regardless.
             if let Some(frustum) = frustum {
-                if !frustum.intersects_obb(loaded.1.min, loaded.1.max, &inst.transform) {
+                // Generic node clips can leave the authored rest bounds.
+                // Their small, bounded part sets remain visible until posed
+                // bounds are available; a rest-only cull would hide motion.
+                if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min, root.max, &inst.transform) {
                     match lane {
                         WorldModelLane::Placed => stats.model_culled += 1,
                         WorldModelLane::Attachment => stats.world_attachment_culled += 1,
@@ -5686,7 +6431,7 @@ impl Renderer {
                 }
             }
             let (layer_draws, prelit) = {
-                let m = &loaded.1;
+                let m = loaded;
                 let mut layers = Vec::with_capacity(1 + m.extra_draws.len());
                 // A model that is ALL anim parts (a lone door asset) has an
                 // empty static stream and nothing to draw for layer 0.
@@ -5706,7 +6451,7 @@ impl Renderer {
             };
             // Rigid parts ride the PARENT's material: a door is cut from the
             // level tile it sits in, so its metal/roughness is the model's.
-            let part_material = loaded.1.material.clone();
+            let has_lightmap_source = loaded.lm_source.is_some();
             // The pack's baked occlusion, on slot 1. Packs share atlases, so
             // this changes only when the pack does — the sort above keeps
             // models of a pack adjacent, so it does not break batching.
@@ -5716,7 +6461,7 @@ impl Renderer {
                 .find(|(m, _)| *m == inst.model)
                 .and_then(|(_, pack)| self.ao_textures.iter().find(|(k, _)| k == pack))
                 .map(|(_, t)| t);
-            if let Some(t) = ao_tex {
+            if let Some(t) = ao_tex.filter(|_|lod_index==0) {
                 draw.base().draw_vars.set_texture(1, t);
                 draw.base().ao_enabled = 1.0;
                 stats.ao_bound += 1;
@@ -5729,7 +6474,7 @@ impl Renderer {
             draw.base().color_adjust_ctl = inst.color_adjust;
             // This copy's window into the light atlas; zero disables — a
             // dynamic prop or an unbaked model lights analytically as before.
-            draw.base().lm_rect = if dynamic {
+            draw.base().lm_rect = if dynamic || !has_lightmap_source {
                 Vec4f::default()
             } else {
                 self.lm_remaps.get(i).copied().unwrap_or_default()
@@ -5739,7 +6484,7 @@ impl Renderer {
             // light is already in the atlas RGB.
             draw.base().dl_apply = if dynamic { 1.0 } else { 0.0 };
             draw.base().depth_bias = inst.depth_order * 1.0e-3;
-            if dynamic {
+            if dynamic && !self.clustered_enabled {
                 // This instance's OWN cell block + transients, and its
                 // ground plane for the sun-ray-projected shadow sample.
                 let (x, z) = (inst.transform.v[12], inst.transform.v[14]);
@@ -5769,12 +6514,18 @@ impl Renderer {
                 draw.base().ground_y = 0.0;
                 dynamic_block_active = false;
             }
-            if last.as_deref() != Some(inst.model.as_str()) {
+            if dynamic && self.clustered_enabled {
+                draw.base().ground_y = match lane {
+                    WorldModelLane::Placed => self.model_ground.get(i),
+                    WorldModelLane::Attachment => self.world_attachment_ground.get(i),
+                }.copied().unwrap_or(0.0);
+            }
+            if last.as_ref().is_none_or(|(model,level)|model!=&inst.model||*level!=lod_index) {
                 match lane {
                     WorldModelLane::Placed => stats.model_draws += 1,
                     WorldModelLane::Attachment => stats.world_attachment_draws += 1,
                 }
-                last = Some(inst.model.clone());
+                last = Some((inst.model.clone(),lod_index));
             }
             match lane {
                 WorldModelLane::Placed => {
@@ -5792,7 +6543,7 @@ impl Renderer {
                 draw.base().draw_vars.set_texture(5, detail);
                 draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                 draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                draw.set_material(material);
+                draw.set_material(cx.cx, material);
                 if draw.base().draw_vars.can_instance() {
                     let new_area = cx.add_instance(&draw.base().draw_vars);
                     draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
@@ -5806,8 +6557,9 @@ impl Renderer {
             // A part carries no baked chart (lm_rect zeroed): it moves, so
             // the static atlas never had a window for it. Its shadow comes
             // from the realtime cascades, which see it as a mover.
-            let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2])>)> = {
-                let m = &self.static_models[at].1;
+            let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2],LayerMaterial)>)> = {
+                let root=&self.static_models[at].1;
+                let m = if lod_index==0{root}else{&root.lods[lod_index-1].1};
                 let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
                 if !m.anim_parts.is_empty() {
                     let key = match lane {
@@ -5815,18 +6567,18 @@ impl Renderer {
                         // Attachments are not placed slots — a slot index
                         // would address someone else's instance — so their
                         // parts follow the per-MODEL command only.
-                        WorldModelLane::Attachment => ModelTarget::Model(inst.model.clone()),
+                        WorldModelLane::Attachment => ModelTarget::Attachment(i),
                     };
                     parts.extend(m.anim_parts.iter().map(|p| {
-                            let (_, time, _) =
+                            let (_, _, _) =
                                 self.model_anim_state.clock(&key, &inst.model, &p.def);
                             (
-                                p.def.transform_at(time),
+                                self.model_anim_state.transform(&key,&inst.model,&p.def),
                                 p.def.indices.len() / 3,
                                 p.draws
                                     .iter()
-                                    .map(|(g, t, d, s)| {
-                                        (g.geometry_id(), t.clone(), d.clone(), *s)
+                                    .map(|(g, t, d, s,m)| {
+                                        (g.geometry_id(), t.clone(), d.clone(), *s,m.clone())
                                     })
                                     .collect(),
                             )
@@ -5845,7 +6597,7 @@ impl Renderer {
                         part
                             .draws
                             .iter()
-                            .map(|(g, t, d, s)| (g.geometry_id(), t.clone(), d.clone(), *s))
+                            .map(|(g, t, d, s,m)| (g.geometry_id(), t.clone(), d.clone(), *s,m.clone()))
                             .collect(),
                     )
                 }));
@@ -5854,13 +6606,13 @@ impl Renderer {
             for (pose, part_tris, part_draws) in &parts {
                 draw.base().transform = Mat4f::mul(&inst.transform, pose);
                 draw.base().lm_rect = Vec4f::default();
-                for (geometry_id, texture, detail, dscale) in part_draws {
+                for (geometry_id, texture, detail, dscale,material) in part_draws {
                     draw.base().draw_vars.geometry_id = Some(*geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                    draw.set_material(&part_material);
+                    draw.set_material(cx.cx, material);
                     if draw.base().draw_vars.can_instance() {
                         let new_area = cx.add_instance(&draw.base().draw_vars);
                         draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
@@ -6162,19 +6914,17 @@ impl Renderer {
         if self.skin_rig_loaded(rig) {
             return;
         }
-        let geometry = Geometry::new(cx);
-        geometry.update(cx, rest.indices, rest.vertices);
-        let ao_map = Texture::new_with_format(
-            cx,
-            TextureFormat::VecRu8 {
-                width: rest.ao_size,
-                height: rest.ao_size,
-                data: Some(rest.ao_pixels),
-                unpack_row_length: None,
-                updated: TextureUpdated::Full,
-            },
-        );
-        self.skin_rig_geometries.push((rig, geometry, ao_map));
+        self.install_uploaded_skin_rig(rig, UploadedSkinRig::upload(cx, rest));
+    }
+
+    pub fn install_uploaded_skin_rig(&mut self, rig: u64, uploaded: UploadedSkinRig) {
+        if !self.skin_rig_loaded(rig) {
+            self.skin_lods.insert(rig,uploaded.lods);
+            if let Some(morph)=uploaded.morph{self.skin_morphs.insert(rig,morph);}
+            if let Some(sdf)=uploaded.sdf{self.skin_prepared_sdf.insert(rig,sdf);}
+            self.skin_material_draws.insert(rig,uploaded.materials);
+            self.skin_rig_geometries.push((rig, uploaded.geometry, uploaded.ao_map));
+        }
     }
 
     /// Upload one delivered SDF atlas as an R8 texture + its addressing
@@ -6265,6 +7015,10 @@ impl Renderer {
             if self.sdf_atlas_tex.iter().any(|(r, _)| *r == item.rig) {
                 continue;
             }
+            if let Some(prepared)=self.skin_prepared_sdf.get(&item.rig){
+                let payload=prepared.as_ref().filter(|(_,meta)|Self::sun_len_compatible(meta.len_per_unit,sun.shadow_len_per_unit())).cloned();
+                self.sdf_atlas_tex.push((item.rig,payload));continue;
+            }
             let payload = item.sdf_sidecar.as_ref().and_then(|(glb, hash)| {
                 let sidecar = std::path::PathBuf::from(format!("{glb}.shadowsdf"));
                 Self::load_shadow_sdf_sidecar(
@@ -6306,6 +7060,12 @@ impl Renderer {
     fn seed_model_sdf(&mut self, cx: &mut Cx, key: &str, sun: &SunLight) {
         if self.model_sdf_tex.contains_key(key) {
             return;
+        }
+        if let Some((_,model))=self.static_models.iter().find(|(id,_)|id==key){
+            if let Some(prepared)=&model.prepared_sdf{
+                let payload=prepared.as_ref().filter(|(_,meta)|Self::sun_len_compatible(meta.len_per_unit,sun.shadow_len_per_unit())).cloned();
+                self.model_sdf_tex.insert(key.to_string(),payload);return;
+            }
         }
         // Bytes that arrived with the model (asset store) outrank the
         // checkout sidecar; they carry no mtime, only the sun gate applies.
@@ -6414,7 +7174,11 @@ impl Renderer {
         sun: &SunLight,
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
+        eye:Vec3f,
     ) {
+        batch.skinned.eye=eye;
+        self.clustered.bind(cx.cx, &mut batch.skinned.draw_vars, self.clustered_enabled);
+        self.gi.bind(cx.cx, &mut batch.skinned.draw_vars);
         sun.write_into(
             &mut batch.skinned.light_dir,
             &mut batch.skinned.sun_color,
@@ -6500,7 +7264,7 @@ impl Renderer {
             // merge — light_grid.rs), written BEFORE the draw item opens so
             // the capture is deterministic. Characters sharing a cell (and
             // rig/atlas) still merge into one item.
-            {
+            if !self.clustered_enabled {
                 let (x, z) = (item.transform.v[12], item.transform.v[14]);
                 let cell = self.stable_light_cell(0x8000_0000_0000_0000 | item.key, x, z);
                 let block = match cell {
@@ -6529,8 +7293,10 @@ impl Renderer {
             // simply is one more caster and receiver in the maps).
             batch.skinned.ground_y = self.char_ground.get(i).copied().unwrap_or(0.0);
             batch.skinned.joint_base = base;
+            let distance=crate::asset_lod::instance_distance(&item.transform,eye);
+            let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=distance);n.checked_sub(1).map(|i|&levels[i].1)});
             batch.skinned.draw_vars.geometry_id =
-                Some(self.skin_rig_geometries[at].1.geometry_id());
+                Some(lod.map_or_else(||self.skin_rig_geometries[at].1.geometry_id(),|lod|lod.geometry.geometry_id()));
             batch.skinned.transform = item.transform;
             batch.skinned.tint = item.tint;
             batch.skinned.color_adjust_ctl = item.color_adjust;
@@ -6547,14 +7313,51 @@ impl Renderer {
             {
                 batch.skinned.draw_vars.set_texture(0, tex);
             }
+            if let Some(texture)=lod.and_then(|lod|lod.base_texture.as_ref()){batch.skinned.draw_vars.set_texture(0,texture);}
             batch.skinned.draw_vars.set_texture(1, &palette_tex);
             // The rig's rest-pose AO atlas — per rig, so it changes exactly
             // when the geometry does and never breaks the rig batching.
-            batch.skinned.draw_vars.set_texture(2, &self.skin_rig_geometries[at].2);
+            batch.skinned.draw_vars.set_texture(2, lod.map_or(&self.skin_rig_geometries[at].2,|lod|&lod.ao_map));
+            batch.skinned.morph_ctl=Vec4f::default();
+            let morph=if let Some(lod)=lod{lod.morph.as_ref()}else{self.skin_morphs.get(&item.rig)};
+            if let Some(morph)=morph{
+                let weights=morph.source.sample_playback(item.morph_clip.as_deref(),item.morph_time,item.morph_looping);
+                batch.skinned.morph_ctl=vec4(morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32);
+                batch.skinned.morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
+                batch.skinned.morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
+                batch.skinned.morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
+                batch.skinned.morph_weights3=vec4(weights[12],weights[13],weights[14],weights[15]);
+                batch.skinned.morph_weights4=vec4(weights[16],weights[17],weights[18],weights[19]);
+                batch.skinned.morph_weights5=vec4(weights[20],weights[21],weights[22],weights[23]);
+                batch.skinned.morph_weights6=vec4(weights[24],weights[25],weights[26],weights[27]);
+                batch.skinned.morph_weights7=vec4(weights[28],weights[29],weights[30],weights[31]);
+                if let Some(shader)=batch.skinned.draw_vars.draw_shader_id{if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==live_id!(morph_map)){batch.skinned.draw_vars.set_texture(slot,&morph.texture);}}
+            }
+            let materials=if let Some(lod)=lod{Some(&lod.materials)}else{self.skin_material_draws.get(&item.rig)};
+            if let Some(parts)=materials.filter(|parts|!parts.is_empty()) {
+                for part in parts {
+                    let definition=&part.surface.definition;
+                    batch.skinned.surface_on=1.0;batch.skinned.metallic=part.metallic;batch.skinned.roughness=part.roughness;
+                    batch.skinned.material_alpha=definition.base_alpha;batch.skinned.alpha_mode=definition.alpha_mode as f32;batch.skinned.alpha_cutoff=definition.alpha_cutoff;
+                    batch.skinned.normal_scale=definition.normal_scale;batch.skinned.occlusion_strength=definition.occlusion_strength;
+                    batch.skinned.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);batch.skinned.double_sided=if definition.double_sided{1.0}else{0.0};
+                    batch.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;batch.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;batch.skinned.draw_vars.options.backface_culling=!definition.double_sided;
+                    batch.skinned.draw_vars.geometry_id=Some(part.geometry.geometry_id());
+                    batch.skinned.draw_vars.set_texture(0,&part.base);
+                    if let Some(shader)=batch.skinned.draw_vars.draw_shader_id {
+                        for(name,texture)in [(live_id!(orm_map),&part.orm),(live_id!(normal_map),&part.surface.normal),(live_id!(occlusion_map),&part.surface.occlusion),(live_id!(emissive_map),&part.surface.emissive)] {
+                            if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==name){batch.skinned.draw_vars.set_texture(slot,texture);}
+                        }
+                    }
+                    if batch.skinned.draw_vars.can_instance(){let area=cx.add_instance(&batch.skinned.draw_vars);batch.skinned.draw_vars.area=cx.update_area_refs(batch.skinned.draw_vars.area,area);}
+                }
+            } else {
+                batch.skinned.surface_on=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =
                     cx.update_area_refs(batch.skinned.draw_vars.area, new_area);
+            }
             }
         }
     }
@@ -6637,6 +7440,9 @@ impl Renderer {
         let mut stats = RenderStats::default();
         let camera_pos = scene_state.camera_pos;
         let stage_matrix = self.stage.matrix();
+        let cluster_view = (self.stage.mode == StageMode::Flat).then(|| (
+            Mat4f::mul(&scene_state.view, &stage_matrix), scene_state.projection,
+        ));
         // CPU frustum for per-frame instance culling AND the Realtime
         // bake's visible-region scheduling, in the same world units the
         // instance transforms use (the stage rides inside the clip matrix).
@@ -6658,18 +7464,27 @@ impl Renderer {
         // draw gates below and the mover collection consume, so the
         // settings/F8 mode switch flips the complete contract atomically.
         let tiers = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode());
+        let sun = crate::sun::resolve_sun(&world.sun);
+        self.build_frame_lights(&sun);
+        crate::entity_lights::append_entity_lights_with_model_headlights(
+            world, &mut self.frame_lights, &self.model_headlight_owners,
+        );
+        let local_shadows = self.clustered_enabled && self.frame_lights.iter().any(|l| l.shadows);
         // Character palettes pack BEFORE the cascades encode: the skinned
         // depth passes bind the same texture the visible draw does.
         match &skinned {
             Some(batch) => self.pack_skin_palettes(cx.cx, &batch.items, &mut stats),
             None => self.skin_joint_bases.clear(),
         }
-        let lm_movers = if tiers.csm {
+        let mut lm_movers = if tiers.csm || local_shadows {
             self.ensure_lm_box_geometry(cx.cx);
-            self.collect_lm_movers(world, skinned.as_ref().map(|b| b.items.as_slice()))
+            self.collect_lm_movers(world, camera_pos, skinned.as_ref().map(|b| b.items.as_slice()))
         } else {
             Vec::new()
         };
+        if tiers.csm && !self.world_atlas_required() {
+            self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
+        }
         // The camera slice the Realtime cascades fit to: the far-plane
         // corners of THIS view, unprojected (far = clip z +w in every
         // backend's convention). Flat stage only — in XR the runtime owns
@@ -6705,6 +7520,47 @@ impl Renderer {
         // render BEFORE this scene pass, so a delivered atlas / fresh
         // cascade set is never sampled stale — no readback, no upload).
         self.run_gpu_lightmap(cx.cx, world, &lm_movers, csm_view.as_ref(), camera_pos);
+        if self.clustered_enabled {
+            self.clustered.update(cx.cx, &self.frame_lights, cluster_view);
+            let statics = if local_shadows {
+                if !(tiers.csm && !self.world_atlas_required()) {
+                    self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
+                }
+                self.collect_local_static_casters(cx.cx, world)
+            } else { Vec::new() };
+            self.clustered.render_shadows(cx.cx, camera_pos, &statics, &lm_movers);
+            stats.clustered = self.clustered.stats();
+        }
+        if self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
+            self.gi.poll();
+            let terrain_rev=world.terrain.as_ref().map_or(0,|t|t.revision);
+            let voxel_rev=world.voxel.as_ref().map_or(0,|v|v.meshes.values().fold(v.structure_rev,|h,m|h.wrapping_mul(1099511628211)^m.rev));
+            let key=(world.render_rev^terrain_rev.rotate_left(17)^voxel_rev.rotate_left(31),world.paint_rev,self.models_rev);
+            if self.gi.needs_scene(key) {
+                if let Ok(slot)=cx.task_pool().reserve(makepad_platform::thread::Lane::Heavy) {
+                    let snapshot_start=Cx::monotonic_now();
+                    match self.gi_snapshot(cx.cx,world){Ok(scene)=>self.gi.submit(key,slot,scene),Err(e)=>self.gi.reject(key,&e)}
+                    self.gi.stats.snapshot_us=((Cx::monotonic_now()-snapshot_start)*1e6)as u64;
+                }else if !self.gi.stats.waiting_for_worker {
+                    self.gi.stats.waiting_for_worker=true;
+                    log!("fast GI: worker queue busy; retrying next frame");
+                }
+            }
+            // Orbit cameras shade their subject, not empty space around a
+            // distant lens. Player views use the followed body; XR falls
+            // back to its world-space eye when no game camera is active.
+            let center=if let Some(focus)=self.csm_focus {
+                camera_pos-vec3f(scene_state.view.v[2],scene_state.view.v[6],scene_state.view.v[10])*focus
+            }else if let Some(e)=world.entity(world.cam_third).or_else(||world.entity(world.cam_follow)) {e.pos+vec3f(0.0,1.0,0.0)}
+            else if self.stage.mode==StageMode::Flat {world.cam_target}else{camera_pos};
+            let movers=self.gi_movers(world,center,skinned.as_ref().map(|b|b.items.as_slice()));
+            self.gi.run(cx.cx,center,&movers,&sun,&self.clustered,self.gpu_baker.csm_binding());
+            if self.gi.stats.relit_rays>0 {if let Some(parent)=self.gi.relight_pass(){self.clustered.parent_shadows(cx.cx,parent);self.gpu_baker.parent_csm_to(cx.cx,parent);}}
+            stats.gi=self.gi.stats;
+            if self.clustered_frames%120==0 && std::env::var_os("MAKEPAD_GI_STATS").is_some(){log!("fast GI: {} triangles, {}/{} probes, {} trace / {} relight rays, {} movers ({} overflow), {} lights, {}us snapshot / {:.2}ms worker, {}us encode, GPU {:?}ms peak {:?}ms, {} bytes resident; building={} rejected={}",stats.gi.triangles,stats.gi.ready_probes,stats.gi.probes,stats.gi.traced_rays,stats.gi.relit_rays,stats.gi.mover_count,stats.gi.omitted_movers,stats.gi.selected_lights,stats.gi.snapshot_us,stats.gi.preparation_ms,stats.gi.encode_us,stats.gi.gpu_ms,stats.gi.gpu_peak_ms,stats.gi.resident_bytes,stats.gi.building,stats.gi.rejected_scene);}
+            if self.clustered_frames%120==0 && std::env::var_os("MAKEPAD_GI_STATS").is_some(){log!("GI placement: {:.2}ms, {} relocated, {} inactive ({} exhausted), {} CPU bytes; trace cap {}, {} blocker cells ({} full-list)",stats.gi.placement_ms,stats.gi.relocated_probes,stats.gi.inactive_probes,stats.gi.placement_exhausted,stats.gi.preparation_cpu_bytes,stats.gi.trace_node_limit,stats.gi.blocker_cells,stats.gi.blocker_overflow_cells);}
+            if self.clustered_frames%120==0 && std::env::var_os("MAKEPAD_GI_STATS").is_some(){log!("GI startup: {} warmup sweeps, {:.3} display blend",stats.gi.startup_sweeps,stats.gi.display_blend);}
+        }
         draw_list.begin_always(cx);
         cx.begin_scene_3d(scene_state);
         let previous_world = cx.set_scene_world_transform_3d(stage_matrix);
@@ -6823,8 +7679,20 @@ impl Renderer {
         // transients — their street-lamp light is already baked into the
         // atlas RGB, and adding it analytically would double-light every
         // static surface. Written before any of their draw items open.
-        self.build_frame_lights(&sun);
-        {
+        if self.clustered_enabled {
+            self.clustered_frames += 1;
+            if self.clustered_frames == 1 || (self.clustered_frames % 120 == 0 && std::env::var_os("MAKEPAD_CLUSTER_STATS").is_some()) {
+                log!("clustered forward: {} lights, {} refs, {} occupied clusters, max {} lights/cluster, {} us build/upload, {} bytes; {} grid; world atlas {}",
+                    stats.clustered.lights, stats.clustered.references, stats.clustered.occupied_clusters,
+                    stats.clustered.max_lights_in_cluster, stats.clustered.build_us, stats.clustered.upload_bytes,
+                    if stats.clustered.world_grid { "world/XR" } else { "frustum" }, self.world_atlas_required());
+                let s = stats.clustered.shadows;
+                if s.faces > 0 || s.omitted_lights > 0 {
+                    log!("local shadows: {} lights, {} faces, {} omitted, {} caster draws, {} us CPU encode",
+                        s.lights,s.faces,s.omitted_lights,s.caster_draws,s.encode_us);
+                }
+            }
+        } else {
             let transients = self.frame_baked_count..self.frame_lights.len();
             select_lights_for_world(
                 &self.frame_lights,
@@ -6847,6 +7715,10 @@ impl Renderer {
                     self.light_sel.len(),
                 );
             }
+        }
+        for dv in [&mut draws.cube.cube.draw_vars, &mut draws.alpha.cube.cube.draw_vars, &mut draws.terrain.draw_vars] {
+            self.clustered.bind(cx.cx, dv, self.clustered_enabled);
+            self.gi.bind(cx.cx, dv);
         }
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn
@@ -7002,7 +7874,9 @@ impl Renderer {
         // refreshes whenever the sun swings, so a day cycle moves the baked
         // shadows instead of freezing them at dawn. Both land in the colours
         // packed below — the GPU never learns this happened.
-        self.bake.update(world, &sun);
+        if self.world_atlas_required() {
+            self.bake.update(world, &sun);
+        }
         stats.bake = self.bake.stats();
 
         let vars_ready = draws.cube.cube.draw_vars.can_instance()
@@ -7059,7 +7933,7 @@ impl Renderer {
         // key never moves from routine mover/replication traffic, which is
         // what keeps OnChange at zero bake passes in steady state (the
         // two-mode invariant; gpu_lightmap.rs pins it).
-        {
+        if self.world_atlas_required() {
             // The DAYLIGHT quantum is in the key: a lamp's strength is a
             // function of the sky (the headroom rail), so a sun that moves
             // enough to change it has changed the atlas, not just the shade
@@ -7084,8 +7958,8 @@ impl Renderer {
                 // re-schedules the whole job; OnChange re-kicks on every
                 // settle, sun changes included.
                 let world_key = lightmap_world_key(world, self.models_rev, day_key);
-                if self.lm_kick_key != Some(world_key)
-                    || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode())
+                if self.world_atlas_required() && (self.lm_kick_key != Some(world_key)
+                    || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode()))
                 {
                     // Name the cause in the bake's own log line: a blowout
                     // that pops in has to be attributable to the run that
@@ -7134,6 +8008,7 @@ impl Renderer {
             }
         }
         let mut dyn_part_shapes = [false; 5];
+        let mut deferred_alpha: [Vec<DeferredAlphaCube>; 5] = Default::default();
         for (part_index, _) in &dyn_parts {
             dyn_part_shapes[world.parts[*part_index].shape.index()] = true;
         }
@@ -7198,17 +8073,28 @@ impl Renderer {
                 transform.v[12] = e.pos.x;
                 transform.v[13] = e.pos.y;
                 transform.v[14] = e.pos.z;
-                draws.cube.cube.transform = transform;
-                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.cube.cube.cube_size = vec3(
+                let size = vec3(
                     e.half.x * 2.0 * e.scale.x,
                     e.half.y * 2.0 * e.scale.y,
                     e.half.z * 2.0 * e.scale.z,
                 );
                 // Movers sample the baked probe lattice, so a crate rolling
                 // under a bridge darkens without a shadow map or a pass.
-                draws.cube.cube.color =
-                    shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
+                let color = shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
+                if color.w < 0.999 {
+                    deferred_alpha[shape_index].push(DeferredAlphaCube {
+                        transform,
+                        size,
+                        color,
+                        glow: e.glow,
+                        color_adjust_ctl: e.color_adjust.instance(),
+                    });
+                    continue;
+                }
+                draws.cube.cube.transform = transform;
+                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                draws.cube.cube.cube_size = size;
+                draws.cube.cube.color = color;
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = e.glow;
                 draws.cube.color_adjust_ctl = e.color_adjust.instance();
@@ -7239,15 +8125,26 @@ impl Renderer {
                         continue;
                     }
                 }
-                draws.cube.cube.transform = transform;
-                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.cube.cube.cube_size = vec3(
+                let size = vec3(
                     part.half.x * 2.0 * owner.scale.x,
                     part.half.y * 2.0 * owner.scale.y,
                     part.half.z * 2.0 * owner.scale.z,
                 );
-                draws.cube.cube.color =
-                    shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
+                let color = shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
+                if color.w < 0.999 {
+                    deferred_alpha[shape_index].push(DeferredAlphaCube {
+                        transform,
+                        size,
+                        color,
+                        glow: part.glow,
+                        color_adjust_ctl: owner.color_adjust.instance(),
+                    });
+                    continue;
+                }
+                draws.cube.cube.transform = transform;
+                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                draws.cube.cube.cube_size = size;
+                draws.cube.cube.color = color;
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = part.glow;
                 draws.cube.color_adjust_ctl = owner.color_adjust.instance();
@@ -7295,6 +8192,16 @@ impl Renderer {
                     m.v[12] = mid.x;
                     m.v[13] = mid.y;
                     m.v[14] = mid.z;
+                    if beam.color.w < 0.999 {
+                        deferred_alpha[shape_index].push(DeferredAlphaCube {
+                            transform: m,
+                            size: vec3(beam.size, beam.size, len),
+                            color: beam.color,
+                            glow: beam.glow,
+                            color_adjust_ctl: vec4(0.0, 1.0, 1.0, 0.0),
+                        });
+                        continue;
+                    }
                     draws.cube.cube.transform = m;
                     draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
                     draws.cube.cube.cube_size = vec3(beam.size, beam.size, len);
@@ -7484,6 +8391,7 @@ impl Renderer {
                 &sun,
                 frustum,
                 &mut stats,
+                camera_pos,
             );
         }
 
@@ -7813,7 +8721,8 @@ impl Renderer {
                         && e.attached_to == 0
                 });
             let has_particles = shape == Shape::Box && particle_count > 0;
-            if !has_static && !has_dynamic_sensor && !has_shadows && !has_particles {
+            let has_deferred = !deferred_alpha[shape_index].is_empty();
+            if !has_static && !has_dynamic_sensor && !has_shadows && !has_particles && !has_deferred {
                 continue;
             }
             let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
@@ -7964,6 +8873,19 @@ impl Renderer {
                 draws.alpha.cube.cube.depth_clip = 1.0;
                 draws.alpha.cube.glow = e.glow;
                 draws.alpha.cube.color_adjust_ctl = e.color_adjust.instance();
+                draws.alpha.cube.cube.draw(cx);
+                stats.dyn_instances += 1;
+            }
+            // Dynamic entities, parts and beams with fractional alpha, held
+            // back from the opaque batch above.
+            for deferred in deferred_alpha[shape_index].drain(..) {
+                draws.alpha.cube.cube.transform = deferred.transform;
+                draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                draws.alpha.cube.cube.cube_size = deferred.size;
+                draws.alpha.cube.cube.color = deferred.color;
+                draws.alpha.cube.cube.depth_clip = 1.0;
+                draws.alpha.cube.glow = deferred.glow;
+                draws.alpha.cube.color_adjust_ctl = deferred.color_adjust_ctl;
                 draws.alpha.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
             }
@@ -8282,6 +9204,34 @@ mod shell_bucket_tests {
 mod realm_lifecycle_tests {
     use super::*;
 
+    #[test]
+    fn clustered_realtime_skips_world_bakes_and_mode_switch_clears_old_shading() {
+        use crate::gpu_lightmap::{BakeTrigger, GpuLightmapMode};
+        let mut renderer = Renderer::default();
+        renderer.set_clustered_lighting(true);
+        renderer.set_gpu_lightmap_mode(GpuLightmapMode::Realtime);
+        let world = GameWorld::new();
+        renderer.kick_lightmap_bake(&world, &SunLight::default(), BakeTrigger::FirstBake);
+        assert!(!renderer.world_atlas_required());
+        assert!(!renderer.gpu_baker.has_state());
+        assert!(renderer.lightmap_bake_progress().is_none());
+        assert!(renderer.lm_kick_key.is_none());
+
+        renderer.set_gpu_lightmap_mode(GpuLightmapMode::OnChange);
+        assert!(renderer.world_atlas_required());
+        renderer.bake.update(&world, &SunLight::default());
+        renderer.lm_ground = Some((Vec4f::default(), Vec4f::default()));
+        renderer.set_gpu_lightmap_mode(GpuLightmapMode::Realtime);
+        assert!(renderer.lm_ground.is_none());
+        assert_eq!(renderer.bake.stats().probes, 0);
+        assert_eq!(renderer.dynamic_shade(Vec3f::default()), 1.0);
+
+        renderer.set_clustered_lighting(false);
+        assert!(renderer.world_atlas_required(), "legacy A/B path must still have its bake");
+        renderer.set_clustered_lighting(true);
+        assert!(!renderer.world_atlas_required());
+    }
+
     fn model(id: &str, x: f32, dynamic: bool, depth_order: f32) -> ModelInstance {
         let mut transform = Mat4f::identity();
         transform.v[12] = x;
@@ -8498,6 +9448,8 @@ mod realm_lifecycle_tests {
     #[test]
     fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
         let mut renderer = Renderer::default();
+        let cluster_config = crate::clustered::ClusterConfig { lights_per_cluster: 16, ..Default::default() };
+        renderer.set_cluster_config(cluster_config);
         renderer.set_shadow_budget(7);
         renderer.set_stage(Stage::mr_diorama(vec3f(1.0, 2.0, 3.0), 0.4, 0.08));
         renderer.set_gpu_lightmap_mode(crate::gpu_lightmap::GpuLightmapMode::Realtime);
@@ -8594,6 +9546,7 @@ mod realm_lifecycle_tests {
         assert_eq!(renderer.bake.generation(), bake_generation.wrapping_add(1));
 
         assert_eq!(renderer.shadow_budget(), 7);
+        assert_eq!(renderer.clustered.config(), cluster_config);
         assert_eq!(renderer.gpu_lightmap_mode(), crate::gpu_lightmap::GpuLightmapMode::Realtime);
         assert_eq!(renderer.csm_config(), csm_config);
         assert_eq!(renderer.bake_settings().ao_rays, 3);
@@ -8960,6 +9913,7 @@ mod light_tests {
             radius,
             dir: vec3f(0.0, -1.0, 0.0),
             spot: 1.0,
+            ..Default::default()
         }
     }
 
@@ -9900,7 +10854,7 @@ mod sky_lane_tests {
     #[test]
     fn real_e1m1_parsed_upload_keeps_the_embedded_sky1_pixels() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../local/asset-ui/asset-server/cas/objects/92/e2/\
+            "../../local/asset-library/store/cas/objects/92/e2/\
              92e29a55fc78fc51fa84022536634f01dad5af350f734b772ad168b0f005f264",
         );
         let Ok(glb) = std::fs::read(&path) else {
@@ -10050,5 +11004,116 @@ mod sky_lane_tests {
         assert_eq!(sky_p.w, 0.25 + 24.0);
         let sky_q = vec4(sky.v_span, 1.0, 0.0, 0.0);
         assert_eq!(sky_q.x, crate::model::SKY_DEFAULT_V_SPAN);
+    }
+}
+
+#[cfg(test)]
+mod prepared_static_preview_tests {
+    use super::*;
+
+    fn triangle() -> StaticModel {
+        let mut vertices = Vec::new();
+        for p in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] {
+            vertices.extend_from_slice(&[p[0], p[1], p[2], 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
+        }
+        StaticModel {
+            vertices, indices: vec![0, 1, 2], texture_uri: None, texture_png: None,
+            min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
+            parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
+            ground_ao: None, draw_layers: Vec::new(), detail_png: None, detail_scale: [1.0, 1.0],
+            prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None,
+            pbr: Default::default(),
+        }
+    }
+
+    #[test]
+    fn generated_png_limits_are_checked_before_pixel_decode() {
+        let png = Cx::encode_rgba_as_png(4, 4, &[255; 64]).unwrap();
+        assert!(decode_generated_png(&png, 2, 1024).is_err());
+        assert!(decode_generated_png(&png, 8, 32).is_err());
+        assert_eq!(decode_generated_png(&png, 8, 64).unwrap().data.len(), 16);
+        let mut model = triangle();
+        model.texture_png = Some(png);
+        let prepared = PreparedStaticPreview::prepare(model).unwrap();
+        assert_eq!(prepared.main.texture.data.len(), 16+4+1);
+    }
+
+    #[test]
+    fn generated_atlas_upload_preserves_repeat_without_building_cpu_mips() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut image = ImageBuffer::default();
+        image.width = 2; image.height = 2; image.data = vec![0xff00_ff00; 4];
+        let texture = upload_generated_texture(&mut cx, image);
+        match texture.get_format(&mut cx) {
+            TextureFormat::VecMipBGRAu8_32 { max_level: Some(0), wrap: TextureWrap::Repeat, data: Some(data), .. } => assert_eq!(data.len(), 4),
+            _ => panic!("generated atlas upload must use its prepared single level"),
+        }
+    }
+
+    #[test]
+    fn preparation_retains_geometry_and_derives_collision_off_ui() {
+        let model = triangle();
+        let prepared = PreparedStaticPreview::prepare(model).unwrap();
+        assert_eq!(prepared.main.indices, [0, 1, 2]);
+        assert_eq!(prepared.mesh_indices.as_ref(), &prepared.main.indices);
+        assert_eq!(prepared.positions.len(), 3);
+        assert!(!prepared.collider_parts.is_empty());
+        assert_eq!(prepared.upload_bytes(), (3 * crate::model::MODEL_VERTEX_FLOATS + 3) * 4 + 12);
+        let other_pane = prepared.clone();
+        assert_eq!(other_pane.main.indices, prepared.main.indices);
+        assert_eq!(other_pane.main.vertices.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), prepared.main.vertices.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn preparation_rejects_bad_indices_positions_and_invalid_png() {
+        let mut model = triangle();
+        model.indices[2] = 999;
+        assert!(PreparedStaticPreview::prepare(model).is_err());
+        let mut model = triangle();
+        model.vertices[0] = f32::NAN;
+        assert!(PreparedStaticPreview::prepare(model).is_err());
+        let mut model = triangle();
+        model.texture_png = Some(vec![1, 2, 3]);
+        assert!(PreparedStaticPreview::prepare(model).is_err());
+    }
+
+    #[test]
+    fn attachment_clips_are_independent_and_aggregate_light_admission_is_atomic() {
+        let model=crate::StaticModel::parse_glb(&crate::asset_morph::tests::fixture(false,true)).unwrap();
+        let part=&model.anim_parts[0];
+        let mut states=ModelStates::default();
+        states.clips.insert(ModelTarget::Attachment(0),ModelClipPlayback{name:Some("pulse".into()),time:1.,looping:false,weight:1.});
+        states.clips.insert(ModelTarget::Attachment(1),ModelClipPlayback{name:Some("pulse".into()),time:0.5,looping:false,weight:1.});
+        assert_eq!(states.transform(&ModelTarget::Attachment(0),"fixture",part).v[12],2.);
+        assert_eq!(states.transform(&ModelTarget::Attachment(1),"fixture",part).v[12],0.);
+        let mut renderer=Renderer::default();renderer.set_clustered_lighting(true);
+        let light=crate::lightmap::LmLight::omni(vec3f(0.,0.,0.),vec3f(1.,1.,1.),10.);
+        renderer.add_asset_frame_lights(vec![light.clone();crate::asset_lights::MAX_ASSET_FRAME_LIGHTS]).unwrap();
+        assert!(renderer.add_asset_frame_lights(vec![light]).is_err());
+        assert_eq!(renderer.host_asset_lights.len(),crate::asset_lights::MAX_ASSET_FRAME_LIGHTS);
+        assert!(renderer.asset_light_error().is_some());
+    }
+
+    #[test]
+    fn morph_shadow_casters_share_visible_weights_and_exclude_rest_duplicates() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let bytes=crate::asset_morph::tests::fixture(false,false);
+        let model=StaticModel::parse_glb(&bytes).unwrap();
+        let morph=crate::asset_morph::AssetMorph::parse(&bytes,false).unwrap();
+        let prepared=PreparedStaticPreview::prepare(model).unwrap().with_morph(morph);
+        let mut renderer=Renderer::default();
+        let uploaded=renderer.upload_static_preview(&mut cx,prepared);
+        renderer.install_uploaded_static("morph",uploaded);
+        let instance=ModelInstance{model:"morph".into(),transform:Mat4f::identity(),tint:vec4(1.,1.,1.,1.),color_adjust:vec4(0.,1.,1.,0.),dynamic:false,depth_order:0.,part_poses:Vec::new(),custom_material:None};
+        renderer.set_models(vec![instance.clone()]);
+        renderer.set_world_attachments(vec![instance]);
+        renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();
+        renderer.set_model_clip_weighted(ModelTarget::Attachment(0),Some("pulse".into()),1.,false,0.5).unwrap();
+        let movers=renderer.collect_lm_movers(&GameWorld::default(),vec3f(0.,0.,0.),None);
+        assert_eq!(movers.len(),2);
+        assert_eq!(movers[0].morph.as_ref().unwrap().weights[0].x,0.75);
+        assert_eq!(movers[1].morph.as_ref().unwrap().weights[0].x,0.625);
+        assert!(renderer.csm_static_casters.is_empty());
+        assert!(renderer.collect_local_static_casters(&mut cx,&GameWorld::default()).is_empty());
     }
 }
