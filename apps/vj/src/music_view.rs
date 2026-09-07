@@ -5323,6 +5323,38 @@ impl WaveLane {
     }
 }
 
+/// The eight directions a text outline is stamped in. Same geometry the
+/// karaoke reader's line outline uses (`views.rs`), kept as its own copy
+/// here rather than shared: the two are unrelated widgets that happen to
+/// need the same ring, not one feature split across two files.
+const WAVE_TEXT_OUTLINE_RING: [(f64, f64); 8] = [
+    (-1.0, 0.0),
+    (1.0, 0.0),
+    (0.0, -1.0),
+    (0.0, 1.0),
+    (-0.7, -0.7),
+    (0.7, -0.7),
+    (-0.7, 0.7),
+    (0.7, 0.7),
+];
+
+/// A bar number, loop-slot number or seek readout drawn directly on the
+/// wave has to survive whatever colour the waveform happens to be under
+/// it -- a bright peak reads as no number at all for a flat-coloured
+/// glyph. A dark ring stamped under the fill, no depth step needed: this
+/// is plain 2D overlay drawing, so draw ORDER already puts the ring
+/// under the fill, unlike the karaoke line's own outline which shares a
+/// depth-tested pass with video and needs one.
+fn draw_outlined_text(draw_text: &mut DrawText, cx: &mut Cx2d, pos: DVec2, text: &str, fill: Vec4f) {
+    let ring = (draw_text.text_style.font_size as f64 * 0.09).max(1.0);
+    draw_text.color = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.85 };
+    for (dx, dy) in WAVE_TEXT_OUTLINE_RING {
+        draw_text.draw_abs(cx, dvec2(pos.x + dx * ring, pos.y + dy * ring), text);
+    }
+    draw_text.color = fill;
+    draw_text.draw_abs(cx, pos, text);
+}
+
 /// What the surface reports back to the host.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaveEvent {
@@ -6064,17 +6096,18 @@ impl Widget for VjWaveScroll {
             if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
                 continue;
             }
-            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
             self.draw_text.text_style.font_size = 9.0;
-            self.draw_text.draw_abs(
+            draw_outlined_text(
+                &mut self.draw_text,
                 cx,
                 dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
                 &slot.to_string(),
+                Vec4f::from_u32(0xf4f7faff),
             );
         }
 
         // Bar numbers, ruled off whichever deck is leading the view.
-        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
+        let bar_number_color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
@@ -6104,10 +6137,12 @@ impl Widget for VjWaveScroll {
                         let x = rect.pos.x + rect.size.x * 0.5
                             + (col - centre) / lane_cols.max(1e-4) as f64;
                         if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
-                            self.draw_text.draw_abs(
+                            draw_outlined_text(
+                                &mut self.draw_text,
                                 cx,
                                 dvec2(x + 2.0, rect.pos.y + lane_h + 1.0),
                                 &format!("{}", bar + 1),
+                                bar_number_color,
                             );
                         }
                     }
@@ -7092,7 +7127,6 @@ impl Widget for VjWaveOverview {
                 (self.drag, self.preview)
             {
                 let head_secs = self.head * duration;
-                self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
                 self.draw_text.text_style.font_size = 9.0;
                 let label = format!(
                     "{} ({})",
@@ -7100,19 +7134,26 @@ impl Widget for VjWaveOverview {
                     crate::clock::offset(target_secs - head_secs)
                 );
                 let x = centre_of(target_secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 84.0);
-                self.draw_text.draw_abs(cx, dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0), &label);
+                draw_outlined_text(
+                    &mut self.draw_text,
+                    cx,
+                    dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
+                    &label,
+                    Vec4f::from_u32(0xf4f7faff),
+                );
             } else if self.drag.is_none() {
                 // Hovering (not dragging) a mark answers WHEN: the strip
                 // already shows WHERE with its hairlines, but a chip's
                 // own x position is a few pixels of precision at best.
                 if let Some(secs) = self.hover_mark_secs() {
-                    self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
                     self.draw_text.text_style.font_size = 9.0;
                     let x = centre_of(secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 48.0);
-                    self.draw_text.draw_abs(
+                    draw_outlined_text(
+                        &mut self.draw_text,
                         cx,
                         dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
                         &crate::clock::playhead(secs),
+                        Vec4f::from_u32(0xf4f7faff),
                     );
                 }
             }
