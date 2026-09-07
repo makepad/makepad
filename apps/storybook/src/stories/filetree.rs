@@ -24,6 +24,7 @@ script_mod! {
     }
 
     mod.stories.FileTreeOverview = StoryPage{
+        StoryNote{text: "The working directory read into a tree. The status dots are cycled for the demonstration rather than read from the repository, so all five kinds are on screen: none, new, modified, deleted and mixed."}
         mod.widgets.StoryFileTree{file_tree +: {width: Fill height: Fill}}
     }
 }
@@ -119,7 +120,19 @@ impl StoryFileTree {
                     }
                 }
                 None => {
-                    file_tree.file(cx, file_node_id, &file_node.name);
+                    // The five status kinds, cycled by node id so every one
+                    // of them is on screen. They are a DEMONSTRATION, not a
+                    // reading of the working tree: four of the five had never
+                    // been drawn anywhere, which is how one of them came to
+                    // be drawn fully transparent without anyone noticing.
+                    let status = match file_node_id.0 % 5 {
+                        0 => GitStatusDotKind::None,
+                        1 => GitStatusDotKind::New,
+                        2 => GitStatusDotKind::Modified,
+                        3 => GitStatusDotKind::Deleted,
+                        _ => GitStatusDotKind::Mixed,
+                    };
+                    file_tree.file_with_status(cx, file_node_id, &file_node.name, status);
                 }
             }
         }
