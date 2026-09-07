@@ -337,6 +337,47 @@ script_mod! {
         color_warning: theme.color_mid
         color_icon_panic: theme.color_high
 
+        // The Architecture map's categorical palette (top-level directory ownership), kind stripes and status roles
+        color_map_1: #x286cab
+        color_map_2: #x00816b
+        color_map_3: #x906b00
+        color_map_4: #x78569e
+        color_map_5: #x04869c
+        color_map_6: #x3b7d3f
+        color_map_7: #x9c5313
+        color_map_8: #xa04b6f
+        color_map_9: #xb64f4b
+        color_map_10: #x606cbd
+        color_map_11: #x737c24
+        color_map_kind_module: #x94bfff
+        color_map_kind_file: #xb7c0cc
+        color_map_kind_struct: #x74cbb7
+        color_map_kind_enum: #x9bcb79
+        color_map_kind_trait: #xc1a0e0
+        color_map_kind_impl: #x8aace0
+        color_map_kind_fn: #xddc27b
+        color_map_kind_const: #xdaa37d
+        color_map_kind_type_alias: #x84c7d8
+        color_map_kind_macro: #xd895b6
+        color_success: #x79be93
+        color_map_basis_exact: #xb8c2cf
+        color_map_basis_inferred: #xd9ae6b
+        color_map_basis_candidates: #xb69acf
+        color_syntax_keyword: #x90badc
+        color_syntax_ident: #xd4d4d4
+        color_syntax_type: #xa7d2cb
+        color_syntax_fn: #xd6c9ac
+        color_syntax_literal: #xb3d1af
+        color_syntax_string: #xe0baac
+        color_syntax_comment: #xb2c3ae
+        color_syntax_macro: #xd8bcde
+        color_syntax_attribute: #xe7c8a6
+        color_syntax_punctuation: #xd4d4d4
+        color_syntax_keyword_branch: #xd8bcde
+        color_syntax_keyword_loop: #xe7c8a6
+        color_syntax_constant: #xe0baac
+        color_syntax_bg: #x202125
+
         // TYPOGRAPHY
         font_size_code: 9.0
         font_wdgt_line_spacing: 1.2

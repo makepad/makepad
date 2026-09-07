@@ -54,6 +54,7 @@ pub mod radio_button;
 pub mod adaptive_view;
 pub mod desktop_button;
 pub mod gauss_view;
+pub mod gauss_chain;
 mod gauss_stack;
 pub mod backdrop;
 pub mod keyboard_view;

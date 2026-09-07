@@ -1,3 +1,12 @@
+//! Text clips like quads: per-instance clip ∩ list clip after the view transform.
+//!
+//! As in `DrawQuad::clip_and_transform_vertex`, `view_clip` is expressed in
+//! list coordinates (callers inverse-transform a screen clip), and applies
+//! after `view_shift`, before the matrix transform. All text vertex variants
+//! use that same intersection. Sampling uses the clipped vertex translated
+//! back by `view_shift`, relative to the original glyph rectangle; clipping
+//! crops glyphs without moving or stretching their atlas/curve coordinates.
+
 use {
     crate::{
         cx_2d::Cx2d,
@@ -138,7 +147,12 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
 
             vertex: fn() {
                 let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-                let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
+                let p_clipped = clamp(
+                    clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                    self.draw_list.view_clip.xy,
+                    self.draw_list.view_clip.zw
+                )
+                let p_sample = p_clipped - self.draw_list.view_shift
                 let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
                 let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
                 let content_rect_size = vec2(
@@ -146,8 +160,8 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
                     max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
                 )
                 self.pos = vec2(
-                    (p_clipped.x - content_rect_pos.x) / content_rect_size.x,
-                    (p_clipped.y - content_rect_pos.y) / content_rect_size.y
+                    (p_sample.x - content_rect_pos.x) / content_rect_size.x,
+                    (p_sample.y - content_rect_pos.y) / content_rect_size.y
                 )
                 self.world = self.draw_list.view_transform * vec4(
                     p_clipped.x,
@@ -583,8 +597,12 @@ script_mod! {
 
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
+            let p_clipped = clamp(
+                clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized = (p_clipped - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             self.pos = p_normalized
             self.t = mix(self.t_min, self.t_max, p_normalized.xy)
@@ -773,8 +791,12 @@ script_mod! {
             let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
 
             let p_raster = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped_raster = clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized_raster = (p_clipped_raster - self.rect_pos) / self.rect_size
+            let p_clipped_raster = clamp(
+                clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized_raster = (p_clipped_raster - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
             let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
@@ -791,10 +813,15 @@ script_mod! {
                 vec2(1.0, 0.0)
             }
             let dilated = self.slug_dilate(p_slug, self.geom.pos, jac, normal)
-            let p_clipped_slug = clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw)
+            let p_clipped_slug = clamp(
+                clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_sample_slug = p_clipped_slug - self.draw_list.view_shift
             let pos_slug = vec2(
-                dilated.x + (p_clipped_slug.x - dilated.z) * jac.x,
-                dilated.y + (p_clipped_slug.y - dilated.w) * jac.w
+                dilated.x + (p_sample_slug.x - dilated.z) * jac.x,
+                dilated.y + (p_sample_slug.y - dilated.w) * jac.w
             )
 
             self.pos = mix(p_normalized_raster, pos_slug, use_slug)
