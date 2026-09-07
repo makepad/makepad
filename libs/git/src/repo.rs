@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::commit::{parse_commit, serialize_commit, Commit, Signature};
@@ -8,7 +9,7 @@ use crate::index::{read_index, write_index, Index, IndexEntry};
 use crate::merge::{self, MergeResult, TreeMergeEntry};
 use crate::object::{read_loose_object, write_loose_object, Object, ObjectKind};
 use crate::oid::ObjectId;
-use crate::pack::{find_packs, read_pack_object, PackIndex, PackLookup};
+use crate::pack::{find_packs, find_packs_in_objects_dir, read_pack_object, PackIndex, PackLookup};
 use crate::refs::{self, RefTarget};
 use crate::tree::{parse_tree, serialize_tree, Tree};
 use crate::worktree;
@@ -17,30 +18,307 @@ use crate::worktree;
 pub struct Repository {
     /// The working directory (parent of .git)
     pub workdir: PathBuf,
-    /// The .git directory
+    /// The worktree-private git directory: `HEAD`, the index, merge state and
+    /// the per-worktree ref namespaces. For an ordinary repository this is
+    /// `.git`; for a linked worktree it is `<common>/worktrees/<name>`.
     pub git_dir: PathBuf,
+    /// The shared git directory: objects, packs, alternates, shared refs and
+    /// `packed-refs`. Equal to `git_dir` for an ordinary repository.
+    pub common_dir: PathBuf,
     /// Loaded pack indices (lazy — populated on first object lookup miss)
-    packs: Option<Vec<PackIndex>>,
+    pub(crate) packs: Option<Vec<PackIndex>>,
     /// Alternate object directories (from .git/objects/info/alternates)
-    alternates: Option<Vec<PathBuf>>,
+    pub(crate) alternates: Option<Vec<PathBuf>>,
     /// Pack indices from alternate object stores
     alternate_packs: Option<Vec<PackIndex>>,
 }
 
+/// The directories a working directory maps to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPaths {
+    pub workdir: PathBuf,
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// Resolve the `.git` entry directly inside `root`. `Ok(None)` means `root`
+/// has no `.git` entry at all; a `.git` file or directory that is malformed
+/// is an error, never a reason to look further up.
+pub fn repository_paths(root: &Path) -> Result<Option<RepositoryPaths>, GitError> {
+    let dot_git = root.join(".git");
+    let link = match std::fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(GitError::Io(e)),
+    };
+    // A `.git` entry exists; from here on every problem is an error, never a
+    // reason to look further up. A dangling symlink is such a problem.
+    let metadata = std::fs::metadata(&dot_git).map_err(|e| {
+        if link.file_type().is_symlink() {
+            GitError::InvalidRef(format!("dangling .git symlink: {}", dot_git.display()))
+        } else {
+            GitError::Io(e)
+        }
+    })?;
+    let git_dir = if metadata.is_dir() {
+        dot_git
+    } else if metadata.is_file() {
+        resolve_gitfile(&dot_git)?
+    } else {
+        return Err(GitError::InvalidRef(format!(
+            "unsupported .git entry: {}",
+            dot_git.display()
+        )));
+    };
+    let common_dir = resolve_commondir(&git_dir)?;
+    Ok(Some(RepositoryPaths {
+        workdir: root.to_path_buf(),
+        git_dir,
+        common_dir,
+    }))
+}
+
+/// Resolve a `.git` file (`gitdir: <path>`) to the git directory it points
+/// at. A relative path is taken from the file's parent directory. The
+/// destination must exist and be a git directory; chained gitfiles and
+/// self references are rejected.
+pub fn resolve_gitfile(path: &Path) -> Result<PathBuf, GitError> {
+    let content = std::fs::read_to_string(path)?;
+    let line = content.lines().next().unwrap_or("").trim();
+    let target = line.strip_prefix("gitdir:").map(str::trim).ok_or_else(|| {
+        GitError::InvalidRef(format!("{}: not a gitfile", path.display()))
+    })?;
+    if target.is_empty() {
+        return Err(GitError::InvalidRef(format!(
+            "{}: empty gitdir pointer",
+            path.display()
+        )));
+    }
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let target = Path::new(target);
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        base.join(target)
+    };
+    // Filesystem semantics: `..` and symlinks resolve the way the kernel
+    // resolves them, and the destination has to exist.
+    let resolved = joined.canonicalize().map_err(|_| {
+        GitError::InvalidRef(format!(
+            "{}: gitdir destination missing: {}",
+            path.display(),
+            joined.display()
+        ))
+    })?;
+    if !resolved.is_dir() {
+        return Err(GitError::InvalidRef(format!(
+            "{}: gitdir points at a file (chained gitfiles are not supported)",
+            path.display()
+        )));
+    }
+    let self_reference = base.canonicalize().map(|b| b == resolved).unwrap_or(false);
+    let looks_like_git_dir = resolved.join("HEAD").is_file()
+        && (resolved.join("objects").is_dir() || resolved.join("commondir").is_file());
+    if self_reference || !looks_like_git_dir {
+        return Err(GitError::InvalidRef(format!(
+            "{}: gitdir destination is not a git directory: {}",
+            path.display(),
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Resolve the shared git directory of `git_dir`: the `commondir` file of a
+/// linked worktree, or `git_dir` itself when there is none.
+pub fn resolve_commondir(git_dir: &Path) -> Result<PathBuf, GitError> {
+    let file = git_dir.join("commondir");
+    let content = match std::fs::read_to_string(&file) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(git_dir.to_path_buf()),
+        Err(e) => return Err(GitError::Io(e)),
+    };
+    let target = content.lines().next().unwrap_or("").trim();
+    if target.is_empty() {
+        return Err(GitError::InvalidRef(format!(
+            "{}: empty commondir pointer",
+            file.display()
+        )));
+    }
+    let target = Path::new(target);
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        git_dir.join(target)
+    };
+    let resolved = joined.canonicalize().map_err(|_| {
+        GitError::InvalidRef(format!(
+            "{}: commondir destination missing: {}",
+            file.display(),
+            joined.display()
+        ))
+    })?;
+    if !resolved.is_dir() {
+        return Err(GitError::InvalidRef(format!(
+            "{}: commondir destination is not a directory: {}",
+            file.display(),
+            resolved.display()
+        )));
+    }
+    // A pointer file that resolves back to the private directory is a cycle
+    // (`commondir = .`), and so is a destination with its own pointer.
+    if git_dir.canonicalize().map(|g| g == resolved).unwrap_or(false) {
+        return Err(GitError::InvalidRef(format!(
+            "{}: commondir points at the private git directory itself",
+            file.display()
+        )));
+    }
+    if resolved.join("commondir").is_file() {
+        return Err(GitError::InvalidRef(format!(
+            "{}: chained commondir pointers are not supported",
+            file.display()
+        )));
+    }
+    let has_refs = resolved.join("refs").is_dir() || resolved.join("packed-refs").is_file();
+    if !resolved.join("objects").is_dir() || !has_refs {
+        return Err(GitError::InvalidRef(format!(
+            "{}: commondir destination is not a git directory: {}",
+            file.display(),
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Lexically remove `.` components and cancel `..` against a preceding
+/// normal component only; leading or unmatched `..` are kept. Used for paths
+/// that may not exist yet; existing paths go through `canonicalize`.
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let cancels = matches!(
+                    out.components().next_back(),
+                    Some(Component::Normal(_))
+                );
+                if cancels {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Resolve one line of `objects/info/alternates`; relative entries are taken
+/// from the common `objects` directory. An existing destination resolves with
+/// filesystem semantics; a missing one keeps its unresolved shape.
+fn resolve_alternate(common_dir: &Path, line: &str) -> PathBuf {
+    let path = Path::new(line);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        common_dir.join("objects").join(path)
+    };
+    joined.canonicalize().unwrap_or_else(|_| normalize_path(&joined))
+}
+
+/// Every place objects can come from: the common `objects` directory, the
+/// alternates it names (one level, as git's reader does) and all their packs.
+pub(crate) struct ObjectSources {
+    /// `objects` directories to try for loose objects, primary first.
+    pub loose_dirs: Vec<PathBuf>,
+    /// The alternate `objects` directories only.
+    pub alternate_dirs: Vec<PathBuf>,
+    /// Packs of the primary store and of every alternate.
+    pub packs: Vec<PackIndex>,
+}
+
+impl ObjectSources {
+    pub(crate) fn read(&self, oid: &ObjectId) -> Result<Object, GitError> {
+        for dir in &self.loose_dirs {
+            match read_loose_object_from_objects_dir(dir, oid) {
+                Ok(obj) => return Ok(obj),
+                Err(GitError::ObjectNotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        for pack in &self.packs {
+            if let Some(offset) = pack.find_offset(oid) {
+                return read_pack_object(&pack.pack_path, offset, pack);
+            }
+        }
+        Err(GitError::ObjectNotFound(oid.to_hex()))
+    }
+}
+
+pub(crate) fn object_sources(common_dir: &Path) -> Result<ObjectSources, GitError> {
+    let primary = common_dir.join("objects");
+    let mut loose_dirs = vec![primary.clone()];
+    let mut alternate_dirs = Vec::new();
+    let mut packs = find_packs(common_dir)?;
+    let alt_file = primary.join("info").join("alternates");
+    match std::fs::read_to_string(&alt_file) {
+        Ok(content) => {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let dir = resolve_alternate(common_dir, line);
+                if !dir.is_dir() {
+                    continue;
+                }
+                packs.extend(find_packs_in_objects_dir(&dir)?);
+                loose_dirs.push(dir.clone());
+                alternate_dirs.push(dir);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(GitError::Io(e)),
+    }
+    Ok(ObjectSources {
+        loose_dirs,
+        alternate_dirs,
+        packs,
+    })
+}
+
 impl Repository {
-    /// Open an existing repository. Walks up from `path` to find .git.
+    fn from_paths(paths: RepositoryPaths) -> Self {
+        Repository {
+            workdir: paths.workdir,
+            git_dir: paths.git_dir,
+            common_dir: paths.common_dir,
+            packs: None,
+            alternates: None,
+            alternate_packs: None,
+        }
+    }
+
+    /// Open an existing repository. Walks up from `path` to find `.git`,
+    /// which may be a directory or a linked worktree's gitfile; an explicit
+    /// `.git` path is accepted as well. A malformed `.git` entry is an error
+    /// and never falls through to an ancestor repository.
     pub fn open(path: &Path) -> Result<Self, GitError> {
-        let mut current = path.canonicalize().map_err(GitError::Io)?;
+        let start = path.canonicalize().map_err(GitError::Io)?;
+        if start.file_name().is_some_and(|name| name == ".git") {
+            if let Some(workdir) = start.parent() {
+                if let Some(paths) = repository_paths(workdir)? {
+                    return Ok(Self::from_paths(paths));
+                }
+            }
+        }
+        let mut current = start;
         loop {
-            let git_dir = current.join(".git");
-            if git_dir.is_dir() {
-                return Ok(Repository {
-                    workdir: current,
-                    git_dir,
-                    packs: None,
-                    alternates: None,
-                    alternate_packs: None,
-                });
+            if let Some(paths) = repository_paths(&current)? {
+                return Ok(Self::from_paths(paths));
             }
             if !current.pop() {
                 return Err(GitError::InvalidRef(format!(
@@ -51,15 +329,15 @@ impl Repository {
         }
     }
 
-    /// Open with an explicit git_dir (for bare repos or testing).
-    pub fn open_git_dir(git_dir: PathBuf, workdir: PathBuf) -> Self {
-        Repository {
+    /// Open with an explicit git_dir (for bare repos, linked worktrees or
+    /// testing). The shared directory comes from `git_dir`'s `commondir`.
+    pub fn open_git_dir(git_dir: PathBuf, workdir: PathBuf) -> Result<Self, GitError> {
+        let common_dir = resolve_commondir(&git_dir)?;
+        Ok(Self::from_paths(RepositoryPaths {
             workdir,
             git_dir,
-            packs: None,
-            alternates: None,
-            alternate_packs: None,
-        }
+            common_dir,
+        }))
     }
 
     // --- Object Operations ---
@@ -68,7 +346,7 @@ impl Repository {
     /// then alternates.
     pub fn read_object(&mut self, oid: &ObjectId) -> Result<Object, GitError> {
         // Try loose first
-        match read_loose_object(&self.git_dir, oid) {
+        match read_loose_object(&self.common_dir, oid) {
             Ok(obj) => return Ok(obj),
             Err(GitError::ObjectNotFound(_)) => {}
             Err(e) => return Err(e),
@@ -109,7 +387,7 @@ impl Repository {
 
     /// Write a raw object. Returns its OID.
     pub fn write_object(&self, kind: ObjectKind, data: &[u8]) -> Result<ObjectId, GitError> {
-        write_loose_object(&self.git_dir, kind, data)
+        write_loose_object(&self.common_dir, kind, data)
     }
 
     /// Read and parse a tree object.
@@ -174,7 +452,7 @@ impl Repository {
 
     /// Resolve HEAD to a concrete OID.
     pub fn head_oid(&self) -> Result<ObjectId, GitError> {
-        refs::resolve_head(&self.git_dir)
+        refs::resolve_head_in(&self.git_dir, &self.common_dir)
     }
 
     /// Get the current branch name (e.g. "main"), or None if HEAD is detached.
@@ -189,29 +467,29 @@ impl Repository {
 
     /// Resolve a ref name to an OID.
     pub fn resolve_ref(&self, name: &str) -> Result<ObjectId, GitError> {
-        refs::resolve_ref(&self.git_dir, name)
+        refs::resolve_ref_in(&self.git_dir, &self.common_dir, name)
     }
 
     /// List all branches.
     pub fn list_branches(&self) -> Result<Vec<refs::Ref>, GitError> {
-        refs::list_refs(&self.git_dir, "refs/heads/")
+        refs::list_refs_in(&self.git_dir, &self.common_dir, "refs/heads/")
     }
 
     /// List all tags.
     pub fn list_tags(&self) -> Result<Vec<refs::Ref>, GitError> {
-        refs::list_refs(&self.git_dir, "refs/tags/")
+        refs::list_refs_in(&self.git_dir, &self.common_dir, "refs/tags/")
     }
 
     /// Create a branch pointing at the given OID.
     pub fn create_branch(&self, name: &str, oid: &ObjectId) -> Result<(), GitError> {
         let refname = format!("refs/heads/{}", name);
-        refs::write_ref(&self.git_dir, &refname, oid)
+        refs::write_ref_in(&self.git_dir, &self.common_dir, &refname, oid)
     }
 
     /// Delete a branch.
     pub fn delete_branch(&self, name: &str) -> Result<(), GitError> {
         let refname = format!("refs/heads/{}", name);
-        refs::delete_ref(&self.git_dir, &refname)
+        refs::delete_ref_in(&self.git_dir, &self.common_dir, &refname)
     }
 
     /// Update HEAD to point at a branch.
@@ -230,7 +508,15 @@ impl Repository {
 
     /// Read the index (staging area).
     pub fn read_index(&self) -> Result<Index, GitError> {
-        read_index(&self.git_dir)
+        // A repository (or a fresh linked worktree) without an index file has
+        // an empty index.
+        match read_index(&self.git_dir) {
+            Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Index {
+                version: 2,
+                entries: Vec::new(),
+            }),
+            other => other,
+        }
     }
 
     /// Write the index.
@@ -335,7 +621,7 @@ impl Repository {
         // Update the current branch ref (or HEAD if detached)
         match self.head()? {
             RefTarget::Symbolic(refname) => {
-                refs::write_ref(&self.git_dir, &refname, &commit_oid)?;
+                refs::write_ref_in(&self.git_dir, &self.common_dir, &refname, &commit_oid)?;
             }
             RefTarget::Direct(_) => {
                 self.detach_head(&commit_oid)?;
@@ -345,32 +631,128 @@ impl Repository {
         Ok(commit_oid)
     }
 
-    /// Walk commit history from a starting OID.
+    /// Walk commit history from a starting OID in topological order: every
+    /// commit is emitted before any of its parents, and among commits with no
+    /// ordering constraint the newer committer timestamp comes first. This is
+    /// `git log --topo-order` with `--date-order` tie-breaking: a merge diamond
+    /// `c3(c1, c2) -> c0` yields `c3, c2, c1, c0` (or `c3, c1, c2, c0`),
+    /// never the shared ancestor before one of its children.
+    ///
+    /// The order is exact whatever the committer clocks say: the walk first
+    /// discovers every commit reachable from `start`, reading each object
+    /// once, then releases a commit only when every reachable child has been
+    /// emitted (Kahn's algorithm over a newest-first heap). No clock-skew
+    /// heuristic bounds the read set, because none can: a child may carry any
+    /// timestamp, and proving a commit childless requires knowing the whole
+    /// reachable set. Callers that scrub history keep the result (or the
+    /// `Timeline` built from it) rather than calling this per step; a 3,000
+    /// commit history walks in tens of milliseconds in release builds.
+    ///
+    /// Shallow boundaries (`<common>/shallow`) are honoured: a listed commit
+    /// is treated as parentless and nothing beyond it is read. A parent
+    /// object missing for any other reason is an error, never a silent gap.
+    /// `max_count` bounds the emitted list; zero yields an empty list.
     pub fn log(
         &mut self,
         start: &ObjectId,
         max_count: usize,
     ) -> Result<Vec<(ObjectId, Commit)>, GitError> {
-        let mut result = Vec::new();
-        let mut queue = vec![*start];
-        let mut seen = std::collections::HashSet::new();
+        use std::cmp::Ordering as CmpOrdering;
+        use std::collections::{hash_map::Entry, BinaryHeap, HashMap};
 
-        while let Some(oid) = queue.pop() {
-            if !seen.insert(oid) {
+        /// Heap entry ordered so that the newest committer time pops first;
+        /// the discovery sequence breaks timestamp ties (earlier first).
+        #[derive(PartialEq, Eq)]
+        struct Newest {
+            timestamp: i64,
+            seq: u64,
+            oid: ObjectId,
+        }
+        impl PartialOrd for Newest {
+            fn partial_cmp(&self, o: &Self) -> Option<CmpOrdering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for Newest {
+            fn cmp(&self, o: &Self) -> CmpOrdering {
+                self.timestamp
+                    .cmp(&o.timestamp)
+                    .then_with(|| o.seq.cmp(&self.seq))
+            }
+        }
+
+        let mut result = Vec::new();
+        if max_count == 0 {
+            return Ok(result);
+        }
+        let shallow = self.shallow_boundary()?;
+
+        // Phase 1: discover the reachable set. `pending_children` counts, per
+        // commit, the parent edges pointing at it from reachable commits; a
+        // duplicated parent entry counts twice and is released twice.
+        let mut commits: HashMap<ObjectId, (u64, Commit)> = HashMap::new();
+        let mut pending_children: HashMap<ObjectId, usize> = HashMap::new();
+        let mut stack: Vec<ObjectId> = vec![*start];
+        commits.insert(*start, (0, self.read_commit(start)?));
+        pending_children.insert(*start, 0);
+        let mut next_seq = 1u64;
+        while let Some(oid) = stack.pop() {
+            if shallow.contains(&oid) {
                 continue;
             }
+            let parents = commits[&oid].1.parents.clone();
+            for parent in parents {
+                *pending_children.entry(parent).or_insert(0) += 1;
+                if let Entry::Vacant(v) = commits.entry(parent) {
+                    v.insert((next_seq, self.read_commit(&parent)?));
+                    next_seq += 1;
+                    stack.push(parent);
+                }
+            }
+        }
+
+        // Phase 2: release commits newest-first once no reachable child is
+        // left. `start` is the only commit without a child in the set.
+        let mut ready: BinaryHeap<Newest> = BinaryHeap::new();
+        ready.push(Newest { timestamp: commits[start].1.committer.timestamp, seq: 0, oid: *start });
+        while let Some(next) = ready.pop() {
+            let (_, commit) = commits.remove(&next.oid).expect("discovered commit");
+            if !shallow.contains(&next.oid) {
+                for parent in &commit.parents {
+                    let left = pending_children.get_mut(parent).expect("counted edge");
+                    *left -= 1;
+                    if *left == 0 {
+                        let (seq, pc) = &commits[parent];
+                        ready.push(Newest { timestamp: pc.committer.timestamp, seq: *seq, oid: *parent });
+                    }
+                }
+            }
+            result.push((next.oid, commit));
             if result.len() >= max_count {
                 break;
             }
-
-            let commit = self.read_commit(&oid)?;
-            for parent in &commit.parents {
-                queue.push(*parent);
-            }
-            result.push((oid, commit));
         }
-
         Ok(result)
+    }
+
+    /// The commits listed in `<common>/shallow`, treated as parentless by
+    /// history walks. Empty for a full clone.
+    fn shallow_boundary(&self) -> Result<std::collections::HashSet<ObjectId>, GitError> {
+        let path = self.common_dir.join("shallow");
+        let mut set = std::collections::HashSet::new();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                for line in text.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        set.insert(ObjectId::from_hex(line)?);
+                    }
+                }
+                Ok(set)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(set),
+            Err(e) => Err(GitError::Io(e)),
+        }
     }
 
     // --- Diff Operations ---
@@ -381,11 +763,12 @@ impl Repository {
         old_tree_oid: &ObjectId,
         new_tree_oid: &ObjectId,
     ) -> Result<Vec<TreeChange>, GitError> {
+        self.ensure_object_sources()?;
         let old_tree = self.read_tree(old_tree_oid)?;
         let new_tree = self.read_tree(new_tree_oid)?;
         // We need a closure that can call self.read_tree, but self is already borrowed.
         // Workaround: use the lower-level read_object to avoid borrowing self in closure.
-        let git_dir = self.git_dir.clone();
+        let git_dir = self.common_dir.clone();
         let packs_ref = &self.packs;
         let alts = &self.alternates;
         diff::diff_trees(&old_tree, &new_tree, "", &mut |oid| {
@@ -407,10 +790,12 @@ impl Repository {
 
     // --- Worktree Operations ---
 
-    fn status_with_options(
+    /// Compute status with explicit traversal options.
+    pub fn status_with_options(
         &mut self,
         options: worktree::StatusOptions,
     ) -> Result<worktree::Status, GitError> {
+        self.ensure_object_sources()?;
         let index = self.read_index()?;
 
         // Try to build HEAD tree file map. If HEAD objects are missing locally
@@ -420,7 +805,7 @@ impl Repository {
                 Ok(head_oid) => {
                     let commit = self.read_commit(&head_oid)?;
                     let tree = self.read_tree(&commit.tree)?;
-                    let git_dir = self.git_dir.clone();
+                    let git_dir = self.common_dir.clone();
                     let packs = &self.packs;
                     let alts = &self.alternates;
                     worktree::flatten_tree(&tree, "", &mut |oid| {
@@ -553,7 +938,7 @@ impl Repository {
     /// Stage a file (add to index).
     pub fn stage_file(&mut self, path: &str) -> Result<(), GitError> {
         let mut index = self.read_index()?;
-        worktree::stage_file(&self.git_dir, &self.workdir, &mut index, path)?;
+        worktree::stage_file(&self.common_dir, &self.workdir, &mut index, path)?;
         self.write_index(&index)
     }
 
@@ -566,8 +951,9 @@ impl Repository {
 
     /// Checkout a branch: update HEAD, write tree to workdir, rebuild index.
     pub fn checkout_branch(&mut self, branch: &str) -> Result<(), GitError> {
+        self.ensure_object_sources()?;
         let refname = format!("refs/heads/{}", branch);
-        let target_oid = refs::resolve_ref(&self.git_dir, &refname)?;
+        let target_oid = refs::resolve_ref_in(&self.git_dir, &self.common_dir, &refname)?;
         let target_commit = self.read_commit(&target_oid)?;
         let target_tree = self.read_tree(&target_commit.tree)?;
 
@@ -576,7 +962,7 @@ impl Repository {
             Ok(head_oid) => {
                 let commit = self.read_commit(&head_oid)?;
                 let tree = self.read_tree(&commit.tree)?;
-                let git_dir = self.git_dir.clone();
+                let git_dir = self.common_dir.clone();
                 let packs = &self.packs;
                 let alts = &self.alternates;
                 worktree::flatten_tree(&tree, "", &mut |oid| {
@@ -588,7 +974,7 @@ impl Repository {
         };
 
         // Get new tree files
-        let git_dir = self.git_dir.clone();
+        let git_dir = self.common_dir.clone();
         let packs = &self.packs;
         let alts = &self.alternates;
         let new_files = worktree::flatten_tree(&target_tree, "", &mut |oid| {
@@ -600,7 +986,7 @@ impl Repository {
 
         // Checkout new tree
         let mut index_entries = Vec::new();
-        let git_dir = self.git_dir.clone();
+        let git_dir = self.common_dir.clone();
         let workdir = self.workdir.clone();
         worktree::checkout_tree(
             &git_dir,
@@ -632,6 +1018,84 @@ impl Repository {
         Ok(())
     }
 
+    /// Move a clean checkout from `old_tree` to `new_tree` the way
+    /// `git read-tree -u -m` does: only paths whose blob or mode differ are
+    /// rewritten or removed, so unchanged files keep their timestamps, and a
+    /// file that no longer matches `old_tree` is never overwritten. The index
+    /// is updated for exactly those paths. Nothing is refused for untracked
+    /// files; callers assert cleanliness first.
+    pub fn update_worktree(
+        &mut self,
+        old_tree: &ObjectId,
+        new_tree: &ObjectId,
+    ) -> Result<(), GitError> {
+        self.ensure_object_sources()?;
+        let old_files = self.flatten_tree_with_mode(old_tree)?;
+        let new_files = self.flatten_tree_with_mode(new_tree)?;
+        let mut removed: Vec<&String> = Vec::new();
+        let mut written: Vec<(&String, ObjectId, u32)> = Vec::new();
+        for (path, (oid, mode)) in &old_files {
+            if !new_files.contains_key(path) {
+                removed.push(path);
+                let _ = (oid, mode);
+            }
+        }
+        for (path, (oid, mode)) in &new_files {
+            if old_files.get(path) != Some(&(*oid, *mode)) {
+                written.push((path, *oid, *mode));
+            }
+        }
+        // Refuse before touching anything: every path we would replace or
+        // delete must still hold its old content.
+        for path in removed.iter().copied().chain(written.iter().map(|(p, _, _)| *p)) {
+            if let Some((old_oid, _)) = old_files.get(path) {
+                let file = self.workdir.join(path);
+                if file.is_file() && worktree::hash_file_blob(&file)? != *old_oid {
+                    return Err(GitError::InvalidObject(format!(
+                        "{path} was modified locally; the update would overwrite it"
+                    )));
+                }
+            }
+        }
+        removed.sort();
+        written.sort_by(|a, b| a.0.cmp(b.0));
+        let mut index = self.read_index()?;
+        for path in &removed {
+            let file = self.workdir.join(path);
+            if file.is_file() {
+                fs::remove_file(&file)?;
+            }
+            worktree::unstage_file(&mut index, path);
+            if let Some(parent) = file.parent() {
+                worktree::remove_empty_dirs(parent, &self.workdir);
+            }
+        }
+        for (path, oid, mode) in &written {
+            let data = self.read_blob(oid)?;
+            let entry = worktree::write_worktree_file(&self.workdir, path, *oid, *mode, &data)?;
+            match index.entries.binary_search_by(|e| e.path.cmp(&entry.path)) {
+                Ok(at) => index.entries[at] = entry,
+                Err(at) => index.entries.insert(at, entry),
+            }
+        }
+        self.write_index(&index)
+    }
+
+    /// Flatten a tree into `path -> (oid, mode)` using the shared object store.
+    pub fn flatten_tree_with_mode(
+        &mut self,
+        tree: &ObjectId,
+    ) -> Result<HashMap<String, (ObjectId, u32)>, GitError> {
+        self.ensure_object_sources()?;
+        let root = self.read_tree(tree)?;
+        let git_dir = self.common_dir.clone();
+        let packs = &self.packs;
+        let alts = &self.alternates;
+        merge::flatten_tree_with_mode(&root, "", &mut |oid| {
+            read_tree_standalone(&git_dir, oid, packs, alts)
+        })
+    }
+
     // --- Merge Operations ---
 
     /// Find the merge base of two commits.
@@ -640,8 +1104,8 @@ impl Repository {
         oid_a: &ObjectId,
         oid_b: &ObjectId,
     ) -> Result<Option<ObjectId>, GitError> {
-        self.ensure_packs()?;
-        let git_dir = self.git_dir.clone();
+        self.ensure_object_sources()?;
+        let git_dir = self.common_dir.clone();
         let packs = &self.packs;
         let alts = &self.alternates;
         merge::find_merge_base(oid_a, oid_b, &mut |oid| {
@@ -663,9 +1127,10 @@ impl Repository {
         branch: &str,
         author: Signature,
     ) -> Result<MergeResult, GitError> {
+        self.ensure_object_sources()?;
         let ours_oid = self.head_oid()?;
         let refname = format!("refs/heads/{}", branch);
-        let theirs_oid = refs::resolve_ref(&self.git_dir, &refname)?;
+        let theirs_oid = refs::resolve_ref_in(&self.git_dir, &self.common_dir, &refname)?;
 
         // Fast-forward check
         let base_oid = self
@@ -681,7 +1146,7 @@ impl Repository {
             // Fast-forward: just move the branch pointer
             match self.head()? {
                 RefTarget::Symbolic(refname) => {
-                    refs::write_ref(&self.git_dir, &refname, &theirs_oid)?;
+                    refs::write_ref_in(&self.git_dir, &self.common_dir, &refname, &theirs_oid)?;
                 }
                 RefTarget::Direct(_) => {
                     self.detach_head(&theirs_oid)?;
@@ -694,7 +1159,7 @@ impl Repository {
             let old_files = {
                 let ours_commit = self.read_commit(&ours_oid)?;
                 let ours_tree = self.read_tree(&ours_commit.tree)?;
-                let git_dir = self.git_dir.clone();
+                let git_dir = self.common_dir.clone();
                 let packs = &self.packs;
                 let alts = &self.alternates;
                 worktree::flatten_tree(&ours_tree, "", &mut |oid| {
@@ -702,7 +1167,7 @@ impl Repository {
                 })?
             };
 
-            let git_dir = self.git_dir.clone();
+            let git_dir = self.common_dir.clone();
             let packs = &self.packs;
             let alts = &self.alternates;
             let new_files = worktree::flatten_tree(&theirs_tree, "", &mut |oid| {
@@ -712,7 +1177,7 @@ impl Repository {
             worktree::remove_worktree_files(&self.workdir, &old_files, &new_files)?;
 
             let mut index_entries = Vec::new();
-            let git_dir = self.git_dir.clone();
+            let git_dir = self.common_dir.clone();
             let workdir = self.workdir.clone();
             worktree::checkout_tree(
                 &git_dir,
@@ -747,7 +1212,7 @@ impl Repository {
         let ours_tree = self.read_tree(&ours_commit.tree)?;
         let theirs_tree = self.read_tree(&theirs_commit.tree)?;
 
-        let git_dir = self.git_dir.clone();
+        let git_dir = self.common_dir.clone();
         let packs = &self.packs;
         let alts = &self.alternates;
         let base_files = merge::flatten_tree_with_mode(&base_tree, "", &mut |oid| {
@@ -907,7 +1372,7 @@ impl Repository {
 
             match self.head()? {
                 RefTarget::Symbolic(refname) => {
-                    refs::write_ref(&self.git_dir, &refname, &commit_oid)?;
+                    refs::write_ref_in(&self.git_dir, &self.common_dir, &refname, &commit_oid)?;
                 }
                 RefTarget::Direct(_) => {
                     self.detach_head(&commit_oid)?;
@@ -923,90 +1388,25 @@ impl Repository {
 
     // --- Private ---
 
-    fn ensure_packs(&mut self) -> Result<(), GitError> {
-        if self.packs.is_none() {
-            let mut packs = find_packs(&self.git_dir)?;
-            // Also load packs from alternates so all standalone reads work
-            let alt_file = self.git_dir.join("objects/info/alternates");
-            if let Ok(content) = std::fs::read_to_string(&alt_file) {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    let path = PathBuf::from(line);
-                    let pack_dir = path.join("pack");
-                    if pack_dir.is_dir() {
-                        if let Ok(entries) = std::fs::read_dir(&pack_dir) {
-                            for entry in entries.flatten() {
-                                let p = entry.path();
-                                if p.extension().map(|e| e == "idx").unwrap_or(false) {
-                                    if let Ok(idx) = crate::pack::read_pack_index(&p) {
-                                        packs.push(idx);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Store alternate dir for loose object lookups
-                    if self.alternates.is_none() {
-                        self.alternates = Some(Vec::new());
-                    }
-                    if let Some(ref mut alts) = self.alternates {
-                        alts.push(path);
-                    }
-                }
-            }
-            self.packs = Some(packs);
+    /// Load packs and alternates (loose directories and their packs) once,
+    /// before any code path that reads objects through the standalone
+    /// closures.
+    pub(crate) fn ensure_object_sources(&mut self) -> Result<(), GitError> {
+        if self.packs.is_none() || self.alternates.is_none() {
+            let sources = object_sources(&self.common_dir)?;
+            self.packs = Some(sources.packs);
+            self.alternates = Some(sources.alternate_dirs);
+            self.alternate_packs = Some(Vec::new());
         }
         Ok(())
     }
 
+    fn ensure_packs(&mut self) -> Result<(), GitError> {
+        self.ensure_object_sources()
+    }
+
     fn ensure_alternates(&mut self) -> Result<(), GitError> {
-        if self.alternates.is_some() {
-            return Ok(());
-        }
-        let alt_file = self.git_dir.join("objects/info/alternates");
-        let content = match std::fs::read_to_string(&alt_file) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.alternates = Some(Vec::new());
-                self.alternate_packs = Some(Vec::new());
-                return Ok(());
-            }
-            Err(e) => return Err(GitError::Io(e)),
-        };
-        let mut dirs = Vec::new();
-        let mut packs = Vec::new();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let path = PathBuf::from(line);
-            if path.is_dir() {
-                // Load packs from this alternate
-                let pack_dir = path.join("pack");
-                if pack_dir.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&pack_dir) {
-                        for entry in entries {
-                            if let Ok(entry) = entry {
-                                let p = entry.path();
-                                if p.extension().map(|e| e == "idx").unwrap_or(false) {
-                                    if let Ok(idx) = crate::pack::read_pack_index(&p) {
-                                        packs.push(idx);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                dirs.push(path);
-            }
-        }
-        self.alternates = Some(dirs);
-        self.alternate_packs = Some(packs);
-        Ok(())
+        self.ensure_object_sources()
     }
 }
 
@@ -1021,7 +1421,7 @@ fn normalize_rel_path(path: &str) -> String {
 }
 
 /// Read a loose object directly from an objects/ directory (for alternates).
-fn read_loose_object_from_objects_dir(
+pub(crate) fn read_loose_object_from_objects_dir(
     objects_dir: &Path,
     oid: &ObjectId,
 ) -> Result<Object, GitError> {
@@ -1056,7 +1456,7 @@ fn read_loose_object_from_objects_dir(
 /// Read an object without requiring &mut Repository — used in closures.
 /// Checks local loose, local packs (which includes alternate packs after ensure_packs),
 /// and alternate loose dirs.
-fn read_object_standalone(
+pub(crate) fn read_object_standalone(
     git_dir: &Path,
     oid: &ObjectId,
     packs: &Option<Vec<PackIndex>>,
@@ -1087,7 +1487,7 @@ fn read_object_standalone(
 }
 
 /// Read and parse a tree object without requiring &mut Repository.
-fn read_tree_standalone(
+pub(crate) fn read_tree_standalone(
     git_dir: &Path,
     oid: &ObjectId,
     packs: &Option<Vec<PackIndex>>,

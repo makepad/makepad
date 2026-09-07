@@ -15,11 +15,14 @@ mod sha1;
 pub mod test_support;
 pub mod tree;
 pub mod worktree;
+pub mod worktrees;
 
 pub use clone::{local_clone_depth1, CloneTimings};
 pub use commit::{Commit, Signature};
 pub use diff::{
-    diff_blobs, diff_lines, diff_trees, format_unified_diff, DiffOp, FileDiff, TreeChange,
+    diff_blobs, diff_lines, diff_lines_bounded, diff_lines_with_limits, diff_trees,
+    format_unified_diff, BoundedDiff, DiffLimits, DiffOp, Exhaustion, FileDiff, LineEnding,
+    LineIndex, LineRecord, TreeChange, UnavailableHunk,
 };
 pub use error::GitError;
 pub use http_sync::{
@@ -33,11 +36,13 @@ pub use merge::{find_merge_base, merge3_text, merge_trees, MergeResult, TreeMerg
 pub use object::{Object, ObjectKind};
 pub use oid::ObjectId;
 pub use refs::{Ref, RefTarget};
-pub use repo::Repository;
+pub use repo::{repository_paths, resolve_commondir, resolve_gitfile, Repository, RepositoryPaths};
 pub use tree::{Tree, TreeEntry};
 pub use worktree::{
     checkout_tree, compute_status, compute_status_for_path_with_options,
     compute_status_for_path_worktree_only_with_options, compute_status_with_options,
     compute_status_worktree_only, compute_status_worktree_only_with_options, flatten_tree,
-    stage_file, unstage_file, FileStatus, Status, StatusEntry, StatusOptions,
+    hash_file_blob, index_entry_from_metadata, stage_file, unstage_file, write_worktree_file,
+    FileStatus, Status, StatusEntry, StatusOptions,
 };
+pub use worktrees::{LinkedWorktree, WorktreeBranch};

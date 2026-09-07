@@ -378,7 +378,13 @@ fn read_u32(data: &[u8], pos: usize) -> u32 {
 
 /// Find all pack files in .git/objects/pack/
 pub fn find_packs(git_dir: &Path) -> Result<Vec<PackIndex>, GitError> {
-    let pack_dir = git_dir.join("objects").join("pack");
+    find_packs_in_objects_dir(&git_dir.join("objects"))
+}
+
+/// Find all pack files under an `objects` directory (the repository's own or
+/// an alternate's).
+pub fn find_packs_in_objects_dir(objects_dir: &Path) -> Result<Vec<PackIndex>, GitError> {
+    let pack_dir = objects_dir.join("pack");
     let mut packs = Vec::new();
 
     let entries = match fs::read_dir(&pack_dir) {
@@ -401,48 +407,24 @@ pub fn find_packs(git_dir: &Path) -> Result<Vec<PackIndex>, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn test_read_from_pack() {
         let dir = crate::test_support::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        fs::write(dir.path().join("test.txt"), "packed content\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "test"])
-            .current_dir(dir.path())
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "info@makepad.nl")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "info@makepad.nl")
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["gc", "--aggressive"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
         let git_dir = dir.path().join(".git");
-        let packs = find_packs(&git_dir).unwrap();
-        assert!(!packs.is_empty(), "should have at least one pack after gc");
+        fs::create_dir_all(git_dir.join("objects")).unwrap();
+        let ids = crate::test_support::write_pack(
+            &git_dir,
+            &[(ObjectKind::Blob, b"packed content\n".to_vec())],
+        )
+        .unwrap();
 
-        let output = Command::new("git")
-            .args(["hash-object", "test.txt"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let blob_hex = String::from_utf8(output.stdout).unwrap().trim().to_string();
-        let blob_oid = ObjectId::from_hex(&blob_hex).unwrap();
+        let packs = find_packs(&git_dir).unwrap();
+        assert!(!packs.is_empty(), "should have at least one pack");
+
+        // The id git assigns to this content.
+        let blob_oid = ObjectId::from_hex("5e4999f3bfe35be914c4bba7b0a362112cd4474c").unwrap();
+        assert_eq!(ids[0], blob_oid);
 
         let pack = &packs[0];
         let offset = pack.find_offset(&blob_oid).expect("blob should be in pack");

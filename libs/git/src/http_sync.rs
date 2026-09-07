@@ -8,7 +8,7 @@ use crate::index::{write_index, Index, IndexEntry};
 use crate::object::{write_loose_object_fast, Object, ObjectKind};
 use crate::oid::{hash_object, ObjectId};
 use crate::refs::{self, RefTarget};
-use crate::repo::Repository;
+use crate::repo::{Repository, RepositoryPaths};
 use crate::tree::Tree;
 use crate::worktree;
 
@@ -476,13 +476,13 @@ pub fn apply_pack_and_checkout(
         .ok()
         .and_then(|repo| repo.head_oid().ok());
 
-    ensure_repo_layout(dst, remote_url)?;
+    let layout = ensure_repo_layout(dst, remote_url)?;
 
     let mut existing_repo = Repository::open(dst).ok();
     let imported_objects = if pack_data.is_empty() {
         0
     } else {
-        import_pack_to_loose(&dst.join(".git"), pack_data, existing_repo.as_mut())?
+        import_pack_to_loose(&layout.common_dir, pack_data, existing_repo.as_mut())?
     };
 
     let mut repo = Repository::open(dst)?;
@@ -490,12 +490,13 @@ pub fn apply_pack_and_checkout(
         checkout_commit(&mut repo, old_head, target_oid, hooks)?;
 
     if let Some(ref_name) = target_ref {
-        refs::write_ref(&repo.git_dir, ref_name, &target_oid)?;
+        refs::write_ref_in(&repo.git_dir, &repo.common_dir, ref_name, &target_oid)?;
         if ref_name.starts_with("refs/heads/") {
             refs::update_head(&repo.git_dir, &RefTarget::Symbolic(ref_name.to_string()))?;
             if let Some(branch) = ref_name.strip_prefix("refs/heads/") {
-                let _ = refs::write_ref(
+                let _ = refs::write_ref_in(
                     &repo.git_dir,
+                    &repo.common_dir,
                     &format!("refs/remotes/origin/{}", branch),
                     &target_oid,
                 );
@@ -507,12 +508,13 @@ pub fn apply_pack_and_checkout(
         refs::update_head(&repo.git_dir, &RefTarget::Direct(target_oid))?;
     }
 
+    // `shallow` and `config` are shared state of the repository.
     fs::write(
-        repo.git_dir.join("shallow"),
+        repo.common_dir.join("shallow"),
         format!("{}\n", target_oid.to_hex()),
     )?;
 
-    write_basic_config(&repo.git_dir, remote_url)?;
+    write_basic_config_if_missing(&repo.common_dir, remote_url)?;
 
     Ok(HttpSyncReport {
         imported_objects,
@@ -525,7 +527,11 @@ fn normalize_remote_url(remote_url: &str) -> String {
     remote_url.trim_end_matches('/').to_string()
 }
 
-fn ensure_repo_layout(dst: &Path, remote_url: &str) -> Result<(), GitError> {
+/// Make sure `dst` is a repository we can import into. An existing
+/// repository (a plain one or a linked worktree) keeps its layout: shared
+/// state goes to its common dir, `HEAD` to its private dir, and an existing
+/// `config` is never overwritten. A fresh destination gets a plain `.git`.
+fn ensure_repo_layout(dst: &Path, remote_url: &str) -> Result<RepositoryPaths, GitError> {
     if dst.exists() {
         if !dst.is_dir() {
             return Err(GitError::InvalidRef(format!(
@@ -537,20 +543,38 @@ fn ensure_repo_layout(dst: &Path, remote_url: &str) -> Result<(), GitError> {
         fs::create_dir_all(dst)?;
     }
 
-    let git_dir = dst.join(".git");
-    fs::create_dir_all(git_dir.join("objects/info"))?;
-    fs::create_dir_all(git_dir.join("refs/heads"))?;
-    fs::create_dir_all(git_dir.join("refs/tags"))?;
+    let paths = match crate::repo::repository_paths(dst)? {
+        Some(paths) => paths,
+        None => {
+            let git_dir = dst.join(".git");
+            RepositoryPaths {
+                workdir: dst.to_path_buf(),
+                git_dir: git_dir.clone(),
+                common_dir: git_dir,
+            }
+        }
+    };
+    fs::create_dir_all(paths.common_dir.join("objects/info"))?;
+    fs::create_dir_all(paths.common_dir.join("refs/heads"))?;
+    fs::create_dir_all(paths.common_dir.join("refs/tags"))?;
+    fs::create_dir_all(&paths.git_dir)?;
 
-    if !git_dir.join("HEAD").exists() {
+    if !paths.git_dir.join("HEAD").exists() {
         refs::update_head(
-            &git_dir,
+            &paths.git_dir,
             &RefTarget::Symbolic("refs/heads/main".to_string()),
         )?;
     }
 
-    write_basic_config(&git_dir, remote_url)?;
-    Ok(())
+    write_basic_config_if_missing(&paths.common_dir, remote_url)?;
+    Ok(paths)
+}
+
+fn write_basic_config_if_missing(common_dir: &Path, remote_url: &str) -> Result<(), GitError> {
+    if common_dir.join("config").exists() {
+        return Ok(());
+    }
+    write_basic_config(common_dir, remote_url)
 }
 
 fn write_basic_config(git_dir: &Path, remote_url: &str) -> Result<(), GitError> {
