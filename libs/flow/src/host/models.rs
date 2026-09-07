@@ -63,6 +63,7 @@ impl FleetSnapshot {
             .filter(|model| matches_requested_domain(&model.domain, domain))
             .cloned()
             .collect();
+        #[cfg(feature = "hub-chat")]
         if domain.is_none() || domain == Some("text") {
             models.extend(crate::engine::executors::chat::provider_model_rows());
         }
