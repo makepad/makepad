@@ -172,19 +172,19 @@ version_code = "auto"
 "#;
         let toml = parse_toml(toml_text).expect("parse");
         assert!(matches!(
-            toml.get("package.metadata.packager.identifier"),
+            toml.get_path(&["package", "metadata", "packager", "identifier"]),
             Some(Toml::Str(v, _)) if v == "rs.robius.robrix"
         ));
         assert!(matches!(
-            toml.get("package.metadata.packager.product_name"),
+            toml.get_path(&["package", "metadata", "packager", "product_name"]),
             Some(Toml::Str(v, _)) if v == "Robrix"
         ));
         assert!(matches!(
-            toml.get("package.metadata.makepad.android.version_code"),
+            toml.get_path(&["package", "metadata", "makepad", "android", "version_code"]),
             Some(Toml::Str(v, _)) if v.eq_ignore_ascii_case("auto")
         ));
         assert!(matches!(
-            toml.get("package.version"),
+            toml.get_path(&["package", "version"]),
             Some(Toml::Str(v, _)) if v == "1.0.0-alpha.1"
         ));
     }
@@ -320,16 +320,16 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
     let Ok(toml) = parse_toml(&cargo_toml) else {
         return out;
     };
-    if let Some(Toml::Str(v, _)) = toml.get("package.version") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "version"]) {
         out.package_version = Some(v.clone());
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.packager.identifier") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "packager", "identifier"]) {
         out.identifier = Some(v.clone());
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.packager.product_name") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "packager", "product_name"]) {
         out.product_name = Some(v.clone());
     }
-    match toml.get("package.metadata.makepad.android.version_code") {
+    match toml.get_path(&["package", "metadata", "makepad", "android", "version_code"]) {
         Some(Toml::Num(n, _)) if *n >= 0.0 && *n <= u32::MAX as f64 => {
             out.version_code = Some(VersionCodeStrategy::Explicit(*n as u32));
         }
@@ -343,10 +343,10 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
         }
         _ => {}
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.makepad.android.version_name") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "makepad", "android", "version_name"]) {
         out.version_name_override = Some(v.clone());
     }
-    if let Some(Toml::Num(n, _)) = toml.get("package.metadata.makepad.android.min_sdk_version") {
+    if let Some(Toml::Num(n, _)) = toml.get_path(&["package", "metadata", "makepad", "android", "min_sdk_version"]) {
         if *n >= 1.0 && *n <= 100.0 && n.fract() == 0.0 {
             out.min_sdk_version = Some(*n as usize);
         } else {
@@ -361,29 +361,18 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
 pub fn get_package_binary_name(build_crate: &str) -> Option<String> {
     let crate_dir = get_crate_dir(build_crate).ok()?;
     let cargo_toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
-
-    let mut in_bin = false;
-    for raw in cargo_toml.lines() {
-        let line = raw.trim();
-        if line.starts_with("[[bin]]") {
-            in_bin = true;
-            continue;
-        }
-        if line.starts_with('[') {
-            in_bin = false;
-        }
-        if in_bin && line.starts_with("name") {
-            if let Some(eq) = line.find('=') {
-                let value = line[eq + 1..].trim().trim_matches('"').to_string();
-                if !value.is_empty() {
-                    return Some(value);
+    let toml = parse_toml(&cargo_toml).ok()?;
+    // The first `[[bin]]` with a name wins, in manifest order.
+    if let Some(Toml::ArrayOfTables(bins)) = toml.get_path(&["bin"]) {
+        for bin in bins {
+            if let Some(Toml::Str(name, _)) = bin.get("name") {
+                if !name.is_empty() {
+                    return Some(name.clone());
                 }
             }
         }
     }
-
-    let toml = parse_toml(&cargo_toml).ok()?;
-    if let Some(Toml::Str(pkg_name, _)) = toml.get("package.name") {
+    if let Some(Toml::Str(pkg_name, _)) = toml.get_path(&["package", "name"]) {
         return Some(pkg_name.clone());
     }
     None
