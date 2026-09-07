@@ -2138,6 +2138,20 @@ mod imp {
         }
     }
 
+    pub fn gpu_pixal_naf_sample(
+        _q: &GpuTensor, _k: &GpuTensor, _v: &GpuTensor, _uv: &GpuTensor,
+        _width: usize, _height: usize, _low_width: usize, _low_height: usize,
+        _heads: usize, _kernel: usize,
+    ) -> Result<GpuTensor, String> { Err(GPU_UNAVAILABLE.to_string()) }
+
+    pub fn gpu_pixal_rope(_x: &GpuTensor, _periods: &GpuTensor, _width: usize, _height: usize) -> Result<GpuTensor,String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_pixal_pool(
+        _x: &GpuTensor, _width: usize, _height: usize, _out_width: usize, _out_height: usize,
+    ) -> Result<GpuTensor,String> { Err(GPU_UNAVAILABLE.to_string()) }
+
     pub fn gpu_skintokens_michelangelo_fourier(
         _condition: &GpuTensor,
     ) -> Result<GpuTensor, String> {

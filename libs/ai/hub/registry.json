@@ -1,6 +1,104 @@
 {
  "models": [
   {
+   "id": "pixal3d",
+   "domain": "mesh",
+   "backend": "trellis",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT and component licenses",
+    "url": "https://github.com/TencentARC/Pixal3D",
+    "summary": "Tencent Pixal3D is MIT. The bundle includes Microsoft TRELLIS decoders, DINOv3/NAF conditioning and BiRefNet under their respective published licenses. ComfyUI GPL source is not bundled.",
+    "restriction": "community"
+   },
+   "vram_gb": 24.0,
+   "note": "Native Pixal3D BF16 image-to-PBR-GLB. Sparse projected NAF avoids the dense 4 GiB texture feature map. Supports 1024/1536 cascades, manual camera FOV, independent structure/texture seeds and shape steps through pixal options. Native BiRefNet and FaithC/xatlas postprocessing. Validated on RTX PRO 6000 at 1024 and 1536; the larger cascade needs more VRAM. This BF16 backend does not implement the Comfy INT8 6 GB mode.",
+   "files": [
+    {
+     "role": "ss-flow",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "shape-flow-512",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "shape-flow-1024",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "texture-flow-1024",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "clip_vision/dino_v3_L_naf_fp32.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/dino_naf.safetensors",
+     "size": 1215214176,
+     "sha256": "4ad2ec4e0879a5b5b04cd97325cc37da954a7b6edca5170b86510f17f2b2290f"
+    },
+    {
+     "role": "shape-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948490494,
+     "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581"
+    },
+    {
+     "role": "texture-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948458812,
+     "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c"
+    },
+    {
+     "role": "ss-decoder",
+     "repo": "microsoft/TRELLIS-image-large",
+     "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+     "cache_as": "trellis2/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "size": 147591972,
+     "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a"
+    },
+    {
+     "role": "native-matte",
+     "repo": "ZhengPeng7/BiRefNet_HR-matting",
+     "path": "model.safetensors",
+     "revision": "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+     "cache_as": "matte/birefnet-hr/model.safetensors",
+     "size": 444473596,
+     "sha256": "a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55"
+    }
+   ]
+  },
+  {
    "id": "bs-roformer-4stem",
    "domain": "stems",
    "backend": "stems",
