@@ -116,6 +116,7 @@ pub mod root;
 pub mod dock;
 pub mod tab;
 pub mod tab_bar;
+pub mod tabs;
 pub mod tab_close_button;
 
 pub mod html;
@@ -249,6 +250,7 @@ pub use crate::{
     stack_navigation::*,
     tab::*,
     tab_bar::*,
+    tabs::*,
     tab_close_button::*,
     text_flow::*,
 
@@ -468,6 +470,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tab_close_button::script_mod(vm);
     crate::tab::script_mod(vm);
     crate::tab_bar::script_mod(vm);
+    crate::tabs::script_mod(vm);
     crate::dock::script_mod(vm);
 
     // Navigation and panels
