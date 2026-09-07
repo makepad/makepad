@@ -1,46 +1,57 @@
-//! The tab stories: the strip bound to a pager, and the looks a strip can take.
+//! The tab stories: a strip that behaves like a browser's, and the shapes a
+//! row of choices can take when it is not one.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
+use std::sync::Mutex;
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
     use mod.storybook.*
 
-    let TabPage = View{
-        width: Fill
-        height: 90.
-        flow: Down
-        padding: theme.mspace_3
-        spacing: theme.space_2
-        show_bg: true
-        draw_bg +: {color: theme.color_surface_container_low}
-    }
-
     mod.stories.TabsOverview = StoryPage{
-        StoryNote{text: "A tab strip is a radio group; a tab BODY is a pager. The library has both and nothing binds them, so every app writes the same four lines. This page is that recipe, and the looks a strip can take."}
+        StoryNote{text: "Tabs are not a row of buttons. They SHARE the width, they shrink together as more arrive, they can be shut, and the one in use is drawn in the panel's own colour so the two read as one surface. Open a few, shut a few, and watch the widths move."}
 
-        StoryHeading{text: "A strip bound to a pager"}
-        StoryRow{
-            tab_one := RadioButtonTab{text: "Overview"}
-            tab_two := RadioButtonTab{text: "Detail"}
-            tab_three := RadioButtonTab{text: "History"}
-        }
-        pages := PageFlip{
+        StoryHeading{text: "A strip and its panel"}
+        strip := Tabs{}
+        panel := RoundedView{
             width: Fill
-            height: Fit
-            lazy_init: true
-            active_page: @one
-            one := TabPage{P{text: "The first page. Only the page on screen is built, because the pager is lazy."}}
-            two := TabPage{P{text: "The second. It was not built until you asked for it."}}
-            three := TabPage{P{text: "The third, likewise."}}
+            height: 110.
+            flow: Down
+            padding: theme.mspace_3
+            spacing: theme.space_2
+            show_bg: true
+            draw_bg +: {color: theme.color_surface_container_low border_radius: theme.radius_s}
+            panel_title := H4{text: "Overview"}
+            panel_note := P{text: "The panel follows the strip. The tab in use carries this panel's colour, which is what says the strip chooses what is underneath."}
         }
         StoryRow{
-            built_note := Label{text: "built so far: overview"}
+            add_one := Button{text: "Add a tab"}
+            tab_count := Label{text: "3 open, each 200 wide"}
         }
 
-        StoryHeading{text: "The looks a strip can take"}
-        StoryNote{text: "Four shapes for one job. A segmented control glides a pill between its answers; a chip group is the same choice in outline; a tab strip is the boxier one; and the segmented control turns on its side without changing anything else."}
+        StoryHeading{text: "When there are many"}
+        StoryNote{text: "Drag the width. Tabs share what there is, down to a floor: below it they stop shrinking and the strip overruns, which is the honest failure until a strip learns to scroll."}
+        StoryRow{
+            strip_width := Slider{
+                width: 300.
+                text: "Strip width"
+                min: 220.
+                max: 720.
+                default: 700.
+                step: 10.
+            }
+            width_note := Label{text: "700 points"}
+        }
+        many_frame := View{
+            width: 700.
+            height: Fit
+            flow: Down
+            many := Tabs{can_add: false}
+        }
+
+        StoryHeading{text: "Rows of choices that are not tabs"}
+        StoryNote{text: "Three neighbours worth telling apart. A segmented control glides a pill between peers and never grows or shrinks. A chip group is the same choice, lighter, and can hold more than one. A vertical segmented control is a rail. None of them shares its width, and that is exactly why none of them is a tab strip."}
         StoryRow{
             period := SegmentedControl{options: ["Day" "Week" "Month"]}
         }
@@ -55,78 +66,103 @@ script_mod! {
         StoryRow{
             SegmentedControlVertical{options: ["North" "East" "South"]}
         }
+    }
+}
 
-        StoryHeading{text: "An icon in a tab"}
-        StoryNote{text: "A tab is a radio button without the circle, so anything that reserved room for that circle has to give it back."}
-        StoryRow{
-            icon_one := RadioButtonTab{
-                text: "Starred"
-                draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-            }
-            icon_two := RadioButtonTab{
-                text: "Plain"
-            }
-        }
+/// The strip's own list. A tab strip owns an ORDER that changes, so the story
+/// has to own one too; a fixed list in the DSL could never be shut or added to.
+static OPEN: Mutex<Option<Vec<(u64, String)>>> = Mutex::new(None);
+static NEXT_ID: Mutex<u64> = Mutex::new(4);
 
-        StoryHeading{text: "When the strip runs out of room"}
-        StoryNote{text: "Drag the width. A strip narrower than its tabs is the case a fixed row cannot answer, and it is the one nothing in the library handles yet: the tabs simply run past the edge."}
-        StoryRow{
-            strip_width := Slider{
-                width: 300.
-                text: "Strip width"
-                min: 200.
-                max: 720.
-                default: 700.
-                step: 10.
-            }
-            strip_note := Label{text: "700 points"}
-        }
-        strip_frame := View{
-            width: 700.
-            height: Fit
-            flow: Right
-            spacing: theme.space_1
-            show_bg: true
-            draw_bg +: {color: theme.color_surface_container_low}
-            padding: theme.mspace_1
-            RadioButtonTab{text: "Mixer"}
-            RadioButtonTab{text: "Effects"}
-            RadioButtonTab{text: "Routing"}
-            RadioButtonTab{text: "Automation"}
-            RadioButtonTab{text: "Metering"}
-            RadioButtonTab{text: "Settings"}
+fn entries() -> Vec<TabEntry> {
+    let mut guard = OPEN.lock().unwrap();
+    let list = guard.get_or_insert_with(|| {
+        vec![
+            (1, "Overview".to_string()),
+            (2, "Detail".to_string()),
+            (3, "History".to_string()),
+        ]
+    });
+    list.iter().map(|(id, name)| TabEntry::new(LiveId(*id), name)).collect()
+}
+
+fn close(id: LiveId) {
+    let mut guard = OPEN.lock().unwrap();
+    if let Some(list) = guard.as_mut() {
+        // Never the last one: a strip with nothing in it has no panel to
+        // show and no way back.
+        if list.len() > 1 {
+            list.retain(|(other, _)| LiveId(*other) != id);
         }
     }
 }
 
-const PAGES: [LiveId; 3] = [live_id!(one), live_id!(two), live_id!(three)];
-const NAMES: [&str; 3] = ["overview", "detail", "history"];
+fn add() {
+    let mut next = NEXT_ID.lock().unwrap();
+    let id = *next;
+    *next += 1;
+    let mut guard = OPEN.lock().unwrap();
+    if let Some(list) = guard.as_mut() {
+        list.push((id, format!("Tab {id}")));
+    }
+}
+
+fn label_of(id: LiveId) -> String {
+    OPEN.lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|l| l.iter().find(|(other, _)| LiveId(*other) == id).map(|(_, n)| n.clone()))
+        .unwrap_or_default()
+}
+
+fn many_entries() -> Vec<TabEntry> {
+    ["Mixer", "Effects", "Routing", "Automation", "Metering", "Settings", "Output", "Notes"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| TabEntry::new(LiveId(i as u64 + 100), name))
+        .collect()
+}
+
+fn sync(cx: &mut Cx, root: &WidgetRef) {
+    let list = entries();
+    let count = list.len();
+    root.tabs(cx, ids!(strip)).set_tabs(cx, list);
+    let width = ((700.0 - 12.0 - 26.0) / count as f64).min(200.0).max(60.0);
+    root.label(cx, ids!(tab_count))
+        .set_text(cx, &format!("{count} open, each {width:.0} wide"));
+}
 
 fn tabs_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
-    if let Some(index) = root
-        .radio_button_set(cx, ids_array!(tab_one, tab_two, tab_three))
-        .selected(cx, actions)
-    {
-        if let Some(page) = PAGES.get(index) {
-            root.page_flip(cx, ids!(pages)).set_active_page(cx, *page);
-        }
-        // Which pages have been BUILT, not which is showing: a lazy pager
-        // only ever builds what has been asked for, and that is the whole
-        // reason to reach for one.
-        let seen = crate::stories::bump(live_id!(tabs_seen_marker));
-        let _ = seen;
-        if let Some(name) = NAMES.get(index) {
-            let label = root.label(cx, ids!(built_note));
-            let text = label.text();
-            if !text.contains(name) {
-                label.set_text(cx, &format!("{text}, {name}"));
-            }
+    let strip = root.tabs(cx, ids!(strip));
+    // Seed on the first pass: the strip owns its order, so nothing in the
+    // DSL can hand it one.
+    if strip.selected().is_none() {
+        sync(cx, root);
+        root.tabs(cx, ids!(many)).set_tabs(cx, many_entries());
+    }
+
+    if let Some(id) = strip.chosen(actions) {
+        let name = label_of(id);
+        root.label(cx, ids!(panel_title)).set_text(cx, &name);
+    }
+    if let Some(id) = strip.closed(actions) {
+        close(id);
+        sync(cx, root);
+        if let Some(now) = root.tabs(cx, ids!(strip)).selected() {
+            root.label(cx, ids!(panel_title)).set_text(cx, &label_of(now));
         }
     }
+    if strip.added(actions) || root.button(cx, ids!(add_one)).clicked(actions) {
+        add();
+        sync(cx, root);
+    }
+
     if let Some(w) = root.slider(cx, ids!(strip_width)).slided(actions) {
-        let mut frame = root.widget(cx, ids!(strip_frame));
+        let mut frame = root.widget(cx, ids!(many_frame));
         script_apply_eval!(cx, frame, { width: #(w) });
-        root.label(cx, ids!(strip_note)).set_text(cx, &format!("{w:.0} points"));
+        let each = ((w - 12.0) / 8.0).min(200.0).max(60.0);
+        root.label(cx, ids!(width_note))
+            .set_text(cx, &format!("{w:.0} points, each tab {each:.0}"));
     }
 }
 
@@ -136,10 +172,10 @@ pub const STORIES: &[Story] = &[Story {
     component: "Tabs",
     name: "Overview",
     dsl: "TabsOverview",
-    added: "2026-02-16",
-    tags: &[],
-    doc: "# Tabs\n\nThere is no `Tabs` widget, and this page is the argument for one plus the recipe until it exists.\n\n**A tab strip is a radio group and a tab body is a pager.** The library ships both and nothing joins them, so four applications in this repository each wrote the same four lines: read which radio was chosen, look up the page id, set the pager's active page. That binding is the first section here.\n\nThe pager is `lazy_init`, so a page is built the first time it is asked for and not before. The line under it names the pages that have actually been built, which is the reason to reach for a lazy pager rather than a stack of hidden views.\n\n**Four shapes for one job.** A segmented control glides a pill between its answers and is right when the choices are peers. A chip group in outline is the same choice, lighter. A tab strip is the boxier one, and it is what an editor with pages wants. The segmented control also turns on its side, which is the vertical rail case, without changing anything else about it.\n\n**What is missing, and this page shows it rather than hiding it.** Drag the strip narrow and the tabs simply run past the edge: nothing in the library scrolls a strip, collapses it into an overflow menu, or scrolls a chosen tab back into view, even though the arithmetic for the overflow split is already written and unused. A tab cannot be closed or added from the DSL either. Those are the widget this page argues for.",
-    subject: "pages",
+    added: "2026-09-07",
+    tags: &["new"],
+    doc: "# Tabs\n\nTabs are not a row of buttons, and the difference is one rule: **they share the width**. They are as wide as they can be up to a maximum, and they shrink together as more arrive rather than running off the edge. A segmented control never does that, which is why a segmented control never reads as tabs however it is painted.\n\nThree more things follow from taking that seriously.\n\n**A tab can be shut, and the mark for it appears when it earns its room.** On every tab at all times it is noise; on none of them the strip is a dead end. It shows on the tab under the pointer, on the tab in use, and on any tab wide enough that it costs nothing. The middle button shuts one without having to aim at the mark, which is the whole reason people use it.\n\n**The tab in use belongs to the panel below it.** It is drawn in the panel's own colour, so the two read as one surface. That is what says the strip chooses what is underneath, rather than that these are buttons which happen to sit above something.\n\n**The strip owns an order that changes.** Tabs are added and shut, so the list cannot live in the markup; the host holds it and hands it over. That is why this page keeps its own list rather than declaring three children.\n\nWhat it does not do yet: a strip narrower than its floor overruns rather than scrolling, and there is no overflow menu and no scroll-the-chosen-tab-into-view. The arithmetic for the overflow split is already in the library and still has no caller.\n\nThe behaviour was lifted from a working browser chrome in this repository rather than invented. Everything particular to that browser stayed behind.",
+    subject: "strip",
     feature: None,
     controls: &[],
     on_actions: Some(tabs_actions),
