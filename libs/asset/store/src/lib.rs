@@ -82,7 +82,7 @@ pub use budget::Budgets;
 pub use cas::{BlobCommit, Cas, MemoryCas};
 #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use cas_file::{BlobWriter, FsCas};
-pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
+pub use catalog::{validate_namespace, CandidateState, Catalog, PublishExpectedHead, RetireReport};
 pub use core::{
     AssetDetail, CatalogCore, PublicAliasHead, PublicAssetRevision, PublicExportAsset,
     PublicExportFilter, PublicExportPage, PublicSearchProjection, PublicSearchTerm, PublishBatchItem,

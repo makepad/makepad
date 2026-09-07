@@ -22,9 +22,7 @@ use crate::core::{
 use crate::error::{io_err, ServerError, ServerResult};
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
-use makepad_asset_data::{
-    AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
-};
+use makepad_asset_data::{AssetRevisionRef, BlobId};
 use std::path::Path;
 
 const STATIC_EXPORT_MIN_SCHEMA_VERSION: i64 = 9;
@@ -615,107 +613,7 @@ impl AssetServerCore {
         items: &[PublishBatchItem],
         now_ms: u64,
     ) -> ServerResult<Vec<PublishBatchOutcome>> {
-        // Decode + guard EVERYTHING before the first mutation, so a bad item
-        // refuses the batch without a rollback ever being needed.
-        let mut decoded: Vec<(AssetManifest, AssetRevisionId)> = Vec::with_capacity(items.len());
-        for item in items {
-            if item.manifest_bytes.len() as u64 > self.budgets.max_manifest_bytes {
-                return Err(ServerError::OverBudget {
-                    what: "asset manifest bytes",
-                    limit: self.budgets.max_manifest_bytes,
-                    found: item.manifest_bytes.len() as u64,
-                });
-            }
-            let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
-            let revision = AssetRevisionId::hash_of(&item.manifest_bytes);
-            if let Some(alias) = &item.alias {
-                if alias.namespace() != item.namespace {
-                    return Err(ServerError::Conflict { what: "alias namespace" });
-                }
-            }
-            // Rights immutability: re-publishing an existing asset must not
-            // change its terms. Compared against the latest published head's
-            // immutable manifest; same-revision replays trivially pass.
-            let candidates = self.catalog().asset_candidates(&manifest.asset_id, 512)?;
-            let prev = candidates
-                .iter()
-                .filter(|c| c.state == CandidateState::Published && c.revision != revision)
-                .max_by_key(|c| c.published_ms.unwrap_or(0))
-                .map(|c| c.revision);
-            if let Some(prev) = prev {
-                if let Some(bytes) = self.catalog().asset_revision_manifest(&prev)? {
-                    if let Ok(previous) = AssetManifest::from_canonical_bytes(&bytes) {
-                        if previous.rights != manifest.rights {
-                            return Err(ServerError::Conflict {
-                                what: "published asset rights would change",
-                            });
-                        }
-                    }
-                }
-            }
-            decoded.push((manifest, revision));
-        }
-        let catalog = self.catalog();
-        let search = self.search();
-        self.db.tx(|db| {
-            let mut out = Vec::with_capacity(items.len());
-            for (item, (manifest, revision)) in items.iter().zip(&decoded) {
-                catalog.register_asset(&manifest.asset_id, &item.namespace, now_ms)?;
-                let already = match catalog.asset_candidate_state(&manifest.asset_id, revision)? {
-                    Some(CandidateState::Published) => true,
-                    Some(CandidateState::Quarantined) => {
-                        return Err(ServerError::InvalidState {
-                            what: "publish batch revision",
-                            state: "quarantined",
-                        });
-                    }
-                    Some(CandidateState::Staged) => {
-                        catalog.transition_in_tx(
-                            db,
-                            "asset",
-                            manifest.asset_id.as_bytes(),
-                            revision.as_bytes(),
-                            &[CandidateState::Staged],
-                            CandidateState::Published,
-                            now_ms,
-                        )?;
-                        false
-                    }
-                    None => {
-                        let staged = catalog.stage_asset_revision_in_tx(
-                            db,
-                            &item.manifest_bytes,
-                            now_ms,
-                        )?;
-                        catalog.transition_in_tx(
-                            db,
-                            "asset",
-                            manifest.asset_id.as_bytes(),
-                            staged.as_bytes(),
-                            &[CandidateState::Staged],
-                            CandidateState::Published,
-                            now_ms,
-                        )?;
-                        false
-                    }
-                };
-                search.set_annotation_in_tx(db, &manifest.asset_id, &item.annotation, now_ms)?;
-                if let Some(alias) = &item.alias {
-                    catalog.set_asset_alias_in_tx(
-                        db,
-                        alias,
-                        &AssetRevisionRef { asset_id: manifest.asset_id, revision: *revision },
-                        now_ms,
-                    )?;
-                }
-                out.push(PublishBatchOutcome {
-                    asset_id: manifest.asset_id,
-                    revision: *revision,
-                    already_published: already,
-                });
-            }
-            Ok(out)
-        })
+        self.core.publish_batch(items, now_ms)
     }
 
     // ---- deterministic stock seeding ---------------------------------------
