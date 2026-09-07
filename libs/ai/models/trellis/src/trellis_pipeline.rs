@@ -9,7 +9,7 @@ use crate::trellis::{
     t2_cfg_combine, t2_euler_step, t2_occupancy_coords, t2_rope_tables, t2_ss_grid_coords,
     t2_t_sequence, T2SamplerConfig, T2_SS_CHANNELS, T2_SS_TOKENS,
 };
-use crate::trellis_dit::{t2_upload_rope, T2CrossKv, T2Dit};
+use crate::trellis_dit::{t2_upload_rope, T2CrossKv, T2Dit, T2ProjectionInput};
 use crate::trellis_vae::T2SsDec;
 use crate::Result;
 
@@ -127,6 +127,24 @@ pub fn t2_sample_flow_concat_ctl(
     cfg: &T2SamplerConfig,
     dense_std: bool,
     cancel: T2CancelHook,
+    on_forward: impl FnMut(usize, f64, &[f32], &[f32]),
+) -> Result<()> {
+    t2_sample_flow_projected_ctl(dit,x,tokens,concat_cond,cond,neg_cond,rope,cfg,dense_std,cancel,None,on_forward)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn t2_sample_flow_projected_ctl(
+    dit: &T2Dit,
+    x: &mut [f32],
+    tokens: usize,
+    concat_cond: Option<&[f32]>,
+    cond: &GpuTensor,
+    neg_cond: &GpuTensor,
+    rope: &(GpuTensor, GpuTensor),
+    cfg: &T2SamplerConfig,
+    dense_std: bool,
+    cancel: T2CancelHook,
+    projection: Option<&GpuTensor>,
     mut on_forward: impl FnMut(usize, f64, &[f32], &[f32]),
 ) -> Result<()> {
     let x_channels = x.len() / tokens;
@@ -160,7 +178,8 @@ pub fn t2_sample_flow_concat_ctl(
         let t1000 = (1000.0 * t) as f32;
         let input = build_input(x);
         let (mut velocity, _) =
-            dit.forward(&input, tokens, t1000, cond, rope, Some(&mut pos_kv), &[])?;
+            dit.forward_projected(&input, tokens, t1000, cond, rope, Some(&mut pos_kv),
+                projection.map(T2ProjectionInput::Conditional).unwrap_or(T2ProjectionInput::None), &[])?;
         on_forward(fwd_index, t, x, &velocity);
         fwd_index += 1;
         if cfg_active {
@@ -168,7 +187,8 @@ pub fn t2_sample_flow_concat_ctl(
                 return Err(crate::DiffusionError::Cancelled);
             }
             let (neg_velocity, _) =
-                dit.forward(&input, tokens, t1000, neg_cond, rope, Some(&mut neg_kv), &[])?;
+                dit.forward_projected(&input, tokens, t1000, neg_cond, rope, Some(&mut neg_kv),
+                    if projection.is_some() {T2ProjectionInput::Unconditional} else {T2ProjectionInput::None}, &[])?;
             on_forward(fwd_index, t, x, &neg_velocity);
             fwd_index += 1;
             t2_cfg_combine(
@@ -226,9 +246,25 @@ pub fn t2_run_ss_cancel(
     cancel: T2CancelHook,
     on_forward: impl FnMut(usize, f64, &[f32], &[f32]),
 ) -> Result<T2SsOutput> {
+    t2_run_ss_projected_cancel(dit,ss_dec,noise_tokens,cond,neg_cond,cfg,ss_res,cancel,None,on_forward)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn t2_run_ss_projected_cancel(
+    dit: &T2Dit,
+    ss_dec: &T2SsDec,
+    noise_tokens: &[f32],
+    cond: &GpuTensor,
+    neg_cond: &GpuTensor,
+    cfg: &T2SamplerConfig,
+    ss_res: usize,
+    cancel: T2CancelHook,
+    projection: Option<&GpuTensor>,
+    on_forward: impl FnMut(usize, f64, &[f32], &[f32]),
+) -> Result<T2SsOutput> {
     let rope = t2_upload_rope(&t2_rope_tables(&t2_ss_grid_coords()))?;
     let mut x = noise_tokens.to_vec();
-    t2_sample_flow_concat_ctl(
+    t2_sample_flow_projected_ctl(
         dit,
         &mut x,
         T2_SS_TOKENS,
@@ -239,6 +275,7 @@ pub fn t2_run_ss_cancel(
         cfg,
         true, // dense torch .std() (Bessel) in the CFG rescale
         cancel,
+        projection,
         on_forward,
     )?;
     if cancel() {

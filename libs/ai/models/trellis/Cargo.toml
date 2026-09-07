@@ -2,8 +2,8 @@
 name = "makepad-ai-trellis"
 version = "0.1.0"
 edition = "2021"
-description = "TRELLIS.2 mesh family. Split out of libs/diffusion (lane T6, /aiarch.md)."
-license = "MIT"
+description = "Native TRELLIS.2 and Pixal3D image-to-mesh models."
+license = "MIT AND Apache-2.0"
 
 [dependencies]
 makepad-ai-common = { path = "../common" }

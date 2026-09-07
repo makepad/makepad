@@ -39,6 +39,20 @@ mod imp {
     pub use crate::{CudaGraph, CudaGraphExec};
 
     unsafe extern "C" {
+        fn makepad_cuda_pixal_naf_sample_f32(
+            q: *const f32, k: *const f32, v: *const f32, uv: *const f32, out: *mut f32,
+            count: u32, width: u32, height: u32, low_width: u32, low_height: u32,
+            heads: u32, qc: u32, vc: u32, kernel: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_pixal_rope_f32(
+            x: *const f32, periods: *const f32, out: *mut f32,
+            width: u32, height: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_pixal_pool_f32(
+            x: *const f32, out: *mut f32, width: u32, height: u32, ow: u32, oh: u32,
+            channels: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_affine_qmv_bf16(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
@@ -14708,6 +14722,70 @@ mod imp {
                     backend.stream,
                 )
             })?;
+            Ok(out)
+        })
+    }
+
+    /// Sparse NAF: attention at the four bilinear taps of each projected voxel.
+    /// All operands are token-major f32; UV is [N,2] in normalized image coordinates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_pixal_naf_sample(
+        q: &GpuTensor, k: &GpuTensor, v: &GpuTensor, uv: &GpuTensor,
+        width: usize, height: usize, low_width: usize, low_height: usize,
+        heads: usize, kernel: usize,
+    ) -> Result<GpuTensor, String> {
+        if q.half || k.half || v.half || uv.half || uv.cols != 2
+            || low_width == 0 || low_height == 0 || heads == 0
+            || width < low_width || height < low_height
+            || width % low_width != 0 || height % low_height != 0
+            || q.cols == 0 || v.cols == 0 || q.cols % heads != 0 || v.cols % heads != 0
+            || width.checked_mul(height) != Some(q.rows)
+            || low_width.checked_mul(low_height) != Some(k.rows)
+            || k.rows != v.rows || k.cols != q.cols
+            || kernel == 0 || kernel > 15 || kernel % 2 == 0
+            || [width,height,low_width,low_height,q.cols,v.cols,uv.rows].iter().any(|&n| n > u32::MAX as usize)
+            || heads > 65535
+        { return Err("gpu_pixal_naf_sample shape/dtype mismatch".into()); }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(uv.rows, v.cols)?;
+            gpu_check(unsafe { makepad_cuda_pixal_naf_sample_f32(
+                q.device_ptr()?,k.device_ptr()?,v.device_ptr()?,uv.device_ptr()?,out.device_ptr()?,
+                uv.rows as u32,width as u32,height as u32,low_width as u32,low_height as u32,
+                heads as u32,q.cols as u32,v.cols as u32,kernel as u32,backend.stream,
+            ) })?;
+            Ok(out)
+        })
+    }
+
+    /// Fused planar-to-token transpose and Pixal3D four-head 2D RoPE.
+    pub fn gpu_pixal_rope(x: &GpuTensor, periods: &GpuTensor, width: usize, height: usize) -> Result<GpuTensor,String> {
+        if x.half || periods.half || x.rows!=256 || periods.rows*periods.cols!=16
+            || width==0 || height==0 || width>1024 || height>1024 || width*height!=x.cols {
+            return Err("gpu_pixal_rope shape/dtype mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out=GpuTensor::from_pool(width*height,256)?;
+            gpu_check(unsafe {makepad_cuda_pixal_rope_f32(x.device_ptr()?,periods.device_ptr()?,out.device_ptr()?,
+                width as u32,height as u32,backend.stream)})?;
+            Ok(out)
+        })
+    }
+
+    pub fn gpu_pixal_pool(
+        x: &GpuTensor, width: usize, height: usize, out_width: usize, out_height: usize,
+    ) -> Result<GpuTensor,String> {
+        if x.half || width == 0 || height == 0 || out_width == 0 || out_height == 0
+            || width.checked_mul(height) != Some(x.cols)
+            || out_width.checked_mul(out_height).is_none()
+            || [width,height,out_width,out_height,x.rows].iter().any(|&n| n > 65535)
+        { return Err("gpu_pixal_pool shape/dtype mismatch".into()); }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out=GpuTensor::from_pool(x.rows,out_width*out_height)?;
+            gpu_check(unsafe { makepad_cuda_pixal_pool_f32(x.device_ptr()?,out.device_ptr()?,
+                width as u32,height as u32,out_width as u32,out_height as u32,x.rows as u32,backend.stream) })?;
             Ok(out)
         })
     }

@@ -976,6 +976,7 @@ pub(crate) mod tests {
             texture: None,
             decimation_target: None,
             texture_size: None,
+            pixal: None,
             gaussians: None,
             motion_mode: None,
             canny_low: None,
