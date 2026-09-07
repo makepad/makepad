@@ -286,6 +286,9 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // A GUI launched by an automation shell must not inherit that
+        // shell's color suppression into its interactive terminal.
+        cmd.env_remove("NO_COLOR");
         cmd.env("TERM_PROGRAM", "terminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         // A terminal spawned inside makepad-wm inherits the compositor's

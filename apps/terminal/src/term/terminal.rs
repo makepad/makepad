@@ -52,6 +52,17 @@ pub struct Terminal {
     pub base_palette: Palette,
     pub base_fg: Rgb,
     pub base_bg: Rgb,
+    pub base_cursor: Option<Rgb>,
+
+    /// Explicit OSC overrides, independent of their RGB value. A hosted
+    /// display inherits its own theme unless the child changes a color.
+    pub palette_overrides: [bool; 256],
+    pub foreground_override: bool,
+    pub background_override: bool,
+
+    /// Whether the baseline colors describe the actual display. A detached
+    /// host inheriting an unknown client theme must not invent OSC replies.
+    pub known_theme_colors: [bool; 259],
 
     /// Kitty keyboard flag stacks, one per screen (the spec keeps them
     /// separate so alt-screen apps can't corrupt the shell's state).
@@ -100,6 +111,11 @@ impl Terminal {
             base_palette: palette,
             base_fg: fg,
             base_bg: bg,
+            base_cursor: None,
+            palette_overrides: [false; 256],
+            foreground_override: false,
+            background_override: false,
+            known_theme_colors: [true; 259],
             kitty_flags_primary: Vec::new(),
             kitty_flags_alternate: Vec::new(),
             modify_other_keys: 0,
@@ -123,6 +139,10 @@ impl Terminal {
         self.palette = self.base_palette;
         self.default_fg = fg;
         self.default_bg = bg;
+        self.palette_overrides.fill(false);
+        self.foreground_override = false;
+        self.background_override = false;
+        self.known_theme_colors.fill(true);
         self.dirty = true;
     }
 
@@ -257,8 +277,7 @@ impl Terminal {
         }
 
         // Insert mode shifts the line right first.
-        if self.modes.get(Mode::Insert) && self.screen().cursor.x + width as usize <= self.cols()
-        {
+        if self.modes.get(Mode::Insert) && self.screen().cursor.x + width as usize <= self.cols() {
             self.insert_blanks(width as usize);
         }
 
@@ -649,8 +668,7 @@ impl Terminal {
     fn reverse_index(&mut self) {
         self.dirty = true;
         let s = self.screen();
-        if s.cursor.y != s.scroll_top || s.cursor.x < s.left_margin || s.cursor.x > s.right_margin
-        {
+        if s.cursor.y != s.scroll_top || s.cursor.x < s.left_margin || s.cursor.x > s.right_margin {
             self.cursor_up(1);
         } else {
             let pen = self.screen().cursor.style;
@@ -955,7 +973,11 @@ impl Terminal {
             }
         }
         // Don't leave a dangling tail at the start of the shifted span.
-        if row.cell(x).map(|c| c.content == CellContent::WideTail).unwrap_or(false) {
+        if row
+            .cell(x)
+            .map(|c| c.content == CellContent::WideTail)
+            .unwrap_or(false)
+        {
             row.cells[x] = Cell::blank_with_bg(&pen);
         }
     }
@@ -1155,12 +1177,10 @@ impl Terminal {
                 Attribute::Italic => style.flags.set(StyleFlags::ITALIC, true),
                 Attribute::ResetItalic => style.flags.set(StyleFlags::ITALIC, false),
                 Attribute::Underline(u) => style.flags.set_underline(u),
-                Attribute::ResetUnderline => {
-                    style.flags.set_underline(crate::term::style::Underline::None)
-                }
-                Attribute::UnderlineColorRgb(rgb) => {
-                    style.underline_color = StyleColor::Rgb(rgb)
-                }
+                Attribute::ResetUnderline => style
+                    .flags
+                    .set_underline(crate::term::style::Underline::None),
+                Attribute::UnderlineColorRgb(rgb) => style.underline_color = StyleColor::Rgb(rgb),
                 Attribute::UnderlineColorPalette(i) => {
                     style.underline_color = StyleColor::Palette(i)
                 }
@@ -1174,9 +1194,7 @@ impl Terminal {
                 Attribute::Invisible => style.flags.set(StyleFlags::INVISIBLE, true),
                 Attribute::ResetInvisible => style.flags.set(StyleFlags::INVISIBLE, false),
                 Attribute::Strikethrough => style.flags.set(StyleFlags::STRIKETHROUGH, true),
-                Attribute::ResetStrikethrough => {
-                    style.flags.set(StyleFlags::STRIKETHROUGH, false)
-                }
+                Attribute::ResetStrikethrough => style.flags.set(StyleFlags::STRIKETHROUGH, false),
                 Attribute::Fg8(n) => style.fg_color = StyleColor::Palette(n),
                 Attribute::FgBright(n) => style.fg_color = StyleColor::Palette(n),
                 Attribute::ResetFg => style.fg_color = StyleColor::None,
@@ -1717,9 +1735,18 @@ impl Terminal {
                 ColorOp::Set(kind, rgb) => {
                     self.dirty = true;
                     match kind {
-                        ColorKind::Palette(i) => self.palette[i as usize] = rgb,
-                        ColorKind::Foreground => self.default_fg = rgb,
-                        ColorKind::Background => self.default_bg = rgb,
+                        ColorKind::Palette(i) => {
+                            self.palette[i as usize] = rgb;
+                            self.palette_overrides[i as usize] = true;
+                        }
+                        ColorKind::Foreground => {
+                            self.default_fg = rgb;
+                            self.foreground_override = true;
+                        }
+                        ColorKind::Background => {
+                            self.default_bg = rgb;
+                            self.background_override = true;
+                        }
                         ColorKind::Cursor => self.cursor_color = Some(rgb),
                     }
                 }
@@ -1727,23 +1754,52 @@ impl Terminal {
                     self.dirty = true;
                     match kind {
                         ColorKind::Palette(i) => {
-                            self.palette[i as usize] = self.base_palette[i as usize]
+                            self.palette[i as usize] = self.base_palette[i as usize];
+                            self.palette_overrides[i as usize] = false;
                         }
-                        ColorKind::Foreground => self.default_fg = self.base_fg,
-                        ColorKind::Background => self.default_bg = self.base_bg,
+                        ColorKind::Foreground => {
+                            self.default_fg = self.base_fg;
+                            self.foreground_override = false;
+                        }
+                        ColorKind::Background => {
+                            self.default_bg = self.base_bg;
+                            self.background_override = false;
+                        }
                         ColorKind::Cursor => self.cursor_color = None,
                     }
                 }
                 ColorOp::Query(kind) => {
-                    let (num, arg, color) = match kind {
+                    let known = match kind {
                         ColorKind::Palette(i) => {
-                            (4u16, Some(i), self.palette[i as usize])
+                            self.known_theme_colors[i as usize]
+                                || self.palette_overrides[i as usize]
                         }
+                        ColorKind::Foreground => {
+                            self.known_theme_colors[256] || self.foreground_override
+                        }
+                        ColorKind::Background => {
+                            self.known_theme_colors[257] || self.background_override
+                        }
+                        ColorKind::Cursor => {
+                            self.known_theme_colors[258] || self.cursor_color.is_some()
+                        }
+                    };
+                    if !known {
+                        // No reply is preferable to a false color. Programs
+                        // then use their normal unsupported-query fallback.
+                        continue;
+                    }
+                    let (num, arg, color) = match kind {
+                        ColorKind::Palette(i) => (4u16, Some(i), self.palette[i as usize]),
                         ColorKind::Foreground => (10, None, self.default_fg),
                         ColorKind::Background => (11, None, self.default_bg),
-                        ColorKind::Cursor => {
-                            (12, None, self.cursor_color.unwrap_or(self.default_fg))
-                        }
+                        ColorKind::Cursor => (
+                            12,
+                            None,
+                            self.cursor_color
+                                .or(self.base_cursor)
+                                .unwrap_or(self.default_fg),
+                        ),
                     };
                     let mut reply = match arg {
                         Some(i) => format!("\x1b]{};{};{}", num, i, encode_color_reply(color)),
@@ -1834,6 +1890,9 @@ impl Terminal {
         self.palette = self.base_palette;
         self.default_fg = self.base_fg;
         self.default_bg = self.base_bg;
+        self.palette_overrides.fill(false);
+        self.foreground_override = false;
+        self.background_override = false;
         self.cursor_color = None;
         self.cursor_style = CursorStyle::Default;
         self.kitty_flags_primary.clear();

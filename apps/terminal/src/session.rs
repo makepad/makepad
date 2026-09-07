@@ -143,6 +143,12 @@ impl Session {
         let _ = self.writer.send(bytes.to_vec());
     }
 
+    /// Whether the full input was accepted by this live PTY, for acknowledged
+    /// file drops. Does not infer that the application consumed the input.
+    pub fn try_write(&mut self, bytes: &[u8]) -> bool {
+        !self.exited && !bytes.is_empty() && self.writer.send(bytes.to_vec()).is_ok()
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = cols.max(2);
         let rows = rows.max(2);
