@@ -258,7 +258,7 @@ pub(super) fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name:"model.render",api_name:"model_render",
-            description:"Render the exact head: four rest PBR views plus up to four moving poses. Cars default to steering/suspension samples; rigs use authored poses/clips. Optional motion overrides samples. Returns an accepted model.jobs job. The completed job attaches actual rendered images to Astra separately from JSON, with objective topology checks. Review and repair defects before publication. Unsupported image delivery/readback fails honestly; tool success alone is not visual approval.",
+            description:"Render the exact head: eight rest PBR views (two sheets) plus up to four moving poses. Start with elevated45-degree front AND rear three-quarter views to assess volume and surface joins; cardinal silhouettes alone can hide wrong depth. Cars default to steering/suspension samples; rigs use authored poses/clips. Optional motion overrides samples. Returns an accepted model.jobs job. The completed job attaches actual rendered images to Astra separately from JSON, with objective topology checks. Review and repair defects before publication. Unsupported image delivery/readback fails honestly; tool success alone is not visual approval.",
             args_doc:r#"{"document":"car","expected":{"generation":"1","content":"0000000000000000000000000000000000000000000000000000000000000000"},"request_id":"review-1"}"#,
             parameters:schema_object(vec![doc(),expected(),("request_id",schema_string_len("stable review identity",1,96)),
                 ("motion",schema_array_bounded("optional explicit samples; default automatic",0,4,schema_object(vec![

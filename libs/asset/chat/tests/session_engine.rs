@@ -301,7 +301,7 @@ fn near_limit_review(headroom: usize, preview_metadata: bool, unknown_field: boo
         ];
         if preview_metadata {
             result.extend([
-                ("views", json::s("rest: front three-quarter,rear,underside,front; motion sheet follows motion_samples, row-major; same exact head, PBR renderer")),
+                ("views", json::s("Each sheet row-major. Volume: elevated 45deg front three-quarter, elevated 45deg rear three-quarter, lower front three-quarter, opposite lower front; Silhouette: front, side, near-top (83deg), underside; perspective projection; Motion: motion_samples order; unused cells blank")),
                 ("images_available", Value::Bool(true)),
             ]);
         }

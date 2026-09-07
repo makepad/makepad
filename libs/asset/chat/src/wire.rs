@@ -130,7 +130,12 @@ impl ToolOutcome {
             });
         }
         if !matches!(self, Self::Ok { .. }) { return self; }
-        let reason: String = reason.chars().take(240).collect();
+        // Once image metadata was omitted for space, retain the compact
+        // warning on retries. A longer view legend can free enough bytes
+        // that a second annotation would otherwise expand it again.
+        let compacted = matches!(&self, Self::Ok { value }
+            if value.get("image_delivery_omitted_fields").is_some());
+        let reason: String = if compacted { "unavailable".into() } else { reason.chars().take(240).collect() };
         annotate(&mut self, if reason.is_empty() { "unavailable" } else { &reason });
         if self.validate().is_ok() { return self; }
         // The new diagnostic has lower priority than the original successful
