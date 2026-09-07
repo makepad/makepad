@@ -929,7 +929,12 @@ impl Badge {
         match self.shape {
             BadgeShape::Round => (height * 0.5) as f32,
             BadgeShape::Rounded => self.radius as f32,
-            BadgeShape::Square => 0.0,
+            // Not zero. sdf.box has no interior term, so at radius zero the
+            // distance inside the shape is zero everywhere and the fill gets
+            // no coverage at all: the face vanished and only the bevel
+            // stroke painted. This is the least that stays opaque and still
+            // reads as a hard corner, against the rounded shape's four.
+            BadgeShape::Square => 1.5,
         }
     }
 
