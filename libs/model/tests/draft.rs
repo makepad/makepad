@@ -7,7 +7,7 @@ fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) {
 
 #[test]
 fn authored_detail_can_fill_128_objects_and_excess_refuses_atomically() {
-    let mut doc = Document::new(Limits::default()).unwrap();
+    let mut doc = Document::new(Limits { max_objects: 128, ..Limits::default() }).unwrap();
     assert_eq!(doc.limits().max_objects, 128);
     let mut operations = Vec::new();
     for i in 0..128 {

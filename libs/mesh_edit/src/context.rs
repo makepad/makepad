@@ -55,15 +55,15 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_vertices: 100_000,
-            max_faces: 50_000,
-            max_corners: 200_000,
-            max_edges: 300_000,
+            max_vertices: 2_000_000,
+            max_faces: 1_000_000,
+            max_corners: 4_000_000,
+            max_edges: 6_000_000,
             max_face_corners: 4096,
-            max_triangles: 200_000,
+            max_triangles: 4_000_000,
             max_weights_per_vertex: 64,
-            max_bytes: 128 * 1024 * 1024,
-            max_work: 100_000_000,
+            max_bytes: 2 * 1024 * 1024 * 1024,
+            max_work: 10_000_000_000,
         }
     }
 }

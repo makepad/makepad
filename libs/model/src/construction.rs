@@ -24,7 +24,7 @@ impl ConstructionOperation {
         let kind=match text(v,"op")?{
             "fiber_shell"=>{fields(v,&["op","object","source","count","length","width","seed","material"])?;
                 let count=integer(need(v,"count")?)?;let length=crate::service::float(need(v,"length")?)?;let width=crate::service::float(need(v,"width")?)?;
-                if !(1..=4096).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5{return Err(Error::Invalid("fiber_shell count/length/width"));}
+                if !(1..=fibers::MAX_STRANDS).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5{return Err(Error::Invalid("fiber_shell count/length/width"));}
                 Construction::Fibers{source:name(text(v,"source")?,limits)?,count,length,width,seed:integer(need(v,"seed")?)?,material:integer(need(v,"material")?)?}},
             "sweep"=>{fields(v,&["op","object","profile","path","caps","material"])?;Construction::Sweep{profile:vectors(need(v,"profile")?,3,128)?,path:vectors(need(v,"path")?,2,128)?,caps:flag(v,"caps")?,material:integer(need(v,"material")?)?}},
             "lathe"=>{fields(v,&["op","object","profile","axis","segments","caps","material"])?;let segments=integer(need(v,"segments")?)?;let axis=integer(need(v,"axis")?)? as usize;

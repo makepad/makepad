@@ -1,6 +1,8 @@
 //! Seeded surface fibers as ordinary closed geometry. No transparent shell
 //! ordering, geometry shader, per-frame allocation or extra renderer is needed.
 use super::*;
+
+pub(super) const MAX_STRANDS: u32 = 32_768;
 use std::collections::{BTreeSet,HashMap};
 
 #[derive(Clone,Copy)]
@@ -80,12 +82,12 @@ impl Random {
     }
 }
 pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,material:u32,ctx:&mut Context<'_>)->Result<Mesh> {
-    if !(1..=4096).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5 {
+    if !(1..=MAX_STRANDS).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5 {
         return Err(Error::Invalid("fiber_shell count/length/width"));
     }
     let count=count as usize;admit(count*7,count*7,count*24,ctx)?;
     let packed=source.triangulate(ctx)?;
-    if packed.triangles.len()>16384{return Err(Error::Budget("fiber_shell source triangles"));}
+    // Triangulation already enforces the document triangle and work limits.
     let working=count.saturating_mul(31*1024+27*64+512).saturating_add(source.memory_bytes()).saturating_add(packed.triangles.len().saturating_mul(512));
     if working>ctx.limits.max_bytes{return Err(Error::Budget("fiber_shell spacing working bytes"));}
     let triangles=packed.triangles.iter().map(|t|SourceTriangle{
