@@ -200,11 +200,14 @@ impl LocalService {
         let url = format!("{}/generate", self.base_url);
         let body = request.serialize_json();
         let job_id = submission::submit(&url, &self.auth_headers, body.as_bytes(),
+            request.queue_policy.as_deref() != Some("reject"),
             cancelled, &mut |note| pending(&submission::safe_note(note, request, &self.auth_headers)), transport)
             .map_err(|error| match error {
                 AssetAiError::Cancelled => AssetAiError::Cancelled,
+                AssetAiError::Busy => AssetAiError::Busy,
+                AssetAiError::QueueFull(limit) => AssetAiError::QueueFull(limit),
                 AssetAiError::Http(reason) => AssetAiError::Http(submission::safe_note(&reason, request, &self.auth_headers)),
-                AssetAiError::Unavailable(reason) if reason.starts_with("disk-space:") =>
+                AssetAiError::Unavailable(reason) if reason.starts_with("disk-space:") || reason.starts_with("local-use:") || reason.starts_with("admission-overloaded:") =>
                     AssetAiError::Unavailable(submission::safe_note(&reason, request, &self.auth_headers)),
                 other => AssetAiError::Http(submission::safe_note(&other.to_string(), request, &self.auth_headers)),
             })?;

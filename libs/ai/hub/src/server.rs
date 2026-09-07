@@ -3288,6 +3288,81 @@ mod lifecycle_tests {
         assert!(String::from_utf8(busy.body).unwrap().contains("busy"));
     }
 
+    #[test]
+    #[ignore = "requires loopback bind; run explicitly with --ignored"]
+    fn actual_generate_refusals_preserve_typed_reject_results_over_http() {
+        use crate::client::{ContentProvider, LocalService};
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        for refused in [
+            AssetAiError::Busy,
+            AssetAiError::QueueFull(4),
+            AssetAiError::Unavailable("local-use: gpu-counter-unavailable".into()),
+        ] {
+            // Exercise the production serializer, including metadata shared
+            // with /realtime. Hand-written client fixtures previously missed
+            // ws_path:null and silently turned these refusals into Http errors.
+            let response = generate_refused(&refused);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let request = GenerateRequestJson {
+                model: "flux1-schnell".into(),
+                prompt: Some("old car".into()),
+                seed: Some(u64::MAX),
+                queue_policy: Some("reject".into()),
+                origin_key: Some("server-refusal-contract".into()),
+                origin_epoch: Some(1),
+                ..Default::default()
+            };
+            let expected_body = request.serialize_json().into_bytes();
+            std::thread::scope(|scope| {
+                let server = scope.spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(stream) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("refusal fixture accept: {error}"),
+                        }
+                    };
+                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        assert!(head.len() < 16 * 1024, "fixture request head too large");
+                        stream.read_exact(&mut byte).unwrap();
+                        head.push(byte[0]);
+                    }
+                    let head = String::from_utf8(head).unwrap();
+                    assert!(head.starts_with("POST /generate HTTP/1.1\r\n"));
+                    let length: usize = head.lines()
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                        .unwrap().parse().unwrap();
+                    assert_eq!(length, expected_body.len());
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    assert_eq!(body, expected_body);
+                    stream.write_all(response.header.as_bytes()).unwrap();
+                    stream.write_all(&response.body).unwrap();
+                    // Close the listener after one POST: reject must return
+                    // its typed result, with no backoff or second submission.
+                });
+                let result = LocalService::new(&url).request_pending(
+                    Domain::Image, &request, &|| false,
+                    &mut |_| panic!("explicit reject must not wait for admission"),
+                );
+                server.join().unwrap();
+                assert_eq!(result, Err(refused));
+            });
+        }
+    }
+
     /// The ordinary case, which must NOT be a refusal: more chat turns than
     /// lanes. They wait, they keep their job ids, and they say where they are
     /// in the line — that is the difference between a busy box and a lost

@@ -26,6 +26,7 @@ pub(super) trait Transport {
 
 pub(super) fn submit(
     url: &str, headers: &[(String, String)], body: &[u8],
+    wait_for_admission: bool,
     cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str), transport: &mut impl Transport,
 ) -> Result<String, AssetAiError> {
     let deadline = transport.now() + BUDGET;
@@ -49,6 +50,29 @@ pub(super) fn submit(
                 // return its typed reason so fleet callers can choose a peer.
                 if let Some(disk) = reason.strip_prefix("model unavailable: disk-space:") {
                     return Err(AssetAiError::Unavailable(format!("disk-space:{disk}")));
+                }
+                if let Some(local_use) = reason.strip_prefix("model unavailable: local-use:") {
+                    return Err(AssetAiError::Unavailable(format!("local-use:{local_use}")));
+                }
+                // An explicit reject policy is an atomic attempt to claim
+                // idle capacity. Waiting/reposting here strands concurrent
+                // fleet callers on the same GPU instead of trying a peer.
+                // Only a proven no-job refusal reaches this branch; a lost
+                // or malformed response must never become a retryable Busy.
+                if !wait_for_admission {
+                    if reason == "HTTP server overloaded before job admission" {
+                        return Err(AssetAiError::Unavailable(format!("admission-overloaded: {reason}")));
+                    }
+                    if reason == "busy: a job is already queued or running" {
+                        return Err(AssetAiError::Busy);
+                    }
+                    if let Some(limit) = reason.strip_prefix("queue full: ")
+                        .and_then(|s| s.strip_suffix(" jobs already queued on this node"))
+                        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                        .and_then(|n| n.parse::<usize>().ok()) {
+                        return Err(AssetAiError::QueueFull(limit));
+                    }
+                    return Err(AssetAiError::Http(format!("{url}: http {status}: {reason}")));
                 }
                 last = format!("http {status}: {reason}");
             }
@@ -213,9 +237,10 @@ fn classify(status: u16, bytes: &[u8], allow_refusal: bool) -> Result<Reply, Ass
     }
     let error = value.get("error").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
     let no_job = matches!(value.get("job_id"), None | Some(Value::Null));
-    let valid_metadata = matches!(value.get("think_open"), None | Some(Value::Null | Value::Bool(_)));
+    let valid_metadata = matches!(value.get("think_open"), None | Some(Value::Null | Value::Bool(_)))
+        && matches!(value.get("ws_path"), None | Some(Value::Null));
     let known_shape = matches!(&value, Value::Obj(fields) if fields.iter().all(|(key, _)|
-        matches!(key.as_str(), "job_id" | "error" | "think_open")));
+        matches!(key.as_str(), "job_id" | "error" | "think_open" | "ws_path")));
     // Explicit null is the GenerateResponseJson no-job contract. Legacy
     // error-only responses are safe only for the hub's Busy/QueueFull reasons.
     let known_reason = error.is_some_and(|reason| reason == "busy: a job is already queued or running"
