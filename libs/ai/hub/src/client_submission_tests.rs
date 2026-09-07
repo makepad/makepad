@@ -10,7 +10,7 @@ const GATE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nCross-Origin-Opener-Po
 fn response(status: u16, body: &str) -> Vec<u8> {
     format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
-fn refusal(status: u16) -> Vec<u8> { response(status, r#"{"job_id":null,"error":"queue full: 2 jobs already queued on this node"}"#) }
+fn refusal(status: u16) -> Vec<u8> { response(status, r#"{"job_id":null,"ws_path":null,"error":"queue full: 2 jobs already queued on this node"}"#) }
 fn accepted() -> Vec<u8> { response(200, r#"{"job_id":"accepted","error":null}"#) }
 fn request(seed: u64) -> GenerateRequestJson {
     GenerateRequestJson { model: "minimax-h3".into(), seed: Some(seed), origin_key: Some("fixture-origin".into()),
@@ -65,6 +65,83 @@ fn disk_refusal_returns_for_fleet_failover_without_reposting_to_full_disk() {
     assert!(matches!(error, AssetAiError::Unavailable(ref reason) if reason.starts_with("disk-space:")));
     assert_eq!(script.posts.len(), 1);
     assert!(notes.is_empty());
+}
+
+#[test]
+fn reject_policy_returns_typed_refusal_without_waiting_or_claiming_a_lease() {
+    for (reply, expected) in [
+        (response(409, r#"{"job_id":null,"ws_path":null,"error":"busy: a job is already queued or running"}"#), AssetAiError::Busy),
+        (refusal(409), AssetAiError::QueueFull(2)),
+        (GATE.to_vec(), AssetAiError::Unavailable("admission-overloaded: HTTP server overloaded before job admission".into())),
+    ] {
+        let service = LocalService::new(NODE);
+        let mut wire = request(u64::MAX);
+        wire.queue_policy = Some("reject".into());
+        let mut script = Script::new([reply, accepted()]);
+        let before = script.now;
+        let result = service.request_pending_using(Domain::Image, &wire, &|| false,
+            &mut |_| panic!("reject must return immediately"), &mut script);
+        assert_eq!(result, Err(expected));
+        assert_eq!(script.posts, vec![wire.serialize_json().into_bytes()]);
+        assert_eq!(script.now, before);
+        assert!(service.lease_origin.lock().unwrap().is_none());
+    }
+}
+
+#[test]
+fn reject_policy_preserves_accepted_ownership_and_never_invents_busy_from_transport() {
+    let mut wire = request(42);
+    wire.queue_policy = Some("reject".into());
+    for reply in [
+        response(409, r#"{"job_id":null,"error":"busy: private prompt"}"#),
+        response(409, r#"{"job_id":null,"error":"busy: a job is already queued or running"}"#)[..40].to_vec(),
+    ] {
+        let mut script = Script::new([reply, accepted()]);
+        let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, &|| false,
+            &mut |_| panic!("reject must not back off"), &mut script);
+        assert!(matches!(result, Err(AssetAiError::Http(_))), "{result:?}");
+        assert!(!result.unwrap_err().to_string().contains("private prompt"));
+        assert_eq!(script.posts.len(), 1);
+    }
+    let service = LocalService::new(NODE);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut script = Script::new([response(503, r#"{"job_id":"owned","error":"busy"}"#)]);
+    script.cancel_on_post = Some(cancel.clone());
+    assert_eq!(service.request_pending_using(Domain::Image, &wire,
+        &|| cancel.load(Ordering::Relaxed), &mut |_| {}, &mut script).unwrap(), "owned");
+    assert_eq!(script.posts.len(), 1);
+    assert!(service.lease_origin.lock().unwrap().is_some());
+}
+
+#[test]
+fn explicit_queue_policy_keeps_bounded_pre_admission_waiting() {
+    let mut wire = request(42);
+    wire.queue_policy = Some("queue".into());
+    let mut script = Script::new([refusal(409), accepted()]);
+    let mut notes = Vec::new();
+    let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, &|| false,
+        &mut |note| notes.push(note.to_owned()), &mut script).unwrap();
+    assert_eq!(result, "accepted");
+    assert_eq!(script.posts, vec![wire.serialize_json().into_bytes(); 2]);
+    assert_eq!(notes.len(), 1);
+}
+
+#[test]
+fn proven_local_use_refusal_returns_for_peer_routing_without_retrying_paused_node() {
+    for policy in [None, Some("reject"), Some("queue")] {
+        let service = LocalService::new(NODE);
+        let mut wire = request(42);
+        wire.queue_policy = policy.map(str::to_owned);
+        let mut script = Script::new([response(409,
+            r#"{"job_id":null,"ws_path":null,"error":"model unavailable: local-use: gpu-counter-unavailable"}"#), accepted()]);
+        let before = script.now;
+        let result = service.request_pending_using(Domain::Image, &wire, &|| false,
+            &mut |_| panic!("local-use admission refusal belongs to fleet routing"), &mut script);
+        assert_eq!(result, Err(AssetAiError::Unavailable("local-use: gpu-counter-unavailable".into())));
+        assert_eq!(script.posts.len(), 1);
+        assert_eq!(script.now, before);
+        assert!(service.lease_origin.lock().unwrap().is_none());
+    }
 }
 
 #[test]
@@ -133,6 +210,8 @@ fn ambiguous_malformed_truncated_or_unrecognized_responses_never_replay() {
         response(503, r#"{"error":"model inference failed"}"#),
         response(409, r#"{"job_id":42,"error":"busy"}"#),
         response(409, r#"{"job_id":null,"error":"busy","think_open":42}"#),
+        response(409, r#"{"job_id":null,"error":"busy","ws_path":"/realtime/owned"}"#),
+        response(409, r#"{"job_id":null,"error":"busy","ws_path":42}"#),
         response(409, r#"{"job_id":"","error":"busy"}"#),
         response(409, r#"{"job_id":null,"job_id":null,"error":"busy"}"#),
         response(503, r#"{"job_id":null,"error":"busy","artifacts":[]}"#),
