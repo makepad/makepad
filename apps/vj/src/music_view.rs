@@ -179,6 +179,35 @@ fn found_marker_hit(found: &[(f64, f64)], secs: f64, tol: f64) -> Option<MarkerH
         .map(|(index, _)| MarkerHit::Found(index))
 }
 
+/// The time a hovered mark sits at, so the hover readout can show WHEN
+/// as well as WHERE. A shape edge is structure, not a placed mark, and
+/// reads nothing here.
+fn mark_time(
+    hit: MarkerHit,
+    loop_span: Option<(f64, f64)>,
+    loop_slots: &[(u16, f64, f64, u32)],
+    found_loops: &[(f64, f64)],
+    cue_secs: f64,
+) -> Option<f64> {
+    match hit {
+        MarkerHit::Save => loop_span.map(|(start, _)| start),
+        MarkerHit::Recall(slot) => {
+            loop_slots.iter().find(|entry| entry.0 == slot).map(|entry| entry.1)
+        }
+        MarkerHit::Found(index) => found_loops.get(index).map(|span| span.0),
+        MarkerHit::Cue => Some(cue_secs),
+        MarkerHit::Shape(_) => None,
+    }
+}
+
+/// Whether a seek release at `finger_y` has left the strip's own band by
+/// more than the abort margin — above or below it, not along it. The
+/// strip is thin and sits among other controls, so a hand lifting off to
+/// reach for something else should not also relocate the playhead.
+fn seek_release_aborted(finger_y: f64, strip_y: f64, strip_h: f64) -> bool {
+    finger_y < strip_y - SEEK_ABORT_PX || finger_y > strip_y + strip_h + SEEK_ABORT_PX
+}
+
 /// How far outside the loop band, in PIXELS, a grab still counts as
 /// grabbing it. A one-beat loop is under two pixels on a whole-track
 /// strip, so without some forgiveness the band would be uncatchable at
@@ -195,6 +224,11 @@ const MARKER_GRAB_PX: f64 = 6.0;
 /// How far a blue marker must be dragged from home before letting go
 /// DELETES it instead of recalling it.
 const MARKER_DELETE_PX: f64 = 50.0;
+/// A seek drag released this far off the strip -- above or below it,
+/// not along it -- does not commit. The strip is thin and sits among
+/// other controls; a hand that lifted off to reach for something else
+/// should not also relocate the playhead.
+const SEEK_ABORT_PX: f64 = 60.0;
 /// How far one notch of the wheel moves a mark it is hovering.
 ///
 /// Ten milliseconds is about a third of the shortest gap a hand can hear
@@ -1030,6 +1064,11 @@ script_mod! {
                 sdf.stroke(#x00000066, 1.0)
                 return sdf.result
             }
+        }
+        // The seek target while dragging, and a hovered mark's time.
+        draw_text +: {
+            color: #xf4f7fa
+            text_style: theme.font_bold{font_size: 9}
         }
     }
 
@@ -6292,6 +6331,10 @@ pub struct VjWaveOverview {
     /// The red chip's hover face: white, so the hand knows it is live.
     #[live]
     draw_marker_cue_hot: DrawQuad,
+    /// The seek target while dragging, and a hovered mark's time. Never
+    /// both at once -- a drag owns the readout while it runs.
+    #[live]
+    draw_text: DrawText,
     /// The landing a drag-in-progress would commit, shown as a dimmer band
     /// beside the ghost. `None` outside a loop drag.
     #[rust]
@@ -6475,13 +6518,27 @@ impl VjWaveOverview {
         std::mem::take(&mut self.events)
     }
 
-    fn seek_at(&mut self, cx: &mut Cx, x: f64) {
-        let rect = self.area.rect(cx);
-        if rect.size.x <= 1.0 {
-            return;
-        }
-        let fraction = ((x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0);
-        self.events.push(OverviewEvent::Seek { fraction });
+    /// One step of a plain seek: preview where the finger is pointing.
+    /// Commits on release, same as the snapped ghost seek below -- a
+    /// plain drag used to commit on every `FingerMove`, which on a strip
+    /// this thin meant one jittery pixel could retarget the deck before
+    /// the hand had aimed.
+    fn preview_seek(&mut self, cx: &mut Cx, x: f64) {
+        let Some((secs, _)) = self.secs_at(cx, x) else { return };
+        self.preview = Some((secs, secs + 2.0 / ZOOM_COLS_PER_SEC));
+        self.preview_raw = Some(secs);
+        self.area.redraw(cx);
+    }
+
+    /// The time a hovered mark sits at, for the hover readout.
+    fn hover_mark_secs(&self) -> Option<f64> {
+        mark_time(
+            self.hover_marker?,
+            self.loop_span,
+            &self.loop_slots,
+            &self.found_loops,
+            self.cue_secs,
+        )
     }
 
     /// Source seconds under a pointer at `x`, plus how many seconds one
@@ -6604,11 +6661,11 @@ impl Widget for VjWaveOverview {
                     self.preview_ghost_seek(cx, fe.abs.x);
                 } else {
                     self.drag = Some(OverviewDrag::Seek);
-                    self.seek_at(cx, fe.abs.x);
+                    self.preview_seek(cx, fe.abs.x);
                 }
             }
             Hit::FingerMove(fe) => match self.drag {
-                Some(OverviewDrag::Seek) => self.seek_at(cx, fe.abs.x),
+                Some(OverviewDrag::Seek) => self.preview_seek(cx, fe.abs.x),
                 Some(OverviewDrag::Marker { hit, origin, .. }) => {
                     self.drag = Some(OverviewDrag::Marker { hit, origin, at: fe.abs });
                     self.area.redraw(cx);
@@ -6629,7 +6686,12 @@ impl Widget for VjWaveOverview {
                 }
                 None => {}
             },
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) => {
+                // A release far off the strip's own band -- above or
+                // below it, not along it -- abandons a seek rather than
+                // committing wherever the finger happened to end up.
+                let rect = self.area.rect(cx);
+                let seek_aborted = seek_release_aborted(fe.abs.y, rect.pos.y, rect.size.y);
                 match (self.drag, self.preview_raw, self.preview) {
                     (Some(OverviewDrag::Marker { hit, origin, at }), _, _) => {
                         let travelled = (at - origin).length();
@@ -6688,9 +6750,15 @@ impl Widget for VjWaveOverview {
                             self.events.push(OverviewEvent::MoveLoop { start_secs: raw });
                         }
                     }
-                    (Some(OverviewDrag::GhostSeek), Some(raw), _) => {
+                    (Some(OverviewDrag::GhostSeek), Some(raw), _) if !seek_aborted => {
                         // The RAW finger position: the engine's snap is the
                         // authority, with its sync-aware reference.
+                        let duration = self.cols.max(1) as f64 / ZOOM_COLS_PER_SEC;
+                        self.events.push(OverviewEvent::Seek {
+                            fraction: (raw / duration).clamp(0.0, 1.0),
+                        });
+                    }
+                    (Some(OverviewDrag::Seek), Some(raw), _) if !seek_aborted => {
                         let duration = self.cols.max(1) as f64 / ZOOM_COLS_PER_SEC;
                         self.events.push(OverviewEvent::Seek {
                             fraction: (raw / duration).clamp(0.0, 1.0),
@@ -7014,6 +7082,38 @@ impl Widget for VjWaveOverview {
                 if !saved {
                     self.draw_marker_live
                         .draw_abs(cx, chip_sized(centre_of(start), grown(MarkerHit::Save)));
+                }
+            }
+            // The seek target while a plain or ghost seek is being
+            // dragged: the absolute time it would land on and how far
+            // that is from where the deck is now, neither of which a
+            // strip this thin can make obvious by eye alone.
+            if let (Some(OverviewDrag::Seek | OverviewDrag::GhostSeek), Some((target_secs, _))) =
+                (self.drag, self.preview)
+            {
+                let head_secs = self.head * duration;
+                self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+                self.draw_text.text_style.font_size = 9.0;
+                let label = format!(
+                    "{} ({})",
+                    crate::clock::playhead(target_secs),
+                    crate::clock::offset(target_secs - head_secs)
+                );
+                let x = centre_of(target_secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 84.0);
+                self.draw_text.draw_abs(cx, dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0), &label);
+            } else if self.drag.is_none() {
+                // Hovering (not dragging) a mark answers WHEN: the strip
+                // already shows WHERE with its hairlines, but a chip's
+                // own x position is a few pixels of precision at best.
+                if let Some(secs) = self.hover_mark_secs() {
+                    self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+                    self.draw_text.text_style.font_size = 9.0;
+                    let x = centre_of(secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 48.0);
+                    self.draw_text.draw_abs(
+                        cx,
+                        dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
+                        &crate::clock::playhead(secs),
+                    );
                 }
             }
         }
@@ -8737,6 +8837,34 @@ mod tests {
         // A tie resolves to the nearest IN, not the first.
         let tight = [(10.0, 12.0), (10.5, 14.0)];
         assert_eq!(found_marker_hit(&tight, 10.45, 0.35), Some(MarkerHit::Found(1)));
+    }
+
+    #[test]
+    fn a_hovered_mark_answers_when_and_a_shape_edge_answers_nothing() {
+        let saved = [(3_u16, 40.0, 44.0, 0xff0000ffu32)];
+        let found = [(60.0, 64.0)];
+        let running = Some((10.0, 12.0));
+        assert_eq!(mark_time(MarkerHit::Save, running, &saved, &found, 5.0), Some(10.0));
+        assert_eq!(mark_time(MarkerHit::Recall(3), running, &saved, &found, 5.0), Some(40.0));
+        // A slot number that is not on the strip has nothing to answer.
+        assert_eq!(mark_time(MarkerHit::Recall(9), running, &saved, &found, 5.0), None);
+        assert_eq!(mark_time(MarkerHit::Found(0), running, &saved, &found, 5.0), Some(60.0));
+        assert_eq!(mark_time(MarkerHit::Cue, running, &saved, &found, 5.0), Some(5.0));
+        // The record's own shape is structure, not a mark someone placed.
+        assert_eq!(mark_time(MarkerHit::Shape(1), running, &saved, &found, 5.0), None);
+    }
+
+    #[test]
+    fn a_seek_release_only_aborts_off_the_strips_own_band() {
+        // Squarely inside the band: commits.
+        assert!(!seek_release_aborted(50.0, 40.0, 20.0));
+        // Just past the top and bottom edges, still within the margin:
+        // a hand lifting slightly off the strip is still aiming at it.
+        assert!(!seek_release_aborted(40.0 - SEEK_ABORT_PX + 1.0, 40.0, 20.0));
+        assert!(!seek_release_aborted(60.0 + SEEK_ABORT_PX - 1.0, 40.0, 20.0));
+        // Well past either edge: the hand let go of the idea, not just the pixel.
+        assert!(seek_release_aborted(40.0 - SEEK_ABORT_PX - 1.0, 40.0, 20.0));
+        assert!(seek_release_aborted(60.0 + SEEK_ABORT_PX + 1.0, 40.0, 20.0));
     }
 
     #[test]
