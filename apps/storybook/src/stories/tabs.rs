@@ -13,17 +13,27 @@ script_mod! {
         StoryNote{text: "Tabs are not a row of buttons. They SHARE the width, they shrink together as more arrive, they can be shut, and the one in use is drawn in the panel's own colour so the two read as one surface. Open a few, shut a few, and watch the widths move."}
 
         StoryHeading{text: "A strip and its panel"}
-        strip := Tabs{}
-        panel := RoundedView{
+        // No gap and no seam: the tab in use and the panel are one surface,
+        // so the strip has to sit flush on a panel of the same colour. A
+        // rounded panel with space above it turns the strip back into a row
+        // of buttons floating over something else.
+        joined := View{
             width: Fill
-            height: 110.
+            height: Fit
             flow: Down
-            padding: theme.mspace_3
-            spacing: theme.space_2
-            show_bg: true
-            draw_bg +: {color: theme.color_surface_container_low border_radius: theme.radius_s}
-            panel_title := H4{text: "Overview"}
-            panel_note := P{text: "The panel follows the strip. The tab in use carries this panel's colour, which is what says the strip chooses what is underneath."}
+            spacing: 0.
+            strip := Tabs{labels: ["Overview" "Detail" "History"]}
+            panel := View{
+                width: Fill
+                height: 110.
+                flow: Down
+                padding: theme.mspace_3
+                spacing: theme.space_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                panel_title := H4{text: "Overview"}
+                panel_note := P{text: "The panel follows the strip. The tab in use carries this panel's colour, which is what says the strip chooses what is underneath."}
+            }
         }
         StoryRow{
             add_one := Button{text: "Add a tab"}
@@ -47,7 +57,10 @@ script_mod! {
             width: 700.
             height: Fit
             flow: Down
-            many := Tabs{can_add: false}
+            many := Tabs{
+                can_add: false
+                labels: ["Mixer" "Effects" "Routing" "Automation" "Metering" "Settings" "Output" "Notes"]
+            }
         }
 
         StoryHeading{text: "Rows of choices that are not tabs"}
@@ -134,10 +147,15 @@ fn sync(cx: &mut Cx, root: &WidgetRef) {
 
 fn tabs_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let strip = root.tabs(cx, ids!(strip));
-    // Seed on the first pass: the strip owns its order, so nothing in the
-    // DSL can hand it one.
-    if strip.selected().is_none() {
+    // The strip shows its own `labels` from the markup, so it is never
+    // blank. This hands it the list the PAGE owns instead, which is the one
+    // that can be added to and shut from, whenever the two have drifted
+    // apart -- on the first pass, and again after a reload rebuilds the
+    // strip from the markup underneath us.
+    if strip.count() != entries().len() {
         sync(cx, root);
+    }
+    if root.tabs(cx, ids!(many)).count() != many_entries().len() {
         root.tabs(cx, ids!(many)).set_tabs(cx, many_entries());
     }
 
