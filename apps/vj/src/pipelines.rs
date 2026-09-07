@@ -1,26 +1,9 @@
-//! The DREAM run's transport: the run itself, executed here (aicore §9).
+//! DREAM work orders execute as Flow instances through asset-creator.
 //!
-//! What used to live here was a client of the STORE's pipeline scheduler:
-//! declare a graph, poll its record, and let the fleet coordinator advance
-//! it. The store stores now — so this file became the thing it used to
-//! watch. A Create spawns the run on its own thread: the creator engine
-//! walks the declared stages against the GPU fleet directly (LAN discovery →
-//! ETA-ranked node pick per stage), splices each stage's output into the
-//! next (expand's text into the prompts, the still into the clip's first
-//! AND last frame), and every catalog-bound stage is PUBLISHED from here
-//! through the same product builder and dressing the worker used — same
-//! thumbnails, same annotations, same provenance strings — so the clip
-//! lands on the grid through the exact catalog-event flow it always did.
-//!
-//! The interface is unchanged (PipeReq/PipeDone, one worker, drained each
-//! tick), and the record is still derived, never stored: Detail reads the
-//! live run registry and synthesizes the same DTOs, constructing only
-//! fields that exist (gen.rs's literal-construction law).
-//!
-//! THE TRADED PROPERTY, deliberately (user-ratified, aicore §9/§14): a run
-//! now lives in the creating app. Quit vj mid-run and the run stops — a run
-//! that must outlive the window is a client that does not close
-//! (`makepad-creator-run`), not a scheduler in the database.
+//! The worker attaches to the configured remote flow-server or shares an
+//! embedded host. Flow schedules dependencies and passes stage results; this
+//! adapter observes progress and publishes completed assets through asset-client.
+//! PipeReq/PipeDone remain the UI's non-blocking worker interface.
 
 use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
@@ -34,7 +17,7 @@ use makepad_asset_creator::engine::{
     self, EngineConfig, RunEvent, Splice, StageOrder,
 };
 use makepad_asset_creator::runner::{
-    fleet_snapshots, FleetPick, PublishTarget,
+    fleet_snapshots, PublishTarget,
 };
 use makepad_asset_creator::pipeline::{
     derive_progress, derive_state, PipelineSpec, RunState, StageSpec, StageState,
@@ -295,7 +278,24 @@ fn worker(
     let jobs = JOBS
         .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
         .clone();
+    // Retain the shared host for this worker's lifetime, including gaps
+    // between runs. Initialization and shutdown stay off the UI thread.
+    let mut flow_session = None;
     for req in rx {
+        if flow_session.is_none() && matches!(&req, PipeReq::Create { .. } | PipeReq::EnqueueJob { .. }) {
+            match makepad_asset_creator::flow::CreatorFlow::shared() {
+                Ok(session) => flow_session = Some(session),
+                Err(error) => {
+                    let answer = match req {
+                        PipeReq::Create { tag, .. } => PipeDone::Created { tag, result: Err(error) },
+                        PipeReq::EnqueueJob { tag, .. } => PipeDone::JobQueued { tag, result: Err(error) },
+                        _ => unreachable!(),
+                    };
+                    if done.send(answer).is_err() { break; }
+                    continue;
+                }
+            }
+        }
         let answer = match req {
             PipeReq::Create { tag, namespace, title, prompt, stages } => {
                 let result = spawn_run(
@@ -612,10 +612,12 @@ fn run_thread(
     let cancel = handle.cancel.clone();
     let engine_spec = spec.clone();
     let engine = pool.submit(Lane::Heavy, move || {
-            engine::run(
+            let flow = makepad_asset_creator::flow::CreatorFlow::shared()
+                .map_err(makepad_ai_hub::error::AssetAiError::Backend)?;
+            engine::run_in(
+                &flow,
                 &engine_spec,
                 &orders,
-                &FleetPick,
                 &EngineConfig::default(),
                 &events_tx,
                 &cancel,
