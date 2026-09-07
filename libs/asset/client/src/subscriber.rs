@@ -25,7 +25,8 @@ pub struct CatalogSubscriberConfig {
     pub kind: Option<AssetKind>,
     /// Duration of each server long-poll.
     pub wait_ms: u64,
-    /// Maximum events requested per response.
+    /// Maximum ordinary delta events per response. A cursor-less preview
+    /// bootstrap is complete and may contain up to 12 active sessions.
     pub batch_limit: u32,
     /// Maximum undrained notifications held in memory.
     pub channel_capacity: usize,
@@ -216,7 +217,9 @@ fn worker(
                         return;
                 }
                 // Advance only after the notification is durably queued.
-                cursor = Some(next);
+                // A gap invalidates the preview cache too. Bootstrap again
+                // so active drafts are restored even without another edit.
+                cursor = if page.gap { None } else { Some(next) };
             }
             Err(error) => {
                 let event = CatalogSubscriptionEvent::Retry { error, retry_in_ms: retry_ms };
