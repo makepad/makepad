@@ -372,6 +372,9 @@ impl ViewRef {
 
     /// Caps the offscreen texture's height in Texture mode (`None` = uncapped). See the `View`
     /// method for details.
+    /// Caps the offscreen texture's height when this view is in Texture mode. `None` (the default)
+    /// leaves it uncapped. Only useful for a Fit-height cached view whose content can be taller than
+    /// the GPU's max texture size; content past the cap is clipped.
     pub fn set_texture_max_height(&self, max: Option<f64>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_texture_max_height(max);
