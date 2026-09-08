@@ -77,7 +77,7 @@ pub fn step_world(world: &mut GameWorld) {
                     BodyKind::Static | BodyKind::Kinematic | BodyKind::Rigid
                 )
         })
-        .map(Solid::from)
+        .map(Solid::for_walking)
         .collect();
     let surfaces: Vec<SurfaceSolid> = world
         .entities

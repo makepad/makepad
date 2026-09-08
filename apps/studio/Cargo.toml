@@ -34,6 +34,7 @@ bench = false
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
+makepad-diskmap = { path = "../../libs/diskmap" }
 makepad-terminal = { path = "../terminal" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
@@ -45,7 +46,11 @@ makepad-bounded-http = { path = "../../libs/bounded_http" }
 makepad-code-editor = { path = "../../code_editor" }
 makepad-code-graph = { path = "../../libs/code_graph" }
 makepad-code-atlas = { path = "../../libs/code_atlas" }
+makepad-code-arch = { path = "../../libs/code_arch" }
 makepad-git = { path = "../../libs/git" }
 
 [target.'cfg(windows)'.dependencies]
 makepad-screen = { path = "../../tools/screen" }
+
+[dev-dependencies]
+makepad-draw = { path = "../../draw" }

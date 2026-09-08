@@ -3,6 +3,7 @@ use makepad_draw::{ImageBuffer, makepad_platform::{Cx,Texture,TextureFormat,Text
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialSurface {
+    pub fur: Option<makepad_gltf::GlbFurMaterial>,
     pub normal_png: Option<Vec<u8>>,
     pub normal_scale: f32,
     pub occlusion_png: Option<Vec<u8>>,
@@ -16,8 +17,32 @@ pub struct MaterialSurface {
     pub double_sided: bool,
 }
 impl Default for MaterialSurface {
-    fn default()->Self {Self{normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
+    fn default()->Self {Self{fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
         emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false}}
+}
+
+pub(crate) fn fur_params(fur: Option<makepad_gltf::GlbFurMaterial>) -> makepad_draw::Vec4f {
+    fur.filter(|fur| fur.valid()).map_or_else(Default::default, |fur| {
+        makepad_draw::vec4(fur.length as f32, fur.density as f32, fur.scale as f32, fur.seed as f32)
+    })
+}
+
+/// Fixed layer and triangle ceilings apply on every platform, including Quest.
+/// The source mesh stays resident once; only draw instances are repeated.
+pub(crate) fn fur_shell_count(length: f32, transform: &makepad_draw::Mat4f, distance: f32, triangles: usize, budget: &mut usize) -> usize {
+    if length <= 0.0 || triangles == 0 || !distance.is_finite() { return 0; }
+    // Account for model scaling, including miniature construction previews.
+    // This angular-size heuristic is independent of the headset eye: both
+    // eyes use the scene camera and retain the same number of layers.
+    let scale = [0, 4, 8].into_iter().map(|i| {
+        (transform.v[i].powi(2) + transform.v[i + 1].powi(2) + transform.v[i + 2].powi(2)).sqrt()
+    }).fold(0.0f32, f32::max);
+    let detail = length * scale * 800.0 / distance.max(0.1);
+    if !detail.is_finite() { return 0; }
+    let desired = if detail < 1.0 { 0 } else if detail < 3.0 { 2 } else if detail < 6.0 { 4 } else { 6 };
+    let shells = desired.min(*budget / triangles);
+    *budget -= shells * triangles;
+    shells
 }
 
 #[derive(Clone,Copy)]

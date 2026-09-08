@@ -402,6 +402,7 @@ impl ShaderOutput {
         writeln!(out, "struct IoV {{").ok();
         writeln!(out, "    thread IoVarying *v;").ok();
         writeln!(out, "    uint vid;").ok();
+        // instance_index() reads this draw-local ordinal, including retained appends.
         writeln!(out, "    uint iid;").ok();
         writeln!(out, "}};").ok();
     }
@@ -491,17 +492,17 @@ impl ShaderOutput {
             "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
         )
         .ok();
-        writeln!(
-            out,
-            "    constant char *_geom_bytes = (constant char *)vb;"
-        )
-        .ok();
+        writeln!(out, "    constant char *_geom_bytes = (constant char *)vb;").ok();
         writeln!(
             out,
             "    constant IoVertexBufferRaw *_geom_raw = (constant IoVertexBufferRaw *)(_geom_bytes + vid * sizeof(IoVertexBufferRaw));"
         )
         .ok();
-        writeln!(out, "    IoVertexBuffer _geom = _mp_decode_geometry(*_geom_raw);").ok();
+        writeln!(
+            out,
+            "    IoVertexBuffer _geom = _mp_decode_geometry(*_geom_raw);"
+        )
+        .ok();
         writeln!(out, "    _io.vb = vb;").ok();
         writeln!(out, "    _io.g = &_geom;").ok();
         writeln!(out, "    _io.i = &_inst;").ok();
@@ -705,8 +706,15 @@ impl ShaderOutput {
             writeln!(
                 out,
                 "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{}{});",
-                idx, filter, address, coord,
-                if sampler.compare { ", compare_func::less_equal" } else { "" }
+                idx,
+                filter,
+                address,
+                coord,
+                if sampler.compare {
+                    ", compare_func::less_equal"
+                } else {
+                    ""
+                }
             )
             .ok();
         }

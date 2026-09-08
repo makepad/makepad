@@ -83,11 +83,27 @@ struct Host {
     client_count: usize,
     stopping: Option<Instant>,
     killed: bool,
+    started_at_ms: u64,
+    last_output: Instant,
 }
 impl Host {
     fn status(&self) -> Value {
         json::obj(vec![
             ("running", Value::Bool(true)),
+            ("title", json::s(self.terminal.title())),
+            (
+                "state_dir",
+                json::s(self.options.state_dir.to_string_lossy()),
+            ),
+            ("started_at_ms", Value::Int(self.started_at_ms as i64)),
+            (
+                "activity",
+                json::s(if self.last_output.elapsed() < Duration::from_secs(2) {
+                    "running"
+                } else {
+                    "idle"
+                }),
+            ),
             ("version", Value::Int(VERSION as i64)),
             ("session_id", json::s(&self.location.session_id)),
             ("pid", Value::Int(std::process::id().into())),
@@ -99,6 +115,18 @@ impl Host {
             ("program", json::s(self.options.program.to_string_lossy())),
             ("instance", json::s(&self.instance)),
         ])
+    }
+    fn persist_name(&self) -> Result<(), String> {
+        let mut saved = claim(&self.location)?.ok_or("Missing session claim")?;
+        if let Value::Obj(fields) = &mut saved {
+            fields.retain(|(key, _)| key != "title");
+            fields.push(("title".into(), json::s(self.terminal.title())));
+        }
+        write_private(&self.location.claim_path, saved.to_json().as_bytes())?;
+        write_private(
+            &self.location.metadata_path,
+            self.status().to_json().as_bytes(),
+        )
     }
     fn replies(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         if self.input.len().saturating_add(bytes.len()) > MAX_INPUT {
@@ -174,6 +202,30 @@ impl Host {
                 peer.projection.invalidate();
                 peer.dirty = true;
                 self.resize(cols, rows)?;
+            }
+            NAME if !peer.read_only => {
+                let value = parse_object(&frame.payload)?;
+                let title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .ok_or("name requires title")?;
+                if title.is_empty() || title.len() > 4096 || title.chars().any(char::is_control) {
+                    return Err(
+                        "Terminal name must be 1..4096 bytes without control characters".into(),
+                    );
+                }
+                self.terminal.set_title(title);
+                self.persist_name()?;
+                for attached in &mut self.peers {
+                    attached.dirty = true;
+                }
+                // tick_peers temporarily owns the peers; generation also invalidates those peers.
+                self.generation = self.generation.wrapping_add(1);
+                peer.dirty = true;
+                peer.queue(STATUS_REPLY, self.status().to_json().as_bytes())?;
+                if !peer.attached {
+                    peer.closing = true;
+                }
             }
             STATUS => {
                 parse_object(&frame.payload)?;
@@ -333,7 +385,12 @@ impl Host {
                 match self.pty.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
+                        let previous_title = self.terminal.title().to_owned();
                         let update = self.terminal.process(&buffer[..n]);
+                        self.last_output = Instant::now();
+                        if self.terminal.title() != previous_title {
+                            self.persist_name()?;
+                        }
                         self.replies(update.replies)?;
                         for peer in &mut self.peers {
                             peer.dirty = true;

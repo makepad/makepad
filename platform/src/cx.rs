@@ -97,7 +97,7 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub uniform_buffers: CxUniformBufferPool,
-    pub(crate) geometries: CxGeometryPool,
+    pub geometries: CxGeometryPool,
 
     pub draw_shaders: CxDrawShaders,
 
@@ -453,10 +453,7 @@ fn memory_budget_from_physical_memory(
     policy: MemoryBudgetPolicy,
 ) -> usize {
     let budget = match policy {
-        MemoryBudgetPolicy::Desktop if physical_memory_bytes < LOW_MEMORY_DEVICE_BYTES => {
-            physical_memory_bytes / 4
-        }
-        MemoryBudgetPolicy::Desktop => DEFAULT_MEMORY_BUDGET_BYTES as u64,
+        MemoryBudgetPolicy::Desktop => physical_memory_bytes / 2,
         MemoryBudgetPolicy::Mobile => (physical_memory_bytes / 4).clamp(
             MIN_MOBILE_MEMORY_BUDGET_BYTES,
             MAX_MOBILE_MEMORY_BUDGET_BYTES,
@@ -653,11 +650,16 @@ impl Cx {
         next
     }
 
-    /// A conservative process-wide memory envelope for cache/batch budgets.
-    /// Native keeps a generous fixed ceiling; web reports the shared wasm
-    /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
-    pub fn memory_budget_bytes(&self) -> usize {
+    /// Process-wide memory envelope for cache/batch budgets.
+    /// Desktop native is half of physical RAM with no upper clamp; web reports
+    /// the shared wasm browser memory envelope through `ToWasmInit` before
+    /// `Event::Startup`.
+    pub fn memory_budget(&self) -> usize {
         self.memory_budget_bytes
+    }
+
+    pub fn memory_budget_bytes(&self) -> usize {
+        self.memory_budget()
     }
 
     pub(crate) fn initialize_memory_budget(&mut self) {
@@ -1030,18 +1032,18 @@ mod memory_budget_tests {
     }
 
     #[test]
-    fn low_memory_desktop_uses_one_quarter_of_physical_ram() {
-        assert_eq!(
-            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Desktop),
-            (1 * GIB) as usize
-        );
-    }
-
-    #[test]
-    fn desktop_at_threshold_keeps_the_default_budget() {
+    fn desktop_uses_half_of_physical_ram_with_no_upper_clamp() {
         assert_eq!(
             memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Desktop),
-            DEFAULT_MEMORY_BUDGET_BYTES
+            (4 * GIB) as usize
+        );
+        assert_eq!(
+            memory_budget_from_physical_memory(16 * GIB, MemoryBudgetPolicy::Desktop),
+            (8 * GIB) as usize
+        );
+        assert_eq!(
+            memory_budget_from_physical_memory(128 * GIB, MemoryBudgetPolicy::Desktop),
+            (64 * GIB) as usize
         );
     }
 

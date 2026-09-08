@@ -391,6 +391,27 @@ impl From<&Entity> for Solid {
     }
 }
 
+impl Solid {
+    /// The axis-sweep controller uses world-aligned bounds. Include the
+    /// measured vehicle exterior, just as the capsule controller's oriented
+    /// walking proxy does, without changing the suspension chassis or mass.
+    pub fn for_walking(e: &Entity) -> Self {
+        let mut solid = Self::from(e);
+        if e.kind == BodyKind::Rigid {
+            if let Some(hurt) = e.hurt_box {
+                let center = e.pos + e.orient.rotate_vec3(&hurt.center);
+                let x = e.orient.rotate_vec3(&vec3f(hurt.half.x, 0.0, 0.0));
+                let y = e.orient.rotate_vec3(&vec3f(0.0, hurt.half.y, 0.0));
+                let z = e.orient.rotate_vec3(&vec3f(0.0, 0.0, hurt.half.z));
+                solid.pos = center;
+                solid.half = vec3f(x.x.abs()+y.x.abs()+z.x.abs(), x.y.abs()+y.y.abs()+z.y.abs(), x.z.abs()+y.z.abs()+z.z.abs());
+                solid.shape = Shape::Box;
+            }
+        }
+        solid
+    }
+}
+
 /// Height of the walkable surface of a WEDGE at a world x/z, or `None` when
 /// the point is outside its footprint.
 ///

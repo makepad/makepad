@@ -17,15 +17,24 @@
 //! - Input is injected through `Cx::dispatch_studio_msg`, the same function the
 //!   studio remote bridge uses, so `Hits`, capture and gestures behave exactly
 //!   as they do for real events. File drops use the native drag/drop event path.
-//! - Grabs piggyback on the existing studio screenshot pipeline
-//!   (`Cx::capture_next_frame_to_file` / `screenshot_requests`), extended here
-//!   with per-window targeting.
+//! - Grabs use readback tickets for render
+//!   textures and the presenting command buffer for Metal drawables. Raw
+//!   pixels are scaled and encoded on one bounded, long-lived worker.
+//! - Standalone macOS serializes a grab with remote commands: apply earlier
+//!   commands, draw pending changes, then submit the capture before applying
+//!   later commands (including input). No NextFrame/animation tick is inserted
+//!   at this boundary. Concurrent HTTP requests are ordered by UI queue order,
+//!   not by the time their clients opened sockets. Each sequence deadline is
+//!   a new boundary; it does not freeze the app for the entire sequence.
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
 mod imp {
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::dvec2;
+    use crate::texture::{
+        ReadbackChannelOrder, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback,
+    };
     use crate::window::WindowId;
     use makepad_studio_protocol::{
         KeyCode, KeyEvent, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp,
@@ -36,9 +45,9 @@ mod imp {
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::mpsc::{channel, Sender};
-    use std::sync::{Mutex, OnceLock};
-    use std::time::Duration;
+    use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     // ------------------------------------------------------------------
     // global state (the HTTP threads' only view of the app)
@@ -61,7 +70,11 @@ mod imp {
     const MAX_HEAD_BYTES: usize = 32 * 1024;
     const MAX_BODY_BYTES: usize = 1 << 20;
     const LOG_RING_CAP: usize = 4000;
-    const GRABS_KEPT_PER_WINDOW: usize = 32;
+    const GRABS_KEPT_PER_WINDOW: usize = 64;
+    const MAX_PENDING_GRABS: usize = 64;
+    const MAX_GRAB_BYTES: usize = 64 * 1024 * 1024;
+    static PENDING_GRABS: AtomicUsize = AtomicUsize::new(0);
+    static GRAB_BYTES: AtomicUsize = AtomicUsize::new(0);
 
     fn queue() -> &'static Mutex<Vec<Cmd>> {
         static Q: OnceLock<Mutex<Vec<Cmd>>> = OnceLock::new();
@@ -122,7 +135,123 @@ mod imp {
 
     struct GrabSink {
         window: Option<usize>,
-        tx: Sender<Result<(u32, u32, Vec<u8>), String>>,
+        requested_at: Instant,
+        scale: f64,
+        cancelled: Arc<AtomicBool>,
+        tx: SyncSender<Result<Grabbed, String>>,
+    }
+
+    impl Drop for GrabSink {
+        fn drop(&mut self) {
+            PENDING_GRABS.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    struct GrabBatch {
+        window: WindowId,
+        ids: std::collections::VecDeque<u64>,
+        due: Instant,
+        every: Duration,
+        last_request: Option<u64>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    #[derive(Default)]
+    struct Captures {
+        batches: Vec<GrabBatch>,
+        windows: HashMap<u64, usize>,
+        tickets: HashMap<ReadbackTicket, u64>,
+        ready: Vec<(u64, TextureReadback)>,
+        failures: Vec<(u64, String)>,
+    }
+
+    thread_local! {
+        // This state belongs only to the UI, unlike the HTTP reply sinks.
+        static CAPTURES: std::cell::RefCell<Captures> = Default::default();
+        static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>)>> = Default::default();
+    }
+
+    struct EncodeJob {
+        sink: GrabSink,
+        width: u32,
+        height: u32,
+        pixels: Arc<[u8]>,
+        stride: usize,
+        order: ReadbackChannelOrder,
+        origin: ReadbackOrigin,
+        capture_ms: f64,
+        backend_png: bool,
+        bytes: Option<GrabBytes>,
+    }
+
+    struct GrabBytes(usize);
+    impl Drop for GrabBytes {
+        fn drop(&mut self) {
+            GRAB_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+        }
+    }
+
+    fn encode_queue() -> &'static Result<SyncSender<EncodeJob>, String> {
+        static ENCODER: OnceLock<Result<SyncSender<EncodeJob>, String>> = OnceLock::new();
+        ENCODER.get_or_init(|| {
+            let (tx, rx) = sync_channel::<EncodeJob>(MAX_PENDING_GRABS);
+            std::thread::Builder::new()
+                .name("makepad-remote-png".into())
+                .spawn(move || {
+                    while let Ok(mut job) = rx.recv() {
+                        if job.sink.cancelled.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        let started = Instant::now();
+                        let result = encode_grab(&job).map(|(width, height, png)| Grabbed {
+                            window_id: job.sink.window.unwrap_or(0),
+                            width,
+                            height,
+                            png,
+                            capture_ms: job.capture_ms,
+                            encode_ms: started.elapsed().as_secs_f64() * 1000.0,
+                            backend_png: job.backend_png,
+                            _bytes: job.bytes.take(),
+                        });
+                        let _ = job.sink.tx.try_send(result);
+                    }
+                })
+                .map_err(|err| format!("grab worker: {err}"))?;
+            Ok(tx)
+        })
+    }
+
+    fn submit_encode(mut job: EncodeJob, raw: bool) {
+        if job.sink.cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        let len = job.pixels.len();
+        if GRAB_BYTES
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(len)
+                    .filter(|total| *total <= MAX_GRAB_BYTES)
+            })
+            .is_err()
+        {
+            let _ = job.sink.tx.try_send(Err(
+                "grab pixel budget full; retry at a slower cadence".into()
+            ));
+            return;
+        }
+        job.bytes = Some(GrabBytes(len));
+        job.backend_png = !raw;
+        match encode_queue() {
+            Ok(tx) => {
+                if let Err(err) = tx.try_send(job) {
+                    let (std::sync::mpsc::TrySendError::Full(job)
+                    | std::sync::mpsc::TrySendError::Disconnected(job)) = err;
+                    let _ = job.sink.tx.try_send(Err("grab encoder queue full".into()));
+                }
+            }
+            Err(err) => {
+                let _ = job.sink.tx.try_send(Err(err.clone()));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -138,9 +267,13 @@ mod imp {
         },
         Grab {
             window: Option<usize>,
-            request_id: u64,
+            ids: Vec<u64>,
+            started: Instant,
+            every: Duration,
+            cancelled: Arc<AtomicBool>,
             tx: Sender<Reply>,
         },
+        CancelGrabs(Vec<u64>),
         Dump(Sender<Reply>),
         /// The task pool's one-line summary (workers, jobs, queue waits).
         PoolSummary(Sender<Reply>),
@@ -209,7 +342,11 @@ mod imp {
             mods: RemoteKeyModifiers,
         },
         Text(String),
-        DropFile { path: String, x: f64, y: f64 },
+        DropFile {
+            path: String,
+            x: f64,
+            y: f64,
+        },
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -238,11 +375,6 @@ mod imp {
     fn hw_last() -> &'static Mutex<Option<crate::makepad_math::DVec2>> {
         static W: OnceLock<Mutex<Option<crate::makepad_math::DVec2>>> = OnceLock::new();
         W.get_or_init(|| Mutex::new(None))
-    }
-
-    fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>, Option<String>)>> {
-        static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>, Option<String>)>>> = OnceLock::new();
-        W.get_or_init(|| Mutex::new(Vec::new()))
     }
 
     // ------------------------------------------------------------------
@@ -290,7 +422,12 @@ mod imp {
             Ok(v) => {
                 let v = v.trim().to_string();
                 let lower = v.to_ascii_lowercase();
-                if lower.is_empty() || lower == "0" || lower == "off" || lower == "false" || lower == "no" {
+                if lower.is_empty()
+                    || lower == "0"
+                    || lower == "off"
+                    || lower == "false"
+                    || lower == "no"
+                {
                     None
                 } else if v.parse::<u16>().is_ok() || v.contains(':') {
                     Some(parse(&v))
@@ -396,7 +533,8 @@ mod imp {
                     let Ok(stream) = stream else { continue };
                     if LIVE_CONNS.load(Ordering::Relaxed) >= MAX_LIVE_CONNS {
                         let mut stream = stream;
-                        let _ = respond(&mut stream, 503, "application/json", b"{\"err\":\"busy\"}");
+                        let _ =
+                            respond(&mut stream, 503, "application/json", b"{\"err\":\"busy\"}");
                         continue;
                     }
                     LIVE_CONNS.fetch_add(1, Ordering::Relaxed);
@@ -425,9 +563,9 @@ mod imp {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
         }
-        !queue().lock().map(|q| q.is_empty()).unwrap_or(true)
-            || !frame_waiters().lock().map(|w| w.is_empty()).unwrap_or(true)
-            || !grab_sinks().lock().map(|g| g.is_empty()).unwrap_or(true)
+        !queue().try_lock().map(|q| q.is_empty()).unwrap_or(false)
+            || FRAME_WAITERS.with_borrow(|waiters| !waiters.is_empty())
+            || PENDING_GRABS.load(Ordering::Relaxed) != 0
     }
 
     // ------------------------------------------------------------------
@@ -523,30 +661,34 @@ mod imp {
     // grab plumbing, called from the screenshot pipeline
     // ------------------------------------------------------------------
 
+    fn is_grab_id(id: u64) -> bool {
+        // File sinks occupy 1<<63 and probes use 1<<40; preserve both.
+        id >= GRAB_ID_BASE && id < (1 << 63)
+    }
+
     /// True when a pending screenshot request may be answered by the pass that
     /// belongs to `window_id`. Non-remote (studio / file-sink) ids always match,
     /// so this is transparent to the existing pipeline.
     pub(crate) fn grab_targets_window(request_id: u64, window_id: Option<usize>) -> bool {
-        if !ACTIVE.load(Ordering::Relaxed) {
+        if !is_grab_id(request_id) {
             return true;
         }
-        let Ok(sinks) = grab_sinks().lock() else {
-            return true;
-        };
-        match sinks.get(&request_id) {
-            None => true,
-            Some(sink) => match (sink.window, window_id) {
-                (None, _) => true,
-                (Some(want), Some(have)) => want == have,
-                (Some(_), None) => false,
-            },
-        }
+        // Called only while the renderer consumes screenshot_requests. Keep
+        // targeting UI-owned so HTTP/GPU locks cannot defer the requested frame.
+        CAPTURES.with_borrow_mut(|captures| match captures.windows.get(&request_id) {
+            Some(want) if Some(*want) != window_id => false,
+            _ => {
+                captures.windows.remove(&request_id);
+                true
+            }
+        })
     }
 
     /// Hand a finished PNG to whichever grab requests asked for it. Returns the
     /// ids that were *not* remote grabs, so the caller can route them onwards.
-    /// Runs on the GPU completion thread: it only does a channel send, all the
-    /// scaling / writing happens back on the HTTP thread.
+    /// Compatibility path for backends that still supply PNGs. The worker
+    /// handles decoding/scaling; capture_kind makes their timing limitation
+    /// explicit. Metal's raw path bypasses this full-size encoding entirely.
     pub(crate) fn deliver_grabs(
         request_ids: Vec<u64>,
         width: u32,
@@ -563,12 +705,229 @@ mod imp {
         for id in request_ids {
             match sinks.remove(&id) {
                 Some(sink) => {
-                    let _ = sink.tx.send(Ok((width, height, png.to_vec())));
+                    let capture_ms = sink.requested_at.elapsed().as_secs_f64() * 1000.0;
+                    submit_encode(
+                        EncodeJob {
+                            sink,
+                            width,
+                            height,
+                            pixels: Arc::from(png),
+                            stride: 0,
+                            order: ReadbackChannelOrder::Rgba,
+                            origin: ReadbackOrigin::TopLeft,
+                            capture_ms,
+                            backend_png: false,
+                            bytes: None,
+                        },
+                        false,
+                    );
                 }
-                None => rest.push(id),
+                None if !is_grab_id(id) => rest.push(id),
+                None => {}
             }
         }
         rest
+    }
+
+    /// Metal calls this as soon as the presenting buffer's pixels are ready,
+    /// before any PNG work. Return non-remote ids for probes/Studio/recording.
+    #[cfg(all(
+        not(headless),
+        any(target_os = "macos", target_os = "ios", target_os = "tvos")
+    ))]
+    pub(crate) fn deliver_grab_pixels(
+        request_ids: Vec<u64>,
+        width: u32,
+        height: u32,
+        pixels: Arc<[u8]>,
+        stride: usize,
+        order: ReadbackChannelOrder,
+        origin: ReadbackOrigin,
+    ) -> Vec<u64> {
+        if !ACTIVE.load(Ordering::Relaxed) {
+            return request_ids;
+        }
+        let captured = Instant::now();
+        // Only the GPU callback takes this blocking lock. The UI uses try_lock.
+        let Ok(mut sinks) = grab_sinks().lock() else {
+            return request_ids;
+        };
+        let mut rest = Vec::new();
+        for id in request_ids {
+            if let Some(sink) = sinks.remove(&id) {
+                let capture_ms = captured.duration_since(sink.requested_at).as_secs_f64() * 1000.0;
+                crate::trace!(
+                    "remote.grab",
+                    "pixels id={} window={:?} sz={}x{} capture_ms={:.3}",
+                    id,
+                    sink.window,
+                    width,
+                    height,
+                    capture_ms
+                );
+                submit_encode(
+                    EncodeJob {
+                        sink,
+                        width,
+                        height,
+                        pixels: pixels.clone(),
+                        stride,
+                        order,
+                        origin,
+                        capture_ms,
+                        backend_png: false,
+                        bytes: None,
+                    },
+                    true,
+                );
+            } else if !is_grab_id(id) {
+                rest.push(id);
+            }
+        }
+        rest
+    }
+
+    fn poll_captures(cx: &mut Cx) {
+        CAPTURES.with_borrow_mut(|captures| {
+            // On native platforms the legacy result lane is unused by apps
+            // (its only other consumer is WebGL, where --remote is disabled).
+            // Isolate our tickets there so an app's public try_take call cannot
+            // consume them, and never drain the app's non-legacy tickets.
+            if !captures.tickets.is_empty() {
+                for (_, result) in cx.take_texture_readback_results(true) {
+                    if let Some(id) = captures.tickets.remove(&result.ticket) {
+                        captures.ready.push((id, result));
+                    }
+                }
+            }
+            if let Ok(mut sinks) = grab_sinks().try_lock() {
+                for (id, error) in captures.failures.drain(..) {
+                    if let Some(sink) = sinks.remove(&id) {
+                        let _ = sink.tx.try_send(Err(error));
+                    }
+                }
+                for (id, result) in captures.ready.drain(..) {
+                    if let Some(sink) = sinks.remove(&id) {
+                        let capture_ms = sink.requested_at.elapsed().as_secs_f64() * 1000.0;
+                        match result.data {
+                            Ok(pixels) => submit_encode(
+                                EncodeJob {
+                                    sink,
+                                    width: result.width as u32,
+                                    height: result.height as u32,
+                                    pixels,
+                                    stride: result.stride,
+                                    order: result.channel_order,
+                                    origin: result.origin,
+                                    capture_ms,
+                                    backend_png: false,
+                                    bytes: None,
+                                },
+                                true,
+                            ),
+                            Err(err) => {
+                                let _ = sink.tx.try_send(Err(err.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            let now = Instant::now();
+            captures.batches.retain_mut(|batch| {
+                if batch.cancelled.load(Ordering::Relaxed) {
+                    return false;
+                }
+                if now < batch.due {
+                    return true;
+                }
+                if let Some(previous) = batch.last_request {
+                    // Wait for the preceding frame to be ENCODED, not read
+                    // back. A skipped/minimized drawable must not accumulate
+                    // several sequence requests on one eventual presentation.
+                    if cx
+                        .screenshot_requests
+                        .iter()
+                        .any(|request| request.request_id == previous)
+                        || captures.tickets.iter().any(|(ticket, id)| {
+                            *id == previous
+                                && cx
+                                    .textures
+                                    .1
+                                    .readbacks
+                                    .slots
+                                    .iter()
+                                    .any(|slot| slot.result.ticket == *ticket && slot.pending)
+                        })
+                    {
+                        return true;
+                    }
+                }
+                let Some(id) = batch.ids.front().copied() else {
+                    return false;
+                };
+                if !cx.windows.is_valid(batch.window) || !cx.windows[batch.window].is_created {
+                    if let Ok(mut sinks) = grab_sinks().try_lock() {
+                        for id in batch.ids.drain(..) {
+                            if let Some(sink) = sinks.remove(&id) {
+                                let _ = sink.tx.try_send(Err("grab window closed".into()));
+                            }
+                        }
+                        return false;
+                    }
+                    return true;
+                }
+                let texture = cx.windows[batch.window]
+                    .main_pass_id
+                    .and_then(|pass| cx.passes[pass].color_textures.first())
+                    .map(|color| color.texture.clone());
+                #[cfg(all(
+                    not(headless),
+                    any(target_os = "macos", target_os = "ios", target_os = "tvos")
+                ))]
+                let texture = if cx.in_makepad_studio { texture } else { None };
+                let ticket = texture.and_then(|texture| {
+                    texture
+                        .read_back(cx, ReadbackRequest { next_render: true })
+                        .ok()
+                });
+                if let Some(ticket) = ticket {
+                    cx.textures
+                        .1
+                        .readbacks
+                        .slots
+                        .iter_mut()
+                        .find(|slot| slot.result.ticket == ticket)
+                        .unwrap()
+                        .legacy = true;
+                    captures.tickets.insert(ticket, id);
+                } else {
+                    // Native Metal drawables are not pooled Texture handles.
+                    // The existing window path blits on the presenting buffer.
+                    captures.windows.insert(id, batch.window.id());
+                    cx.screenshot_requests.push(ScreenshotRequest {
+                        request_id: id,
+                        kind_id: 0,
+                    });
+                }
+                batch.ids.pop_front();
+                batch.last_request = Some(id);
+                batch.due += batch.every;
+                // Preserve draw-buffer tweaks at rest; the native boundary
+                // also records any redraw already pending from earlier input.
+                cx.request_remote_window_present(batch.window);
+                crate::trace!(
+                    "remote.grab",
+                    "arm id={} window={} repaint={} late_ms={:.3}",
+                    id,
+                    batch.window.id(),
+                    cx.repaint_id,
+                    now.saturating_duration_since(batch.due - batch.every)
+                        .as_secs_f64()
+                        * 1000.0
+                );
+                !batch.ids.is_empty()
+            });
+        });
     }
 
     // ------------------------------------------------------------------
@@ -578,37 +937,132 @@ mod imp {
     /// Drain the command queue and publish window state. Called from
     /// `Cx::poll_control_channel`, i.e. from the event loop of every backend.
     pub(crate) fn poll(cx: &mut Cx) {
+        // The native Mac event callback supplies its renderer so it can seal
+        // a grab BEFORE the next command. Hosted/headless backends retain
+        // their ordinary next-render readback path.
+        #[cfg(all(target_os = "macos", not(headless)))]
+        if !cx.in_makepad_studio {
+            return;
+        }
+        poll_with_present(cx, |_, _| None);
+    }
+
+    #[cfg(all(target_os = "macos", not(headless)))]
+    pub(crate) fn poll_macos(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> bool) {
+        poll_with_present(cx, |cx, window| Some(present(cx, window)));
+    }
+
+    #[cfg(all(target_os = "macos", not(headless)))]
+    pub(crate) fn next_grab_deadline() -> Option<Instant> {
+        CAPTURES.with_borrow(|captures| {
+            captures
+                .batches
+                .iter()
+                .filter(|batch| !batch.cancelled.load(Ordering::Relaxed))
+                .map(|batch| batch.due)
+                .min()
+        })
+    }
+
+    fn poll_with_present(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) {
         if !ACTIVE.load(Ordering::Relaxed) {
             return;
         }
         publish_windows(cx);
 
         let cmds: Vec<Cmd> = {
-            let mut q = queue().lock().unwrap();
-            if q.is_empty() {
-                Vec::new()
-            } else {
-                std::mem::take(&mut *q)
+            match queue().try_lock() {
+                Ok(mut q) => std::mem::take(&mut *q),
+                Err(_) => Vec::new(),
             }
         };
+        // A due sequence frame precedes commands dispatched on this wake.
+        poll_captures(cx);
+        present_captures(cx, &mut present);
         for cmd in cmds {
+            poll_captures(cx);
+            present_captures(cx, &mut present);
+            let wait_window = match &cmd {
+                Cmd::Input {
+                    window, wait: true, ..
+                } => Some(*window),
+                Cmd::Tweak { wait: true, .. } | Cmd::Ai { wait: true, .. } => Some(None),
+                _ => None,
+            };
             apply(cx, cmd);
+            // Do not batch later input ahead of a grab in this same drain.
+            poll_captures(cx);
+            present_captures(cx, &mut present);
+            if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
+                cx.request_remote_window_present(window);
+                if present(cx, window) == Some(false) {
+                    FRAME_WAITERS.with_borrow_mut(|waiters| {
+                        for (_, tx, _) in waiters.drain(..) {
+                            let _ = tx.send(Reply::Err(
+                                "requested input frame could not be submitted; retry".into(),
+                            ));
+                        }
+                    });
+                }
+            }
+            resolve_frame_waiters(cx);
         }
 
+        poll_captures(cx);
+        present_captures(cx, &mut present);
+        resolve_frame_waiters(cx);
+    }
+
+    fn present_captures(cx: &mut Cx, present: &mut impl FnMut(&mut Cx, WindowId) -> Option<bool>) {
+        let windows = CAPTURES.with_borrow(|captures| {
+            let mut windows: Vec<usize> = captures.windows.values().copied().collect();
+            windows.sort_unstable();
+            windows.dedup();
+            windows
+        });
+        for window in windows {
+            let result = match resolve_window(cx, Some(window)) {
+                Ok(window) => present(cx, window),
+                Err(_) => Some(false),
+            };
+            if result.is_none() {
+                continue;
+            }
+            // A failed drawable must not silently move this capture across
+            // later input. Fail closed; never wait on the UI for the GPU.
+            CAPTURES.with_borrow_mut(|captures| {
+                captures.windows.retain(|id, target| {
+                    if *target != window {
+                        return true;
+                    }
+                    cx.screenshot_requests
+                        .retain(|request| request.request_id != *id);
+                    captures.failures.push((
+                        *id,
+                        "grab frame could not be submitted at arming; retry".into(),
+                    ));
+                    false
+                });
+            });
+        }
+    }
+
+    fn resolve_frame_waiters(cx: &Cx) {
         // Resolve anyone who asked to be answered after the next frame.
         let repaint_id = cx.repaint_id;
-        let mut waiters = frame_waiters().lock().unwrap();
-        waiters.retain(|(target, tx, payload)| {
-            if repaint_id >= *target {
-                let text = match payload {
-                    Some(payload) => payload.clone(),
-                    None => format!("{{\"ok\":1,\"f\":{repaint_id}}}"),
-                };
-                let _ = tx.send(Reply::Text(text));
-                false
-            } else {
-                true
-            }
+        FRAME_WAITERS.with_borrow_mut(|waiters| {
+            waiters.retain(|(target, tx, payload)| {
+                if repaint_id >= *target {
+                    let text = match payload {
+                        Some(payload) => payload.clone(),
+                        None => format!("{{\"ok\":1,\"f\":{repaint_id}}}"),
+                    };
+                    let _ = tx.send(Reply::Text(text));
+                    false
+                } else {
+                    true
+                }
+            })
         });
     }
 
@@ -630,9 +1084,10 @@ mod imp {
                 y: geom.position.y,
             });
         }
-        let mut status = status_cell().lock().unwrap();
-        if status.windows != windows {
-            status.windows = windows;
+        if let Ok(mut status) = status_cell().try_lock() {
+            if status.windows != windows {
+                status.windows = windows;
+            }
         }
     }
 
@@ -674,6 +1129,13 @@ mod imp {
                     }
                 };
                 let time = cx.seconds_since_app_start();
+                crate::trace!(
+                    "remote.grab",
+                    "input window={} wait={} repaint={}",
+                    window_id.id(),
+                    wait,
+                    cx.repaint_id
+                );
                 let mut input_result = None;
                 for input in inputs {
                     // Hardware-faithful injection: the same platform path
@@ -817,7 +1279,9 @@ mod imp {
                         Input::DropFile { path, x, y } => {
                             let size = cx.windows[window_id].window_geom.inner_size;
                             if x >= size.x || y >= size.y {
-                                let _ = tx.send(Reply::Err("drop coordinates are outside the window".into()));
+                                let _ = tx.send(Reply::Err(
+                                    "drop coordinates are outside the window".into(),
+                                ));
                                 return;
                             }
                             let (handled, response) = inject_file_drop(cx, path, x, y);
@@ -837,33 +1301,56 @@ mod imp {
                     cx.dispatch_studio_msg(msg, window_id, dvec2(0.0, 0.0));
                 }
                 if wait {
-                    frame_waiters()
-                        .lock()
-                        .unwrap()
-                        .push((cx.repaint_id + 1, tx, input_result));
+                    FRAME_WAITERS.with_borrow_mut(|waiters| {
+                        waiters.push((cx.repaint_id + 1, tx, input_result))
+                    });
                 } else {
                     let _ = tx.send(input_result.map_or(Reply::Ok, Reply::Text));
                 }
             }
             Cmd::Grab {
                 window,
-                request_id,
+                ids,
+                started,
+                every,
+                cancelled,
                 tx,
             } => {
-                if let Err(err) = resolve_window(cx, window) {
-                    grab_sinks().lock().unwrap().remove(&request_id);
-                    let _ = tx.send(Reply::Err(err));
-                    return;
-                }
-                cx.screenshot_requests.push(ScreenshotRequest {
-                    request_id,
-                    kind_id: 0,
+                let window = match resolve_window(cx, window) {
+                    Ok(window) => window,
+                    Err(err) => {
+                        let _ = tx.send(Reply::Err(err));
+                        return;
+                    }
+                };
+                CAPTURES.with_borrow_mut(|captures| {
+                    captures.batches.push(GrabBatch {
+                        window,
+                        ids: ids.into(),
+                        due: started,
+                        every,
+                        last_request: None,
+                        cancelled,
+                    })
                 });
-                // Repaint, don't redraw: a grab must show what is on screen,
-                // including edits made directly to the draw buffers (the
-                // tweaker's theme pulse); a redraw would overwrite those.
-                cx.repaint_windows();
                 let _ = tx.send(Reply::Ok);
+            }
+            Cmd::CancelGrabs(ids) => {
+                cx.screenshot_requests
+                    .retain(|request| !ids.contains(&request.request_id));
+                CAPTURES.with_borrow_mut(|captures| {
+                    captures
+                        .batches
+                        .retain(|batch| !batch.cancelled.load(Ordering::Relaxed));
+                    for id in &ids {
+                        captures.windows.remove(id);
+                    }
+                    for (ticket, id) in &captures.tickets {
+                        if ids.contains(id) {
+                            cx.cancel_texture_readback(*ticket);
+                        }
+                    }
+                });
             }
             Cmd::Dump(tx) => {
                 let dump = match cx.widget_tree_dump_callback {
@@ -1014,10 +1501,9 @@ mod imp {
                 match result {
                     Ok(json) => {
                         if wait {
-                            frame_waiters()
-                                .lock()
-                                .unwrap()
-                                .push((cx.repaint_id + 1, tx, Some(json)));
+                            FRAME_WAITERS.with_borrow_mut(|waiters| {
+                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            });
                         } else {
                             let _ = tx.send(Reply::Text(json));
                         }
@@ -1030,15 +1516,16 @@ mod imp {
             Cmd::Ai { op, args, wait, tx } => {
                 let result = match cx.ai_callback {
                     Some(callback) => callback(cx, &op, &args),
-                    None => Err("no AI overlay (this app does not link makepad-aichat)".to_string()),
+                    None => {
+                        Err("no AI overlay (this app does not link makepad-aichat)".to_string())
+                    }
                 };
                 match result {
                     Ok(json) => {
                         if wait {
-                            frame_waiters()
-                                .lock()
-                                .unwrap()
-                                .push((cx.repaint_id + 1, tx, Some(json)));
+                            FRAME_WAITERS.with_borrow_mut(|waiters| {
+                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            });
                         } else {
                             let _ = tx.send(Reply::Text(json));
                         }
@@ -1100,7 +1587,11 @@ mod imp {
         for line in lines {
             if let Some((name, value)) = line.split_once(':') {
                 if name.trim().eq_ignore_ascii_case("content-length") {
-                    content_length = value.trim().parse::<usize>().unwrap_or(0).min(MAX_BODY_BYTES);
+                    content_length = value
+                        .trim()
+                        .parse::<usize>()
+                        .unwrap_or(0)
+                        .min(MAX_BODY_BYTES);
                 }
             }
         }
@@ -1127,20 +1618,35 @@ mod imp {
 
         let response = route(&method, &path, &params);
         let _ = match response {
-            Out::Json(status, text) => respond(&mut stream, status, "application/json", text.as_bytes()),
-            Out::Text(status, text) => respond(&mut stream, status, "text/plain; charset=utf-8", text.as_bytes()),
+            Out::Json(status, text) => {
+                respond(&mut stream, status, "application/json", text.as_bytes())
+            }
+            Out::Text(status, text) => respond(
+                &mut stream,
+                status,
+                "text/plain; charset=utf-8",
+                text.as_bytes(),
+            ),
             Out::Png(bytes) => respond(&mut stream, 200, "image/png", &bytes),
         };
     }
 
     /// Called only while applying UI commands. These event markers never
     /// cross the HTTP command channel; only the path and coordinates do.
-    fn inject_file_drop(cx: &mut Cx, path: String, x: f64, y: f64) -> (bool, crate::event::DragResponse) {
+    fn inject_file_drop(
+        cx: &mut Cx,
+        path: String,
+        x: f64,
+        y: f64,
+    ) -> (bool, crate::event::DragResponse) {
         use crate::event::{DragEvent, DragItem, DragResponse, DropEvent, Event};
         use crate::thread::lock_from_ui;
         use std::sync::Arc;
 
-        let items = Arc::new(vec![DragItem::FilePath { path, internal_id: None }]);
+        let items = Arc::new(vec![DragItem::FilePath {
+            path,
+            internal_id: None,
+        }]);
         let response = Arc::new(Mutex::new(DragResponse::None));
         cx.call_event_handler(&Event::Drag(DragEvent {
             modifiers: Default::default(),
@@ -1214,6 +1720,7 @@ mod imp {
             "/" | "/help" => Out::Text(200, cheat_sheet()),
             "/s" | "/status" => route_status(p),
             "/g" | "/grab" => route_grab(p),
+            "/gseq" => route_grab_sequence(p),
             "/gq" => route_grab_quit(p),
             "/m" | "/mouse" => route_mouse(p, None),
             "/click" => route_mouse(p, Some("click")),
@@ -1250,7 +1757,15 @@ mod imp {
             // The AI chat overlay (apps/aichat, seated in every Window on F10):
             // `/ai?on=1|0` toggles, `/ai?say=TEXT` types a line, `/ai/transcript`
             // reads the conversation. Answered by `Cx::ai_callback`.
-            "/ai" => route_ai(if p.get(&["say"]).is_some() { "say" } else { "toggle" }, p, true),
+            "/ai" => route_ai(
+                if p.get(&["say"]).is_some() {
+                    "say"
+                } else {
+                    "toggle"
+                },
+                p,
+                true,
+            ),
             "/ai/transcript" => route_ai("transcript", p, false),
             "/tweak" => route_tweak("toggle", p, true),
             "/tweak/state" => route_tweak("state", p, false),
@@ -1271,11 +1786,15 @@ mod imp {
             // The shader constant tables: annotated literals compiled into
             // a hot-patchable uniform buffer (see Cx::shader_const_patch).
             "/shader/consts" => {
-                let shader = p.get(&["shader", "s"]).and_then(|v| v.parse::<usize>().ok());
+                let shader = p
+                    .get(&["shader", "s"])
+                    .and_then(|v| v.parse::<usize>().ok());
                 reply_to_out(ask(move |tx| Cmd::ShaderConsts { shader, tx }, 4))
             }
             "/shader/const" => {
-                let Some(shader) = p.get(&["shader", "s"]).and_then(|v| v.parse::<usize>().ok())
+                let Some(shader) = p
+                    .get(&["shader", "s"])
+                    .and_then(|v| v.parse::<usize>().ok())
                 else {
                     return err("need shader=ID");
                 };
@@ -1373,7 +1892,11 @@ mod imp {
              /                 this sheet\n\
              /s[?w=ID]         {{\"app\":..,\"pid\":..,\"w\":[{{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\":f,\"pos\":[x,y]}}]}}\n\
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
-             /g?w=&scale=&raw= grab window w (default: first). writes a png, returns {{\"png\":path,\"w\":id,\"sz\":[w,h]}}; raw=1 sends image/png bytes\n\
+             /g?w=&scale=&raw= grab window w (default: first). returns {{\"png\":path,\"w\":id,\"sz\":[w,h],\"capture_ms\":ms,\"encode_ms\":ms}}; raw=1 sends image/png bytes\n\
+             \x20                 standalone macOS: pending Draw + immediate present at UI arming, before later input; no animation tick. Other backends: next render\n\
+             /gseq?n=8&every_ms=50&scale=1  a separate present per deadline; n=1..64, every_ms>=8, span<=60s; {{\"png\":[paths],\"frames\":[per-frame timings]}}\n\
+             \x20                 scheduled_ms and pixels_ms share the request origin; capture_ms = pixels_ms - scheduled_ms; cadence never waits for PNG encoding\n\
+             \x20                 commands follow UI queue order (concurrent sockets have no client-time order); macOS wait=1 input replies after submitting its applied frame\n\
              /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
                                add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
              /click?x=&y=      alias for /m?k=click\n\
@@ -1576,7 +2099,11 @@ mod imp {
         let window = p.window();
         let mods = p.mods();
         if let Some(text) = p.get(&["t", "text"]) {
-            return send_input(window, vec![Input::Text(text.to_string())], p.flag(&["wait"]));
+            return send_input(
+                window,
+                vec![Input::Text(text.to_string())],
+                p.flag(&["wait"]),
+            );
         }
         let Some(name) = p.get(&["c", "code", "key", "key_code"]) else {
             return err("need t= (text) or c= (key code)");
@@ -1647,31 +2174,54 @@ mod imp {
                 "w" | "window" => "w",
                 _ => return Err("unknown drop parameter"),
             };
-            if seen.contains(&key) { return Err("duplicate drop parameter"); }
+            if seen.contains(&key) {
+                return Err("duplicate drop parameter");
+            }
             seen.push(key);
         }
         let path = p.get(&["path"]).ok_or("drop requires path=")?;
-        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control)
-            || !std::path::Path::new(path).is_absolute() {
-            return Err("drop path must be absolute, at most 4096 bytes, with no control characters");
+        if path.is_empty()
+            || path.len() > 4096
+            || path.chars().any(char::is_control)
+            || !std::path::Path::new(path).is_absolute()
+        {
+            return Err(
+                "drop path must be absolute, at most 4096 bytes, with no control characters",
+            );
         }
-        let coordinate = |key| p.get(&[key]).and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .ok_or("drop requires finite, nonnegative x= and y=");
+        let coordinate = |key| {
+            p.get(&[key])
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or("drop requires finite, nonnegative x= and y=")
+        };
         let x = coordinate("x")?;
         let y = coordinate("y")?;
-        let window = p.get(&["w", "window"]).map(|value| {
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err("drop window must be a nonnegative integer");
-            }
-            value.parse::<usize>().map_err(|_| "drop window is out of range")
-        }).transpose()?;
+        let window = p
+            .get(&["w", "window"])
+            .map(|value| {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("drop window must be a nonnegative integer");
+                }
+                value
+                    .parse::<usize>()
+                    .map_err(|_| "drop window is out of range")
+            })
+            .transpose()?;
         let wait = match p.get(&["wait"]) {
             None | Some("0" | "false") => false,
             Some("1" | "true") => true,
             _ => return Err("drop wait must be 0 or 1"),
         };
-        Ok((window, Input::DropFile { path: path.to_string(), x, y }, wait))
+        Ok((
+            window,
+            Input::DropFile {
+                path: path.to_string(),
+                x,
+                y,
+            },
+            wait,
+        ))
     }
 
     fn route_drop(p: &Params) -> Out {
@@ -1700,7 +2250,11 @@ mod imp {
         if since.is_none() && selected.len() > count {
             selected = selected.split_off(selected.len() - count);
         }
-        let mut out = format!("{{\"n\":{},\"pool\":{},\"l\":[", ring.next_seq, json_str(&pool));
+        let mut out = format!(
+            "{{\"n\":{},\"pool\":{},\"l\":[",
+            ring.next_seq,
+            json_str(&pool)
+        );
         for (index, (_, line)) in selected.iter().enumerate() {
             if index > 0 {
                 out.push(',');
@@ -1716,69 +2270,127 @@ mod imp {
         width: u32,
         height: u32,
         png: Vec<u8>,
+        capture_ms: f64,
+        encode_ms: f64,
+        backend_png: bool,
+        _bytes: Option<GrabBytes>,
     }
 
-    fn grab_one(window: Option<usize>, scale: f64) -> Result<Grabbed, String> {
-        let request_id = GRAB_ID_BASE + NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let (png_tx, png_rx) = channel();
-        grab_sinks().lock().unwrap().insert(
-            request_id,
-            GrabSink {
-                window,
-                tx: png_tx,
-            },
-        );
+    struct PendingGrabs {
+        ids: Vec<u64>,
+        replies: Vec<Receiver<Result<Grabbed, String>>>,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+        paths: Vec<PathBuf>,
+    }
 
-        // Queue the request; `poll` validates the window and arms the pipeline.
+    impl Drop for PendingGrabs {
+        fn drop(&mut self) {
+            self.cancelled.store(true, Ordering::Relaxed);
+            let mut sinks = grab_sinks().lock().unwrap();
+            for id in &self.ids {
+                sinks.remove(id);
+            }
+            drop(sinks);
+            let mut pins = pinned_grabs().lock().unwrap();
+            for path in &self.paths {
+                pins.remove(path);
+            }
+            drop(pins);
+            queue()
+                .lock()
+                .unwrap()
+                .push(Cmd::CancelGrabs(self.ids.clone()));
+            wake_commands();
+        }
+    }
+
+    fn arm_grabs(
+        window: Option<usize>,
+        scale: f64,
+        n: usize,
+        every: Duration,
+    ) -> Result<PendingGrabs, String> {
+        let started = Instant::now();
+        // Start the long-lived worker on this HTTP thread, never from the UI
+        // or a GPU callback. No temporary worker is spawned for a frame.
+        encode_queue().as_ref().map_err(Clone::clone)?;
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("grab scale must be positive and finite".into());
+        }
+        let window = Some(
+            window
+                .or_else(|| status_cell().lock().unwrap().windows.first().map(|w| w.id))
+                .ok_or("no windows")?,
+        );
+        PENDING_GRABS
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(n)
+                    .filter(|total| *total <= MAX_PENDING_GRABS)
+            })
+            .map_err(|_| "grab request limit reached (64); retry after pending grabs finish")?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut pending = PendingGrabs {
+            ids: Vec::with_capacity(n),
+            replies: Vec::with_capacity(n),
+            cancelled: cancelled.clone(),
+            deadline: started + every * (n as u32 - 1) + Duration::from_secs(10),
+            paths: Vec::new(),
+        };
+        {
+            let mut sinks = grab_sinks().lock().unwrap();
+            for index in 0..n {
+                let id = GRAB_ID_BASE + NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = sync_channel(1);
+                sinks.insert(
+                    id,
+                    GrabSink {
+                        window,
+                        requested_at: started + every * index as u32,
+                        scale,
+                        cancelled: cancelled.clone(),
+                        tx,
+                    },
+                );
+                pending.ids.push(id);
+                pending.replies.push(rx);
+            }
+        }
         match ask(
-            move |tx| Cmd::Grab {
+            |tx| Cmd::Grab {
                 window,
-                request_id,
+                ids: pending.ids.clone(),
+                started,
+                every,
+                cancelled,
                 tx,
             },
             4,
         ) {
-            Reply::Ok => {}
-            Reply::Err(msg) => {
-                grab_sinks().lock().unwrap().remove(&request_id);
-                return Err(msg);
-            }
-            Reply::Text(_) => {
-                grab_sinks().lock().unwrap().remove(&request_id);
-                return Err("unexpected grab reply".to_string());
-            }
+            Reply::Ok => Ok(pending),
+            Reply::Err(msg) => Err(msg),
+            Reply::Text(_) => Err("unexpected grab reply".into()),
         }
+    }
 
-        let grabbed = png_rx.recv_timeout(Duration::from_secs(10));
-        grab_sinks().lock().unwrap().remove(&request_id);
-        let (mut width, mut height, mut png) = match grabbed {
-            Ok(Ok(v)) => v,
-            Ok(Err(msg)) => return Err(msg),
-            Err(_) => return Err("grab timeout (is this backend rendering?)".to_string()),
-        };
+    fn receive_grab(pending: &PendingGrabs, index: usize) -> Result<Grabbed, String> {
+        pending.replies[index]
+            .recv_timeout(pending.deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "grab timeout (is this backend rendering?)".to_string())?
+    }
 
-        if scale > 0.0 && (scale - 1.0).abs() > 1.0e-6 {
-            let (w, h, bytes) = rescale_png(&png, width, height, scale)?;
-            width = w;
-            height = h;
-            png = bytes;
-        }
+    fn grab_one(window: Option<usize>, scale: f64) -> Result<Grabbed, String> {
+        let pending = arm_grabs(window, scale, 1, Duration::ZERO)?;
+        receive_grab(&pending, 0)
+    }
 
-        let window_id = window.unwrap_or_else(|| {
-            status_cell()
-                .lock()
-                .unwrap()
-                .windows
-                .first()
-                .map(|w| w.id)
-                .unwrap_or(0)
-        });
-        Ok(Grabbed {
-            window_id,
-            width,
-            height,
-            png,
-        })
+    fn grab_json(grabbed: &Grabbed, path: &std::path::Path) -> String {
+        format!(
+            "{{\"png\":{},\"w\":{},\"sz\":[{},{}],\"capture_ms\":{:.3},\"encode_ms\":{:.3},\"capture_kind\":{}}}",
+            json_str(&path.display().to_string()), grabbed.window_id, grabbed.width, grabbed.height,
+            grabbed.capture_ms, grabbed.encode_ms,
+            json_str(if grabbed.backend_png { "backend_png" } else { "pixels" }),
+        )
     }
 
     fn route_grab(p: &Params) -> Out {
@@ -1791,18 +2403,65 @@ mod imp {
             return Out::Png(grabbed.png);
         }
         match write_grab(grabbed.window_id, &grabbed.png) {
-            Ok(path) => Out::Json(
-                200,
-                format!(
-                    "{{\"png\":{},\"w\":{},\"sz\":[{},{}]}}",
-                    json_str(&path.display().to_string()),
-                    grabbed.window_id,
-                    grabbed.width,
-                    grabbed.height
-                ),
-            ),
+            Ok(path) => Out::Json(200, grab_json(&grabbed, &path)),
             Err(msg) => err(&msg),
         }
+    }
+
+    fn route_grab_sequence(p: &Params) -> Out {
+        let n = match p.get(&["n"]).unwrap_or("8").parse::<usize>() {
+            Ok(n @ 1..=64) => n,
+            _ => return err("gseq n must be an integer in 1..=64"),
+        };
+        let every_ms = match p.get(&["every_ms"]).unwrap_or("50").parse::<u64>() {
+            Ok(ms @ 8..=60_000) if ms * (n as u64 - 1) <= 60_000 => ms,
+            _ => {
+                return err(
+                    "gseq every_ms must be 8..=60000; total cadence span must not exceed 60s",
+                )
+            }
+        };
+        let mut pending = match arm_grabs(
+            p.window(),
+            p.f64(&["scale"], 1.0),
+            n,
+            Duration::from_millis(every_ms),
+        ) {
+            Ok(pending) => pending,
+            Err(msg) => return err(&msg),
+        };
+        // Every capture is already scheduled. Waiting for encodes here cannot
+        // retime the UI's requests, even when encoding is slower than cadence.
+        let mut paths = Vec::with_capacity(n);
+        let mut frames = Vec::with_capacity(n);
+        for index in 0..n {
+            let grabbed = match receive_grab(&pending, index) {
+                Ok(grabbed) => grabbed,
+                Err(msg) => return err(&format!("gseq frame {index}: {msg}")),
+            };
+            let path = match write_grab_file(grabbed.window_id, &grabbed.png, true) {
+                Ok(path) => path,
+                Err(msg) => return err(&msg),
+            };
+            paths.push(json_str(&path.display().to_string()));
+            let mut frame = grab_json(&grabbed, &path);
+            frame.pop();
+            frame.push_str(&format!(
+                ",\"scheduled_ms\":{},\"pixels_ms\":{:.3}}}",
+                index as u64 * every_ms,
+                index as f64 * every_ms as f64 + grabbed.capture_ms
+            ));
+            frames.push(frame);
+            pending.paths.push(path);
+        }
+        Out::Json(
+            200,
+            format!(
+                "{{\"png\":[{}],\"n\":{n},\"every_ms\":{every_ms},\"frames\":[{}]}}",
+                paths.join(","),
+                frames.join(",")
+            ),
+        )
     }
 
     /// The canonical last call of an agent session: final evidence for every
@@ -1848,7 +2507,19 @@ mod imp {
 
     /// Write the PNG into the per-run grab dir and prune old ones so a long
     /// session can't fill the disk.
+    fn pinned_grabs() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+        static PINS: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+        PINS.get_or_init(Default::default)
+    }
+
     fn write_grab(window_id: usize, png: &[u8]) -> Result<PathBuf, String> {
+        write_grab_file(window_id, png, false)
+    }
+
+    fn write_grab_file(window_id: usize, png: &[u8], pin: bool) -> Result<PathBuf, String> {
+        // Serialize writers/pruning on HTTP threads only. A concurrent /g
+        // cannot delete the first paths of a sequence still being returned.
+        let mut pins = pinned_grabs().lock().unwrap();
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = grab_dir().lock().unwrap().clone();
         if dir.as_os_str().is_empty() {
@@ -1859,6 +2530,9 @@ mod imp {
         let prefix = format!("grab-w{window_id}-");
         let path = dir.join(format!("{prefix}{seq:05}.png"));
         std::fs::write(&path, png).map_err(|e| format!("grab write: {e}"))?;
+        if pin {
+            pins.insert(path.clone());
+        }
 
         let mut mine: Vec<PathBuf> = std::fs::read_dir(&dir)
             .map(|entries| {
@@ -1866,9 +2540,11 @@ mod imp {
                     .flatten()
                     .map(|entry| entry.path())
                     .filter(|path| {
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.starts_with(&prefix))
+                        !pins.contains(path)
+                            && path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.starts_with(&prefix))
                     })
                     .collect()
             })
@@ -1883,46 +2559,83 @@ mod imp {
         Ok(path)
     }
 
-    fn rescale_png(
-        png: &[u8],
-        width: u32,
-        height: u32,
-        scale: f64,
-    ) -> Result<(u32, u32, Vec<u8>), String> {
+    fn encode_grab(job: &EncodeJob) -> Result<(u32, u32, Vec<u8>), String> {
         use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
         use makepad_zune_png::makepad_zune_core::colorspace::ColorSpace;
         use makepad_zune_png::PngDecoder;
 
-        let target_w = ((width as f64) * scale).round().max(1.0) as u32;
-        let target_h = ((height as f64) * scale).round().max(1.0) as u32;
-        if target_w == width && target_h == height {
-            return Ok((width, height, png.to_vec()));
+        let width = job.width as usize;
+        let height = job.height as usize;
+        if width == 0 || height == 0 || job.pixels.is_empty() {
+            return Err("grab backend returned no pixels".into());
         }
-        let mut decoder = PngDecoder::new(ZCursor::new(png));
-        let pixels = decoder
-            .decode_raw()
-            .map_err(|err| format!("grab decode failed: {err:?}"))?;
-        let colorspace = decoder
-            .colorspace()
-            .ok_or_else(|| "grab decode: no colorspace".to_string())?;
-        if colorspace != ColorSpace::RGBA {
-            return Err("grab decode: not rgba".to_string());
+        let target_w = ((width as f64) * job.sink.scale).round().max(1.0) as usize;
+        let target_h = ((height as f64) * job.sink.scale).round().max(1.0) as usize;
+        let target_bytes = target_w
+            .checked_mul(target_h)
+            .and_then(|area| area.checked_mul(4))
+            .filter(|bytes| *bytes <= MAX_GRAB_BYTES)
+            .ok_or("scaled grab exceeds the 64 MiB pixel limit")?;
+        if job.backend_png && target_w == width && target_h == height {
+            return Ok((job.width, job.height, job.pixels.to_vec()));
         }
-        let src_w = width as usize;
-        let mut out = vec![0u8; target_w as usize * target_h as usize * 4];
-        for y in 0..target_h as usize {
-            let src_y = (y as u64 * height as u64 / target_h as u64) as usize;
-            for x in 0..target_w as usize {
-                let src_x = (x as u64 * width as u64 / target_w as u64) as usize;
-                let src = (src_y * src_w + src_x) * 4;
-                let dst = (y * target_w as usize + x) * 4;
-                if src + 4 <= pixels.len() {
-                    out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+        let decoded;
+        let (pixels, stride, order, origin) = if job.backend_png {
+            let mut decoder = PngDecoder::new(ZCursor::new(&*job.pixels));
+            decoded = decoder
+                .decode_raw()
+                .map_err(|err| format!("grab decode failed: {err:?}"))?;
+            if decoder.colorspace() != Some(ColorSpace::RGBA) {
+                return Err("grab decode: not rgba".into());
+            }
+            (
+                &decoded[..],
+                width * 4,
+                ReadbackChannelOrder::Rgba,
+                ReadbackOrigin::TopLeft,
+            )
+        } else {
+            (&job.pixels[..], job.stride, job.order, job.origin)
+        };
+        if width == 0
+            || height == 0
+            || stride < width * 4
+            || stride
+                .checked_mul(height)
+                .is_none_or(|len| len > pixels.len())
+        {
+            return Err("grab readback has invalid dimensions or stride".into());
+        }
+        // Sample first, then convert only the retained pixels. In particular,
+        // scale=0.5 encodes one quarter as many pixels, with no full-size PNG.
+        let mut out = vec![0u8; target_bytes];
+        for y in 0..target_h {
+            let src_y = y * height / target_h;
+            let src_y = if origin == ReadbackOrigin::BottomLeft {
+                height - 1 - src_y
+            } else {
+                src_y
+            };
+            for x in 0..target_w {
+                let src = src_y * stride + (x * width / target_w) * 4;
+                let dst = (y * target_w + x) * 4;
+                out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+                if order == ReadbackChannelOrder::Bgra {
+                    out.swap(dst, dst + 2);
                 }
             }
         }
-        let bytes = Cx::encode_rgba_as_png(target_w, target_h, &out)?;
-        Ok((target_w, target_h, bytes))
+        let bytes = Cx::encode_rgba_as_png(target_w as u32, target_h as u32, &out)?;
+        Ok((target_w as u32, target_h as u32, bytes))
+    }
+
+    fn wake_commands() {
+        // SignalToUI coalesces wakes until timer 0 clears its flag. A remote
+        // capture must also wake between those ticks (including 200 ms idle).
+        #[cfg(all(target_os = "macos", not(headless)))]
+        crate::os::apple::macos::macos_app::wake_event_loop();
+        #[cfg(not(all(target_os = "macos", not(headless))))]
+        crate::thread::SignalToUI::set_ui_signal();
     }
 
     /// Queue a command and block this HTTP thread until the event loop answers.
@@ -1932,6 +2645,7 @@ mod imp {
     {
         let (tx, rx) = channel();
         queue().lock().unwrap().push(make(tx));
+        wake_commands();
         match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
             Ok(reply) => reply,
             Err(_) => Reply::Err("timeout (app busy or not running its event loop)".to_string()),
@@ -2076,14 +2790,20 @@ mod imp {
             let Some(key) = read_string(&chars, &mut index) else {
                 break;
             };
-            while matches!(chars.get(index), Some(' ') | Some('\n') | Some('\t') | Some('\r')) {
+            while matches!(
+                chars.get(index),
+                Some(' ') | Some('\n') | Some('\t') | Some('\r')
+            ) {
                 index += 1;
             }
             if chars.get(index) != Some(&':') {
                 continue;
             }
             index += 1;
-            while matches!(chars.get(index), Some(' ') | Some('\n') | Some('\t') | Some('\r')) {
+            while matches!(
+                chars.get(index),
+                Some(' ') | Some('\n') | Some('\t') | Some('\r')
+            ) {
                 index += 1;
             }
             match chars.get(index) {
@@ -2271,20 +2991,40 @@ mod imp {
 
         #[test]
         fn file_drop_requires_unambiguous_path_coordinates_and_options() {
-            let path = std::env::temp_dir().join("reference car.png").to_string_lossy().into_owned();
-            let fields = vec![("path".into(), path.clone()), ("x".into(), "12.5".into()), ("y".into(), "20".into())];
+            let path = std::env::temp_dir()
+                .join("reference car.png")
+                .to_string_lossy()
+                .into_owned();
+            let fields = vec![
+                ("path".into(), path.clone()),
+                ("x".into(), "12.5".into()),
+                ("y".into(), "20".into()),
+            ];
             let mut valid = fields.clone();
             valid.extend([("w".into(), "2".into()), ("wait".into(), "1".into())]);
-            assert!(matches!(parse_drop(&Params(valid)), Ok((Some(2), Input::DropFile { path: p, x: 12.5, y: 20.0 }, true)) if p == path));
+            assert!(
+                matches!(parse_drop(&Params(valid)), Ok((Some(2), Input::DropFile { path: p, x: 12.5, y: 20.0 }, true)) if p == path)
+            );
             for (key, value) in [
-                ("path", "relative.png"), ("path", ""), ("path", "/tmp/invalid\0.png"),
-                ("x", "NaN"), ("x", "inf"), ("x", "-1"), ("y", ""),
-                ("w", "two"), ("w", "-1"), ("wait", "sometimes"), ("paths", "ignored.png"),
+                ("path", "relative.png"),
+                ("path", ""),
+                ("path", "/tmp/invalid\0.png"),
+                ("x", "NaN"),
+                ("x", "inf"),
+                ("x", "-1"),
+                ("y", ""),
+                ("w", "two"),
+                ("w", "-1"),
+                ("wait", "sometimes"),
+                ("paths", "ignored.png"),
             ] {
                 let mut invalid = fields.clone();
                 invalid.retain(|(name, _)| name != key);
                 invalid.push((key.into(), value.into()));
-                assert!(parse_drop(&Params(invalid)).is_err(), "{key} accepted invalid value");
+                assert!(
+                    parse_drop(&Params(invalid)).is_err(),
+                    "{key} accepted invalid value"
+                );
             }
             let mut duplicate = fields.clone();
             duplicate.push(("path".into(), path.clone()));
@@ -2304,7 +3044,10 @@ mod imp {
             use crate::event::{DragHit, DragItem, DragResponse, DragState, Event};
             use crate::makepad_math::Rect;
             use crate::thread::lock_from_ui;
-            use std::{cell::{Cell, RefCell}, rc::Rc};
+            use std::{
+                cell::{Cell, RefCell},
+                rc::Rc,
+            };
 
             let area = Rc::new(Cell::new(Area::Empty));
             let target = area.clone();
@@ -2314,8 +3057,14 @@ mod imp {
                 seen.borrow_mut().push(event.name());
                 match event.drag_hits(cx, target.get()) {
                     DragHit::Drag(hit) => {
-                        assert_eq!(hit.state, DragState::In, "previous drop left stale drag state");
-                        assert!(matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == "/not-read-by-platform/reference.png"));
+                        assert_eq!(
+                            hit.state,
+                            DragState::In,
+                            "previous drop left stale drag state"
+                        );
+                        assert!(
+                            matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == "/not-read-by-platform/reference.png")
+                        );
                         *lock_from_ui(&hit.response) = DragResponse::Copy;
                     }
                     DragHit::Drop(hit) => assert_eq!(hit.abs, dvec2(20.0, 30.0)),
@@ -2325,15 +3074,32 @@ mod imp {
             let draw_list = DrawList::new(&mut cx);
             let list = &mut cx.draw_lists[draw_list.id()];
             list.rect_areas.push(CxRectArea {
-                rect: Rect { pos: dvec2(10.0, 10.0), size: dvec2(100.0, 100.0) },
+                rect: Rect {
+                    pos: dvec2(10.0, 10.0),
+                    size: dvec2(100.0, 100.0),
+                },
                 draw_clip: (dvec2(0.0, 0.0), dvec2(200.0, 200.0)),
             });
-            area.set(Area::Rect(RectArea { draw_list_id: draw_list.id(), rect_id: 0, redraw_id: list.redraw_id }));
+            area.set(Area::Rect(RectArea {
+                draw_list_id: draw_list.id(),
+                rect_id: 0,
+                redraw_id: list.redraw_id,
+            }));
             for _ in 0..2 {
-                assert_eq!(inject_file_drop(&mut cx, "/not-read-by-platform/reference.png".into(), 20.0, 30.0),
-                    (true, DragResponse::Copy));
+                assert_eq!(
+                    inject_file_drop(
+                        &mut cx,
+                        "/not-read-by-platform/reference.png".into(),
+                        20.0,
+                        30.0
+                    ),
+                    (true, DragResponse::Copy)
+                );
             }
-            assert_eq!(sequence.borrow().as_slice(), ["Drag", "Drop", "DragEnd", "Drag", "Drop", "DragEnd"]);
+            assert_eq!(
+                sequence.borrow().as_slice(),
+                ["Drag", "Drop", "DragEnd", "Drag", "Drop", "DragEnd"]
+            );
         }
 
         #[test]
@@ -2358,7 +3124,10 @@ mod imp {
             // the index is where the terminator starts, so head = buf[..14]
             // and body = buf[14 + 4..]
             assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\nbody"), Some(14));
-            assert_eq!(find_head_end(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"), Some(24));
+            assert_eq!(
+                find_head_end(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"),
+                Some(24)
+            );
             assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n"), None);
         }
     }

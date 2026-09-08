@@ -139,11 +139,11 @@ head pins the intended edited content. New game clients fetch the compiled GLB;
 they do not replay modeling operations. Old CSG `ModelProgram` source remains text.
 
 Limits are provisional resource guards, not measured Quest 3 performance claims.
-The default document admits 128 objects and 64 materials, with at most 256
-operations per batch. Existing 128 MiB working-memory, 200,000 compiled-triangle,
-64 MiB source and 16 MiB transaction limits also apply; more objects do not
-increase those geometry or memory budgets.
-Four open documents, one admitted authoring operation per host, bounded queues,
+The default document admits 2048 objects and 512 materials, with at most 256
+operations per batch. Working memory is 2 GiB, with 10 billion work units,
+4,000,000 compiled triangles, 256 MiB source and 64 MiB transactions.
+Undo history retains up to 4096 batches before an explicit checkpoint.
+Sixteen open documents, one admitted authoring operation per host, bounded queues,
 cancellation checkpoints and prepared render products prevent UI-side modeling
 work. Global geometry operations have explicit resource and attribute admission rules.
 

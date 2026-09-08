@@ -175,6 +175,10 @@ pub fn wake_event_loop() {
     }
 }
 
+/// One-shot capture deadlines bypass both idle heartbeat and display-link
+/// pacing. Reserved independently of the pointer-capture paint clock.
+pub(super) const REMOTE_CAPTURE_TIMER_ID: u64 = u64::MAX - 1;
+
 /// Whether this process may activate itself or make a window key.
 ///
 /// USER LAW (2026-08-26): an agent-driven or test instance must never steal
@@ -240,7 +244,9 @@ unsafe fn objc_exception_text(obj: ObjcId) -> String {
     if utf8.is_null() {
         return String::new();
     }
-    std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+    std::ffi::CStr::from_ptr(utf8)
+        .to_string_lossy()
+        .into_owned()
 }
 
 extern "C" fn log_objc_exception(exception: ObjcId) -> ObjcId {
@@ -352,6 +358,7 @@ pub struct MacosApp {
     /// NSTimer pacing stays). Entries are (cocoa window, link).
     display_links: Vec<(ObjcId, ObjcId)>,
     display_links_paused: bool,
+    remote_capture_deadline: Option<Instant>,
     /// The frame clock, measured (`MAKEPAD_TRACE=frames`).
     pub frame_trace: crate::frame_trace::FrameTrace,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
@@ -401,7 +408,6 @@ pub struct MacosApp {
     pub pin_ns_moves: u64,
     pub pin_sum_dx: f64,
     //current_ns_event: Option<ObjcId>,
-
     /// Set by `send_command_event()` to avoid sending keyboard events
     /// for keyboard shortcuts that trigger a macOS menu command.
     pub(crate) menu_command_fired: bool,
@@ -425,6 +431,7 @@ impl MacosApp {
                 timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
                 display_links: Vec::new(),
                 display_links_paused: false,
+                remote_capture_deadline: None,
                 frame_trace: crate::frame_trace::FrameTrace::new(),
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
@@ -460,8 +467,8 @@ impl MacosApp {
         // submenu and the "Quit X" item label match. NSBundle returns nil
         // when the binary isn't bundled at all; fall back to a generic
         // label in that case.
-        let app_name = unsafe { current_bundle_name() }
-            .unwrap_or_else(|| "Application".to_string());
+        let app_name =
+            unsafe { current_bundle_name() }.unwrap_or_else(|| "Application".to_string());
         self.update_macos_menu(&MacosMenu::Main {
             items: vec![MacosMenu::Sub {
                 name: app_name.clone(),
@@ -693,7 +700,15 @@ impl MacosApp {
         }
 
         match ev_type {
-            NSEventType::NSApplicationDefined => { // event loop unblocker
+            NSEventType::NSApplicationDefined => {
+                // A wake used to leave remote commands waiting for timer 0
+                // (up to 200 ms idle, or an occluded display-link callback).
+                if crate::remote::needs_ticks() {
+                    MacosApp::do_callback(MacosEvent::Timer(TimerEvent {
+                        time: None,
+                        timer_id: REMOTE_CAPTURE_TIMER_ID,
+                    }));
+                }
             }
             NSEventType::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
@@ -1035,9 +1050,9 @@ impl MacosApp {
     pub fn defer_window_closed(window_id: WindowId) {
         unsafe {
             let main_thread_block = objc_block!(move || {
-                MacosApp::do_callback(MacosEvent::WindowClosed(
-                    crate::event::WindowClosedEvent { window_id },
-                ));
+                MacosApp::do_callback(MacosEvent::WindowClosed(crate::event::WindowClosedEvent {
+                    window_id,
+                }));
             });
             let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
             let block_operation: ObjcId =
@@ -1175,13 +1190,21 @@ impl MacosApp {
                         frame
                     };
                     let lo_x = frame.origin.x.max(svis.origin.x);
-                    let hi_x = (frame.origin.x + frame.size.width)
-                        .min(svis.origin.x + svis.size.width);
+                    let hi_x =
+                        (frame.origin.x + frame.size.width).min(svis.origin.x + svis.size.width);
                     let lo_y = frame.origin.y.max(svis.origin.y);
-                    let hi_y = (frame.origin.y + frame.size.height)
-                        .min(svis.origin.y + svis.size.height);
-                    let gx = if lo_x < hi_x { (lo_x + hi_x) * 0.5 } else { frame.origin.x + frame.size.width * 0.5 };
-                    let gy_cocoa = if lo_y < hi_y { (lo_y + hi_y) * 0.5 } else { frame.origin.y + frame.size.height * 0.5 };
+                    let hi_y =
+                        (frame.origin.y + frame.size.height).min(svis.origin.y + svis.size.height);
+                    let gx = if lo_x < hi_x {
+                        (lo_x + hi_x) * 0.5
+                    } else {
+                        frame.origin.x + frame.size.width * 0.5
+                    };
+                    let gy_cocoa = if lo_y < hi_y {
+                        (lo_y + hi_y) * 0.5
+                    } else {
+                        frame.origin.y + frame.size.height * 0.5
+                    };
                     let screens: ObjcId = msg_send![class!(NSScreen), screens];
                     let primary: ObjcId = msg_send![screens, firstObject];
                     let sframe: NSRect = msg_send![primary, frame];
@@ -1383,7 +1406,9 @@ impl MacosApp {
                 let metal_link_wanted = std::env::var("MAKEPAD_METAL_DISPLAY_LINK")
                     .map(|v| v != "0")
                     .unwrap_or(false);
-                if let Some(link_class) = Class::get("CAMetalDisplayLink").filter(|_| metal_link_wanted) {
+                if let Some(link_class) =
+                    Class::get("CAMetalDisplayLink").filter(|_| metal_link_wanted)
+                {
                     let layer: ObjcId = msg_send![view, layer];
                     if layer != nil {
                         let allocated: ObjcId = msg_send![link_class, alloc];
@@ -1392,8 +1417,7 @@ impl MacosApp {
                             let () = msg_send![link, setDelegate: self.timer_delegate_instance];
                             let default_range: CAFrameRateRange =
                                 msg_send![link, preferredFrameRateRange];
-                            let default_latency: isize =
-                                msg_send![link, preferredFrameLatency];
+                            let default_latency: isize = msg_send![link, preferredFrameLatency];
                             let screen: ObjcId = msg_send![window, screen];
                             let maximum_fps: isize = if screen != nil {
                                 msg_send![screen, maximumFramesPerSecond]
@@ -1473,15 +1497,18 @@ impl MacosApp {
                     continue;
                 }
                 let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
-                let () =
-                    msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
+                let () = msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
                 if self.display_links_paused {
                     let () = msg_send![link, setPaused: YES];
                 }
                 self.display_links.push((window, link));
                 crate::log!(
                     "macos: paint pacing on {} (frame-flip clock), window {}",
-                    if is_metal_link { "CAMetalDisplayLink" } else { "CADisplayLink" },
+                    if is_metal_link {
+                        "CAMetalDisplayLink"
+                    } else {
+                        "CADisplayLink"
+                    },
                     self.display_links.len()
                 );
             }
@@ -1506,20 +1533,66 @@ impl MacosApp {
         }
     }
 
+    /// Retire a CAMetalDisplayLink before a manual capture takes ownership of
+    /// its layer's drawables. The ordinary paint path re-arms the missing link.
+    pub(super) fn remove_window_metal_display_link(&mut self, window: ObjcId) -> bool {
+        let Some(class) = Class::get("CAMetalDisplayLink") else {
+            return false;
+        };
+        let mut removed = false;
+        self.display_links.retain(|(owner, link)| {
+            if *owner != window {
+                return true;
+            }
+            let is_metal: BOOL = unsafe { msg_send![*link, isKindOfClass: class] };
+            if is_metal != YES {
+                return true;
+            }
+            unsafe {
+                let () = msg_send![*link, invalidate];
+                // This branch only accepts CAMetalDisplayLink, which we
+                // created with alloc/initWithMetalLayer in ensure_display_link.
+                let () = msg_send![*link, release];
+            }
+            removed = true;
+            false
+        });
+        removed
+    }
+
+    pub(super) fn schedule_remote_capture(&mut self, deadline: Option<Instant>) {
+        if self.remote_capture_deadline == deadline {
+            return;
+        }
+        self.stop_timer(REMOTE_CAPTURE_TIMER_ID);
+        self.remote_capture_deadline = deadline;
+        if let Some(deadline) = deadline {
+            self.start_timer(
+                REMOTE_CAPTURE_TIMER_ID,
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    .max(0.000_001),
+                false,
+            );
+        }
+    }
+
     /// One window's display link fired: dispatch a LinkFire carrying WHICH
     /// window and the flip's TARGET timestamp mapped into app time — the
     /// rock-solid per-window clock the paint below samples.
     pub fn send_display_link_fired(link: ObjcId) {
         let Some((window, primary, app_now)) = try_with_macos_app(|app| {
-            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
-                (app.display_links[i].0, i == 0, app.time_now())
-            })
-        }).flatten() else {
+            app.display_links
+                .iter()
+                .position(|(_w, l)| *l == link)
+                .map(|i| (app.display_links[i].0, i == 0, app.time_now()))
+        })
+        .flatten() else {
             return;
         };
-        let (target, media_now): (f64, f64) = unsafe {
-            (msg_send![link, targetTimestamp], CACurrentMediaTime())
-        };
+        let (target, media_now): (f64, f64) =
+            unsafe { (msg_send![link, targetTimestamp], CACurrentMediaTime()) };
         let time = app_now + (target - media_now).clamp(0.0, 0.1);
         MacosApp::do_callback(MacosEvent::LinkFire {
             window,
@@ -1541,20 +1614,21 @@ impl MacosApp {
             metal_link_trace_report();
             return;
         }
-        let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) =
-            unsafe {
-                (
-                    msg_send![update, targetTimestamp],
-                    msg_send![update, targetPresentationTimestamp],
-                    msg_send![update, drawable],
-                    CACurrentMediaTime(),
-                )
-            };
+        let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) = unsafe {
+            (
+                msg_send![update, targetTimestamp],
+                msg_send![update, targetPresentationTimestamp],
+                msg_send![update, drawable],
+                CACurrentMediaTime(),
+            )
+        };
         let Some((window, primary, app_now)) = try_with_macos_app(|app| {
-            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
-                (app.display_links[i].0, i == 0, app.time_now())
-            })
-        }).flatten() else {
+            app.display_links
+                .iter()
+                .position(|(_w, l)| *l == link)
+                .map(|i| (app.display_links[i].0, i == 0, app.time_now()))
+        })
+        .flatten() else {
             metal_link_trace_report();
             return;
         };
@@ -1616,6 +1690,9 @@ impl MacosApp {
             let time = with_macos_app(|app| app.time_now());
             if with_macos_app(|app| app.timers[i].nstimer == nstimer) {
                 let timer_id = with_macos_app(|app| app.timers[i].timer_id);
+                if timer_id == REMOTE_CAPTURE_TIMER_ID {
+                    with_macos_app(|app| app.remote_capture_deadline = None);
+                }
                 if !with_macos_app(|app| app.timers[i].repeats) {
                     with_macos_app(|app| app.timers.remove(i));
                 }
@@ -1823,7 +1900,10 @@ fn filter_extensions(settings: &FileDialog) -> Vec<String> {
     let mut out = Vec::new();
     for filter in &settings.filters {
         for extension in &filter.extensions {
-            let cleaned = extension.trim().trim_start_matches('*').trim_start_matches('.');
+            let cleaned = extension
+                .trim()
+                .trim_start_matches('*')
+                .trim_start_matches('.');
             if cleaned.is_empty() || extension.trim() == "*" {
                 return Vec::new();
             }

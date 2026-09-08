@@ -4,6 +4,11 @@ mod raster;
 mod shader;
 mod virtual_gpu;
 
+pub use crate::texture::{
+    ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, ReadbackTicket,
+    TextureReadback, TextureReadbackUsage, TEXTURE_READBACK_MAX_BYTES, TEXTURE_READBACK_MAX_REQUESTS,
+};
+
 use crate::os::shared_framebuf::PollTimers;
 use crate::{
     audio::{AudioDeviceId, AudioInputFn, AudioOutputFn},
@@ -175,6 +180,22 @@ impl CxMediaApi for Cx {
 }
 
 impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        self.headless_capture_texture_readbacks(None);
+    }
+
+    pub(crate) fn headless_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        if self.textures.1.readbacks.slots.is_empty() { return; }
+        for work in self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft) {
+            debug_assert_ne!(work.ticket.0, 0);
+            let bytes = self.os.render_targets.read_color_raw_bgra8(work.texture_id)
+                .filter(|bytes| bytes.len() == work.width * work.height * 4 && bytes.len() <= work.reserved_bytes)
+                .ok_or(ReadbackError::NotRendered);
+            work.completion.finish(bytes);
+        }
+    }
+
     /// No-op in headless mode; the real macOS backend raises the app's windows.
     #[cfg(target_os = "macos")]
     pub fn macos_activate_app(&mut self) {}

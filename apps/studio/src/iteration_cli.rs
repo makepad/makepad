@@ -17,6 +17,7 @@ fn cli_identifier(value: &str) -> bool {
 pub fn cli_tool_name(name: &str) -> Result<&str, String> {
     Ok(match name {
         "inspect" | "flow_inspect" => "flow_inspect",
+        "rename" | "flow_rename" => "flow_rename",
         "context" | "flow_context" => "flow_context",
         "report" | "flow_report" => "flow_report",
         "split" | "flow_lane" => "flow_lane",

@@ -9,6 +9,37 @@ script_mod! {
     use mod.widgets.*
     use mod.geom
 
+    // The same root-space pattern follows both static and skinned surfaces.
+    // Each extra shell reuses the base mesh; strand count never becomes CPU
+    // geometry, skin weights, editable topology or collision primitives.
+    let FurSurface = {
+        v_fur_root: varying(vec3)
+        v_fur_normal: varying(vec3)
+        fur_hash: fn(p: vec2) -> float {
+            return fract(sin(dot(p, vec2(127.1, 311.7)) + self.fur.w * 0.123) * 43758.5453)
+        }
+        fur_mask: fn() -> float {
+            if self.fur.x <= 0.0 || self.fur_layer.x <= 0.0 { return 1.0 }
+            let n = abs(self.v_fur_normal)
+            var uv = self.v_fur_root.xy
+            if n.y >= n.x && n.y >= n.z { uv = self.v_fur_root.xz }
+            else if n.x > n.z { uv = self.v_fur_root.yz }
+            let p = uv * self.fur.z
+            let cell = floor(p)
+            let seed = self.fur_hash(cell)
+            if seed > self.fur.y { return 0.0 }
+            let center = vec2(self.fur_hash(cell + vec2(17.0, 3.0)), self.fur_hash(cell + vec2(7.0, 29.0))) * 0.5 + vec2(0.25, 0.25)
+            let radius = 0.43 * (1.0 - self.fur_layer.x * 0.8)
+            let delta = fract(p) - center
+            return step(dot(delta, delta), radius * radius)
+        }
+        fur_shade: fn(lit: vec3, n: vec3, view: vec3) -> vec3 {
+            if self.fur.x <= 0.0 { return lit }
+            let rim = 1.0 - abs(dot(normalize(n), normalize(view)))
+            return lit * (0.72 + 0.28 * self.fur_layer.x + 0.18 * rim * rim)
+        }
+    }
+
     // One appearance law for every asset family. Hue is a rotation around
     // the neutral-grey axis, so textured/multi-colour assets keep their
     // shading while changing family; saturation and value are optional
@@ -105,11 +136,11 @@ script_mod! {
         // One PCF tap against cascade `ci`'s tile (strip u = (u + ci)/3,
         // matching shadow_csm::CSM_CASCADES = 3). Taps clamp 2.5 texels
         // inside the tile so the 4x4 tent never reads a neighbour cascade.
-        csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_tap: fn(u: float, v: float, ci: float, ref01: float, receiver: vec2, slope: vec2) -> float {
             let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
-            return step(ref01, self.csm_map.sample_nearest(
+            return step(ref01 + dot(vec2(uu, vv) - receiver, slope), self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
         }
@@ -120,7 +151,7 @@ script_mod! {
         // penumbra the box gave, but continuous — the box alone is
         // piecewise constant per shadow-map texel, which reads as
         // stair-steps along every sunlit edge.
-        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float, slope: vec2) -> float {
             let e = self.csm_p.y
             let tu = u / e - 0.5
             let tv = v / e - 0.5
@@ -132,25 +163,25 @@ script_mod! {
             let wv0 = 1.0 - fv
             var s = 0.0
             var r = 0.0
-            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01, vec2(u, v), slope)
             s = r * wv0
-            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
-            r = r + self.csm_tap(bu, bv, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01, vec2(u, v), slope)
             s = s + r * fv
             return s * 0.11111111
         }
@@ -160,6 +191,20 @@ script_mod! {
         // overlap in light-space XY without sharing a depth interval, so XY
         // alone is not coverage. Then the csm_pcf tent filter. Slope-scaled bias:
         // grazing sun needs more depth slack or every curved surface acnes.
+        // Receiver-plane depth changes across the filter footprint. At
+        // sunset, comparing every tap with the center depth shadows a flat
+        // plane against itself. Match each texel's plane depth instead.
+        csm_slope: fn(ci: float, n: vec3) -> vec2 {
+            var rx = self.csm_rx0.xyz
+            var ry = self.csm_ry0.xyz
+            var rz = self.csm_rz0.xyz
+            if ci > 0.5 { rx = self.csm_rx1.xyz ry = self.csm_ry1.xyz rz = self.csm_rz1.xyz }
+            if ci > 1.5 { rx = self.csm_rx2.xyz ry = self.csm_ry2.xyz rz = self.csm_rz2.xyz }
+            let depth = dot(n, rz)
+            if abs(depth) < length(rz) * 0.005 { return vec2(0.0, 0.0) }
+            return vec2(-2.0 * dot(n, rx) / dot(rx, rx), 2.0 * dot(n, ry) / dot(ry, ry)) * (dot(rz, rz) / depth)
+        }
+
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
                 return 1.0
@@ -210,7 +255,7 @@ script_mod! {
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01, self.csm_slope(ci, n))
             // Cross-fade the outer band of a cascade's window into the
             // NEXT cascade: with soft edges a hard hand-over would show as
             // a line where the penumbra's texel size steps.
@@ -228,7 +273,7 @@ script_mod! {
                 }
                 if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
                     let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2, self.csm_slope(ci + 1.0, n))
                     s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
                 }
             }
@@ -1188,6 +1233,7 @@ script_mod! {
     // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
+        ..FurSurface,
         ..ColorAdjust,
         alpha_blend: false
         // Imported model layers may be deliberate sheets (roof soffits,
@@ -1325,11 +1371,11 @@ script_mod! {
         v_csm: varying(vec4f)
         v_csm_n: varying(vec3f)
 
-        csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_tap: fn(u: float, v: float, ci: float, ref01: float, receiver: vec2, slope: vec2) -> float {
             let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
-            return step(ref01, self.csm_map.sample_nearest(
+            return step(ref01 + dot(vec2(uu, vv) - receiver, slope), self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
         }
@@ -1340,7 +1386,7 @@ script_mod! {
         // penumbra the box gave, but continuous — the box alone is
         // piecewise constant per shadow-map texel, which reads as
         // stair-steps along every sunlit edge.
-        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float, slope: vec2) -> float {
             let e = self.csm_p.y
             let tu = u / e - 0.5
             let tv = v / e - 0.5
@@ -1352,27 +1398,41 @@ script_mod! {
             let wv0 = 1.0 - fv
             var s = 0.0
             var r = 0.0
-            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01, vec2(u, v), slope)
             s = r * wv0
-            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
-            r = r + self.csm_tap(bu, bv, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01, vec2(u, v), slope)
             s = s + r * fv
             return s * 0.11111111
+        }
+
+        // Receiver-plane depth changes across the filter footprint. At
+        // sunset, comparing every tap with the center depth shadows a flat
+        // plane against itself. Match each texel's plane depth instead.
+        csm_slope: fn(ci: float, n: vec3) -> vec2 {
+            var rx = self.csm_rx0.xyz
+            var ry = self.csm_ry0.xyz
+            var rz = self.csm_rz0.xyz
+            if ci > 0.5 { rx = self.csm_rx1.xyz ry = self.csm_ry1.xyz rz = self.csm_rz1.xyz }
+            if ci > 1.5 { rx = self.csm_rx2.xyz ry = self.csm_ry2.xyz rz = self.csm_rz2.xyz }
+            let depth = dot(n, rz)
+            if abs(depth) < length(rz) * 0.005 { return vec2(0.0, 0.0) }
+            return vec2(-2.0 * dot(n, rx) / dot(rx, rx), 2.0 * dot(n, ry) / dot(ry, ry)) * (dot(rz, rz) / depth)
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -1425,7 +1485,7 @@ script_mod! {
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01, self.csm_slope(ci, n))
             // Cross-fade the outer band of a cascade's window into the
             // NEXT cascade: with soft edges a hard hand-over would show as
             // a line where the penumbra's texel size steps.
@@ -1443,7 +1503,7 @@ script_mod! {
                 }
                 if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
                     let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2, self.csm_slope(ci + 1.0, n))
                     s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
                 }
             }
@@ -1594,6 +1654,9 @@ script_mod! {
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
             var normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             if self.morph_ctl.w>0.5{normal_in=normalize(normal_in+self.morph_delta(self.geom.ao_uv,1.0))}
+            self.v_fur_root = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            self.v_fur_normal = self.oct_decode(unpack2f16(self.geom.nrm))
+            pos = pos + normal_in * (self.fur.x * self.fur_layer.x)
             let model_view = self.draw_list.view_transform * self.transform
             let raw_world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
@@ -2015,6 +2078,7 @@ script_mod! {
         }
 
         pixel: fn() {
+            if self.fur_mask() < 0.5 { discard() }
             let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
             let alpha=tex.w*self.material_alpha*mix(1.0,self.v_tint.w,self.surface_on)
             if self.surface_on<0.5 && tex.w<0.5 {discard()}
@@ -2145,7 +2209,7 @@ script_mod! {
             let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.eye.xyz, albedo, rough, metal)
             let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)
             let emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
-            let lit = albedo * ((1.0 - metal) * (surface_ambient*(ao*sao*occlusion)+surface_direct*(ao_direct*sun_lit)+local*ao_direct)) + sun_spec*f + amb_spec*occlusion + local_pbr*ao_direct + emission
+            let lit = self.fur_shade(albedo * ((1.0 - metal) * (surface_ambient*(ao*sao*occlusion)+surface_direct*(ao_direct*sun_lit)+local*ao_direct)) + sun_spec*f + amb_spec*occlusion + local_pbr*ao_direct, n, self.eye.xyz-self.v_csm.xyz) + emission
             let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
             return self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.v_fog)*coverage,coverage),self.v_csm.xyz,n)
         }
@@ -2233,6 +2297,7 @@ script_mod! {
     // static world must never pay. Lighting/fog match DrawSceneSkinned minus
     // the AO path — a deforming mesh cannot carry a baked occlusion atlas.
     mod.draw.DrawSceneSkinnedGpu = mod.std.set_type_default() do #(DrawSceneSkinnedGpu::script_shader(vm)){
+        ..FurSurface,
         ..ColorAdjust,
         alpha_blend: false
         backface_culling: true
@@ -2322,11 +2387,11 @@ script_mod! {
             return normalize(vec3(e.x - t * sx, e.y - t * sy, nz))
         }
 
-        csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_tap: fn(u: float, v: float, ci: float, ref01: float, receiver: vec2, slope: vec2) -> float {
             let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
-            return step(ref01, self.csm_map.sample_nearest(
+            return step(ref01 + dot(vec2(uu, vv) - receiver, slope), self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
         }
@@ -2337,7 +2402,7 @@ script_mod! {
         // penumbra the box gave, but continuous — the box alone is
         // piecewise constant per shadow-map texel, which reads as
         // stair-steps along every sunlit edge.
-        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float, slope: vec2) -> float {
             let e = self.csm_p.y
             let tu = u / e - 0.5
             let tv = v / e - 0.5
@@ -2349,27 +2414,41 @@ script_mod! {
             let wv0 = 1.0 - fv
             var s = 0.0
             var r = 0.0
-            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01, vec2(u, v), slope)
             s = r * wv0
-            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
-            r = r + self.csm_tap(bu, bv, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01, vec2(u, v), slope)
             s = s + r * fv
             return s * 0.11111111
+        }
+
+        // Receiver-plane depth changes across the filter footprint. At
+        // sunset, comparing every tap with the center depth shadows a flat
+        // plane against itself. Match each texel's plane depth instead.
+        csm_slope: fn(ci: float, n: vec3) -> vec2 {
+            var rx = self.csm_rx0.xyz
+            var ry = self.csm_ry0.xyz
+            var rz = self.csm_rz0.xyz
+            if ci > 0.5 { rx = self.csm_rx1.xyz ry = self.csm_ry1.xyz rz = self.csm_rz1.xyz }
+            if ci > 1.5 { rx = self.csm_rx2.xyz ry = self.csm_ry2.xyz rz = self.csm_rz2.xyz }
+            let depth = dot(n, rz)
+            if abs(depth) < length(rz) * 0.005 { return vec2(0.0, 0.0) }
+            return vec2(-2.0 * dot(n, rx) / dot(rx, rx), 2.0 * dot(n, ry) / dot(ry, ry)) * (dot(rz, rz) / depth)
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -2422,7 +2501,7 @@ script_mod! {
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01, self.csm_slope(ci, n))
             // Cross-fade the outer band of a cascade's window into the
             // NEXT cascade: with soft edges a hard hand-over would show as
             // a line where the penumbra's texel size steps.
@@ -2440,7 +2519,7 @@ script_mod! {
                 }
                 if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
                     let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2, self.csm_slope(ci + 1.0, n))
                     s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
                 }
             }
@@ -2518,6 +2597,9 @@ script_mod! {
             var rest = vec4(self.geom.px, self.geom.py, self.geom.pz, 1.0)
             var rn = self.oct_decode(unpack2f16(self.geom.nrm))
             if self.morph_ctl.w>0.5{rest=vec4(rest.xyz+self.morph_delta(self.geom.source_vertex,0.0),1.0);rn=normalize(rn+self.morph_delta(self.geom.source_vertex,1.0))}
+            self.v_fur_root = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            self.v_fur_normal = self.oct_decode(unpack2f16(self.geom.nrm))
+            rest = vec4(rest.xyz + rn * (self.fur.x * self.fur_layer.x), 1.0)
             let jj = unpack4u8(self.geom.joints)
             let jw = unpack4u8(self.geom.weights)
             var pos = vec3(0.0, 0.0, 0.0)
@@ -2613,6 +2695,7 @@ script_mod! {
         surface_linear: fn(v:vec3)->vec3 {return mix(v/12.92,pow((v+vec3(0.055,0.055,0.055))/1.055,vec3(2.4,2.4,2.4)),step(vec3(0.04045,0.04045,0.04045),v))}
         surface_display: fn(v:vec3)->vec3 {return mix(v*12.92,1.055*pow(max(v,vec3(0.0,0.0,0.0)),vec3(0.4166667,0.4166667,0.4166667))-vec3(0.055,0.055,0.055),step(vec3(0.0031308,0.0031308,0.0031308),v))}
         pixel: fn() {
+            if self.fur_mask() < 0.5 { discard() }
             let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
             let alpha=tex.w*self.v_color.w*self.material_alpha
             if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{discard()}
@@ -2700,7 +2783,7 @@ script_mod! {
                 let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength)
                 let emission=self.surface_linear(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
-                let result=direct+ambient*occlusion+punctual*ao_direct+emission
+                let result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
                 return self.gi_display(vec4(mix(self.surface_display(result),self.fog_color,self.v_fog)*coverage,coverage),self.v_csm.xyz,n)
             }
@@ -3240,11 +3323,11 @@ script_mod! {
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
-        csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_tap: fn(u: float, v: float, ci: float, ref01: float, receiver: vec2, slope: vec2) -> float {
             let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
-            return step(ref01, self.csm_map.sample_nearest(
+            return step(ref01 + dot(vec2(uu, vv) - receiver, slope), self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
         }
@@ -3255,7 +3338,7 @@ script_mod! {
         // penumbra the box gave, but continuous — the box alone is
         // piecewise constant per shadow-map texel, which reads as
         // stair-steps along every sunlit edge.
-        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float, slope: vec2) -> float {
             let e = self.csm_p.y
             let tu = u / e - 0.5
             let tv = v / e - 0.5
@@ -3267,27 +3350,41 @@ script_mod! {
             let wv0 = 1.0 - fv
             var s = 0.0
             var r = 0.0
-            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu, bv - e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01, vec2(u, v), slope)
             s = r * wv0
-            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
-            r = r + self.csm_tap(bu, bv, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01, vec2(u, v), slope)
             s = s + r
-            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
-            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
-            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01, vec2(u, v), slope)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01, vec2(u, v), slope)
             s = s + r * fv
             return s * 0.11111111
+        }
+
+        // Receiver-plane depth changes across the filter footprint. At
+        // sunset, comparing every tap with the center depth shadows a flat
+        // plane against itself. Match each texel's plane depth instead.
+        csm_slope: fn(ci: float, n: vec3) -> vec2 {
+            var rx = self.csm_rx0.xyz
+            var ry = self.csm_ry0.xyz
+            var rz = self.csm_rz0.xyz
+            if ci > 0.5 { rx = self.csm_rx1.xyz ry = self.csm_ry1.xyz rz = self.csm_rz1.xyz }
+            if ci > 1.5 { rx = self.csm_rx2.xyz ry = self.csm_ry2.xyz rz = self.csm_rz2.xyz }
+            let depth = dot(n, rz)
+            if abs(depth) < length(rz) * 0.005 { return vec2(0.0, 0.0) }
+            return vec2(-2.0 * dot(n, rx) / dot(rx, rx), 2.0 * dot(n, ry) / dot(ry, ry)) * (dot(rz, rz) / depth)
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -3340,7 +3437,7 @@ script_mod! {
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01, self.csm_slope(ci, n))
             // Cross-fade the outer band of a cascade's window into the
             // NEXT cascade: with soft edges a hard hand-over would show as
             // a line where the penumbra's texel size steps.
@@ -3358,7 +3455,7 @@ script_mod! {
                 }
                 if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
                     let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2, self.csm_slope(ci + 1.0, n))
                     s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
                 }
             }
@@ -5937,6 +6034,10 @@ pub struct DrawSceneSkyMap {
 pub struct DrawSceneSkinned {
     #[deref]
     pub draw_vars: DrawVars,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub fur: Vec4f,
+    // Keep this base's instance payload a multiple of eight bytes so
+    // derived material fields follow it without Rust tail padding.
+    #[live(vec2(0.0,0.0))] pub fur_layer: Vec2f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_ctl:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights0:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights1:Vec4f,
@@ -6050,6 +6151,14 @@ pub struct DrawScenePbr {
     #[live(0.0)] pub double_sided:f32,
 
 }
+
+// DrawVars reads inherited instance fields as one contiguous float slice.
+// Tail padding in the base shifts every PBR field (AO becomes red emission).
+const _: () = {
+    let end = std::mem::offset_of!(DrawSceneSkinned, prelit) + std::mem::size_of::<f32>();
+    assert!(std::mem::size_of::<DrawSceneSkinned>() == end);
+    assert!(std::mem::offset_of!(DrawScenePbr, metallic) == end);
+};
 
 /// Minimal camera-space held-model shader. The transform is the only instance
 /// lane; daylight is uniform per view and material color comes from the same
@@ -6165,6 +6274,10 @@ pub struct DrawSceneScreen {
 pub struct DrawSceneSkinnedGpu {
     #[deref]
     pub draw_vars: DrawVars,
+    #[live(vec4(0.0,0.0,0.0,0.0))] pub fur: Vec4f,
+    // Keep this base's instance payload a multiple of eight bytes so
+    // derived material fields follow it without Rust tail padding.
+    #[live(vec2(0.0,0.0))] pub fur_layer: Vec2f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_ctl:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights0:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights1:Vec4f,

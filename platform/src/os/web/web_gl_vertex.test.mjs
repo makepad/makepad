@@ -821,3 +821,42 @@ test("pending shaders preserve async readiness and VAO allocation failures skip 
   assert.equal(s.gl.calls.pointers.length, 0);
   assert.equal(s.gl.calls.draws.length, 0);
 });
+
+
+test("retained instances keep packed bits, append only the suffix, and orphan replacements", () => {
+  const s = subject();
+  const uploads = [];
+  const allocations = [];
+  s.gl.bufferData = (_target, capacity) => allocations.push(capacity);
+  s.gl.bufferSubData = (_target, offset, data, first, count) => {
+    uploads.push({ offset, words: Array.from(new Uint32Array(data.buffer, data.byteOffset + first * 4, count)) });
+  };
+  new Uint32Array(s.memory.buffer, 64, 6).set([0x7fc00001, 3, 1, 9, 2, 0]);
+  s.FromWasmRetainedArrayBuffer({ buffer_id: 1, data: { ptr: 64, len: 3 }, first_slot: 0 });
+  assert.deepEqual(allocations, [256]);
+  assert.equal(uploads[0].words[0], 0x7fc00001);
+  s.FromWasmRetainedArrayBuffer({ buffer_id: 1, data: { ptr: 64, len: 6 }, first_slot: 3 });
+  assert.deepEqual(allocations, [256]);
+  assert.deepEqual(uploads[1], { offset: 12, words: [9, 2, 0] });
+  s.FromWasmRetainedArrayBuffer({ buffer_id: 1, data: { ptr: 64, len: 6 }, first_slot: 0 });
+  assert.deepEqual(allocations, [256, 256]);
+  assert.equal(s.array_buffers[1].valid, true);
+});
+
+test("retained allocation failures reject the publication and recover", () => {
+  const s = subject();
+  const args = { buffer_id: 1, data: { ptr: 64, len: 3 }, first_slot: 0 };
+  s.gl.fail_buffer_allocation = true;
+  assert.doesNotThrow(() => s.FromWasmRetainedArrayBuffer(args));
+  assert.equal(s.array_buffers[1].valid, false);
+  s.gl.fail_buffer_allocation = false;
+  s.FromWasmRetainedArrayBuffer(args);
+  assert.equal(s.array_buffers[1].valid, true);
+  const original = s.gl.bufferSubData;
+  s.gl.bufferSubData = () => { throw new Error("lost"); };
+  assert.doesNotThrow(() => s.FromWasmRetainedArrayBuffer(args));
+  assert.equal(s.array_buffers[1].valid, false);
+  s.gl.bufferSubData = original;
+  s.FromWasmRetainedArrayBuffer(args);
+  assert.equal(s.array_buffers[1].valid, true);
+});

@@ -17,6 +17,7 @@ workspace.members = [
     "apps/video",
     "apps/pdf",
     "apps/files",
+    "libs/diskmap",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
@@ -103,6 +104,7 @@ workspace.members = [
     "xr",
     # === studio ===
     "apps/studio",
+    "libs/code_arch",
     "libs/code_graph",
     "libs/code_atlas",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===

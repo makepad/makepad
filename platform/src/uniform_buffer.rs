@@ -22,11 +22,16 @@ impl UniformBuffer {
     }
 
     pub fn clear(&self, cx: &mut Cx) {
-        cx.uniform_buffers[self.uniform_buffer_id()].data.clear();
+        self.set_bytes(cx, &[]);
     }
 
     pub fn set_bytes(&self, cx: &mut Cx, data: &[u8]) {
+        if cx.uniform_buffers[self.uniform_buffer_id()].data == data {
+            return;
+        }
+        let generation = cx.next_uniform_gen();
         let cx_uniform_buffer = &mut cx.uniform_buffers[self.uniform_buffer_id()];
+        cx_uniform_buffer.generation = generation;
         cx_uniform_buffer.data.clear();
         cx_uniform_buffer.data.extend_from_slice(data);
     }
@@ -98,6 +103,7 @@ impl std::ops::IndexMut<UniformBufferId> for CxUniformBufferPool {
 
 #[derive(Default)]
 pub struct CxUniformBuffer {
+    pub generation: u64,
     pub data: Vec<u8>,
     pub os: CxOsUniformBuffer,
 }

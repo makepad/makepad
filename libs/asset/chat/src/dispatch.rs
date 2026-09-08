@@ -226,6 +226,9 @@ impl ToolExecutor for AssetServerTools {
                          stores); ask the person to run the enhancement from their app"
                     .to_string(),
             },
+            ContentToolCall::AgentDelegate { .. } => ToolOutcome::Unavailable {
+                reason: "agent.delegate requires a configured game client".into(),
+            },
             ContentToolCall::LlmConsult { .. } => ToolOutcome::Unavailable {
                 reason: "llm.consult is executed by the chat broker".to_string(),
             },
@@ -249,6 +252,7 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldRemove { .. }
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldList
+            | ContentToolCall::WorldRender { .. }
             | ContentToolCall::WorldGetSource
             | ContentToolCall::WorldApi { .. }
             | ContentToolCall::WorldGetPlan

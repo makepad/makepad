@@ -22,8 +22,8 @@ use crate::{
     model::{format_size, FileEntry, SortKey, SortSpec},
     theme::Palette,
     thumbs::{clear_thumb, fill_thumb, Thumbs},
-    treemap_view::{TreemapAction, TreemapViewRef, TreemapViewWidgetExt},
 };
+use makepad_diskmap::{DiskMapAction, DiskMapRef, DiskMapWidgetExt};
 
 /// Cells in a grid row. The row template carries this many; the ones past the
 /// column count for the current width are hidden, and hidden views take no
@@ -341,7 +341,11 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            treemap := MpfTreemap{}
+            treemap := DiskMap{
+                draw_bg +: {color: mod.mpf.bg}
+                draw_text +: {color: mod.mpf.fg}
+                draw_bold +: {color: mod.mpf.fg_bright}
+            }
         }
     }
 }
@@ -688,8 +692,8 @@ impl FileContents {
     }
 
     /// The treemap, for the shell to point at a folder and drain.
-    pub fn treemap(&self, cx: &mut Cx) -> TreemapViewRef {
-        self.view.treemap_view(cx, ids!(treemap))
+    pub fn treemap(&self, cx: &mut Cx) -> DiskMapRef {
+        self.view.disk_map(cx, ids!(treemap))
     }
 
     pub fn set_colors(&mut self, cx: &mut Cx, colors: Colors) {
@@ -1427,10 +1431,10 @@ impl FileContents {
                 // batch, and dropping either would lose the menu or the
                 // selection.
                 let map_uid = self.treemap(cx).widget_uid();
-                let map_actions: Vec<TreemapAction> = actions
+                let map_actions: Vec<DiskMapAction> = actions
                     .iter()
                     .filter_map(|a| a.as_widget_action().filter(|wa| wa.widget_uid == map_uid))
-                    .map(|wa| wa.cast::<TreemapAction>())
+                    .map(|wa| wa.cast::<DiskMapAction>())
                     .collect();
                 for action in map_actions {
                     match action {
@@ -1440,7 +1444,7 @@ impl FileContents {
                     // browser somewhere else, which is the opposite of what a
                     // map is for. Deeper picks resolve their metadata on the
                     // worker pool so the same shell actions can use them.
-                    TreemapAction::Selected(path) => {
+                    DiskMapAction::Selected(path) => {
                         self.map_entry = None;
                         self.map_entry_job = None;
                         self.map_entry_pending = (!self.rows.iter().any(|r| r.entry.path == path)).then(|| path.clone());
@@ -1466,20 +1470,21 @@ impl FileContents {
                     // more — deleted by something other than this app since
                     // the folder was measured. It has already dropped it; the
                     // listing should hear about it too.
-                    TreemapAction::Vanished(path) => {
+                    DiskMapAction::Opened(_) => {}
+                    DiskMapAction::Vanished(path) => {
                         self.selected.remove(&path);
                         out.push(FileContentsAction::Restated);
                     }
-                    TreemapAction::FilterCleared => {
+                    DiskMapAction::FilterCleared => {
                         out.push(FileContentsAction::MapFilterCleared);
                     }
                     // A secondary click that stayed a click: the menu opens
                     // exactly as it would have on the press, only now it is
                     // certain no pan was meant.
-                    TreemapAction::Context(at) => {
+                    DiskMapAction::Context(at) => {
                         self.open_context(cx, at);
                     }
-                    TreemapAction::None => {}
+                    DiskMapAction::None => {}
                     }
                 }
             }
@@ -1622,6 +1627,10 @@ impl Widget for FileContents {
         self.grid_columns = Self::columns_for(self.last_width.max(tile_width), tile_width);
         self.body_rect = cx.turtle().rect();
         self.hit_rects.clear();
+        if self.mode.is_treemap() {
+            self.treemap(cx)
+                .apply_palette(Palette::for_cx(cx).map_palette());
+        }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             // Only the page for `mode` is visible, so whatever list this is,
             // `mode` says which one.

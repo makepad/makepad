@@ -1617,6 +1617,53 @@ export class WasmWebGL extends WasmWebBrowser {
     buffer.max_index = max_index;
   }
 
+  FromWasmRetainedArrayBuffer(args) {
+    const gl = this.gl;
+    const buffer = this.numeric_buffer_for_update(this.array_buffers, args?.buffer_id, "array");
+    if (!buffer) return;
+    const reject = (reason) => {
+      buffer.retained_capacity = 0;
+      this.report_vertex_submission_once(`retained:${args.buffer_id}:${reason}`, reason, { buffer_id: args.buffer_id });
+    };
+    const checked = this.make_validated_wasm_view(args.data, 4, false, "retained instances", Float32Array);
+    if (!checked.ok || !Number.isSafeInteger(args.first_slot) || args.first_slot < 0 || args.first_slot > args.data.len) {
+      reject(checked.reason || "invalid retained upload range");
+      return;
+    }
+    let bound = false;
+    try {
+      let first = args.first_slot;
+      if (!buffer.gl_buf) buffer.gl_buf = gl.createBuffer();
+      if (!buffer.gl_buf) { reject("retained buffer allocation returned null"); return; }
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.gl_buf);
+      bound = true;
+      if (first === 0 || !buffer.retained_capacity || checked.byte_length > buffer.retained_capacity) {
+        let capacity = 256;
+        while (capacity < checked.byte_length) capacity *= 2;
+        gl.bufferData(gl.ARRAY_BUFFER, capacity, gl.STATIC_DRAW);
+        if (typeof gl.getError === "function" && gl.getError() !== gl.NO_ERROR) {
+          reject("retained buffer allocation failed");
+          return;
+        }
+        buffer.retained_capacity = capacity;
+        buffer.gl_buf._buffer_byte_length = capacity;
+        first = 0;
+      }
+      for (let offset = first; offset < checked.element_count; offset += 65536) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, checked.array, offset, Math.min(65536, checked.element_count - offset));
+      }
+      buffer.valid = true;
+      buffer.byte_length = checked.byte_length;
+      buffer.length = checked.element_count;
+      buffer.source_kind = "f32";
+      // Browser/driver owns in-flight backing stores. No fabricated completion.
+    } catch (error) {
+      reject(`retained upload failed: ${error?.message || error}`);
+    } finally {
+      if (bound) { try { gl.bindBuffer(gl.ARRAY_BUFFER, null); } catch (_) {} }
+    }
+  }
+
   FromWasmAllocArrayBuffer(args) {
     const gl = this.gl;
     const buffer_id = args && args.buffer_id;
@@ -1702,6 +1749,7 @@ export class WasmWebGL extends WasmWebBrowser {
     buffer.byte_length = checked.byte_length;
     buffer.length = checked.element_count;
     buffer.source_kind = compact ? "bytes" : "f32";
+    buffer.retained_capacity = 0;
   }
 
   preflight_webgl_draw(args, vao, shader) {
@@ -2261,6 +2309,23 @@ export class WasmWebGL extends WasmWebBrowser {
         args.live_uniforms_gen_hi,
       );
 
+      if (!shader.custom_uniform_buffers) shader.custom_uniform_buffers = [];
+      for (let slot = 0; slot < (args.custom_uniforms || []).length; slot++) {
+        const input = args.custom_uniforms[slot];
+        let entry = shader.custom_uniform_buffers[slot];
+        if (!entry) {
+          entry = { buffer: gl.createBuffer(), binding: this.get_uniform_block_binding(shader.program, input.block_name) };
+          shader.custom_uniform_buffers[slot] = entry;
+        }
+        const checked = this.make_validated_wasm_view(input.data, 1, true, "custom uniforms", Uint8Array);
+        if (!checked.ok || !entry.buffer) continue;
+        if (entry.lo !== input.generation_lo || entry.hi !== input.generation_hi) {
+          this.upload_uniform_buffer_data(gl, entry.buffer, checked.array, gl.DYNAMIC_DRAW);
+          entry.lo = input.generation_lo;
+          entry.hi = input.generation_hi;
+        }
+        this.bind_uniform_block(gl, entry.binding, entry.buffer);
+      }
       this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
       this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
       this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, vao.draw_call_uniform_buf);
@@ -2848,169 +2913,148 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmRequestRenderTextureCapture(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
-    const gl = this.gl;
-    const texture = this.textures[args.texture_id];
-    if (
-      !texture ||
-      texture._render_target_valid === false ||
-      !texture._width ||
-      !texture._height
-    ) {
+    const ticket_lo = args.ticket_lo || 0;
+    const ticket_hi = args.ticket_hi || 0;
+    if (ticket_lo || ticket_hi) this.readback_api_active = true;
+    if (args.register_only) return;
+    const send = (error, data = new Uint8Array(0), offset = 0, complete = true,
+                  width = 0, height = 0) => {
+      if (this.wasm == null || this.webgl_context_lost) return;
       this.to_wasm.ToWasmRenderTextureCapture({
-        texture_id: args.texture_id,
-        width: 0,
-        height: 0,
-        data: new Uint8Array(0),
-        error: "render target is not allocated",
+        texture_id: args.texture_id, ticket_lo, ticket_hi,
+        width, height, offset, complete, data, error,
       });
       this.do_wasm_pump();
+    };
+    if (this.webgl_context_lost) return; // loss notification already failed all tickets
+    const gl = this.gl;
+    const texture = this.textures[args.texture_id];
+    if (!texture || texture._render_target_valid === false ||
+        !texture._width || !texture._height) {
+      send("render target is not allocated");
       return;
     }
-
     const width = texture._width;
     const height = texture._height;
     const byteLength = width * height * 4;
+    if ((args.width && args.width !== width) || (args.height && args.height !== height)) {
+      send("allocation changed");
+      return;
+    }
+    this.readback_reserved_bytes ||= 0;
+    if (!Number.isSafeInteger(byteLength) || byteLength <= 0 ||
+        byteLength > 32 * 1024 * 1024 - this.readback_reserved_bytes ||
+        this.pending_render_texture_captures.size >= 256) {
+      send("readback capacity exceeded");
+      return;
+    }
     const framebuffer = gl.createFramebuffer();
     const pixelBuffer = gl.createBuffer();
     if (!framebuffer || !pixelBuffer) {
       if (pixelBuffer) gl.deleteBuffer(pixelBuffer);
       if (framebuffer) gl.deleteFramebuffer(framebuffer);
-      this.to_wasm.ToWasmRenderTextureCapture({
-        texture_id: args.texture_id,
-        width: 0,
-        height: 0,
-        data: new Uint8Array(0),
-        error: "could not allocate WebGL readback objects",
-      });
-      this.do_wasm_pump();
+      send("could not allocate WebGL readback objects");
       return;
     }
-    const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const oldFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
     const oldPixelBuffer = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
-    const oldPackAlignment = gl.getParameter(gl.PACK_ALIGNMENT);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.framebufferTexture2D(
-      gl.FRAMEBUFFER,
-      gl.COLOR_ATTACHMENT0,
-      gl.TEXTURE_2D,
-      texture,
-      0,
-    );
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
-      gl.deleteBuffer(pixelBuffer);
-      gl.deleteFramebuffer(framebuffer);
-      this.to_wasm.ToWasmRenderTextureCapture({
-        texture_id: args.texture_id,
-        width: 0,
-        height: 0,
-        data: new Uint8Array(0),
-        error: "render target framebuffer is incomplete",
-      });
-      this.do_wasm_pump();
-      return;
+    const packState = [gl.PACK_ALIGNMENT, gl.PACK_ROW_LENGTH, gl.PACK_SKIP_ROWS, gl.PACK_SKIP_PIXELS]
+      .filter(value => value !== undefined).map(name => [name, gl.getParameter(name)]);
+    let fence = null;
+    let queueError = "";
+    try {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error("render target framebuffer is incomplete");
+      }
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pixelBuffer);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, byteLength, gl.STREAM_READ);
+      for (const [name] of packState) gl.pixelStorei(name, name === gl.PACK_ALIGNMENT ? 1 : 0);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+      fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (!fence || gl.getError() !== gl.NO_ERROR) throw new Error("could not queue WebGL2 readPixels");
+      gl.flush();
+    } catch (error) {
+      queueError = String(error);
+    } finally {
+      for (const [name, value] of packState) gl.pixelStorei(name, value);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, oldFramebuffer);
     }
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pixelBuffer);
-    gl.bufferData(gl.PIXEL_PACK_BUFFER, byteLength, gl.STREAM_READ);
-    gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-    // With a PIXEL_PACK_BUFFER bound, zero is a byte offset. The transfer is
-    // queued on the producing WebGL command stream and does not copy to JS.
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
-    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    gl.flush();
-    gl.pixelStorei(gl.PACK_ALIGNMENT, oldPackAlignment);
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
-
     const capture = { frame_id: 0, done: false };
     this.pending_render_texture_captures.add(capture);
+    this.readback_reserved_bytes += byteLength;
     const finish = (error, release_gl = !this.webgl_context_lost) => {
-      if (capture.done) {
-        return false;
-      }
+      if (capture.done) return false;
       capture.done = true;
-      if (capture.frame_id) {
-        window.cancelAnimationFrame(capture.frame_id);
-        capture.frame_id = 0;
-      }
+      if (capture.frame_id) window.cancelAnimationFrame(capture.frame_id);
+      capture.frame_id = 0;
       this.pending_render_texture_captures.delete(capture);
+      this.readback_reserved_bytes -= byteLength;
       if (release_gl) {
         if (fence) gl.deleteSync(fence);
         gl.deleteBuffer(pixelBuffer);
         gl.deleteFramebuffer(framebuffer);
       }
-      if (error && !this.webgl_context_lost) {
-        this.to_wasm.ToWasmRenderTextureCapture({
-          texture_id: args.texture_id,
-          width: 0,
-          height: 0,
-          data: new Uint8Array(0),
-          error,
-        });
-        this.do_wasm_pump();
-      }
+      if (error) send(error);
       return true;
     };
-    if (!fence || gl.getError() !== gl.NO_ERROR) {
-      finish("could not queue WebGL2 readPixels");
-      return;
-    }
-
+    capture.finish = finish;
+    if (queueError) { finish(queueError); return; }
+    let offset = 0;
+    let ready = false;
     const pollStarted = performance.now();
-    const poll = () => {
+    const poll = frameTime => {
       capture.frame_id = 0;
-      if (capture.done) {
-        return;
-      }
-      if (this.wasm == null) {
-        finish();
-        return;
-      }
+      if (capture.done) return;
+      if (this.wasm == null) { finish(); return; }
       if (this.webgl_context_lost || gl.isContextLost()) {
-        finish(undefined, false);
+        this.handle_webgl_context_lost();
         return;
       }
-      const status = gl.clientWaitSync(fence, 0, 0);
-      if (status === gl.TIMEOUT_EXPIRED) {
-        if (performance.now() - pollStarted > 10000) {
-          finish("WebGL readback fence timed out");
+      if (!ready) {
+        const status = gl.clientWaitSync(fence, 0, 0);
+        if (status === gl.TIMEOUT_EXPIRED) {
+          if (performance.now() - pollStarted > 10000) {
+            finish("WebGL readback fence timed out");
+          } else { capture.frame_id = window.requestAnimationFrame(poll); }
           return;
         }
-        capture.frame_id = window.requestAnimationFrame(poll);
-        return;
+        if (status === gl.WAIT_FAILED) { finish("WebGL readback fence failed"); return; }
+        ready = true;
       }
-      if (status === gl.WAIT_FAILED) {
-        finish("WebGL readback fence failed");
-        return;
+      // One shared budget across ALL captures, not one budget per ticket.
+      // Both getBufferSubData and the JS->wasm bridge receive only this chunk.
+      if (this.readback_copy_frame !== frameTime) {
+        this.readback_copy_frame = frameTime;
+        this.readback_copy_bytes = 0;
       }
-      const data = new Uint8Array(byteLength);
-      try {
-        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pixelBuffer);
-        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data);
-      } catch (error) {
-        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
-        finish(`WebGL readback copy failed: ${error}`);
-        return;
+      const count = Math.min(byteLength - offset, 256 * 1024 - (this.readback_copy_bytes || 0));
+      if (count > 0) {
+        const data = new Uint8Array(count);
+        const previousBuffer = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
+        try {
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pixelBuffer);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, offset, data);
+          if (gl.getError() !== gl.NO_ERROR) throw new Error("getBufferSubData failed");
+        } catch (error) {
+          finish(`WebGL readback copy failed: ${error}`);
+          return;
+        } finally {
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, previousBuffer);
+        }
+        const start = offset;
+        offset += count;
+        this.readback_copy_bytes = (this.readback_copy_bytes || 0) + count;
+        const complete = offset === byteLength;
+        if (complete && !finish()) return;
+        send("", data, start, complete, width, height);
+        if (complete) return;
       }
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
-      if (!finish()) {
-        return;
-      }
-      this.to_wasm.ToWasmRenderTextureCapture({
-        texture_id: args.texture_id,
-        width,
-        height,
-        data,
-        error: "",
-      });
-      this.do_wasm_pump();
-    };
-    if (!this.webgl_context_lost) {
       capture.frame_id = window.requestAnimationFrame(poll);
-    }
+    };
+    capture.frame_id = window.requestAnimationFrame(poll);
   }
 
   FromWasmBeginRenderCanvas(args) {
@@ -3592,6 +3636,10 @@ export class WasmWebGL extends WasmWebBrowser {
       this.timers.length = 0;
     }
     for (const capture of this.pending_render_texture_captures || []) {
+      if (capture.finish) {
+        capture.finish(undefined, !this.webgl_context_lost);
+        continue;
+      }
       capture.done = true;
       if (capture.frame_id) {
         window.cancelAnimationFrame(capture.frame_id);
@@ -3653,6 +3701,23 @@ export class WasmWebGL extends WasmWebBrowser {
     // all Rust-owned GPU resources yet, so claiming browser restoration would
     // leave a subtly broken app. A reload only happens after the user asks.
     this.webgl_context_lost = true;
+    // Deliver terminal ticket errors before shutting down wasm scheduling.
+    // Bypass the normal pump's lost-context guard, and discard its outgoing
+    // messages: no GL calls or renders may run against the lost context.
+    if (this.readback_api_active && this.to_wasm && this.to_wasm.ToWasmRenderTextureCapture && this.wasm_process_msg) {
+      try {
+        this.to_wasm.ToWasmRenderTextureCapture({
+          texture_id: 0, ticket_lo: 0xffffffff, ticket_hi: 0xffffffff,
+          width: 0, height: 0, offset: 0, complete: true,
+          data: new Uint8Array(0), error: "device lost",
+        });
+        const message = this.to_wasm;
+        this.to_wasm = this.new_to_wasm();
+        this.wasm_process_msg(message).free();
+      } catch (error) {
+        console.error(`makepad: readback device-loss delivery failed: ${error}`);
+      }
+    }
     try {
       this.reset_active_render_target_textures();
     } catch (error) {

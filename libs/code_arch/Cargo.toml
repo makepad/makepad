@@ -1,0 +1,10 @@
+[package]
+name = "makepad-code-arch"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded architecture plans, canonical TOML, and source freshness"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-toml-parser = { path = "../toml_parser" }
+makepad-code-graph = { path = "../code_graph" }

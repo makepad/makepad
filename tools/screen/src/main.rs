@@ -18,8 +18,20 @@ fn native_main() -> Result<(), String> {
         server::{self, StartOptions},
     };
     use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os().skip(1).collect::<Vec<_>>().into_iter();
     let operation = args.next().unwrap_or_else(|| "agents".into());
+    // tools/agents forwards through the browser operation; allow its name subcommand.
+    let operation = if operation == "agents" {
+        let mut remaining = args.clone();
+        if remaining.next().as_deref() == Some(std::ffi::OsStr::new("name")) {
+            args.next();
+            OsString::from("name")
+        } else {
+            operation
+        }
+    } else {
+        operation
+    };
     let operation = operation.to_str().ok_or("Screen operation must be UTF-8")?;
     if operation == "--version" {
         if args.next().is_some() {
@@ -29,12 +41,13 @@ fn native_main() -> Result<(), String> {
         return Ok(());
     }
     if ![
-        "agents", "tui", "start", "serve", "attach", "status", "list", "stop",
+        "agents", "tui", "start", "serve", "attach", "status", "list", "stop", "name",
     ]
     .contains(&operation)
     {
         return Err("Unknown screen operation".into());
     }
+    let mut name_parts = Vec::new();
     let mut state_dir = None;
     let mut session = None;
     let mut cwd = None;
@@ -49,6 +62,10 @@ fn native_main() -> Result<(), String> {
     let mut command = Vec::<OsString>::new();
     let mut seen = BTreeSet::new();
     while let Some(flag) = args.next() {
+        if operation == "name" && !flag.to_string_lossy().starts_with("--") {
+            name_parts.push(flag.into_string().map_err(|_| "Name must be UTF-8")?);
+            continue;
+        }
         if flag == "--" {
             command.extend(args);
             break;
@@ -137,7 +154,18 @@ fn native_main() -> Result<(), String> {
         }
         return makepad_screen::launcher::run(state_dir, cwd);
     }
-    let state_dir = state_dir.ok_or("--state-dir is required")?;
+    let state_dir = if operation == "list" {
+        Some(makepad_screen::launcher::resolve_state_dir(
+            state_dir,
+            &cwd.clone()
+                .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?),
+        )?)
+    } else {
+        state_dir
+    };
+    let state_dir = state_dir
+        .or_else(|| std::env::var_os("MAKEPAD_SCREEN_STATE_DIR").map(PathBuf::from))
+        .ok_or("--state-dir is required (or run inside a makepad-screen session)")?;
     if !state_dir.is_absolute() {
         return Err("--state-dir must be absolute".into());
     }
@@ -148,11 +176,33 @@ fn native_main() -> Result<(), String> {
         println!("{}", server::list(&state_dir)?.to_json());
         return Ok(());
     }
-    let session = session.ok_or("--session is required")?;
+    let session = session
+        .or_else(|| std::env::var("MAKEPAD_SCREEN_SESSION").ok())
+        .ok_or("--session is required (or run inside a makepad-screen session)")?;
     if !valid_session(&session) {
         return Err(
             "Session ID must be 1..48 ASCII letters, digits, hyphens or underscores".into(),
         );
+    }
+    if operation == "name" {
+        println!(
+            "{}",
+            server::name(
+                &state_dir,
+                &session,
+                &name_parts
+                    .into_iter()
+                    .chain(
+                        command
+                            .into_iter()
+                            .map(|v| v.to_string_lossy().into_owned())
+                    )
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )?
+            .to_json()
+        );
+        return Ok(());
     }
     match operation {
         "start" | "serve" => {

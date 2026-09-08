@@ -248,10 +248,10 @@ impl Cx {
             if instance_slots == 0 {
                 continue;
             }
-            let instance_count = draw_item
-                .instances
-                .as_ref()
-                .map_or(0usize, |instances| instances.len() / instance_slots);
+            let instance_count = draw_item.retained_instances.as_ref().map_or_else(
+                || draw_item.instances.as_ref().map_or(0, |instances| instances.len() / instance_slots),
+                |_| draw_item.retained_instance_count,
+            );
             if instance_count == 0 {
                 continue;
             }
@@ -270,7 +270,10 @@ impl Cx {
 
             if draw_call.instance_dirty {
                 metrics.instance_bytes = metrics.instance_bytes.saturating_add(
-                    (draw_item.instances.as_ref().map_or(0usize, Vec::len) * 4) as u64,
+                    (draw_item.retained_instances.as_ref().map_or_else(
+                        || draw_item.instances.as_ref().map_or(0usize, Vec::len),
+                        |_| draw_item.retained_upload_range.len(),
+                    ) * 4) as u64,
                 );
             }
 
@@ -334,7 +337,14 @@ pub struct CxDrawListPool(pub(crate) IdPool<CxDrawList>);
 impl CxDrawListPool {
     pub fn alloc(&mut self) -> DrawList {
         let draw_list = DrawList(self.0.alloc());
-        self[draw_list.id()].reset_draw_item_uniform_caches();
+        let id = draw_list.id();
+        // A recycled slot keeps the GPU resources of its draw items, never
+        // the previous owner's list uniforms: a stale view_clip from a
+        // dropped list would clip the new owner's instances.
+        self[id].draw_list_uniforms = Default::default();
+        self[id].zbias_hold = None;
+        self[id].reset_zbias = false;
+        self[id].reset_draw_item_uniform_caches();
         draw_list
     }
 
@@ -468,6 +478,12 @@ pub struct CxDrawItem {
     // these values stick around to reduce buffer churn
     pub draw_item_id: usize,
     pub instances: Option<Vec<f32>>,
+    /// Immutable worker payload; old callers continue using `instances`.
+    pub retained_instances: Option<crate::retained_instances::RetainedInstances>,
+    pub retained_instance_id: u64,
+    /// Recording may vary draw count without changing the immutable publication.
+    pub retained_instance_count: usize,
+    pub retained_upload_range: std::ops::Range<usize>,
     pub os: CxOsDrawCall,
 }
 
@@ -656,6 +672,10 @@ impl CxDrawItems {
                 draw_item_id,
                 redraw_id,
                 instances: Some(Vec::new()),
+                retained_instances: None,
+                retained_instance_id: 0,
+                retained_instance_count: 0,
+                retained_upload_range: 0..0,
                 os: CxOsDrawCall::default(),
                 kind: kind,
             });
@@ -663,6 +683,10 @@ impl CxDrawItems {
             // reuse an older one, keeping all GPU resources attached
             let draw_item = &mut self.buffer[draw_item_id];
             draw_item.instances.as_mut().unwrap().clear();
+            if draw_item.retained_instances.is_none() {
+                draw_item.retained_instance_id = 0;
+            }
+            draw_item.retained_instances = None;
             draw_item.kind = kind;
             draw_item.redraw_id = redraw_id;
         }

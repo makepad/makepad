@@ -178,10 +178,7 @@ impl Engine {
             return Err("Stored history has reached its 64-lane bound".into());
         }
         let old = self.flows.get(source).ok_or("Unknown lane")?;
-        if old.successor.is_some()
-            || old.lifecycle != FlowLifecycle::Active
-            || old.worktree.is_none()
-        {
+        if old.successor.is_some() || old.lifecycle != FlowLifecycle::Active {
             return Err("Split requires the active lane that owns this source and terminal".into());
         }
         if old.runs.iter().any(|run| !run.closed) {
@@ -240,7 +237,6 @@ impl Engine {
         prefix.job = None;
         prefix.lifecycle = FlowLifecycle::Archived;
         prefix.successor = Some(id.clone());
-        prefix.worktree = None;
         next.id = id.clone();
         next.title = title;
         next.predecessor = Some(source.into());

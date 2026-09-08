@@ -14,13 +14,14 @@ pub const STATUS: u8 = 9;
 pub const STATUS_REPLY: u8 = 10;
 pub const TEXT: u8 = 11;
 pub const TEXT_REPLY: u8 = 12;
+pub const NAME: u8 = 13;
 
 pub struct Frame {
     pub kind: u8,
     pub payload: Vec<u8>,
 }
 pub fn encode_frame(kind: u8, payload: &[u8]) -> Result<Vec<u8>, String> {
-    if !(HELLO..=TEXT_REPLY).contains(&kind) || payload.len() > MAX_FRAME {
+    if !(HELLO..=NAME).contains(&kind) || payload.len() > MAX_FRAME {
         return Err("Invalid screen frame kind or size".into());
     }
     let mut bytes = Vec::with_capacity(payload.len() + 5);
@@ -35,7 +36,7 @@ pub fn decode_frame(input: &mut Vec<u8>) -> Result<Option<Frame>, String> {
     }
     let kind = input[0];
     let length = u32::from_be_bytes(input[1..5].try_into().unwrap()) as usize;
-    if !(HELLO..=TEXT_REPLY).contains(&kind) || length > MAX_FRAME {
+    if !(HELLO..=NAME).contains(&kind) || length > MAX_FRAME {
         return Err("Invalid screen frame kind or size".into());
     }
     if input.len() < length + 5 {

@@ -8,7 +8,8 @@
 
 use std::path::Path;
 
-use crate::{contents::ViewMode, treemap_view::MapProjection};
+use crate::contents::ViewMode;
+use makepad_diskmap::MapProjection;
 
 /// Everything the context menu can ask for. There is nothing here that the
 /// shell does not do.

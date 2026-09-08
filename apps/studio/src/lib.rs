@@ -9,20 +9,17 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 pub mod activity;
-pub mod activity_dashboard;
-pub mod activity_demo;
-pub mod activity_views;
 pub mod agent_session;
 pub mod ai;
 pub mod appearance;
 pub mod atlas;
-pub mod canvas;
 pub mod canvas_draw;
 mod canvas_input;
 pub mod disk;
 pub mod disk_graph;
 pub mod document;
 pub mod document_worker;
+pub mod history_list;
 pub mod iteration;
 pub mod iteration_git;
 pub mod iteration_host;
@@ -34,6 +31,7 @@ pub mod mcp;
 pub mod presentation;
 pub mod project_tree;
 pub mod state;
+pub mod surface;
 pub mod surface_pump;
 pub mod usage;
 pub mod usage_codex;
@@ -68,6 +66,18 @@ script_mod! {
             border_radius: theme.container_corner_radius
         }
     }
+    let ProjIcon = RadioButtonTab{
+        width: 30 height: 30 padding: 0 margin: 0 spacing: 0 align: Center
+        text: ""
+        icon_walk: Walk{width: 17 height: 17 margin: 0}
+        label_walk: Walk{width: 0 height: 0 margin: 0}
+        draw_icon +: {color: theme.color_text}
+        draw_bg +: {
+            border_radius: 4.0
+            color_active: mix(theme.color_bg_app, theme.color_focus, 0.2)
+            border_color_active: theme.color_focus
+        }
+    }
     let Row = View{
         width: Fill height: Fit
         flow: Right spacing: theme.space_2
@@ -79,8 +89,7 @@ script_mod! {
         draw_text +: {color: theme.color_text}
     }
 
-    /** The Settings tab body. Only rows that work today: the appearance
-     * picker (standalone; the WM owns it when hosted) and where state lives. */
+    /** Appearance, Architecture code density, and the saved state location. */
     mod.widgets.StudioSettings = ScrollYView{
         width: Fill height: Fill
         flow: Down spacing: theme.space_3 padding: theme.space_3
@@ -113,13 +122,25 @@ script_mod! {
             style_note := Hint{text: ""}
         }
 
+        SectionTitle{text: "Architecture"}
+        architecture := Card{
+            Row{
+                RowLabel{text: "Code indentation"}
+                architecture_indent := DropDown{
+                    width: 220 labels: ["1 cell" "2 cells" "3 cells" "4 cells" "5 cells" "6 cells" "7 cells" "8 cells"]
+                    selected_item: 1
+                }
+            }
+            Hint{text: "Cells per tab or four spaces in the map."}
+        }
+
         SectionTitle{text: "Storage"}
         storage := Card{
             Row{
                 RowLabel{text: "State"}
                 state_dir_label := Label{padding: 0 draw_text +: {color: theme.color_text}}
             }
-            Hint{text: "Your appearance and tab layout are saved here between sessions."}
+            Hint{text: "Your settings and tab layout are saved here between sessions."}
         }
     }
 
@@ -128,34 +149,30 @@ script_mod! {
         width: Fill height: Fill flow: Down
         View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
             terminal_session_status := Hint{width: Fill text: "Connecting persistent terminal…"}
-            Tip{text: "Connect to a running Studio terminal"
+            Tip{text: "Running agent"
                 connect_terminal := Button{width: 24 height: 22 text: ">_" padding: 0}
             }
         }
         term := MpTerm{}
     }
 
-    mod.widgets.StudioDisk = ScrollYView{
+    mod.widgets.StudioDisk = View{
         width: Fill height: Fill
-        flow: Down spacing: theme.space_3 padding: theme.space_3
+        flow: Down spacing: 0
         show_bg: true
         draw_bg +: {color: theme.color_bg_app}
-        SectionTitle{text: "Disk & workspaces"}
-        Row{
-            refresh_disk := Button{text: "Refresh inventory"}
-            disk_scan_status := Label{padding: 0 text: "Waiting for first sample"}
+        View{
+            width: Fill height: Fit flow: Right spacing: theme.space_2
+            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+            align: Align{y: 0.5}
+            disk_scan_status := Label{padding: 0 text: "Waiting for first sample" draw_text +: {color: theme.color_text_disabled}}
+            View{width: Fill height: 1}
+            refresh_disk := Button{text: "Refresh" height: 28}
+            disk_path := DropDown{width: 220 labels: []}
+            preview_cleanup := Button{text: "Preview cleanup" height: 28}
         }
-        Hint{text: "Inspect growing build directories and leftover workspaces before reclaiming space. The corner graph shows volume use and recent changes."}
-        Row{
-            disk_path := DropDown{width: Fill labels: []}
-            preview_cleanup := Button{text: "Preview cleanup"}
-        }
-        cleanup_note := Hint{text: "Select a measured path to see its cleanup constraints."}
-        disk_report := Label{
-            width: Fill height: Fit padding: 0
-            draw_text +: {color: theme.color_text wrap: Words}
-            text: "Inspecting disk usage…"
-        }
+        cleanup_note := Hint{padding: Inset{left: 10 right: 10} text: "Select a measured path to see its cleanup constraints."}
+        cwd_map := DiskMap{width: Fill height: Fill}
     }
     mod.widgets.StudioActivity = ScrollYView{
         width: Fill height: Fill flow: Down padding: 14

@@ -44,12 +44,13 @@ pub mod video_encode;
 pub mod video_file;
 
 mod draw_list;
+pub mod retained_instances;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[cfg(all(not(headless), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;
 pub mod component;
@@ -263,7 +264,7 @@ pub use {
             StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
             MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
         },
-        texture::{
+        texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, 
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,
         },

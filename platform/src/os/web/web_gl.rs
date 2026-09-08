@@ -206,17 +206,29 @@ impl Cx {
 
                 if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
                     if draw_item.os.inst_vb_id.is_none() {
                         draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
 
-                    self.os.from_wasm(FromWasmAllocArrayBuffer {
-                        buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                        data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap()),
-                        byte_data: WasmPtrU8::new(&[]),
-                    });
+                    if let Some(retained) = &draw_item.retained_instances {
+                        self.os.from_wasm(FromWasmRetainedArrayBuffer {
+                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
+                            data: WasmPtrF32::new(retained.data()),
+                            first_slot: draw_item.retained_upload_range.start,
+                        });
+                    } else {
+                        self.os.from_wasm(FromWasmAllocArrayBuffer {
+                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
+                            data: WasmPtrF32::new(draw_item.instances.as_deref().unwrap()),
+                            byte_data: WasmPtrU8::new(&[]),
+                        });
+                    }
                     draw_call.instance_dirty = false;
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
                 }
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
@@ -450,18 +462,27 @@ impl Cx {
                 };
                 let instances = if sh.mapping.instances.total_slots == 0 {
                     0
+                } else if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count
                 } else {
                     draw_item.instances.as_ref().map_or(0, |instances| {
                         instances.len() / sh.mapping.instances.total_slots
                     })
                 };
-                if sh.mapping.flags.debug_draw && instances > 0 {
+                if instances == 0 {
+                    continue;
+                }
+                if sh.mapping.flags.debug_draw {
                     CxDrawShaderMapping::debug_dump_shader_draw_call(
                         "webgl",
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances,
                     );
                 }
@@ -509,6 +530,23 @@ impl Cx {
                 debug_assert_ne!(live_uniforms_gen, 0);
 
                 self.os.from_wasm(FromWasmDrawCall {
+                    custom_uniforms: sh
+                        .mapping
+                        .uniform_buffers
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, input)| {
+                            let uniform = draw_call.uniform_buffer_slots[slot]
+                                .as_ref()
+                                .map(|b| &self.uniform_buffers[b.uniform_buffer_id()]);
+                            WCustomUniformBuffer {
+                                block_name: input.block_name.clone(),
+                                data: WasmPtrU8::new(uniform.map_or(&[], |b| b.data.as_slice())),
+                                generation_lo: uniform.map_or(0, |b| b.generation as u32),
+                                generation_hi: uniform.map_or(0, |b| (b.generation >> 32) as u32),
+                            }
+                        })
+                        .collect(),
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
@@ -646,7 +684,8 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
-        self.textures.1.serials.submit();
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(draw_pass_id, serial);
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
@@ -747,7 +786,11 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
-        self.textures.1.serials.submit();
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(draw_pass_id, serial);
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.web_capture_texture_readbacks(Some(draw_pass_id));
+        }
     }
 
     fn webgl_collect_draw_list_shaders(

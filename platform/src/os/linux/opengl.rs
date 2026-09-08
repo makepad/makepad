@@ -365,7 +365,8 @@ impl Cx {
         step: f32,
     ) {
         self.render_view_inner(pass, list, zbias, step);
-        self.textures.1.serials.submit();
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(pass, serial);
     }
 
     fn render_view_inner(
@@ -491,10 +492,20 @@ impl Cx {
 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
                     draw_call.instance_dirty = false;
-                    draw_item
-                        .os
-                        .inst_vb
-                        .update_array_buffer(gl, draw_item.instances.as_ref().unwrap());
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    if let Some(retained) = &draw_item.retained_instances {
+                        draw_item.os.inst_vb.update_retained_array(
+                            gl,
+                            retained.data(),
+                            draw_item.retained_upload_range.clone(),
+                        );
+                    } else {
+                        draw_item
+                            .os
+                            .inst_vb
+                            .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
+                    }
                 }
 
                 // update the zbias uniform if we have it.
@@ -506,8 +517,11 @@ impl Cx {
                     .draw_call_uniforms
                     .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
 
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                    / sh.mapping.instances.total_slots) as u64;
+                let instances = if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count as u64
+                } else {
+                    (draw_item.instances.as_ref().map_or(0, Vec::len) / sh.mapping.instances.total_slots) as u64
+                };
 
                 if instances == 0 {
                     continue;
@@ -519,7 +533,11 @@ impl Cx {
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances as usize,
                     );
                 }
@@ -717,9 +735,12 @@ impl Cx {
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
-                    let instances = (draw_item.instances.as_ref().unwrap().len()
-                        / sh.mapping.instances.total_slots)
-                        as u64;
+                    let instances = if draw_item.retained_instances.is_some() {
+                        draw_item.retained_instance_count as u64
+                    } else {
+                        (draw_item.instances.as_ref().map_or(0, Vec::len)
+                            / sh.mapping.instances.total_slots) as u64
+                    };
                     (gl.glDepthMask)(if draw_call.options.depth_write {
                         gl_sys::TRUE
                     } else {
@@ -760,10 +781,17 @@ impl Cx {
                             {
                                 let cx_uniform_buffer =
                                     &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
-                                cx_uniform_buffer
-                                    .os
-                                    .buffer
-                                    .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                if cx_uniform_buffer.os.uploaded_generation
+                                    != cx_uniform_buffer.generation
+                                    || cx_uniform_buffer.os.buffer.gl_buffer.is_none()
+                                {
+                                    cx_uniform_buffer
+                                        .os
+                                        .buffer
+                                        .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                    cx_uniform_buffer.os.uploaded_generation =
+                                        cx_uniform_buffer.generation;
+                                }
                                 binding.bind_buffer(gl, &cx_uniform_buffer.os.buffer);
                             } else {
                                 binding.bind_buffer(gl, &OpenglBuffer::default());
@@ -1141,6 +1169,10 @@ impl Cx {
         unsafe {
             (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
             //(gl.glFinish)();
+        }
+        #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.gl_capture_texture_readbacks(Some(draw_pass_id));
         }
     }
 
@@ -2518,6 +2550,7 @@ impl CxOsDrawCall {
 #[derive(Default, Clone)]
 pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
+    pub uploaded_generation: u64,
 }
 
 /// Column-major identity 4x4 — default SurfaceTexture UV transform (Android OES).
@@ -3444,9 +3477,47 @@ impl CxOsPass {
 #[derive(Default, Clone)]
 pub struct OpenglBuffer {
     pub gl_buffer: Option<u32>,
+    pub retained_capacity: usize,
 }
 
 impl OpenglBuffer {
+    pub fn update_retained_array(
+        &mut self,
+        gl: &LibGl,
+        data: &[f32],
+        range: std::ops::Range<usize>,
+    ) {
+        let bytes = std::mem::size_of_val(data);
+        let mut start = range.start * 4;
+        if self.gl_buffer.is_none() {
+            self.alloc_gl_buffer(gl);
+            start = 0;
+        }
+        unsafe {
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
+            // Orphaning delegates old GPU-reader ownership to the GL driver.
+            if start == 0 || bytes > self.retained_capacity {
+                self.retained_capacity = bytes.next_power_of_two().max(256);
+                (gl.glBufferData)(
+                    gl_sys::ARRAY_BUFFER,
+                    self.retained_capacity as _,
+                    std::ptr::null(),
+                    gl_sys::STATIC_DRAW,
+                );
+                start = 0;
+            }
+            for offset in (start..bytes).step_by(256 * 1024) {
+                (gl.glBufferSubData)(
+                    gl_sys::ARRAY_BUFFER,
+                    offset as _,
+                    (bytes - offset).min(256 * 1024) as _,
+                    (data.as_ptr() as *const u8).add(offset) as *const _,
+                );
+            }
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+        }
+    }
+
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
         unsafe {
             let mut gl_buffer = 0;
@@ -3456,6 +3527,7 @@ impl OpenglBuffer {
     }
 
     pub fn update_array_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        self.retained_capacity = 0;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3594,6 +3666,277 @@ impl EglRenderBridge {
 
 // Resolved only for clients using the lifetime API; LibGl's ordinary draw path
 // gains no queries, scans, or fence calls. A zero timeout never waits for GPU work.
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[derive(Default)]
+pub(crate) struct GlReadbacks {
+    functions: Option<GlReadbackFunctions>,
+    jobs: Vec<GlReadback>,
+    worker: Option<crate::texture::ReadbackWorker>,
+    device_lost: bool,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+struct GlReadback {
+    work: crate::texture::ReadbackWork,
+    framebuffer: u32,
+    buffer: u32,
+    fence: GlSync,
+    mapped: bool,
+    copy: Option<crate::texture::ReadbackCopyJob>,
+    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[derive(Clone, Copy)]
+struct GlReadbackFunctions {
+    framebuffer_status: unsafe extern "C" fn(u32) -> u32,
+    create: unsafe extern "C" fn(u32, u32) -> GlSync,
+    poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+    delete: unsafe extern "C" fn(GlSync),
+    current: unsafe extern "C" fn() -> GlSync,
+    integer: unsafe extern "C" fn(u32, *mut i32),
+    map: unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync,
+    unmap: unsafe extern "C" fn(u32) -> u8,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl Cx {
+    fn gl_readback_functions(&mut self) -> Result<GlReadbackFunctions, crate::texture::ReadbackError> {
+        use crate::texture::ReadbackError;
+        #[cfg(target_os = "linux")]
+        let display = self.os.opengl_cx.as_ref().ok_or(ReadbackError::DeviceLost)?;
+        #[cfg(target_os = "android")]
+        let display = self.os.display.as_ref().ok_or(ReadbackError::DeviceLost)?;
+        let get_proc = display.libegl.eglGetProcAddress.ok_or(ReadbackError::UnsupportedBackend)?;
+        let functions = &mut self.textures.1.gl_readbacks.functions;
+        unsafe {
+            if functions.is_none() {
+                macro_rules! resolve {
+                    ($name:expr, $ty:ty) => {{
+                        let pointer = get_proc($name.as_ptr());
+                        if pointer.is_null() { return Err(ReadbackError::UnsupportedBackend); }
+                        std::mem::transmute::<*mut std::ffi::c_void, $ty>(pointer)
+                    }};
+                }
+                *functions = Some(GlReadbackFunctions {
+                    framebuffer_status: resolve!(c"glCheckFramebufferStatus", unsafe extern "C" fn(u32) -> u32),
+                    create: resolve!(c"glFenceSync", unsafe extern "C" fn(u32, u32) -> GlSync),
+                    poll: resolve!(c"glClientWaitSync", unsafe extern "C" fn(GlSync, u32, u64) -> u32),
+                    delete: resolve!(c"glDeleteSync", unsafe extern "C" fn(GlSync)),
+                    current: resolve!(c"eglGetCurrentContext", unsafe extern "C" fn() -> GlSync),
+                    integer: resolve!(c"glGetIntegerv", unsafe extern "C" fn(u32, *mut i32)),
+                    map: resolve!(c"glMapBufferRange", unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync),
+                    unmap: resolve!(c"glUnmapBuffer", unsafe extern "C" fn(u32) -> u8),
+                });
+            }
+            let functions = functions.unwrap();
+            if (functions.current)() != display.egl_context {
+                // Keep pending work when a window temporarily owns the current
+                // context. No GL operation may run on the wrong context.
+                return Err(ReadbackError::Backpressure);
+            }
+            Ok(functions)
+        }
+    }
+
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        if self.textures.1.readbacks.slots.is_empty() && self.textures.1.gl_readbacks.jobs.is_empty() { return; }
+        self.gl_capture_texture_readbacks(None);
+    }
+
+    fn gl_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        if self.textures.1.gl_readbacks.jobs.is_empty()
+            && !self.textures.1.readbacks.slots.iter().any(|slot| slot.pending && slot.pass == pass) {
+            return;
+        }
+        if self.textures.1.gl_readbacks.device_lost {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        if self.textures.1.gl_readbacks.worker.is_none() {
+            match ReadbackWorker::new(self) {
+                Ok(worker) => self.textures.1.gl_readbacks.worker = Some(worker),
+                Err(error) => { self.fail_pending_readbacks(error); return; }
+            }
+        }
+        self.textures.1.gl_readbacks.worker.as_ref().unwrap().set_active(true);
+        let functions = match self.gl_readback_functions() {
+            Ok(functions) => functions,
+            Err(ReadbackError::Backpressure) => return,
+            Err(error) => {
+                self.fail_pending_readbacks(error);
+                self.textures.1.gl_readbacks.device_lost = true;
+                self.gl_finish_lost_readback_leases();
+                return;
+            }
+        };
+        // A pass has a uniform row orientation. Current-allocation requests
+        // may refer to different passes; set each result from its native owner.
+        let work = self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        for work in work {
+            let origin = if self.textures[work.texture_id].os.rendered_top_left { ReadbackOrigin::TopLeft } else { ReadbackOrigin::BottomLeft };
+            for slot in &mut self.textures.1.readbacks.slots {
+                if slot.result.ticket == work.ticket { slot.result.origin = origin; }
+            }
+            let Some(source) = self.textures[work.texture_id].os.gl_texture else {
+                work.completion.finish(Err(ReadbackError::NotRendered)); continue;
+            };
+            let gl = self.os.gl();
+            unsafe {
+                const PACK: u32 = 0x88eb; // GL_PIXEL_PACK_BUFFER
+                let mut framebuffer = 0;
+                let mut buffer = 0;
+                let mut old_fbo = 0;
+                let mut old_buffer = 0;
+                let mut old_pack = 0;
+                let mut old_row = 0;
+                let mut old_skip_rows = 0;
+                let mut old_skip_pixels = 0;
+                (functions.integer)(0x8caa, &mut old_fbo); // READ_FRAMEBUFFER_BINDING
+                (functions.integer)(0x88ed, &mut old_buffer);
+                (functions.integer)(0x0d05, &mut old_pack);
+                (functions.integer)(0x0d02, &mut old_row);
+                (functions.integer)(0x0d03, &mut old_skip_rows);
+                (functions.integer)(0x0d04, &mut old_skip_pixels);
+                (gl.glGenFramebuffers)(1, &mut framebuffer);
+                (gl.glGenBuffers)(1, &mut buffer);
+                (gl.glBindFramebuffer)(0x8ca8, framebuffer); // READ_FRAMEBUFFER
+                (gl.glFramebufferTexture2D)(0x8ca8, gl_sys::COLOR_ATTACHMENT0, gl_sys::TEXTURE_2D, source, 0);
+                let complete = (functions.framebuffer_status)(0x8ca8) == 0x8cd5;
+                (gl.glBindBuffer)(PACK, buffer);
+                (gl.glBufferData)(PACK, (work.width * work.height * 4) as isize, std::ptr::null(), 0x88e1); // STREAM_READ
+                (gl.glPixelStorei)(0x0d05, 1);
+                (gl.glPixelStorei)(0x0d02, 0);
+                (gl.glPixelStorei)(0x0d03, 0);
+                (gl.glPixelStorei)(0x0d04, 0);
+                if complete {
+                    (gl.glReadPixels)(0, 0, work.width as i32, work.height as i32, gl_sys::RGBA, gl_sys::UNSIGNED_BYTE, std::ptr::null_mut());
+                }
+                let fence = (functions.create)(0x9117, 0);
+                let error = (gl.glGetError)();
+                (gl.glPixelStorei)(0x0d05, old_pack);
+                (gl.glPixelStorei)(0x0d02, old_row);
+                (gl.glPixelStorei)(0x0d03, old_skip_rows);
+                (gl.glPixelStorei)(0x0d04, old_skip_pixels);
+                (gl.glBindBuffer)(PACK, old_buffer as u32);
+                (gl.glBindFramebuffer)(0x8ca8, old_fbo as u32);
+                if !complete || fence.is_null() || error != 0 {
+                    if !fence.is_null() { (functions.delete)(fence); }
+                    (gl.glDeleteBuffers)(1, &buffer);
+                    (gl.glDeleteFramebuffers)(1, &framebuffer);
+                    work.completion.finish(Err(if error == 0x0507 { ReadbackError::DeviceLost } else { ReadbackError::Failed }));
+                    continue;
+                }
+                (gl.glFlush)();
+                if pass.is_none() { self.textures.1.serials.submit(); }
+                // The dedicated FBO retains the exact source image after
+                // Texture::release; it survives until this fence/copy retires.
+                self.textures.1.gl_readbacks.jobs.push(GlReadback { work, framebuffer, buffer, fence, mapped: false, copy: None, receive: None });
+            }
+        }
+        self.gl_poll_readback_leases(functions);
+    }
+
+    fn gl_poll_readback_leases(&mut self, functions: GlReadbackFunctions) {
+        use crate::texture::ReadbackError;
+        if unsafe { (self.os.gl().glGetError)() } == 0x0507 { // CONTEXT_LOST
+            self.textures.1.gl_readbacks.device_lost = true;
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        let mut jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        let gl = self.os.gl();
+        let worker = self.textures.1.gl_readbacks.worker.as_ref().unwrap();
+        unsafe {
+            const PACK: u32 = 0x88eb;
+            let mut old_buffer = 0;
+            (functions.integer)(0x88ed, &mut old_buffer);
+            for mut job in jobs.drain(..) {
+                let mut result = None;
+                if !job.mapped {
+                    match (functions.poll)(job.fence, 0, 0) {
+                        0x911a | 0x911c => {
+                            (gl.glBindBuffer)(PACK, job.buffer);
+                            let length = job.work.width * job.work.height * 4;
+                            let address = (functions.map)(PACK, 0, length as isize, 1) as usize; // MAP_READ_BIT
+                            job.mapped = address != 0;
+                            if address == 0 || length > job.work.reserved_bytes {
+                                result = Some(Err(ReadbackError::Failed));
+                            } else {
+                                let width = job.work.width;
+                                let height = job.work.height;
+                                let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                job.receive = Some(receive);
+                                // The renderer retains the mapped PBO and does
+                                // not unmap/delete it until this lease returns.
+                                job.copy = Some(Box::new(move || {
+                                    let bytes = crate::texture::copy_readback_rows(address, width * 4, width, height);
+                                    let _ = send.try_send(bytes);
+                                }));
+                            }
+                        }
+                        0x911b => {} // TIMEOUT_EXPIRED: zero wait, try next signal.
+                        _ => result = Some(Err(ReadbackError::DeviceLost)),
+                    }
+                }
+                if let Some(copy) = job.copy.take() {
+                    if let Err((copy, disconnected)) = worker.try_copy(copy) {
+                        if disconnected {
+                            drop(copy);
+                            result = Some(Err(ReadbackError::Failed));
+                        } else { job.copy = Some(copy); }
+                    }
+                }
+                if let Some(receive) = &job.receive {
+                    match receive.try_recv() {
+                        Ok(bytes) => result = Some(Ok(bytes)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => result = Some(Err(ReadbackError::Failed)),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if let Some(mut result) = result {
+                    if job.mapped {
+                        (gl.glBindBuffer)(PACK, job.buffer);
+                        if (functions.unmap)(PACK) == 0 { result = Err(ReadbackError::DeviceLost); }
+                    }
+                    (functions.delete)(job.fence);
+                    (gl.glDeleteBuffers)(1, &job.buffer);
+                    (gl.glDeleteFramebuffers)(1, &job.framebuffer);
+                    job.work.completion.finish(result);
+                } else { pending.push(job); }
+            }
+            (gl.glBindBuffer)(PACK, old_buffer as u32);
+        }
+        worker.set_active(!pending.is_empty() || self.textures.1.readbacks.slots.iter().any(|slot| slot.pending && slot.pass.is_none()));
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+
+    fn gl_finish_lost_readback_leases(&mut self) {
+        use crate::texture::ReadbackError;
+        let jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        for mut job in jobs {
+            // Never unmap while a worker still holds the pointer. A lost
+            // context owns destruction of its GL names; no further GL calls
+            // are issued, and this renderer cannot allocate new staging.
+            drop(job.copy.take());
+            if job.receive.as_ref().is_some_and(|receive| matches!(receive.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))) {
+                pending.push(job);
+            } else {
+                job.work.completion.finish(Err(ReadbackError::DeviceLost));
+            }
+        }
+        if let Some(worker) = &self.textures.1.gl_readbacks.worker {
+            worker.set_active(!pending.is_empty());
+        }
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+}
+
 #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
 type GlSync = *mut std::ffi::c_void;
 #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]

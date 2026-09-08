@@ -177,14 +177,14 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_the_picker() {
-        let s = Settings { style: Some("nextstep".into()), dark: true };
+        let s = Settings { style: Some("nextstep".into()), dark: true, ..Default::default() };
         assert_eq!(picker_index(&s), 5);
         let c = StyleChoice::from_settings(&s, DesktopStyle::Macos, Some(true));
         assert_eq!(c.family, DesktopStyle::NextStep);
         assert!(!c.dark, "a family without a dark variant stays light");
         assert_eq!(c.name(), "nextstep");
 
-        let follow = Settings { style: None, dark: true };
+        let follow = Settings { style: None, dark: true, ..Default::default() };
         assert_eq!(picker_index(&follow), 0);
         let c = StyleChoice::from_settings(&follow, DesktopStyle::Macos, Some(true));
         assert_eq!(c, StyleChoice { family: DesktopStyle::Macos, dark: true });
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(describe("macos-dark"), "macOS (dark)");
         assert_eq!(describe("windows-2000"), "Windows 2000");
 
-        let junk = Settings { style: Some("beos".into()), dark: false };
+        let junk = Settings { style: Some("beos".into()), dark: false, ..Default::default() };
         assert_eq!(picker_index(&junk), 0);
         assert_eq!(StyleChoice::from_settings(&junk, DesktopStyle::Omarchy, None).family, DesktopStyle::Omarchy);
     }
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn follow_host_tracks_appearance_despite_opposite_saved_preference() {
         for saved_dark in [false, true] {
-            let settings = Settings { style: None, dark: saved_dark };
+            let settings = Settings { style: None, dark: saved_dark, ..Default::default() };
             for host_dark in [true, false, true] {
                 let choice = StyleChoice::from_settings(&settings, DesktopStyle::Macos, Some(host_dark));
                 assert_eq!(choice.family, DesktopStyle::Macos);
@@ -215,7 +215,7 @@ mod tests {
     fn explicit_styles_keep_manual_appearance_when_host_changes() {
         for family in DesktopStyle::ALL {
             for dark in [false, true] {
-                let settings = Settings { style: Some(family.id().into()), dark };
+                let settings = Settings { style: Some(family.id().into()), dark, ..Default::default() };
                 for host_dark in [Some(true), Some(false), None] {
                     let choice = StyleChoice::from_settings(&settings, DesktopStyle::Macos, host_dark);
                     assert_eq!(choice.family, family);

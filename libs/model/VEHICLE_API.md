@@ -53,13 +53,17 @@ to aim it towards the car's +Z front. Example:
 {"op":"light","name":"headlight_left","attachment":{"object":"body"},
  "transform":{"translation":[0.6,0.15,2.0],"rotation":[0,1,0,0]},
  "kind":"spot","inner":0.12,"outer":0.4,
- "color":[1,0.9,0.7],"intensity":500,"range":30}
+ "color":[1,0.9,0.7],"intensity":150,"range":30}
 ```
 
 Intensity is candela, range metres, cone half-angles radians. The full car
 instance transform places both mesh and emitters; model scale does not change
 light intensity or range. Use an emissive material for a visibly glowing lamp
-surface as well. Authored lights remain independent of the gameplay command
+surface as well. For a daylight game, start the lens around emissive strength
+0.1 and compare its highlights and beam against the sun before increasing it.
+Keep lens color, metallic and roughness explicit when using `surface_material`:
+omitted factors reset to defaults, including emissive RGB zero.
+Authored lights remain independent of the gameplay command
 that toggles generic entity headlights. The host automatically suppresses its
 two generic headlights when the installed exterior has authored emitters;
 independent script lights remain available.

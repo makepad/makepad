@@ -1,7 +1,7 @@
 //! UI-owned shared documents and a real CodeEditor view. Filesystem reads live
 //! in document_worker; clean disk updates preserve sessions, dirty ones conflict.
 
-use crate::document_worker::{FileSnapshot, MAX_DOCUMENTS, MAX_FILE_BYTES};
+use crate::document_worker::{FileSnapshot, PreparedSnapshot, MAX_DOCUMENTS, MAX_FILE_BYTES};
 use makepad_code_editor::{
     code_editor::{CodeEditorAction, KeepCursorInView},
     decoration::DecorationSet,
@@ -77,6 +77,7 @@ pub struct ChangedRange {
 #[derive(Clone, Debug)]
 struct Metadata {
     baseline: Arc<String>,
+    current: Arc<String>,
     disk: Arc<String>,
     observed_revision: u64,
     saved_revision: u64,
@@ -103,13 +104,40 @@ pub struct DocumentHandle(Rc<DocumentInner>);
 impl DocumentHandle {
     fn new(path: PathBuf, text: Arc<String>, observed_revision: u64) -> Self {
         let document = CodeDocument::new(text.as_str().into(), DecorationSet::new());
-        let external_session = RefCell::new(CodeSession::new(document.clone()));
+        let external_session = CodeSession::new(document.clone());
+        Self::with_document(path, text, document, external_session, observed_revision)
+    }
+    /// A document the worker prepared: its allocations are attached, nothing
+    /// is tokenised or laid out here (the UI-thread law). A view that does
+    /// not match the document is refused rather than laid out here.
+    fn from_prepared(
+        path: PathBuf,
+        text: Arc<String>,
+        prepared: PreparedSnapshot,
+        observed_revision: u64,
+    ) -> Result<Self, String> {
+        let document = CodeDocument::from_prepared(prepared.document);
+        let external_session = CodeSession::from_prepared(document.clone(), prepared.view)
+            .map_err(|_| {
+                "Prepared view does not match the document; request a fresh preparation".to_owned()
+            })?;
+        Ok(Self::with_document(
+            path,
+            text,
+            document,
+            external_session,
+            observed_revision,
+        ))
+    }
+    fn with_document(path: PathBuf, text: Arc<String>, document: CodeDocument, external_session: CodeSession, observed_revision: u64) -> Self {
+        let external_session = RefCell::new(external_session);
         Self(Rc::new(DocumentInner {
             path,
             document,
             external_session,
             sessions: RefCell::new(Vec::new()),
             metadata: RefCell::new(Metadata {
+                current: text.clone(),
                 baseline: text.clone(),
                 disk: text,
                 observed_revision,
@@ -140,6 +168,9 @@ impl DocumentHandle {
     }
     pub fn has_conflict(&self) -> bool {
         self.0.metadata.borrow().conflict
+    }
+    pub fn current_snapshot(&self) -> Arc<String> {
+        self.0.metadata.borrow().current.clone()
     }
     pub fn disk_text(&self) -> Arc<String> {
         self.0.metadata.borrow().disk.clone()
@@ -245,6 +276,7 @@ impl DocumentHandle {
             meta.dirty = text != *meta.baseline;
             meta.conflict = meta.disk != meta.baseline;
         }
+        meta.current = Arc::new(text);
         meta.revision += 1;
         meta.last_change = None;
     }
@@ -271,6 +303,7 @@ impl DocumentHandle {
         meta.disk = text.clone();
         meta.error = None;
         if clean || converged {
+            meta.current = text.clone();
             meta.baseline = text;
             meta.dirty = false;
             meta.conflict = false;
@@ -318,6 +351,7 @@ impl DocumentHandle {
             local = disk.as_ref().clone();
         }
         let mut meta = self.0.metadata.borrow_mut();
+        meta.current = Arc::new(local.clone());
         meta.saved_revision = saved_revision;
         if saved_revision >= meta.observed_revision {
             meta.disk = saved_text.clone();
@@ -375,7 +409,32 @@ impl DocumentRegistry {
         self.documents.values()
     }
 
+    /// Admit a snapshot whose editor state the worker did not prepare: a
+    /// cold document is tokenised here (tests and hosts without a worker).
     pub fn apply_snapshot(&mut self, snapshot: &FileSnapshot) -> Result<DocumentHandle, String> {
+        self.admit(snapshot, None, true)
+    }
+
+    /// Admit a snapshot with the worker's prepared editor state: a cold
+    /// document attaches it (`CodeDocument::from_prepared`), an existing one
+    /// takes the text as a delta as before; the UI thread tokenises nothing.
+    /// A preparation whose identity (text hash/len, line count, revision)
+    /// disagrees with the snapshot is refused with no tokenising or layout
+    /// fallback; the caller requests a fresh preparation from the worker.
+    pub fn apply_prepared(
+        &mut self,
+        snapshot: &FileSnapshot,
+        prepared: Option<PreparedSnapshot>,
+    ) -> Result<DocumentHandle, String> {
+        self.admit(snapshot, prepared, false)
+    }
+
+    fn admit(
+        &mut self,
+        snapshot: &FileSnapshot,
+        prepared: Option<PreparedSnapshot>,
+        allow_unprepared: bool,
+    ) -> Result<DocumentHandle, String> {
         let existing = self
             .get(&snapshot.path)
             .or_else(|| self.get(&snapshot.requested_path));
@@ -397,7 +456,26 @@ impl DocumentRegistry {
             if self.documents.len() >= MAX_DOCUMENTS {
                 return Err(format!("At most {MAX_DOCUMENTS} documents can be retained"));
             }
-            let handle = DocumentHandle::new(snapshot.path.clone(), text, snapshot.revision);
+            let handle = match prepared {
+                Some(prepared) => {
+                    prepared_matches_snapshot(&prepared, snapshot, &text)?;
+                    DocumentHandle::from_prepared(
+                        snapshot.path.clone(),
+                        text,
+                        prepared,
+                        snapshot.revision,
+                    )?
+                }
+                None if allow_unprepared => {
+                    DocumentHandle::new(snapshot.path.clone(), text, snapshot.revision)
+                }
+                None => {
+                    return Err(
+                        "Prepared editor state is required for a new document; request a fresh preparation"
+                            .into(),
+                    );
+                }
+            };
             self.documents.insert(snapshot.path.clone(), handle.clone());
             handle
         };
@@ -686,6 +764,40 @@ fn position_at(text: &str, byte: usize) -> Position {
     }
 }
 
+/// The preparation must be the worker's output for this snapshot: same
+/// revision, byte length, line count and text (the document digest follows
+/// the text). A mismatch is never repaired by tokenising or laying out here.
+fn prepared_matches_snapshot(
+    prepared: &PreparedSnapshot,
+    snapshot: &FileSnapshot,
+    text: &str,
+) -> Result<(), String> {
+    if prepared.revision() != snapshot.revision {
+        return Err(
+            "Prepared snapshot revision does not match; request a fresh preparation".into(),
+        );
+    }
+    let prepared_text = prepared.document.as_text();
+    let lines = prepared_text.as_lines();
+    if lines.len() != text.split('\n').count() {
+        return Err(
+            "Prepared snapshot line count does not match; request a fresh preparation".into(),
+        );
+    }
+    let rendered = prepared_text.to_string();
+    if rendered.len() != text.len() || rendered != *text {
+        return Err("Prepared snapshot text does not match; request a fresh preparation".into());
+    }
+    if prepared.view.digest() != prepared.document.digest()
+        || prepared.view.version() != prepared.document.version()
+    {
+        return Err(
+            "Prepared view does not match the document; request a fresh preparation".into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +911,75 @@ mod tests {
         assert!(!doc.is_dirty());
         assert!(!doc.has_conflict());
         assert_eq!(doc.disk_revision(), 3);
+    }
+
+    /// The UI-thread law (4b): a prepared snapshot is admitted by attaching
+    /// the worker's allocations — an order of magnitude under the
+    /// preparation itself, which is the tokenisation and layout.
+    #[test]
+    fn a_prepared_snapshot_is_admitted_without_tokenising() {
+        use crate::document_worker::prepare_snapshot;
+        use std::time::Instant;
+        let text: String = (0..20_000).map(|i| format!("fn item_{i}(x: u32) -> u32 {{ let y = x * {i}; if y > 10 {{ y }} else {{ 0 }} }} // line {i}\n")).collect();
+        assert!(text.len() < MAX_FILE_BYTES);
+        let started = Instant::now();
+        let prepared = prepare_snapshot(&text).with_revision(1);
+        let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut s = FileSnapshot { requested_path: PathBuf::from("/x/prepared.rs"), path: PathBuf::from("/x/prepared.rs"), revision: 1, text: Some(Arc::new(text.clone())), error: None, observed: None };
+        let mut registry = DocumentRegistry::default();
+        let started = Instant::now();
+        let handle = registry.apply_prepared(&s, Some(prepared)).unwrap();
+        let apply_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(handle.current_text(), text);
+        eprintln!("record=prepared_admission lines=20000 bytes={} prepare_ms={prepare_ms:.2} apply_ms={apply_ms:.2}", text.len());
+        assert!(apply_ms * 10.0 < prepare_ms, "admission ({apply_ms:.2} ms) is not an order of magnitude under the preparation ({prepare_ms:.2} ms): it tokenised on the UI thread");
+        // a second snapshot of the same file takes the delta path unchanged
+        s.revision = 2;
+        s.text = Some(Arc::new(format!("{text}// tail\n")));
+        let again = registry.apply_prepared(&s, None).unwrap();
+        assert!(again.same_document(&handle));
+        assert!(again.current_text().ends_with("// tail\n"));
+        // a prepared state that does not match its text is refused, never attached
+        let other = FileSnapshot { requested_path: PathBuf::from("/x/other.rs"), path: PathBuf::from("/x/other.rs"), revision: 3, text: Some(Arc::new("one\ntwo\n".into())), error: None, observed: None };
+        let wrong = prepare_snapshot("a\nb\nc\nd\n").with_revision(3);
+        assert!(registry.apply_prepared(&other, Some(wrong)).is_err());
+        assert!(registry.get(Path::new("/x/other.rs")).is_none());
+    }
+
+    #[test]
+    fn a_prepared_snapshot_with_the_same_line_count_but_different_text_is_refused() {
+        use crate::document_worker::prepare_snapshot;
+        let snapshot = FileSnapshot {
+            requested_path: PathBuf::from("/x/same-lines.rs"),
+            path: PathBuf::from("/x/same-lines.rs"),
+            revision: 1,
+            text: Some(Arc::new("one\ntwo\n".into())),
+            error: None,
+            observed: None,
+        };
+        let wrong = prepare_snapshot("aaa\nbbb\n").with_revision(1);
+        let mut registry = DocumentRegistry::default();
+        assert!(registry.apply_prepared(&snapshot, Some(wrong)).is_err());
+        assert!(registry.get(Path::new("/x/same-lines.rs")).is_none());
+        assert!(registry.apply_snapshot(&snapshot).is_ok(), "unprepared admission remains the explicit legacy path");
+    }
+
+    #[test]
+    fn a_prepared_view_mismatch_is_refused_without_layout() {
+        use crate::document_worker::prepare_snapshot;
+        let mut mixed = prepare_snapshot("hello\n").with_revision(1);
+        mixed.view = prepare_snapshot("world\n").view;
+        let snapshot = FileSnapshot {
+            requested_path: PathBuf::from("/x/view.rs"),
+            path: PathBuf::from("/x/view.rs"),
+            revision: 1,
+            text: Some(Arc::new("hello\n".into())),
+            error: None,
+            observed: None,
+        };
+        let mut registry = DocumentRegistry::default();
+        assert!(registry.apply_prepared(&snapshot, Some(mixed)).is_err());
+        assert!(registry.get(Path::new("/x/view.rs")).is_none());
     }
 
     #[test]

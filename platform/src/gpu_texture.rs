@@ -35,9 +35,12 @@ use std::{
 };
 
 use crate::{
-    texture::{Texture, TextureAlloc, TextureCategory, TextureFormat, TexturePixel},
+    texture::{Texture, TextureFormat},
     Cx,
 };
+
+#[cfg(not(headless))]
+use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
 
 #[cfg(any(
     target_os = "windows",
@@ -45,6 +48,7 @@ use crate::{
     target_os = "macos",
     target_os = "ios",
 ))]
+#[cfg(not(headless))]
 use crate::texture::{CxTexturePool, TextureId};
 
 /// Serializes hard-decode / media GPU work with Makepad present copies on the

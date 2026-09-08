@@ -376,6 +376,7 @@ impl Cx {
 
     #[cfg(not(target_os = "android"))]
     #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(not(headless))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
         loop {
             let response = self.net.recv().ok()?;

@@ -1110,6 +1110,7 @@ fn is_mutating(call: &ContentToolCall) -> bool {
     matches!(
         call,
         ContentToolCall::ImageGenerate { .. }
+            | ContentToolCall::AgentDelegate { .. }
             | ContentToolCall::VideoGenerate { .. }
             | ContentToolCall::AudioGenerate { .. }
             | ContentToolCall::SpeechGenerate { .. }

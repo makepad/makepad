@@ -1,15 +1,17 @@
-//! The presentation seam shared by the Structured, Canvas and Architecture
-//! presentations of one live workspace. A presenter changes geometry and
-//! input coordinates; it never owns documents, processes or Dock items.
+//! The presentation seam shared by the Structured and Architecture
+//! presentations of one live workspace and by the zoomable tasks view. A
+//! presenter changes geometry and input coordinates; it never owns
+//! documents, processes or Dock items.
 use crate::workspace;
 use makepad_widgets::*;
 
-/// World-space origin offset that keeps card coordinates positive inside the
-/// canvas draw list while the camera pans across a very large workspace.
+/// World-space origin offset that keeps world coordinates positive inside a
+/// zoomable draw list while the camera pans across a very large space.
 pub(crate) const ORIGIN: f64 = 32768.0;
 
-/// The canvas camera: window-local view rectangle, pan, scale and the
-/// 8192-unit rebase that keeps draw-list coordinates precise at extreme pans.
+/// A zoomable presentation's camera: window-local view rectangle, pan, scale
+/// and the 8192-unit rebase that keeps draw-list coordinates precise at
+/// extreme pans.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Camera {
     pub view: Rect,
@@ -37,25 +39,27 @@ impl Camera {
     pub fn local_to_screen(&self, p: DVec2) -> DVec2 {
         self.view.pos + self.pan + (p - dvec2(ORIGIN, ORIGIN) + self.rebase) * self.scale
     }
-    pub(crate) fn world_to_local(&self, p: DVec2) -> DVec2 {
+    pub fn world_to_local(&self, p: DVec2) -> DVec2 {
         p - self.rebase + dvec2(ORIGIN, ORIGIN)
     }
-    pub(crate) fn world_at(&self, p: DVec2) -> DVec2 {
+    pub fn world_at(&self, p: DVec2) -> DVec2 {
         (p - self.view.pos - self.pan) / self.scale
     }
-    pub(crate) fn screen_rect(&self, g: workspace::Geometry) -> Rect {
+    pub fn screen_rect(&self, g: workspace::Geometry) -> Rect {
         Rect {
             pos: self.view.pos + self.pan + dvec2(g.x, g.y) * self.scale,
             size: dvec2(g.w, g.h) * self.scale,
         }
     }
-    pub(crate) fn local_rect(&self, g: workspace::Geometry) -> Rect {
+    pub fn local_rect(&self, g: workspace::Geometry) -> Rect {
         Rect {
             pos: self.world_to_local(dvec2(g.x, g.y)),
             size: dvec2(g.w, g.h),
         }
     }
-    pub(crate) fn transform(&self) -> PopupAnchorTransform {
+    /// The popup/IME anchor transform a body drawn through this camera
+    /// reports to its host.
+    pub fn transform(&self) -> PopupAnchorTransform {
         PopupAnchorTransform {
             scale: self.scale,
             translation: self.view.pos
@@ -63,7 +67,8 @@ impl Camera {
                 + (self.rebase - dvec2(ORIGIN, ORIGIN)) * self.scale,
         }
     }
-    pub(crate) fn matrix(&self) -> Mat4f {
+    /// The draw-list view transform of this camera.
+    pub fn matrix(&self) -> Mat4f {
         let t = self.transform();
         let mut m = Mat4f::identity();
         m.v[0] = t.scale as f32;

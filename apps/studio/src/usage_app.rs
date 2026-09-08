@@ -255,7 +255,7 @@ impl App {
             return;
         }
         self.iterations.selected = Some(flow.clone());
-        self.set_flows_visible(cx, true);
+        self.set_workspace_mode(cx, Mode::Tasks);
         if let Err(error) = self.recover_flow_terminal(cx, &flow) {
             self.flow_note(cx, &error);
         }
@@ -491,10 +491,13 @@ impl App {
                     .unwrap_or_else(|| "—".into());
                 self.ui.label(cx, &[id, reset]).set_text(cx, &value);
             }
-            self.ui.widget(cx, &[id, id!(usage_stale)]).set_visible(
-                cx,
-                p.is_some_and(|p| p.observed_at > 0 && p.is_stale(disk::now())),
-            );
+            // the quiet slot reads "refreshing…" while this provider's fetch
+            // runs, else "stale" once the last observation is old
+            let refreshing = self.usage_snapshot.polling == Some(provider);
+            let stale = p.is_some_and(|p| p.observed_at > 0 && p.is_stale(disk::now()));
+            let quiet = self.ui.label(cx, &[id, id!(usage_stale)]);
+            quiet.set_text(cx, if refreshing { "refreshing…" } else { "stale" });
+            quiet.set_visible(cx, refreshing || stale);
             self.ui
                 .widget(cx, &[id, id!(usage_limit)])
                 .set_visible(cx, limit > 0.0);

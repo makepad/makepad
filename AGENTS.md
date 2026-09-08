@@ -3,6 +3,25 @@
 Repository-wide rules. Read the linked references when the task needs them;
 use current source for API signatures and working examples.
 
+## Current delegation context
+
+- Codex / Astra designs, reviews, and BUILDS the hard things by default:
+  renderers, shaders, worker pipelines, layout engines, crate geometry,
+  memory/lifetime contracts, and diagnose-and-fix of deep bugs. Give it the
+  design of record, exact file ownership, and acceptance criteria.
+- Fable integrates: wiring crate/host contracts into the Studio views,
+  coordination across lanes, independent design and code reviews, and only
+  those proofs that need a GPU launch Astra's sandbox cannot do (no Metal
+  device there). Do not spend Fable on scripted checks.
+- Grok does the mundane and the proofs: mechanical edits, extractions, theme
+  roles, tests and sweeps, and every scripted runtime proof (hidden-instance
+  walks, grabs, `/gseq` sequences, counter checks, overlays). A proof lane
+  writes observations; a fix lane (Astra hard, Fable integration) acts on
+  them; then Grok proves again. Never bundle "prove + fix" into one Fable lane.
+- Keep this hierarchy in the context of Studio flows and their root agents,
+  including when resuming an archived lane. The user's later directions can
+  change these roles for a particular task or flow.
+
 ## Local work and documentation
 
 - Plans go in `local/plans/<topic>.md`.
@@ -15,6 +34,65 @@ use current source for API signatures and working examples.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
   `widgets/src/`, `code_editor/`, and `apps/studio/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
+
+## Software installation requires explicit approval
+
+- NEVER install, upgrade, bootstrap, or download and run external software
+  without the user's prior explicit approval for that software and installation.
+  This includes tools, applications, runtimes, SDKs, plugins, package-manager
+  installs, and third-party tools compiled from downloaded source.
+- This rule applies equally to system-wide, user-local, virtual-environment,
+  repository-local, and temporary installations. Putting an executable in
+  `local/`, `/tmp`, or `~/.local/`, or avoiding administrator privileges, does
+  not make it exempt. Compiling a third-party tool for local use counts as
+  installation even without a package manager.
+- A feature request, permission to build/test, or a missing dependency is NOT
+  installation approval. Before installing, explain the software and version,
+  source, installation location, purpose, and commands or system changes, then
+  wait for explicit approval. Do not silently add a required external runtime
+  tool to Studio or another app as a workaround.
+- Use already-installed tools and normal builds of this repository where
+  possible. If additional software is needed, leave installation pending and
+  explain the limitation; continue independent work. Approval already given
+  for the specific installation remains valid within its stated scope.
+
+## Commit content and Studio iteration history
+
+- Keep AI-generated Markdown, plans, reports, scratch helpers, logs, recordings,
+  captures, build output, and other temporary artifacts out of commits. Existing
+  instruction files such as `AGENTS.md` are the Markdown exception. Preserve
+  existing tracked documentation and incoming human/external changes; do not
+  blanket-delete files or ignore every Markdown path.
+- Run the existing repository tests for validation. Do not add generated test
+  files, inline test code, or test scaffolding unless the user explicitly requests
+  that change. Preserve existing tests; do not remove or weaken them to pass.
+- Studio's source hierarchy is `local` → `work` → `dev`: `local` records every
+  build iteration, `work` contains coherent feature commits, and `dev` contains
+  lower-frequency, validated milestones and incoming external PRs.
+- NEVER push `local`, its private flow branches, or checkpoint/archive refs.
+  Never merge private checkpoint ancestry into a public branch. Promote only
+  by squash from `local` into `work`, then squash feature groups from `work`
+  into named `dev` milestones. Fetch/sync incoming `work` and `dev` changes
+  without rewriting published history or discarding unrelated work.
+- For Studio-managed flow builds, use this order: platform build checks,
+  rustfmt on changed Rust, repeat checks if formatting changed the source,
+  commit the exact eligible source to `local`, release binary build, existing
+  native tests, then launch. Record the checkpoint hash with the binary and
+  its evidence. Reuse bounded worktrees; never create one per build.
+- Agents may code the next revision while its previous app is running. The
+  next compilation/check waits until the person closes that flow's app and
+  Studio observes its exit. Standalone evaluations obey the same gate.
+- A validated revision requires `cargo check` for its supported platforms with
+  zero warnings/errors, the existing native tests on the current host, and a
+  release build/runtime check when applicable. Use the repository's actual
+  package/target support matrix. Missing SDKs, runners, or required tests are
+  blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
+- Validate the exact resulting source for each feature/milestone promotion so
+  `dev` remains useful for bisecting. Public squash/push operations must expose
+  their source, destination, included changes, validation, and conflicts.
+- Agents working in Studio flows must also follow
+  [Studio flow instructions](apps/studio/AGENTS.md). This covers todo deltas,
+  terminal image delivery, test ownership, recordings, and revision feedback.
 
 ## Builds and runtime verification
 

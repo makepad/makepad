@@ -1,4 +1,4 @@
-// Application integration for the shared canvas/Dock presentation. This file
+// Application integration for the shared Dock presentation. This file
 // is included by main.rs so the app keeps a single dispatch and ownership root.
 impl App {
     fn project_dir(&self) -> PathBuf {
@@ -17,9 +17,6 @@ impl App {
                 .worker
                 .as_ref()
                 .is_none_or(|w| w.is_finished())
-            && !self.demo_recording
-            && !self.demo_record_starting
-            && !self.demo_finalizing
             && self
                 .disk_worker
                 .as_ref()
@@ -94,7 +91,7 @@ impl App {
             .borrow::<StudioSurface>()
         {
             if let Err(e) = surface.workspace.save(&dir) {
-                log!("studio canvas save: {e}");
+                log!("studio workspace save: {e}");
             }
         }
         let mut documents: Vec<_> = self
@@ -117,121 +114,36 @@ impl App {
             log!("studio items save: {e}");
         }
     }
-    fn focus_canvas_item(&self, cx: &mut Cx, id: u64) {
-        if let Some(mut surface) = self
-            .ui
-            .widget(cx, ids!(workspace))
-            .borrow_mut::<StudioSurface>()
-        {
-            if surface.workspace.mode == Mode::Canvas {
-                surface.focus_card(cx, id);
-            }
+    /// The mode radios and the Project pane follow the workspace mode; the
+    /// tasks view and its caption tools are shown by `set_flows_visible`.
+    fn refresh_mode_controls(&mut self, cx: &mut Cx) {
+        let mode = self.workspace_mode(cx);
+        self.ui
+            .dock(cx, ids!(dock))
+            .item(id!(project_tree_tab))
+            .set_visible(cx, mode == Mode::Structured);
+        for (id, active) in [
+            (id!(mode_structured), mode == Mode::Structured),
+            (id!(mode_tasks), mode == Mode::Tasks),
+            (id!(mode_architecture), mode == Mode::Architecture),
+            (id!(mode_disk), mode == Mode::Disk),
+        ] {
+            self.ui.radio_button(cx, &[id]).set_active(cx, active, Animate::No);
         }
-    }
-    fn refresh_canvas_controls(&self, cx: &mut Cx) {
-        if let Some(surface) = self
-            .ui
-            .widget(cx, ids!(workspace))
-            .borrow::<StudioSurface>()
-        {
-            let w = &surface.workspace;
-            let width = self.ui.window(cx, ids!(main_window)).get_inner_size(cx).x;
-            self.ui
-                .dock(cx, ids!(dock))
-                .item(id!(project_tree_tab))
-                .set_visible(cx, w.mode == Mode::Structured);
-            self.ui
-                .view(cx, ids!(canvas_controls))
-                .set_visible(cx, w.mode == Mode::Canvas);
-            self.ui
-                .widget(cx, ids!(canvas_summary))
-                .set_visible(cx, w.mode == Mode::Canvas && width >= 1100.0);
-
-            self.ui.radio_button(cx, ids!(mode_structured)).set_active(
-                cx,
-                w.mode == Mode::Structured,
-                Animate::No,
-            );
-            self.ui.radio_button(cx, ids!(mode_canvas)).set_active(
-                cx,
-                w.mode == Mode::Canvas,
-                Animate::No,
-            );
-            self.ui.radio_button(cx, ids!(mode_architecture)).set_active(
-                cx,
-                w.mode == Mode::Architecture,
-                Animate::No,
-            );
-            self.ui
-                .drop_down(cx, ids!(layout_picker))
-                .set_selected_item(cx, if w.layout == LayoutMode::Auto { 0 } else { 1 });
-            self.ui
-                .drop_down(cx, ids!(layout_picker))
-                .set_disabled(cx, w.mode != Mode::Canvas);
-            self.ui.label(cx, ids!(canvas_summary)).set_text(
-                cx,
-                &format!(
-                    "{} items · {}",
-                    w.cards.len(),
-                    makepad_studio::workspace::zoom_label(w.camera.zoom)
-                ),
-            );
+        self.ui.view(cx, ids!(arch_tools)).set_visible(cx, mode == Mode::Architecture);
+        self.ui.view(cx, ids!(tasks_tools)).set_visible(cx, mode == Mode::Tasks);
+        self.ui.view(cx, ids!(disk_tools)).set_visible(cx, mode == Mode::Disk);
+        if mode == Mode::Architecture {
+            self.sync_atlas_toolbar(cx);
         }
-        self.refresh_toolbar(cx);
+        if mode == Mode::Disk {
+            self.refresh_disk_panel(cx);
+        }
+        self.ui.view(cx, ids!(toolbar)).redraw(cx);
     }
     fn workspace_json(&self, cx: &mut Cx) -> Value {
-        let widget = self.ui.widget(cx, ids!(workspace));
-        let Some(surface) = widget.borrow::<StudioSurface>() else {
-            return Value::Null;
-        };
-        let w = &surface.workspace;
-        let cards = w
-            .cards
-            .iter()
-            .map(|c| {
-                let g = w.geometry(c.id);
-                json::obj(vec![
-                    ("id", json::s(format!("{:x}", c.id))),
-                    ("kind", json::s(c.kind.as_str())),
-                    ("title", json::s(&c.title)),
-                    ("detail", json::s(&c.detail)),
-                    (
-                        "parent",
-                        c.parent
-                            .map(|p| json::s(format!("{p:x}")))
-                            .unwrap_or(Value::Null),
-                    ),
-                    (
-                        "rect",
-                        g.map(|g| {
-                            Value::Arr([g.x, g.y, g.w, g.h].into_iter().map(Value::F64).collect())
-                        })
-                        .unwrap_or(Value::Null),
-                    ),
-                ])
-            })
-            .collect();
         json::obj(vec![
-            ("mode", json::s(w.mode.as_str())),
-            ("layout", json::s(w.layout.as_str())),
-            ("zoom", Value::F64(w.camera.zoom)),
-            (
-                "pan",
-                Value::Arr(vec![Value::F64(w.camera.pan_x), Value::F64(w.camera.pan_y)]),
-            ),
-            ("cards", Value::Arr(cards)),
-            (
-                "navigator",
-                surface
-                    .navigator_geometry()
-                    .map(|(bounds, window)| {
-                        let rect = |g: makepad_studio::workspace::Geometry| {
-                            Value::Arr([g.x, g.y, g.w, g.h].into_iter().map(Value::F64).collect())
-                        };
-                        json::obj(vec![("bounds", rect(bounds)), ("window", rect(window))])
-                    })
-                    .unwrap_or(Value::Null),
-            ),
+            ("mode", json::s(self.workspace_mode(cx).as_str())),
             ("coverage", json::s(&self.activity_snapshot.coverage)),
             (
                 "active_item",
@@ -244,190 +156,23 @@ impl App {
     fn refresh_workspace(&mut self, cx: &mut Cx) {
         self.materialize_tabs(cx);
         let dock = self.ui.dock(cx, ids!(dock));
-        let items = dock.clone_state().unwrap_or_default();
-        let project = id!(studio_project).0;
-        let root = Card::new(
-            project,
-            CardKind::System,
-            self.project_dir()
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-        );
-        let mut cards = vec![root];
-        let mut terminal_pids = HashMap::new();
-        let mut ordered: Vec<_> = items.iter().collect();
-        ordered.sort_by_key(|(id, _)| id.0);
-        for (id, item) in ordered {
-            let DockItem::Tab { name, kind, .. } = item else {
-                continue;
-            };
-            let card_kind = if *kind == id!(TerminalTab) {
-                CardKind::Terminal
-            } else if *kind == id!(CodeTab) {
-                CardKind::Code
-            } else if *kind == id!(DesignTab) {
-                CardKind::System
-            } else {
-                // Utilities never occupy agent work slots, including old layouts.
-                continue;
-            };
-            let mut card = Card::new(id.0, card_kind, name.clone());
-            card.parent = Some(project);
-            if *kind == id!(TerminalTab) {
-                if let Some(term) = dock.item(*id).widget(cx, ids!(term)).borrow::<MpTerm>() {
-                    if let Some(pid) = self
-                        .agent_pid_for_tab(id.0)
-                        .or_else(|| term.child_pid().map(|p| p as u32))
-                    {
-                        terminal_pids.insert(pid as u32, id.0);
-                        card.detail = format!(
-                            "Live PTY · PID {pid} · {}",
-                            term.cwd
-                                .as_ref()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_default()
-                        );
-                    } else {
-                        card.detail = self
-                            .agent_terminal_status(id.0)
-                            .unwrap_or_else(|| "Starting live terminal".into());
-                    }
-                }
-            } else if *kind == id!(CodeTab) {
-                if let Some(editor) = dock.item(*id).borrow::<StudioCodeEditor>() {
-                    card.detail = editor.status();
-                }
-                if let Some(error) = self.code_errors.get(&id.0) {
-                    card.detail = format!("File unavailable: {error}");
-                }
-                if let Some(path) = self.code_tabs.get(&id.0) {
-                    card.title = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    card.detail = format!("{} · {}", card.detail, path.display());
-                }
-            } else if *kind == id!(DesignTab) {
-                if let Some(design) = self.designs.iter().find(|d| d.id == id.0) {
-                    card.detail = design.detail.clone();
-                    card.parent = design.parent.or(Some(project));
-                    let body = dock.item(*id);
-                    body.label(cx, ids!(design_detail))
-                        .set_text(cx, &design.detail);
-                    body.label(cx, ids!(design_path)).set_text(
-                        cx,
-                        &design
-                            .path
-                            .as_ref()
-                            .map(|p| format!("Double-click card header to open {p}"))
-                            .unwrap_or_default(),
-                    );
-                }
-            }
-            cards.push(card);
-        }
-        // The observer also sees Studio's own quota/inventory helpers. Only
-        // terminal-owned jobs belong to the work graph; keep full diagnostics
-        // in the separate Activity utility.
-        let work_pids = self
-            .activity_snapshot
-            .terminal_descendants(terminal_pids.keys().copied());
-        let running = self
-            .activity_snapshot
-            .processes
-            .iter()
-            .filter(|p| p.state == ProcessState::Running && work_pids.contains(&p.pid))
-            .count();
-        cards[0].detail = format!("{}\n\n{} live processes · {} open files\n\nTerminals, code and connected system designs. Open Activity for observation details.", self.project_dir().display(), running, self.code_tabs.len());
-        if !self.activity_snapshot.errors.is_empty() {
-            cards[0].detail.push_str(&format!(
-                "\n\nObservation: {}",
-                self.activity_snapshot.errors.join("; ")
-            ));
-        }
-        let process_ids: HashMap<u32, u64> = self
-            .activity_snapshot
-            .processes
-            .iter()
-            .filter(|p| work_pids.contains(&p.pid) && !terminal_pids.contains_key(&p.pid))
-            .map(|p| {
-                (
-                    p.pid,
-                    LiveId::from_str_num("studio-process", p.pid as u64).0,
-                )
-            })
-            .collect();
-        for p in &self.activity_snapshot.processes {
-            if !process_ids.contains_key(&p.pid) {
+        for design in &self.designs {
+            let body = dock.item(LiveId(design.id));
+            if body.is_empty() {
                 continue;
             }
-            let kind = process_kind(&p.command);
-            let running = p.state == ProcessState::Running;
-            let title = format!(
-                "{} · {}",
-                if running { "Running" } else { "Exited" },
-                p.command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("process")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("process")
+            body.label(cx, ids!(design_detail))
+                .set_text(cx, &design.detail);
+            body.label(cx, ids!(design_path)).set_text(
+                cx,
+                &design
+                    .path
+                    .as_ref()
+                    .map(|p| format!("Code: {p}"))
+                    .unwrap_or_default(),
             );
-            let mut card = Card::new(process_ids[&p.pid], kind, title);
-            card.parent = Some(
-                terminal_pids
-                    .get(&p.parent_pid)
-                    .copied()
-                    .or_else(|| process_ids.get(&p.parent_pid).copied())
-                    .unwrap_or(project),
-            );
-            card.detail = format!(
-                "{}\n\nPID {} · parent {}\n{}",
-                p.command,
-                p.pid,
-                p.parent_pid,
-                if running {
-                    "Observed running; output is in its terminal"
-                } else {
-                    "No longer observed; exit code and outcome unknown"
-                }
-            );
-            cards.push(card);
         }
-        cards.extend(self.command_cards.iter().cloned());
-        // Closing a terminal removes the live ownership edge, not its history.
-        let ids: std::collections::HashSet<_> = cards.iter().map(|c| c.id).collect();
-        for c in &mut cards {
-            if c.parent.is_some_and(|p| !ids.contains(&p)) {
-                c.parent = Some(project);
-            }
-        }
-        // Restored design parents may refer to a deleted item or a cycle; the
-        // registry validator rejects cycles, so prune malformed restored edges.
-        for i in 0..cards.len() {
-            let mut seen = std::collections::HashSet::new();
-            let mut next = Some(cards[i].id);
-            while let Some(id) = next {
-                if !seen.insert(id) {
-                    cards[i].parent = Some(project);
-                    break;
-                }
-                next = cards.iter().find(|c| c.id == id).and_then(|c| c.parent);
-            }
-        }
-        if let Some(mut surface) = self
-            .ui
-            .widget(cx, ids!(workspace))
-            .borrow_mut::<StudioSurface>()
-        {
-            if let Err(e) = surface.update_cards(cx, cards) {
-                log!("studio workspace: {e}");
-            }
-        }
-        self.refresh_canvas_controls(cx);
+        self.refresh_mode_controls(cx);
         let mut report = format!(
             "{}\n{}\n\nPROCESSES\n",
             self.project_dir().display(),
@@ -475,16 +220,17 @@ impl App {
         }
         if let Some((&id, _)) = self.code_tabs.iter().find(|(_, p)| {
             **p == path
-                || self
-                    .documents
-                    .get(p)
-                    .zip(self.documents.get(&path))
-                    .is_some_and(|(a, b)| a.same_document(&b))
+                || {
+                    let documents = self.documents.borrow();
+                    documents
+                        .get(p)
+                        .zip(documents.get(&path))
+                        .is_some_and(|(a, b)| a.same_document(&b))
+                }
         }) {
             if focus {
                 self.ui.dock(cx, ids!(dock)).select_tab(cx, LiveId(id));
                 self.active_item = Some(id);
-                self.focus_canvas_item(cx, id);
             }
             return Ok(format!("{id:x}"));
         }
@@ -514,9 +260,6 @@ impl App {
             self.active_item = Some(id.0);
         }
         self.refresh_workspace(cx);
-        if focus {
-            self.focus_canvas_item(cx, id.0);
-        }
         self.save_dock(cx);
         self.workspace_dirty = true;
         Ok(format!("{:x}", id.0))
@@ -537,9 +280,14 @@ impl App {
             return Err("The Project pane stays available in Structured mode".into());
         }
         if let Some(path) = self.code_tabs.get(&id).cloned() {
-            self.documents.remove(&path)?;
-            if let Some(worker) = &mut self.document_worker {
-                worker.unwatch(&path);
+            let last_tab = !self.code_tabs.iter().any(|(other, other_path)| {
+                *other != id && self.documents_share_path(other_path, &path)
+            });
+            if last_tab && !self.map_holds_document(&path) {
+                self.documents.borrow_mut().remove(&path)?;
+                if let Some(worker) = &mut self.document_worker {
+                    worker.unwatch(&path);
+                }
             }
             self.code_tabs.remove(&id);
             self.code_errors.remove(&id);
@@ -551,24 +299,172 @@ impl App {
     }
     fn save_code(&mut self, cx: &mut Cx, tab: u64) -> Result<String, String> {
         let document = self.code_document(cx, tab)?;
+        let id = self.queue_document_save(&document)?;
+        Ok(format!(
+            "Save {id} queued; read_code reports dirty=false only after the write is acknowledged"
+        ))
+    }
+    /// Explicit save of one registry document. Conflicts stay unsaved.
+    fn queue_document_save(&mut self, document: &DocumentHandle) -> Result<u64, String> {
         if document.has_conflict() {
             return Err(
                 "Disk changed while this buffer has edits; resolve the conflict before saving"
                     .into(),
             );
         }
-        let id = self
-            .document_worker
+        self.document_worker
             .as_mut()
             .ok_or("Document reader unavailable")?
             .save(
                 document.path().to_owned(),
                 document.disk_text(),
                 Arc::new(document.current_text()),
-            )?;
+            )
+    }
+    /// Save every dirty registry document (map-only buffers included). A
+    /// conflict still has to be resolved before that file is written.
+    fn save_all_documents(&mut self, cx: &mut Cx) -> Result<String, String> {
+        let dirty: Vec<DocumentHandle> = self
+            .documents
+            .borrow()
+            .handles()
+            .filter(|document| document.is_dirty() && !document.has_conflict())
+            .cloned()
+            .collect();
+        if dirty.is_empty() {
+            return Ok("No unsaved documents".into());
+        }
+        let mut queued = 0usize;
+        for document in &dirty {
+            self.queue_document_save(document)?;
+            queued += 1;
+        }
+        self.ui.label(cx, ids!(status_state)).set_text(
+            cx,
+            &format!("Save all: {queued} queued"),
+        );
         Ok(format!(
-            "Save {id} queued; read_code reports dirty=false only after the write is acknowledged"
+            "Save all queued {queued} document{}",
+            if queued == 1 { "" } else { "s" }
         ))
+    }
+    fn unsaved_registry_documents(&self) -> Vec<DocumentHandle> {
+        self.documents
+            .borrow()
+            .handles()
+            .filter(|document| document.is_dirty() || document.has_conflict())
+            .cloned()
+            .collect()
+    }
+    fn documents_share_path(&self, a: &Path, b: &Path) -> bool {
+        if a == b {
+            return true;
+        }
+        let documents = self.documents.borrow();
+        documents
+            .get(a)
+            .zip(documents.get(b))
+            .is_some_and(|(left, right)| left.same_document(&right))
+    }
+    fn tab_holds_document(&self, path: &Path) -> bool {
+        self.code_tabs
+            .values()
+            .any(|tab| self.documents_share_path(tab, path))
+    }
+    fn map_holds_document(&self, path: &Path) -> bool {
+        if self
+            .map_document_watchers
+            .get(path)
+            .is_some_and(|views| !views.is_empty())
+        {
+            return true;
+        }
+        self.map_document_watchers.iter().any(|(watched, views)| {
+            !views.is_empty() && self.documents_share_path(watched, path)
+        })
+    }
+    fn document_is_held(&self, path: &Path) -> bool {
+        self.tab_holds_document(path) || self.map_holds_document(path)
+    }
+    fn document_watch_paths(&self) -> Vec<PathBuf> {
+        let mut paths = HashSet::new();
+        paths.extend(self.code_tabs.values().cloned());
+        paths.extend(self.map_document_watchers.keys().cloned());
+        for handle in self.documents.borrow().handles() {
+            if handle.is_dirty() || handle.has_conflict() {
+                paths.insert(handle.path().to_owned());
+            }
+        }
+        paths.into_iter().collect()
+    }
+    fn retain_map_document(&mut self, uid: WidgetUid, path: PathBuf) {
+        if self
+            .map_document_watchers
+            .get(&path)
+            .is_some_and(|views| views.contains(&uid))
+        {
+            return;
+        }
+        let held = self.document_is_held(&path);
+        if !held {
+            match self.document_worker.as_mut() {
+                Some(worker) => {
+                    if let Err(error) = worker.watch(path.clone()) {
+                        log!("atlas: cannot watch {}: {error}", path.display());
+                        return;
+                    }
+                }
+                None => {
+                    log!("atlas: document reader unavailable for {}", path.display());
+                    return;
+                }
+            }
+        }
+        self.map_document_watchers
+            .entry(path)
+            .or_default()
+            .insert(uid);
+    }
+    fn release_map_document(&mut self, uid: WidgetUid, path: PathBuf) {
+        if let Some(views) = self.map_document_watchers.get_mut(&path) {
+            views.remove(&uid);
+            if views.is_empty() {
+                self.map_document_watchers.remove(&path);
+            }
+        }
+        self.release_unwatched_document(&path);
+    }
+    fn release_map_view(&mut self, uid: WidgetUid) {
+        let paths: Vec<PathBuf> = self
+            .map_document_watchers
+            .iter()
+            .filter(|(_, views)| views.contains(&uid))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in paths {
+            self.release_map_document(uid, path);
+        }
+    }
+    /// Drop a worker watch and registry entry when neither the map nor a tab
+    /// still wants the path, unless the buffer is dirty or conflicted.
+    fn release_unwatched_document(&mut self, path: &Path) {
+        if self.document_is_held(path) {
+            return;
+        }
+        let dirty = self
+            .documents
+            .borrow()
+            .get(path)
+            .is_some_and(|document| document.is_dirty() || document.has_conflict());
+        if dirty {
+            return;
+        }
+        if self.documents.borrow_mut().remove(path).is_ok() {
+            if let Some(worker) = &mut self.document_worker {
+                worker.unwatch(path);
+            }
+            self.map_document_watchers.remove(path);
+        }
     }
     fn drain_documents(&mut self, cx: &mut Cx) {
         let saved = self
@@ -579,10 +475,14 @@ impl App {
         for save in saved {
             match save.result {
                 Ok(()) => {
+                    let doc = self.documents.borrow().get(&save.path);
                     if let (Some(doc), Some(text), Some(revision)) =
-                        (self.documents.get(&save.path), save.text, save.revision)
+                        (doc, save.text, save.revision)
                     {
+                        let path = doc.path().to_owned();
                         doc.save_succeeded(text, revision);
+                        drop(doc);
+                        self.release_unwatched_document(&path);
                         self.ui
                             .label(cx, ids!(status_state))
                             .set_text(cx, "File saved");
@@ -596,15 +496,19 @@ impl App {
                 }
             }
         }
-        let snapshots = self
+        let deliveries = self
             .document_worker
             .as_mut()
-            .map(DocumentWorker::poll)
+            .map(DocumentWorker::poll_prepared)
             .unwrap_or_default();
         let mut changed = false;
-        for snapshot in snapshots {
-            match self.documents.apply_snapshot(&snapshot) {
+        for delivery in deliveries {
+            let snapshot = delivery.snapshot;
+            // the worker prepared the editor state: admission attaches it
+            let applied = self.documents.borrow_mut().apply_prepared(&snapshot, delivery.prepared);
+            match applied {
                 Ok(handle) => {
+                    log!("studio document: prepared {}", snapshot.path.display());
                     let tabs: Vec<_> = self
                         .code_tabs
                         .iter()
@@ -624,9 +528,7 @@ impl App {
                         });
                         if let Some(existing) = duplicate {
                             if let Some(path) = self.code_tabs.remove(&id) {
-                                if let Some(worker) = &mut self.document_worker {
-                                    worker.unwatch(&path);
-                                }
+                                self.release_unwatched_document(&path);
                             }
                             self.ui.dock(cx, ids!(dock)).close_tab(cx, LiveId(id));
                             if self.active_item == Some(id) {
@@ -634,7 +536,6 @@ impl App {
                                 self.ui
                                     .dock(cx, ids!(dock))
                                     .select_tab(cx, LiveId(existing));
-                                self.focus_canvas_item(cx, existing);
                             }
                             self.save_dock(cx);
                             self.workspace_dirty = true;
@@ -654,6 +555,12 @@ impl App {
                     changed = true;
                 }
                 Err(error) => {
+                    if error.contains("Prepared ") {
+                        if let Some(worker) = &mut self.document_worker {
+                            worker.refresh(&snapshot.requested_path);
+                            worker.refresh(&snapshot.path);
+                        }
+                    }
                     for (id, path) in &self.code_tabs {
                         if *path == snapshot.requested_path {
                             self.code_errors.insert(*id, error.clone());
@@ -667,6 +574,7 @@ impl App {
         }
         if changed {
             self.refresh_workspace(cx);
+            self.notify_atlas_documents(cx);
         }
     }
     fn drain_activity(&mut self, cx: &mut Cx) {
@@ -701,29 +609,5 @@ impl App {
             }
             self.refresh_workspace(cx);
         }
-    }
-}
-fn process_kind(command: &str) -> CardKind {
-    let program = command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
-    if program == "codex" && command.split_whitespace().nth(1) == Some("app-server") {
-        // A CLI service process does not establish a running model turn.
-        CardKind::Run
-    } else if ["claude", "codex", "fable", "aider", "opencode"].contains(&program) {
-        CardKind::Agent
-    } else if command.contains("cargo test")
-        || command.contains("pytest")
-        || command.contains("vitest")
-    {
-        CardKind::Test
-    } else if command.contains("/target/release/") || command.contains("/target/debug/") {
-        CardKind::App
-    } else {
-        CardKind::Run
     }
 }

@@ -17,10 +17,14 @@ cargo build --release -p makepad-app-asset-server
 ```
 
 With no flags it serves the checkout's standard store root
-(`local/asset-ui/asset-server`, or `$AI_CONTENT_ASSET_ROOT`) on ephemeral
+(`local/asset-library/store`, or `$AI_CONTENT_ASSET_ROOT`) on ephemeral
 ports, announces itself on the LAN beacon, publishes
-`local/ai_content_library`, and coordinates fleet jobs. `--help` lists every
-flag.
+`local/asset-library`, and coordinates fleet jobs. `--help` lists every
+flag. `MAKEPAD_ROOT` relocates the checkout root; `MAKEPAD_ASSET_LIBRARY`
+overrides the generated payload library. Its `store/` subdirectory is the default
+catalog/CAS root; `AI_CONTENT_ASSET_ROOT` or `--root` explicitly selects another
+store. App cache directories remain separate. No default falls
+back to a legacy home-directory store or an app-specific empty seed store.
 
 ---
 
@@ -121,7 +125,7 @@ Three ways, in order of precedence:
 
 ```bash
 # find it (it holds the lock and wrote the listen file)
-cat local/asset-ui/asset-server/listen        # ip:control:data
+cat local/asset-library/store/listen        # ip:control:data
 pkill -TERM -f 'makepad-asset-server'         # clean shutdown: joins every thread
 ./target/release/makepad-asset-server > /tmp/asset-server.log 2>&1 &
 ```

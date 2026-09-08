@@ -9,7 +9,7 @@
 //!
 //! Everything here is the shell — the entry model lives in `model`, the views
 //! in `contents`, thumbnails in `thumbs`, file operations in `ops`, the
-//! treemap's arithmetic in `treemap` and its widget in `treemap_view`.
+//! treemap's arithmetic and widget in `makepad_diskmap`.
 
 pub use makepad_widgets;
 
@@ -43,11 +43,8 @@ mod model;
 mod ops;
 mod preview;
 mod rename;
-mod sizecache;
 mod theme;
 mod thumbs;
-mod treemap;
-mod treemap_view;
 mod vfs;
 
 use crate::{
@@ -59,9 +56,9 @@ use crate::{
     preview::{Preview, PreviewHost},
     rename::BatchMode,
     theme::Palette,
-    treemap_view::MapProjection,
     vfs::vfs,
 };
+use makepad_diskmap::{treemap, MapProjection};
 
 #[cfg(feature = "chat")]
 use crate::{
@@ -4678,7 +4675,7 @@ const CLASS_NAMES: [&str; 7] =
     ["Video", "Images", "Audio", "Code", "Docs", "Archives", "Other"];
 
 /// The `FileKind`s behind one legend class — the exact inverse of
-/// `treemap_view::kind_class`, asserted so in a test below.
+/// `makepad_diskmap::kind_class`, asserted so in a test below.
 fn class_kind_values(class: usize) -> &'static [crate::model::FileKind] {
     use crate::model::FileKind::*;
     match class {
@@ -4769,6 +4766,7 @@ impl MatchEvent for App {
         if vfs::demo_requested() {
             vfs::install(Arc::new(demo::DemoVfs::new()));
         }
+        let _ = model::scan_all();
         // The block view's saved rendering and whether its filter sidebar
         // was left open — both come back exactly as they were left.
         self.projection = match model::pref_get("projection").as_deref() {
@@ -5083,7 +5081,7 @@ impl AppMain for App {
         Palette::for_vm(vm).publish(vm);
         crate::theme::script_mod(vm);
         crate::thumbs::script_mod(vm);
-        crate::treemap_view::script_mod(vm);
+        makepad_diskmap::script_mod(vm);
         crate::contents::script_mod(vm);
         #[cfg(feature = "chat")]
         crate::chat_panel::script_mod(vm);
@@ -5257,7 +5255,7 @@ mod dormancy_tests {
             FileKind::Pdf,
             FileKind::Generic,
         ] {
-            let class = crate::treemap_view::kind_class(kind) as usize;
+            let class = makepad_diskmap::kind_class(kind) as usize;
             assert!(
                 class_kind_values(class).contains(&kind),
                 "{kind:?} paints as class {class} but the legend chip for it filters {:?}",

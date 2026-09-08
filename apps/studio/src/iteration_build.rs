@@ -28,7 +28,7 @@ struct Build {
     directory: PathBuf,
     log: PathBuf,
     manifest: PathBuf,
-    owned: OwnedWorktree,
+    owned: RepoCheckout,
     config: iteration::FlowConfig,
     host_target: String,
     target_directory: PathBuf,
@@ -161,7 +161,7 @@ impl Host {
             .map_err(|_| "Manifest is outside its declared repository")?;
         let manifest = fs::canonicalize(owned.path.join(relative)).map_err(err)?;
         if !manifest.starts_with(&owned.path) {
-            return Err("Manifest escapes the owned worktree".into());
+            return Err("Manifest escapes the open repository".into());
         }
         let directory = self.directory.join("builds").join(flow).join(job);
         fs::create_dir_all(&directory).map_err(err)?;
@@ -1090,11 +1090,7 @@ impl Host {
             .engine
             .flows
             .iter()
-            .filter_map(|(id, flow)| {
-                flow.worktree
-                    .as_ref()
-                    .map(|path| (id.clone(), path.clone()))
-            })
+            .map(|(id, flow)| (id.clone(), flow.config.repo.clone()))
             .collect();
         for (flow, path) in paths {
             let fingerprint = match source_fingerprint(&path) {

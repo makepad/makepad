@@ -99,9 +99,22 @@ impl SurfaceOperation {
                         "alpha",
                         "alpha_cutoff",
                         "double_sided",
+                        "fur",
                     ],
                 )?;
                 let mut value = SurfaceMaterial::default();
+                value.fur = match v.get("fur") {
+                    None | Some(Value::Null) => None,
+                    Some(fur) => {
+                        fields(fur, &["length", "density", "scale", "seed"])?;
+                        Some(makepad_gltf::GlbFurMaterial {
+                            length: number(fur, "length", 0.015)?,
+                            density: number(fur, "density", 0.65)?,
+                            scale: number(fur, "scale", 180.0)?,
+                            seed: count(fur, "seed", 0)?,
+                        })
+                    }
+                };
                 value.base_color = vec4(v, "base_color", value.base_color)?;
                 value.metallic = number(v, "metallic", value.metallic)?;
                 value.roughness = number(v, "roughness", value.roughness)?;

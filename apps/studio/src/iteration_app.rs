@@ -24,13 +24,16 @@ struct IterationAppState {
     image_request: Option<IterationRequest>,
     image_request_id: Option<String>,
     confirmation: Option<IterationViewAction>,
+    menu_flow: Option<String>,
+    deleting: std::collections::HashSet<String>,
+    delete_after_stop: std::collections::HashSet<String>,
     split_confirmation: Option<(String, String)>,
     restored_heights: std::collections::BTreeSet<String>,
     restored_widths: std::collections::BTreeSet<String>,
-    new_provider: Option<String>,
     archived_ids: Vec<String>,
     pending_lifecycles: HashMap<String, iteration::FlowLifecycle>,
     resume_when_active: std::collections::HashSet<String>,
+    resume_hash_provider: Option<String>,
 }
 
 impl App {
@@ -308,12 +311,35 @@ impl App {
             id!(RecordingTab),
             "Recorded app · MP4",
         );
-        self.demo_video_visible = true;
-        self.demo_video_pending = Some(path);
+        self.flow_video_visible = true;
+        self.flow_video_pending = Some(path);
         self.ui
             .video(cx, ids!(recording_player))
             .stop_and_cleanup_resources(cx);
-        self.resume_demo_video(cx);
+        self.resume_flow_video(cx);
+    }
+    fn close_flow_video(&mut self, cx: &mut Cx) {
+        self.flow_video_pending = None;
+        self.flow_video_visible = false;
+        self.ui
+            .video(cx, ids!(recording_player))
+            .stop_and_cleanup_resources(cx);
+    }
+    /// The player reads its file once it exists in the utility panel; the
+    /// pending path is consumed by the first draw that finds it unprepared.
+    fn resume_flow_video(&mut self, cx: &mut Cx) {
+        if self.flow_video_pending.is_none() {
+            return;
+        }
+        let video = self.ui.video(cx, ids!(recording_player));
+        if video.is_unprepared() {
+            if let Some(path) = self.flow_video_pending.take() {
+                video.set_source(makepad_widgets::video::VideoDataSource::Filesystem {
+                    path: path.display().to_string(),
+                });
+                video.begin_playback(cx);
+            }
+        }
     }
     fn start_iterations(&mut self, cx: &mut Cx) {
         if self.iterations.worker.is_some() {
@@ -330,23 +356,30 @@ impl App {
             self.ui.label(cx, ids!(status_state)).set_text(cx, text);
         }
     }
+    /// The tasks view covers the work area while visible; the Structured
+    /// Dock keeps every terminal alive underneath. Call through
+    /// `set_workspace_mode`, which also presents the surface and the radios.
     fn set_flows_visible(&mut self, cx: &mut Cx, visible: bool) {
-        self.set_demo_visible(cx, false);
         self.iterations.visible = visible;
         self.ui.view(cx, ids!(work_area)).set_visible(cx, !visible);
         self.ui.view(cx, ids!(flows_area)).set_visible(cx, visible);
-        self.ui
-            .view(cx, ids!(caption_flow_tools))
-            .set_visible(cx, visible);
-        self.ui
-            .radio_button(cx, ids!(flows_tab))
-            .set_active(cx, visible, Animate::No);
-        self.ui
-            .radio_button(cx, ids!(demo_back))
-            .set_active(cx, !visible, Animate::No);
+        self.ui.view(cx, ids!(tasks_tools)).set_visible(cx, visible);
         self.bind_flow_terminals(cx);
         self.sync_flow_terminal_ownership(cx);
+        self.refresh_tasks_empty_state(cx);
         self.refresh_ai_context(cx);
+    }
+    /// An empty tasks view says how to start a lane instead of showing nothing.
+    fn refresh_tasks_empty_state(&self, cx: &mut Cx) {
+        let empty = self.iterations.snapshot.engine.flows.is_empty();
+        let note = self.ui.label(cx, ids!(flow_note));
+        if empty {
+            note.set_text(
+                cx,
+                "No lanes yet · start a Fable or Codex lane with the icons in the title bar",
+            );
+        }
+        note.set_visible(cx, self.iterations.visible && empty);
     }
     fn sync_flow_terminal_ownership(&self, cx: &mut Cx) {
         if let Some(mut view) = self
@@ -421,6 +454,31 @@ impl App {
         Ok(())
     }
     fn poll_lane_lifecycles(&mut self, cx: &mut Cx) {
+        for flow in self
+            .iterations
+            .delete_after_stop
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(error) = self.flow_terminal_stop_error(&flow) {
+                self.iterations.delete_after_stop.remove(&flow);
+                self.iterations.deleting.remove(&flow);
+                self.refresh_deleting_lanes(cx);
+                self.flow_note(cx, &error);
+            } else if self.flow_terminal_stopped(&flow) {
+                if self
+                    .submit_iteration(
+                        cx,
+                        IterationRequest::Flow(FlowCommand::Delete { flow: flow.clone() }),
+                        &format!("delete_lane:{flow}"),
+                    )
+                    .is_ok()
+                {
+                    self.iterations.delete_after_stop.remove(&flow);
+                }
+            }
+        }
         let pending: Vec<_> = self
             .iterations
             .pending_lifecycles
@@ -566,9 +624,6 @@ impl App {
                     if purpose == "create" {
                         self.iterations.selected =
                             value.get("id").and_then(Value::as_str).map(str::to_owned);
-                        self.ui
-                            .view(cx, ids!(flow_create_panel))
-                            .set_visible(cx, false);
                     }
                     if purpose == "preview" {
                         self.iterations.preview = Some(value.clone());
@@ -603,6 +658,10 @@ impl App {
                     self.flow_note(cx, "Request recorded");
                 }
                 Err(error) => {
+                    if let Some(flow) = purpose.strip_prefix("delete_lane:") {
+                        self.iterations.deleting.remove(flow);
+                        self.refresh_deleting_lanes(cx);
+                    }
                     if let Some(flow) = purpose.strip_prefix("resume_lane:") {
                         self.iterations.resume_when_active.remove(flow);
                     }
@@ -612,7 +671,51 @@ impl App {
         }
         if let Some(snapshot) = snapshot {
             self.iterations.snapshot_ready = true;
+            let removed: Vec<_> = self
+                .iterations
+                .snapshot
+                .engine
+                .flows
+                .keys()
+                .filter(|flow| !snapshot.engine.flows.contains_key(*flow))
+                .map(|flow| (flow.clone(), self.flow_terminal_id(flow)))
+                .collect();
+            for (flow, tab) in removed {
+                let shared = snapshot
+                    .engine
+                    .flows
+                    .keys()
+                    .any(|id| self.flow_terminal_id(id) == tab);
+                if !shared {
+                    if let Ok(widget) = self.terminal(cx, tab) {
+                        if let Some(mut term) = widget.borrow_mut::<MpTerm>() {
+                            term.unload(cx);
+                        }
+                    }
+                    self.ui.dock(cx, ids!(dock)).close_tab(cx, LiveId(tab));
+                    self.agent_sessions.bindings.remove(&tab);
+                    self.agent_sessions.mirrors.remove(&tab);
+                    self.agent_sessions.saved_views.remove(&tab);
+                }
+                self.iterations.terminals.remove(&flow);
+                self.iterations.pending_lifecycles.remove(&flow);
+                self.iterations.resume_when_active.remove(&flow);
+            }
+            self.iterations.deleting.retain(|flow| {
+                snapshot.engine.flows.contains_key(flow)
+                    && !snapshot
+                        .operations
+                        .as_arr()
+                        .unwrap_or(&[])
+                        .iter()
+                        .any(|report| {
+                            report.get("flow").and_then(Value::as_str) == Some(flow)
+                                && report.get("kind").and_then(Value::as_str) == Some("lane_delete")
+                                && report.get("error").is_some()
+                        })
+            });
             self.iterations.snapshot = snapshot;
+            self.refresh_tasks_empty_state(cx);
             let ids: Vec<_> = self
                 .iterations
                 .snapshot
@@ -657,15 +760,16 @@ impl App {
                     .map(str::to_owned)
                     .or_else(|| ids.first().cloned());
             }
+            let labels: Vec<String> = ids
+                .iter()
+                .map(|id| self.iterations.snapshot.engine.flows[id].title.clone())
+                .collect();
             if self.iterations.ids != ids {
-                self.ui.drop_down(cx, ids!(flow_choose)).set_labels(
-                    cx,
-                    ids.iter()
-                        .map(|id| self.iterations.snapshot.engine.flows[id].title.clone())
-                        .collect(),
-                );
                 self.iterations.ids = ids;
             }
+            self.ui
+                .drop_down(cx, ids!(flow_choose))
+                .set_labels(cx, labels);
             if let Some(index) = self
                 .iterations
                 .ids
@@ -681,7 +785,11 @@ impl App {
                 .widget(cx, ids!(flow_scene))
                 .borrow_mut::<StudioIterationView>()
             {
-                view.set_engine(cx, Arc::new(self.iterations.snapshot.engine.clone()));
+                let mut engine = self.iterations.snapshot.engine.clone();
+                engine
+                    .flows
+                    .retain(|id, _| !self.iterations.deleting.contains(id));
+                view.set_engine(cx, Arc::new(engine));
                 view.select_flow(cx, self.iterations.selected.clone());
                 for flow in self.iterations.snapshot.engine.flows.keys() {
                     view.set_recording_artifacts(
@@ -879,13 +987,19 @@ impl App {
             .flows
             .values()
             .filter(|f| f.lifecycle != iteration::FlowLifecycle::Archived)
-            .filter_map(|f| {
-                f.worktree
-                    .as_ref()
-                    .map(|p| (f.id.clone(), f.title.clone(), p.clone(), f.lifecycle))
+            .map(|f| {
+                (
+                    f.id.clone(),
+                    f.title.clone(),
+                    f.config.repo.clone(),
+                    f.lifecycle,
+                )
             })
             .collect();
         for (flow, title, cwd, lifecycle) in flows {
+            if self.iterations.deleting.contains(&flow) {
+                continue;
+            }
             let id = LiveId(self.flow_terminal_id(&flow));
             let dock = self.ui.dock(cx, ids!(dock));
             if dock.item(id).is_empty() {
@@ -1005,6 +1119,7 @@ impl App {
     }
     fn confirm_flow_action(&mut self, cx: &mut Cx, action: IterationViewAction) {
         let (flow, title, verb, explanation) = match &action {
+            IterationViewAction::DeleteFlow { flow } => (flow, "Delete lane?", "Delete lane", "Its terminal is stopped and its history removed."),
             IterationViewAction::ArchiveFlow { flow } => (flow, "Archive lane?", "Archive lane",
                 "Save its conversation and move this lane to the archive. Its chat, recordings and code history are kept; you can resume it later."),
             IterationViewAction::ClearHistory { flow } => (flow, "Clear lane history?", "Clear history",
@@ -1016,7 +1131,11 @@ impl App {
         let Some(lane) = self.iterations.snapshot.engine.flows.get(flow) else {
             return;
         };
-        let message = format!("{}\n\n{}", lane.title, explanation);
+        let message = if matches!(action, IterationViewAction::DeleteFlow { .. }) {
+            format!("Delete lane {}? {}", lane.title, explanation)
+        } else {
+            format!("{}\n\n{}", lane.title, explanation)
+        };
         self.show_utility(cx, id!(flow_confirm_tab), id!(FlowConfirmTab), title);
         self.ui
             .label(cx, ids!(flow_confirm_message))
@@ -1029,7 +1148,118 @@ impl App {
         cx.set_key_focus(self.ui.button(cx, ids!(flow_confirm_cancel)).area());
     }
 
+    fn open_resume_hash_dialog(&mut self, cx: &mut Cx, provider: &str) {
+        if self.ui.modal(cx, ids!(utility_overlay)).is_open() {
+            self.close_utility(cx);
+        }
+        self.iterations.resume_hash_provider = Some(provider.to_owned());
+        self.ui
+            .text_input(cx, ids!(resume_hash_input))
+            .set_text(cx, "");
+        self.ui.label(cx, ids!(resume_hash_error)).set_text(cx, "");
+        self.ui
+            .widget(cx, ids!(resume_hash_error))
+            .set_visible(cx, false);
+        let modal = self.ui.modal(cx, ids!(resume_hash_overlay));
+        modal.open(cx);
+        cx.set_key_focus(self.ui.text_input(cx, ids!(resume_hash_input)).area());
+    }
+
+    fn close_resume_hash_dialog(&mut self, cx: &mut Cx) {
+        self.iterations.resume_hash_provider = None;
+        self.ui.modal(cx, ids!(resume_hash_overlay)).close(cx);
+    }
+
+    fn handle_resume_hash_dialog(&mut self, cx: &mut Cx, actions: &Actions) {
+        let open = self.ui.modal(cx, ids!(resume_hash_overlay)).is_open()
+            || self.iterations.resume_hash_provider.is_some();
+        if !open {
+            return;
+        }
+        if self
+            .ui
+            .button(cx, ids!(resume_hash_cancel))
+            .clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(resume_hash_input))
+                .escaped(actions)
+            || self
+                .ui
+                .modal(cx, ids!(resume_hash_overlay))
+                .dismissed(actions)
+        {
+            self.close_resume_hash_dialog(cx);
+            return;
+        }
+        if !self.ui.button(cx, ids!(resume_hash_ok)).clicked(actions)
+            && self
+                .ui
+                .text_input(cx, ids!(resume_hash_input))
+                .returned(actions)
+                .is_none()
+        {
+            return;
+        }
+        let text = self.ui.text_input(cx, ids!(resume_hash_input)).text();
+        match iteration::validate_resume_token(&text) {
+            Ok(token) => {
+                let Some(provider) = self.iterations.resume_hash_provider.take() else {
+                    self.close_resume_hash_dialog(cx);
+                    return;
+                };
+                self.close_resume_hash_dialog(cx);
+                let repo = self.project_dir();
+                let sequence = self.iterations.snapshot.engine.revision.saturating_add(1);
+                match iteration::lane_create_from_resume_hash(repo, &provider, sequence, &token) {
+                    Ok((title, config)) => {
+                        self.send_iteration(
+                            cx,
+                            IterationRequest::Flow(FlowCommand::Create { title, config }),
+                            "create",
+                        );
+                    }
+                    Err(error) => self.flow_note(cx, &error),
+                }
+            }
+            Err(error) => {
+                self.ui
+                    .label(cx, ids!(resume_hash_error))
+                    .set_text(cx, &error);
+                self.ui
+                    .widget(cx, ids!(resume_hash_error))
+                    .set_visible(cx, true);
+                cx.set_key_focus(self.ui.text_input(cx, ids!(resume_hash_input)).area());
+            }
+        }
+    }
+
     fn handle_iteration_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if let Some(flow) = self.iterations.menu_flow.clone() {
+            if self.ui.button(cx, ids!(flow_menu_clear)).clicked(actions) {
+                self.confirm_flow_action(
+                    cx,
+                    IterationViewAction::ClearHistory { flow: flow.clone() },
+                );
+            }
+            if self.ui.button(cx, ids!(flow_menu_videos)).clicked(actions) {
+                self.confirm_flow_action(cx, IterationViewAction::DeleteRecordings { flow });
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(flow_delete_archive))
+            .clicked(actions)
+        {
+            let index = self
+                .ui
+                .drop_down(cx, ids!(flow_archive_choose))
+                .selected_item();
+            if let Some(flow) = self.iterations.archived_ids.get(index).cloned() {
+                self.confirm_flow_action(cx, IterationViewAction::DeleteFlow { flow });
+            }
+        }
+        self.handle_resume_hash_dialog(cx, actions);
         self.handle_flow_split_confirmation(cx, actions);
         if self
             .ui
@@ -1046,6 +1276,13 @@ impl App {
             if let Some(action) = self.iterations.confirmation.take() {
                 self.close_utility(cx);
                 match action {
+                    IterationViewAction::DeleteFlow { flow } => {
+                        self.close_flow_video(cx);
+                        self.close_flow_image(cx);
+                        if let Err(error) = self.request_delete_lane(cx, flow) {
+                            self.flow_note(cx, &error);
+                        }
+                    }
                     IterationViewAction::ArchiveFlow { flow } => {
                         self.request_lane_lifecycle(cx, flow, iteration::FlowLifecycle::Archived)
                     }
@@ -1057,7 +1294,7 @@ impl App {
                         );
                     }
                     IterationViewAction::DeleteRecordings { flow } => {
-                        self.close_demo_video(cx);
+                        self.close_flow_video(cx);
                         self.send_iteration(
                             cx,
                             IterationRequest::DeleteVideos { flow },
@@ -1069,29 +1306,35 @@ impl App {
             }
         }
         if self.ui.button(cx, ids!(caption_ai)).clicked(actions) {
-            cx.global::<makepad_widgets::ai_slot::AiSlotRequests>().open = Some(true);
+            // The assistant button toggles: a click while the slot is open closes it.
+            let requests = cx.global::<makepad_widgets::ai_slot::AiSlotRequests>();
+            let open = !requests.is_open;
+            requests.open = Some(open);
             cx.new_next_frame();
             cx.redraw_all();
-        }
-        if self.ui.radio_button(cx, ids!(flows_tab)).clicked(actions) {
-            self.set_flows_visible(cx, true);
         }
         for (button, provider) in [
             (id!(flow_new_fable), "claude"),
             (id!(flow_new_codex), "codex"),
         ] {
-            if self.ui.button(cx, &[button]).clicked(actions) {
-                self.iterations.new_provider = Some(provider.into());
-                let panel = self.ui.view(cx, ids!(flow_create_panel));
-                panel.set_visible(cx, true);
-                self.ui.button(cx, ids!(flow_create)).set_text(
-                    cx,
-                    if provider == "claude" {
-                        "Start Fable lane"
-                    } else {
-                        "Start Codex lane"
-                    },
-                );
+            if let Some(modifiers) = self.ui.button(cx, &[button]).clicked_modifiers(actions) {
+                match iteration::provider_lane_action(modifiers.shift) {
+                    iteration::ProviderLaneAction::OpenResumeHash => {
+                        self.open_resume_hash_dialog(cx, provider);
+                    }
+                    iteration::ProviderLaneAction::CreateFresh => {
+                        let repo = self.project_dir();
+                        let sequence = self.iterations.snapshot.engine.revision.saturating_add(1);
+                        self.send_iteration(
+                            cx,
+                            IterationRequest::Flow(FlowCommand::Create {
+                                title: iteration::automatic_lane_title(provider, sequence),
+                                config: iteration::default_lane_config(repo, provider),
+                            }),
+                            "create",
+                        );
+                    }
+                }
             }
         }
         if self.ui.button(cx, ids!(flow_archives)).clicked(actions) {
@@ -1169,38 +1412,18 @@ impl App {
                 view.zoom_by(cx, 1.25);
             }
         }
-        if self.ui.button(cx, ids!(flow_create)).clicked(actions) {
-            let repo = self.project_dir();
-            let config = iteration::FlowConfig {
-                manifest: repo.join("Cargo.toml"),
-                repo,
-                package: self.ui.text_input(cx, ids!(flow_package)).text(),
-                binary: self.ui.text_input(cx, ids!(flow_binary)).text(),
-                check_targets: self
-                    .ui
-                    .text_input(cx, ids!(flow_targets))
-                    .text()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                test_scope: iteration::TestScope::Workspace,
-                agent_provider: self.iterations.new_provider.clone(),
-                delegation_context: iteration::DEFAULT_DELEGATION_CONTEXT.into(),
-            };
-            let title = self.ui.text_input(cx, ids!(flow_title)).text();
-            self.send_iteration(
-                cx,
-                IterationRequest::Flow(FlowCommand::Create { title, config }),
-                "create",
-            );
-        }
         for action in actions {
             let Some(wa) = action.as_widget_action() else {
                 continue;
             };
             match wa.cast::<IterationViewAction>() {
+                IterationViewAction::SelectTerminal { flow, session } => {
+                    if let Err(error) =
+                        self.select_terminal_view(self.flow_terminal_id(&flow), session)
+                    {
+                        self.flow_note(cx, &error);
+                    }
+                }
                 IterationViewAction::ConnectTerminal { flow } => {
                     self.open_terminal_connections(cx, self.flow_terminal_id(&flow))
                 }
@@ -1220,9 +1443,17 @@ impl App {
                 IterationViewAction::StopFlow { flow } => {
                     self.request_lane_lifecycle(cx, flow, iteration::FlowLifecycle::Stopped)
                 }
-                action @ IterationViewAction::ArchiveFlow { .. } => {
-                    self.confirm_flow_action(cx, action)
+                IterationViewAction::LaneMenu { flow } => {
+                    self.show_utility(
+                        cx,
+                        id!(flow_lane_menu_tab),
+                        id!(FlowLaneMenuTab),
+                        "Lane menu",
+                    );
+                    self.iterations.menu_flow = Some(flow);
                 }
+                action @ (IterationViewAction::DeleteFlow { .. }
+                | IterationViewAction::ArchiveFlow { .. }) => self.confirm_flow_action(cx, action),
                 IterationViewAction::SelectFlow { id } => self.iterations.selected = Some(id),
                 IterationViewAction::BuildEmbedded {
                     flow,
@@ -1429,6 +1660,47 @@ impl App {
             } else {
                 self.flow_note(cx, "Preview the sync first");
             }
+        }
+    }
+}
+
+impl App {
+    fn request_delete_lane(&mut self, cx: &mut Cx, flow: String) -> Result<(), String> {
+        let lane = self
+            .iterations
+            .snapshot
+            .engine
+            .flows
+            .get(&flow)
+            .ok_or("Unknown lane")?;
+        if lane.predecessor.is_some() || lane.successor.is_some() {
+            return Err(
+                "Deleting split history is pending the terminal-lineage integration".into(),
+            );
+        }
+        if self.iterations.deleting.contains(&flow) {
+            return Ok(());
+        }
+        if lane.successor.is_none() {
+            self.stop_flow_terminal(cx, &flow)?;
+        }
+        self.iterations.delete_after_stop.insert(flow.clone());
+        self.iterations.deleting.insert(flow);
+        self.refresh_deleting_lanes(cx);
+        Ok(())
+    }
+
+    fn refresh_deleting_lanes(&mut self, cx: &mut Cx) {
+        if let Some(mut view) = self
+            .ui
+            .widget(cx, ids!(flow_scene))
+            .borrow_mut::<StudioIterationView>()
+        {
+            let mut engine = self.iterations.snapshot.engine.clone();
+            engine
+                .flows
+                .retain(|id, _| !self.iterations.deleting.contains(id));
+            view.set_engine(cx, Arc::new(engine));
         }
     }
 }
