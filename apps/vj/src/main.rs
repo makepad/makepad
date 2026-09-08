@@ -4895,6 +4895,25 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fadeout_learn), "fadeout"),
 ];
 
+/// How many extra input ports the settings file will be read for. A cap
+/// rather than a scan, because the store has no way to ask for every key
+/// under a prefix and a bounded read is honest about it.
+const MAX_EXTRA_INPUTS: usize = 16;
+
+/// Whether a port name is one the operator asked for, allowing for the
+/// spacing and case a name is written down with -- the same normalising
+/// the surface matching uses, for the same reason.
+fn port_name_matches(name: &str, wanted: &str) -> bool {
+    let fold = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let (name, wanted) = (fold(name), fold(wanted));
+    !wanted.is_empty() && name.contains(&wanted)
+}
+
 /// One MIDI message, in words.
 ///
 /// The console's troubleshooting story for a controller that does nothing
@@ -4952,6 +4971,18 @@ fn describe_midi(data: [u8; 3]) -> String {
 #[cfg(test)]
 mod midi_monitor_tests {
     use super::describe_midi;
+
+    #[test]
+    fn a_name_written_down_by_hand_still_matches_the_port() {
+        use super::port_name_matches;
+        assert!(port_name_matches("Launch Control XL", "launch control xl"));
+        assert!(port_name_matches("Launch Control XL", "LaunchControlXL"));
+        assert!(port_name_matches("2- Some Synth 1", "Some Synth"), "a substring is enough");
+        assert!(!port_name_matches("Some Synth", "Other Synth"));
+        // An empty line in the file opens nothing, rather than everything.
+        assert!(!port_name_matches("Some Synth", ""));
+        assert!(!port_name_matches("Some Synth", "   "));
+    }
 
     #[test]
     fn a_message_is_described_by_what_it_is_not_by_its_bytes() {
@@ -7712,6 +7743,16 @@ pub struct App {
     /// message arrived on, or that a device was present at all.
     #[rust]
     midi_ports: Vec<MidiPortDesc>,
+    /// Input ports to open besides the control surface's own, by name.
+    ///
+    /// Recognition is what picks the DIALECT; it should never have been
+    /// what decides whether a device is heard at all. Until the device list
+    /// has a page, this is the operator's way of saying "open that one too"
+    /// -- and once a port is open, the learn layer can bind anything on it,
+    /// because learn has always been port-blind and simply never had
+    /// anything but the surface to hear.
+    #[rust]
+    midi_extra_inputs: Vec<String>,
     /// Print every MIDI message, in and out, to the app's own log — which
     /// the console strip already shows, with a filter. Off by default; the
     /// switch is `midi.monitor` in `midi.txt`, or `VJ_TRACE_LED` for a
@@ -12803,23 +12844,18 @@ p2 {}
             if let Some(sender) = self.clock_sender.take() {
                 sender.close_and_wait();
             }
-            // Back to the APC's own ports, which is what the LED writer
-            // needs and all it needs. The record of what the clock owns
-            // goes back with them: nothing reads it while the sender is
-            // gone, but a field whose doc comment says "every output the
+            // Back to the surface's own ports, which is what the LED
+            // writer needs and all it needs. The record of what the clock
+            // owns goes back with them: nothing reads it while the sender
+            // is gone, but a field whose doc comment says "every output the
             // clock is being sent to" and which names a set nobody owns is
             // a bug already written, waiting for its first reader.
-            let ports = self.apc_output_ports.clone();
+            let ports = self.midi_open_outputs();
             cx.use_midi_outputs(&ports);
             self.clock_out_ports = ports;
             return;
         }
-        let mut ports = self.apc_output_ports.clone();
-        for port in &self.all_output_ports {
-            if !ports.contains(port) {
-                ports.push(*port);
-            }
-        }
+        let ports = self.midi_open_outputs();
         cx.use_midi_outputs(&ports);
         let share = std::sync::Arc::new(std::sync::Mutex::new(
             crate::midi_clock::ClockShare::new(),
@@ -12853,6 +12889,9 @@ p2 {}
         let mut store = crate::settings::Settings::new();
         store.set_bool("midi.soft_takeover", self.soft_takeover);
         store.set_bool("midi.monitor", self.midi_monitor);
+        for (index, name) in self.midi_extra_inputs.iter().enumerate() {
+            store.set_text(&format!("midi.open.{index}"), name);
+        }
         let _ = crate::durable::write_file(&Self::midi_settings_path(), store.to_text());
     }
 
@@ -12871,6 +12910,13 @@ p2 {}
         // The default is what this console has always done.
         self.soft_takeover = store.bool("midi.soft_takeover", false);
         self.midi_monitor |= store.bool("midi.monitor", false);
+        // Indexed rows with the NAME in the value: a key may not hold a
+        // space and a port name is full of them.
+        self.midi_extra_inputs = (0..MAX_EXTRA_INPUTS)
+            .filter_map(|index| store.raw(&format!("midi.open.{index}")))
+            .map(str::to_string)
+            .filter(|name| !name.is_empty())
+            .collect();
     }
 
     fn clock_settings_path() -> std::path::PathBuf {
@@ -14196,6 +14242,39 @@ p2 {}
         self.run_pad_cmds(cmds);
     }
 
+    /// Every input port to open: the control surface's own, plus any the
+    /// operator named in the settings file.
+    ///
+    /// ONE decider, because there are two callers -- the port scan and the
+    /// clock switch -- and an open set computed in two places is a rule
+    /// that only holds until somebody flips the other switch.
+    fn midi_open_inputs(&self) -> Vec<MidiPortId> {
+        let mut open = self.apc_input_ports.clone();
+        for desc in &self.midi_ports {
+            if !desc.port_type.is_input() || open.contains(&desc.port_id) {
+                continue;
+            }
+            if self.midi_extra_inputs.iter().any(|w| port_name_matches(&desc.name, w)) {
+                open.push(desc.port_id);
+            }
+        }
+        open
+    }
+
+    /// Every output port to open: the surface's own, and -- while the clock
+    /// is going out -- everything else the machine has, minus its own echo.
+    fn midi_open_outputs(&self) -> Vec<MidiPortId> {
+        let mut open = self.apc_output_ports.clone();
+        if self.clock_out {
+            for port in &self.all_output_ports {
+                if !open.contains(port) {
+                    open.push(*port);
+                }
+            }
+        }
+        open
+    }
+
     /// The name the machine gave a port, for the monitor to print.
     fn midi_port_name(&self, port: MidiPortId) -> &str {
         self.midi_ports
@@ -14248,11 +14327,15 @@ p2 {}
                 }
                 None => {}
             }
-            if !self.apc_input_ports.contains(&port) {
-                self.note_midi_in(port, data.data, "dropped: port not opened");
-                continue;
-            }
-            let claimed = self.apc.decode(data.data);
+            // The pad decoder is the SURFACE's, and it holds state -- the
+            // page, the bank -- so a message from anything else must not
+            // reach it. It is not dropped, though: learn has already had
+            // it, and the desk test below still sees it.
+            let surface_port = self.apc_input_ports.contains(&port);
+            let claimed = match surface_port {
+                true => self.apc.decode(data.data),
+                false => None,
+            };
             if let Some(action) = claimed {
                 self.note_midi_in(port, data.data, &format!("surface: {action:?}"));
                 pad_touched |= matches!(action, ApcAction::Pad { .. });
@@ -14268,14 +14351,23 @@ p2 {}
             // set stays as the floor beneath it: the clip grid and the
             // crossfader were never the desk's, whatever the decoder makes
             // of a particular note on a particular model.
-            if claimed.is_none() && !is_vj_reserved_midi(data.data) {
+            if claimed.is_none() && surface_port && !is_vj_reserved_midi(data.data) {
+                // The desk is played from the SURFACE. Now that other
+                // devices can be opened, saying so is what keeps a synth's
+                // knobs out of the lighting rig -- and today nothing else
+                // is ever opened, so it changes nothing yet, which is the
+                // only moment such a rule can be added for free.
                 let outcome = match self.lighting.as_ref() {
                     Some(desk) => format!("lighting: {:?}", desk.handle_midi(data.data)),
                     None => "nobody (lighting is off)".to_string(),
                 };
                 self.note_midi_in(port, data.data, &outcome);
             } else if claimed.is_none() {
-                self.note_midi_in(port, data.data, "nobody");
+                let outcome = match surface_port {
+                    true => "nobody",
+                    false => "nobody (not the surface)",
+                };
+                self.note_midi_in(port, data.data, outcome);
             }
         }
         for action in actions {
@@ -30781,17 +30873,16 @@ impl MatchEvent for App {
             .filter(|desc| desc.port_type.is_output() && !apc40::is_loopback_port(&desc.name))
             .map(|desc| desc.port_id)
             .collect();
-        // The clock, when it is on, goes to every output; the LEDs only
-        // ever go to the pad surface's own.
-        let opened = match self.clock_out {
-            true => self.all_output_ports.clone(),
-            false => outputs.clone(),
-        };
-        cx.use_midi_inputs(&inputs);
-        cx.use_midi_outputs(&opened);
-        self.clock_out_ports = opened;
         self.apc_input_ports = inputs;
         self.apc_output_ports = outputs;
+        // The clock, when it is on, goes to every output; the LEDs only
+        // ever go to the surface's own. Inputs are the surface's plus
+        // whatever the operator asked for by name.
+        let opened_in = self.midi_open_inputs();
+        let opened_out = self.midi_open_outputs();
+        cx.use_midi_inputs(&opened_in);
+        cx.use_midi_outputs(&opened_out);
+        self.clock_out_ports = opened_out;
         self.apc_leds.set_model(model.unwrap_or_default());
         // The press decoder translates grid notes with the same per-model
         // mapping the LEDs use — one truth for both directions.
