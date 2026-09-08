@@ -94,6 +94,7 @@ fn games(
         exclude_tag: None,
         creator: None,
         live_only: true,
+        newest: false,
         page_size: 50,
         facets: 0,
     };
