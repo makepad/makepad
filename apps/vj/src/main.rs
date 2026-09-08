@@ -4895,6 +4895,82 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fadeout_learn), "fadeout"),
 ];
 
+/// Snap a 7-bit control's position to a neutral it could not otherwise
+/// reach.
+///
+/// A knob or fader from a controller has 128 positions and no more. If its
+/// neutral -- flat on a tone band, unity on a gain, centred on the sweep --
+/// does not happen to fall on one of them, the hardware simply cannot ask
+/// for it: deck gain has unity at 84.67 of 127 and the tone bands have flat
+/// at 63.5, so neither the fader nor a single knob on the surface could
+/// ever be set to the value they are marked with. Every one of them was a
+/// hair off, forever, and no amount of care with the hand would fix it.
+///
+/// The window is half a step wide and INCLUSIVE, which is the part that
+/// matters: a neutral landing exactly between two positions -- the tone
+/// bands' case, flat at 63.5 -- is then reachable from both, and a centre
+/// detent that only works from one side is not a centre. The comparison is
+/// written in step units because that is the question being asked: which
+/// of the 128 did the hand reach for.
+///
+/// Only for values that arrived from a 7-bit control. A pointer on a screen
+/// has as many positions as it has pixels and is not owed a detent it was
+/// not asked for.
+fn seven_bit_detent(position: f32, neutral: f32) -> f32 {
+    let asked = (position * 127.0).round();
+    match (asked - neutral * 127.0).abs() <= 0.5 {
+        true => neutral,
+        false => position,
+    }
+}
+
+#[cfg(test)]
+mod detent_tests {
+    use super::seven_bit_detent;
+
+    /// Unity on the deck fader sits at 84.67 of 127, so no position lands
+    /// on it. The nearest one has to mean it.
+    #[test]
+    fn a_gain_fader_can_reach_unity_at_all() {
+        let neutral = 1.0 / crate::decks::MAX_DECK_GAIN;
+        let at = |step: u8| seven_bit_detent(step as f32 / 127.0, neutral);
+        assert_eq!(at(85), neutral, "the nearest position means unity");
+        assert!((at(85) * crate::decks::MAX_DECK_GAIN - 1.0).abs() < 1e-6);
+        // And only the nearest: its neighbours still mean what they say.
+        assert_ne!(at(84), neutral);
+        assert_ne!(at(86), neutral);
+        assert!((at(84) - 84.0 / 127.0).abs() < 1e-6, "untouched");
+    }
+
+    /// The master has the same shape at a different place.
+    #[test]
+    fn the_master_can_reach_unity_too() {
+        let neutral = 1.0 / crate::mixer::MAX_MASTER_GAIN;
+        assert_eq!(seven_bit_detent(106.0 / 127.0, neutral), neutral);
+        assert_ne!(seven_bit_detent(105.0 / 127.0, neutral), neutral);
+    }
+
+    /// Flat on a tone band is at 63.5, exactly between two positions, so
+    /// both of them have to mean flat -- a centre detent reachable from
+    /// only one side is not a centre.
+    #[test]
+    fn a_centre_between_two_positions_is_reachable_from_both() {
+        assert_eq!(seven_bit_detent(63.0 / 127.0, 0.5), 0.5);
+        assert_eq!(seven_bit_detent(64.0 / 127.0, 0.5), 0.5);
+        assert_ne!(seven_bit_detent(62.0 / 127.0, 0.5), 0.5);
+        assert_ne!(seven_bit_detent(65.0 / 127.0, 0.5), 0.5);
+    }
+
+    /// The ends of the travel are positions like any other and must not be
+    /// dragged anywhere.
+    #[test]
+    fn the_ends_of_the_travel_are_left_alone() {
+        assert_eq!(seven_bit_detent(0.0, 0.5), 0.0);
+        assert_eq!(seven_bit_detent(1.0, 0.5), 1.0);
+        assert_eq!(seven_bit_detent(0.0, 1.0 / 1.5), 0.0);
+    }
+}
+
 /// How many extra input ports the settings file will be read for. A cap
 /// rather than a scan, because the store has no way to ask for every key
 /// under a prefix and a bounded read is honest about it.
@@ -9811,7 +9887,10 @@ impl App {
                 }
             }
             "master" => {
-                let value = crate::mixer::master_from_control(v);
+                let value = crate::mixer::master_from_control(seven_bit_detent(
+                    v,
+                    1.0 / crate::mixer::MAX_MASTER_GAIN,
+                ));
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
@@ -14143,6 +14222,7 @@ p2 {}
                 // for 1.0 and the master sat at five sixths, with the last
                 // of its travel unreachable from the hardware -- while the
                 // same fader adopted through learn could reach all of it.
+                let value = seven_bit_detent(value, 1.0 / crate::mixer::MAX_MASTER_GAIN);
                 let value = crate::mixer::master_from_control(value);
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
@@ -14176,7 +14256,8 @@ p2 {}
                     _ => None,
                 };
                 if let Some(deck) = deck {
-                    let cmds = self.decks.set_gain(deck, value * 1.5);
+                    let value = seven_bit_detent(value, 1.0 / crate::decks::MAX_DECK_GAIN);
+                    let cmds = self.decks.set_gain(deck, value * crate::decks::MAX_DECK_GAIN);
                     self.run_deck_cmds(cx, cmds);
                     self.sync_deck_controls(cx);
                 }
@@ -14184,6 +14265,9 @@ p2 {}
             // Top knob row: each deck's three tone bands plus its filter.
             ApcAction::TrackKnob { index, value } => {
                 let deck = if index < 4 { DeckId::A } else { DeckId::B };
+                // Flat on a band, and centred on the sweep, are both the
+                // middle of the knob's travel.
+                let value = seven_bit_detent(value, 0.5);
                 let cmds = match index % 4 {
                     3 => self.decks.set_filter(deck, value),
                     band => self.decks.set_eq(deck, band, hardware_band_gain(value)),
@@ -14202,6 +14286,7 @@ p2 {}
                     2 => 0,
                     _ => 3,
                 };
+                let value = seven_bit_detent(value, 0.5);
                 let cmds = self.decks.set_stem(deck, stem, hardware_band_gain(value));
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_knobs(cx, deck);
