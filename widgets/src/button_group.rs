@@ -617,6 +617,10 @@ impl SegmentedControl {
     pub fn set_selected(&mut self, cx: &mut Cx, index: usize) {
         if index < self.options.len() && self.selected != index {
             self.selected = index;
+            // The arrows resume from the answer, not from wherever the keys
+            // were last standing: a host that sets the answer itself has
+            // moved the row, and the keyboard's place moved with it.
+            self.focused = index;
             self.draw_bg.redraw(cx);
         }
     }
