@@ -72,6 +72,320 @@ pub fn page_window(total: usize, current: usize, siblings: usize, boundaries: us
     slots
 }
 
+
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+
+/// What a strip reports: the page now being asked for, 1-indexed, the same
+/// way `page_window` counts.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum PaginationAction {
+    Changed(usize),
+    #[default]
+    None,
+}
+
+/// What one drawn rect answers to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Cell {
+    Page(usize),
+    /// The fold. Drawn, and never answers.
+    Gap,
+    Prev,
+    Next,
+}
+
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    mod.widgets.DrawPageCellBase = #(DrawPageCell::script_component(vm))
+    set_type_default() do #(DrawPageCell::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color: #00000000
+        radius: 4.0
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(0.5 0.5 self.rect_size.x - 1.0 self.rect_size.y - 1.0 self.radius)
+            sdf.fill(self.color)
+            return sdf.result
+        }
+    }
+
+    mod.widgets.PaginationBase = #(Pagination::register_widget(vm))
+
+    /** A numbered strip for a list too long to show at once: the pages
+     * around the one being read, the ends, and one mark for the rest. */
+    mod.widgets.Pagination = set_type_default() do mod.widgets.PaginationBase{
+        width: Fit
+        height: 30.
+        /** how many pages there are 1..9999 step 1 */
+        total: 1
+        /** which page is being read, counting from one 1..9999 step 1 */
+        page: 1
+        /** how many neighbours to show each side of it 0..4 step 1 */
+        siblings: 1
+        /** how many to keep pinned at each end 0..3 step 1 */
+        boundaries: 1
+        /** offer the two step marks at the ends 0..1 step 1 */
+        can_step: true
+        /** how wide one cell is 18..64 step 2 */
+        cell_size: 30.
+        /** the room between two cells 0..12 step 1 */
+        cell_gap: 2.
+
+        draw_cell +: {color: #00000000}
+        draw_cell_hover +: {color: theme.color_surface_container_high}
+        draw_cell_current +: {color: theme.color_primary}
+        draw_text +: {
+            color: theme.color_text_meta
+            text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+        draw_text_current +: {
+            color: theme.color_on_primary
+            text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+    }
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawPageCell {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    color: Vec4f,
+    #[live]
+    radius: f32,
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct Pagination {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    /// The strip's own rect, so the widget has something to be hovered by
+    /// and redrawn by: every cell is placed absolutely and leaves none.
+    #[redraw]
+    #[live]
+    draw_bg: DrawPageCell,
+    #[live]
+    draw_cell: DrawPageCell,
+    #[live]
+    draw_cell_hover: DrawPageCell,
+    #[live]
+    draw_cell_current: DrawPageCell,
+    #[live]
+    pub draw_text: DrawText,
+    #[live]
+    pub draw_text_current: DrawText,
+
+    #[live(1)]
+    pub total: usize,
+    #[live(1)]
+    pub page: usize,
+    #[live(1)]
+    pub siblings: usize,
+    #[live(1)]
+    pub boundaries: usize,
+    #[live(true)]
+    pub can_step: bool,
+    #[live(30.0)]
+    pub cell_size: f64,
+    #[live(2.0)]
+    pub cell_gap: f64,
+
+    #[rust]
+    cells: Vec<(Rect, Cell)>,
+    #[rust]
+    hover: Option<Cell>,
+    #[rust]
+    area: Area,
+}
+
+impl Pagination {
+    /// The page this strip is on, counting from one.
+    pub fn page(&self) -> usize {
+        self.page.clamp(1, self.total.max(1))
+    }
+
+    /// Turn to a page, if it is a different one and one that exists.
+    pub fn set_page(&mut self, cx: &mut Cx, page: usize) {
+        let page = page.clamp(1, self.total.max(1));
+        if page != self.page {
+            self.page = page;
+            self.hover = None;
+            self.redraw(cx);
+        }
+    }
+
+    /// The page a cell answers with, or nothing for the fold and for a step
+    /// that has nowhere left to go.
+    fn answer(&self, cell: Cell) -> Option<usize> {
+        let page = self.page();
+        match cell {
+            Cell::Page(p) => Some(p),
+            Cell::Gap => None,
+            Cell::Prev => (page > 1).then(|| page - 1),
+            Cell::Next => (page < self.total.max(1)).then(|| page + 1),
+        }
+    }
+}
+
+impl Widget for Pagination {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let slots = page_window(self.total, self.page, self.siblings, self.boundaries);
+        // Every cell is one size, so the strip's own width is known before
+        // anything is drawn and a Fit strip can ask for exactly it.
+        let count = slots.len() + if self.can_step { 2 } else { 0 };
+        let step = self.cell_size + self.cell_gap;
+        let natural = (count as f64 * step - self.cell_gap).max(0.0);
+        let walk = Walk {
+            width: match walk.width {
+                Size::Fit { .. } => Size::Fixed(natural),
+                other => other,
+            },
+            ..walk
+        };
+        self.draw_bg.begin(cx, walk, self.layout);
+        let strip = cx.turtle().rect();
+        self.cells.clear();
+
+        let mut order: Vec<Cell> = Vec::with_capacity(count);
+        if self.can_step {
+            order.push(Cell::Prev);
+        }
+        order.extend(slots.iter().map(|slot| match slot {
+            PageSlot::Page(p) => Cell::Page(*p),
+            PageSlot::Ellipsis => Cell::Gap,
+        }));
+        if self.can_step {
+            order.push(Cell::Next);
+        }
+
+        let page = self.page();
+        let line = 14.0_f64.min(strip.size.y);
+        let mut x = strip.pos.x;
+        for cell in order {
+            let rect = Rect {
+                pos: dvec2(x, strip.pos.y),
+                size: dvec2(self.cell_size, strip.size.y),
+            };
+            let current = matches!(cell, Cell::Page(p) if p == page);
+            let live = self.answer(cell).is_some();
+            if current {
+                self.draw_cell_current.draw_abs(cx, rect);
+            } else if live && self.hover == Some(cell) {
+                self.draw_cell_hover.draw_abs(cx, rect);
+            } else {
+                self.draw_cell.draw_abs(cx, rect);
+            }
+            let label = match cell {
+                Cell::Page(p) => p.to_string(),
+                Cell::Gap => "\u{2026}".to_string(),
+                Cell::Prev => "\u{2039}".to_string(),
+                Cell::Next => "\u{203a}".to_string(),
+            };
+            let text_walk = Walk {
+                abs_pos: Some(dvec2(x, strip.pos.y + (strip.size.y - line) * 0.5)),
+                width: Size::Fixed(self.cell_size),
+                height: Size::Fixed(line),
+                ..Walk::default()
+            };
+            let mid = Align { x: 0.5, y: 0.5 };
+            if current {
+                self.draw_text_current.draw_walk(cx, text_walk, mid, &label);
+            } else {
+                self.draw_text.draw_walk(cx, text_walk, mid, &label);
+            }
+            self.cells.push((rect, cell));
+            x += step;
+        }
+
+        self.draw_bg.end(cx);
+        self.area = self.draw_bg.area();
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                let at = self
+                    .cells
+                    .iter()
+                    .find(|(r, c)| r.contains(fe.abs) && self.answer(*c).is_some())
+                    .map(|(_, c)| *c);
+                if at != self.hover {
+                    self.hover = at;
+                    cx.set_cursor(if at.is_some() {
+                        MouseCursor::Hand
+                    } else {
+                        MouseCursor::Default
+                    });
+                    self.redraw(cx);
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                if self.hover.take().is_some() {
+                    self.redraw(cx);
+                }
+            }
+            Hit::FingerDown(fe) => {
+                let hit = self
+                    .cells
+                    .iter()
+                    .find(|(r, _)| r.contains(fe.abs))
+                    .map(|(_, c)| *c);
+                if let Some(page) = hit.and_then(|cell| self.answer(cell)) {
+                    let uid = self.uid;
+                    self.set_page(cx, page);
+                    cx.widget_action(uid, PaginationAction::Changed(page));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Which page of how many, so a test can read the strip in one line.
+    fn text(&self) -> String {
+        format!("{} of {}", self.page(), self.total.max(1))
+    }
+}
+
+impl PaginationRef {
+    pub fn page(&self) -> usize {
+        self.borrow().map(|inner| inner.page()).unwrap_or(1)
+    }
+
+    pub fn set_page(&self, cx: &mut Cx, page: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_page(cx, page);
+        }
+    }
+
+    pub fn set_total(&self, cx: &mut Cx, total: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.total = total.max(1);
+            let page = inner.page();
+            inner.set_page(cx, page);
+            inner.redraw(cx);
+        }
+    }
+
+    /// The page asked for this pass, if one was.
+    pub fn changed(&self, actions: &Actions) -> Option<usize> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<PaginationAction>() {
+            PaginationAction::Changed(page) => Some(page),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

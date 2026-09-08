@@ -229,6 +229,7 @@ pub use crate::{
     modal::*,
     nav_control::*,
     page_flip::*,
+    pagination::*,
     popup_menu::*,
     popup_notification::*,
     data_grid::*,
@@ -451,6 +452,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
+    crate::pagination::script_mod(vm);
     crate::marquee::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
@@ -723,6 +725,30 @@ mod chip_registration_tests {
         assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
         assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
         assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pagination_registration_tests {
+    /// The strip registers after the view and label it draws with, carries
+    /// exactly one preset, and keeps its arithmetic a free function: the
+    /// window is what the tests are about, the drawing is not.
+    #[test]
+    fn test_pagination_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let pagination = include_str!("pagination.rs");
+        assert!(lib.contains("pub mod pagination;"));
+        assert!(lib.contains("pagination::*"));
+        let at = lib.find("crate::pagination::script_mod(vm);").expect("pagination registered");
+        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before pagination");
+        }
+        assert!(pagination.contains("mod.widgets.PaginationBase = #(Pagination::register_widget(vm))"));
+        assert_eq!(
+            pagination.matches("set_type_default() do mod.widgets.PaginationBase").count(),
+            1
+        );
+        assert!(pagination.contains("pub fn page_window("), "the arithmetic stays a free function");
     }
 }
 
