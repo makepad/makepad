@@ -8362,6 +8362,20 @@ pub const TRACK_DRAG_SLOP: f64 = 5.0;
 /// Peak travel, not the release's distance: a carry that goes out and
 /// comes back has still been a carry, and letting go over the row it
 /// started on must not read as a click on it.
+/// Whether a press on a row body carries that row: picks it, drags it, or
+/// loads a deck from it on release.
+///
+/// The primary button only -- and any touch, which has no second button to
+/// offer. A `View` reports its finger events whatever button made them, so
+/// without this a press of the SECONDARY button picked the row, a drag with
+/// it carried the selection, and the release LOADED A DECK. The worst thing
+/// a console can do with a gesture it does not understand is guess, and
+/// guessing "put this record on air" during a set is the worst guess
+/// available. Everything that is not the primary button means nothing here.
+pub fn press_carries_a_row(device: &DigitDevice) -> bool {
+    device.is_primary_hit()
+}
+
 pub fn track_list_hits(
     ui: &WidgetRef,
     cx: &mut Cx,
@@ -8404,8 +8418,14 @@ pub fn track_list_hits(
         } else if item.button(cx, ids!(hp_queue)).clicked(actions) {
             TrackListHit::PreviewQueue
         } else if let Some(down) = body.finger_down(actions) {
+            if !press_carries_a_row(&down.device) {
+                continue;
+            }
             TrackListHit::Pick(row_id, down.modifiers)
         } else if let Some(moved) = body.finger_move(actions) {
+            if !press_carries_a_row(&moved.device) {
+                continue;
+            }
             // Travelled far enough from where the finger went down: the
             // operator is carrying the picked rows, not choosing one.
             if (moved.abs - moved.abs_start).length() < TRACK_DRAG_SLOP {
@@ -8413,6 +8433,9 @@ pub fn track_list_hits(
             }
             TrackListHit::Drag(row_id)
         } else if let Some(up) = body.finger_up(actions) {
+            if !press_carries_a_row(&up.device) {
+                continue;
+            }
             // The click lands on the RELEASE, and only for a press that
             // never became a carry. Once the ghost is out, the drop decides
             // where those rows go — loading on the way past is how one drag
@@ -8593,6 +8616,24 @@ mod tests {
         // The two mark columns are a tick or nothing, never a word.
         assert_eq!(column_text(Column::Stem, &row), "✓");
         assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    #[test]
+    fn only_the_primary_button_carries_a_row() {
+        use makepad_widgets::makepad_platform::event::finger::DigitDevice;
+        assert!(press_carries_a_row(&DigitDevice::Mouse { button: MouseButton::PRIMARY }));
+        // The one that used to load a deck.
+        assert!(!press_carries_a_row(&DigitDevice::Mouse { button: MouseButton::SECONDARY }));
+        for other in [MouseButton::MIDDLE, MouseButton::BACK, MouseButton::FORWARD] {
+            assert!(
+                !press_carries_a_row(&DigitDevice::Mouse { button: other }),
+                "{other:?} should mean nothing on a row",
+            );
+        }
+        assert!(
+            press_carries_a_row(&DigitDevice::Touch { uid: 1 }),
+            "a touch has no second button to offer, so it must still carry",
+        );
     }
 
     #[test]
