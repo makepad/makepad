@@ -391,10 +391,21 @@ impl Drawer {
     /// Move the sheet to a rung, the way a drag would leave it there.
     pub fn set_detent(&mut self, cx: &mut Cx, detent: SheetDetent) {
         self.detent = detent;
-        let column = self.side.is_column();
-        let base = self.size.extent(column).unwrap_or(self.pass_extent);
-        self.live_extent = detent_extent(detent, base, self.pass_extent);
-        self.extent_dressed = true;
+        if self.pass_extent > 0.0 {
+            let column = self.side.is_column();
+            let base = self.size.extent(column).unwrap_or(self.pass_extent);
+            self.live_extent = detent_extent(detent, base, self.pass_extent);
+            self.extent_dressed = true;
+        } else {
+            // Nothing has measured the window yet — this is a rung being
+            // set in the same breath as the open, before a single draw —
+            // so there is no room to compute against. Leave it for the
+            // draw that is about to happen, which will have the pass.
+            // Computing here would resolve every rung to nothing and then
+            // mark the answer as final, which is a sheet that opens
+            // invisible and stays that way.
+            self.extent_dressed = false;
+        }
         self.modal.redraw(cx);
     }
 
