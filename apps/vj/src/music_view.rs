@@ -3429,28 +3429,36 @@ script_mod! {
                                 align: Align{x: 0.0, y: 0.5}
                                 // Catalog-only controls: the local listing is neither
                                 // searched nor paginated, so these fold away with it.
+                                // OUTSIDE the catalog-only view on purpose. It used to
+                                // live inside it, so the LOCAL FILES switch hid the box
+                                // along with the paging controls — and an operator who
+                                // had dropped four hundred files on the window got four
+                                // hundred rows and no way to type a name at all. The
+                                // night the store cannot be reached is exactly the night
+                                // that matters. The category and paging controls stay
+                                // catalog-only below, because a local listing has
+                                // neither.
+                                music_search := TextInput{
+                                    // Twelve characters of query at the floor, and a
+                                    // ceiling: past ~488 the box is just a long empty
+                                    // trough, and the row's other controls can use it.
+                                    width: Fill{min: 96. max: 488.}
+                                    // One line, always: the themed input wraps its text
+                                    // by default, and a long query is not worth making
+                                    // the whole row two lines tall.
+                                    flow: Flow.Right{wrap: false}
+                                    empty_text: "search music…"
+                                }
                                 music_catalog := View{
                                     width: Fill
                                     height: Fit
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
-                                    // Twelve characters of query, eight of category: the
-                                    // floors below which a field stops being a field. The
-                                    // search box takes whatever the row does not spend;
-                                    // the category cell is narrowed by
-                                    // `App::sync_library_density` when the console does.
-                                    music_search := TextInput{
-                                        // Twelve characters of query at the floor, and a
-                                        // ceiling: past ~488 the box is just a long empty
-                                        // trough, and the row's other controls can use it.
-                                        width: Fill{min: 96. max: 488.}
-                                        // One line, always: the themed input wraps its
-                                        // text by default, and a long query is not worth
-                                        // making the whole row two lines tall.
-                                        flow: Flow.Right{wrap: false}
-                                        empty_text: "search music…"
-                                    }
+                                    // Eight characters of category: the floor below which
+                                    // a field stops being a field. The category cell is
+                                    // narrowed by `App::sync_library_density` when the
+                                    // console is.
                                     music_category_cell := View{
                                         width: 96
                                         height: Fit
@@ -8639,6 +8647,27 @@ pub const TRACK_SCROLL_SPEED: f64 = 90.0;
 /// Peak travel, not the release's distance: a carry that goes out and
 /// comes back has still been a carry, and letting go over the row it
 /// started on must not read as a click on it.
+/// Whether a local file's row answers what the operator typed.
+///
+/// The catalog's search is a posting index reached over HTTP; a local
+/// listing has none of that and never had any search at all, so an operator
+/// who dropped four hundred files on the window got four hundred rows and no
+/// way to narrow them. This is the whole of the local answer: every word of
+/// the query has to appear somewhere in the row's own text.
+///
+/// SUBSTRING, not whole-word, because that is what a filename is like —
+/// "opener-final-2" should answer "final". Every word ANDed, so a second
+/// word narrows rather than widens. And folded through the same table the
+/// catalog index uses, so "cafe" finds "Café" on both sides of the LOCAL
+/// FILES switch rather than only one.
+pub fn local_row_matches(query: &str, haystack: &str) -> bool {
+    let folded = makepad_asset_data::fold::fold_to_ascii(haystack);
+    makepad_asset_data::fold::fold_to_ascii(query)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .all(|word| folded.contains(word))
+}
+
 /// Which row the viewport should sit on after a re-listing, given the row it
 /// sat on before it, or `None` when nothing it was showing survived.
 ///
@@ -8988,6 +9017,42 @@ mod tests {
         assert_eq!(carried_top_row(&was, 1, &listing(&["a"])), None, "b and c both gone");
         assert_eq!(carried_top_row(&was, 9, &listing(&["a"])), None, "already past the end");
         assert_eq!(carried_top_row(&was, 0, &[]), None, "nothing to land on at all");
+    }
+
+    #[test]
+    fn a_local_row_answers_a_word_from_anywhere_in_its_name() {
+        let row = "F:/music/crates/opener-final-2.mp3";
+        // A filename is not words with spaces between them, so whole-word
+        // matching would answer almost nothing an operator types.
+        assert!(local_row_matches("final", row));
+        assert!(local_row_matches("opener", row));
+        assert!(local_row_matches("crates", row), "the folder it sits in counts too");
+        assert!(!local_row_matches("closer", row));
+    }
+
+    #[test]
+    fn every_word_narrows_rather_than_widens() {
+        let row = "F:/music/deep house/opener.mp3";
+        assert!(local_row_matches("deep opener", row), "both present, in any order");
+        assert!(!local_row_matches("deep closer", row), "one missing is no match");
+    }
+
+    #[test]
+    fn a_local_row_folds_the_same_way_the_catalog_index_does() {
+        let row = "F:/music/Café del Mar.mp3";
+        assert!(local_row_matches("cafe", row), "the spelling somebody types");
+        assert!(local_row_matches("café", row), "and the one on the file");
+        // Both sides of the LOCAL FILES switch answer the same question.
+        assert!(local_row_matches("CAFE", row));
+    }
+
+    #[test]
+    fn an_empty_or_punctuation_only_query_matches_everything() {
+        // The caller skips the filter for a blank query; this is the second
+        // line of that defence, for a query that is all separators.
+        for query in ["", "   ", "---", "..."] {
+            assert!(local_row_matches(query, "anything at all"), "{query:?}");
+        }
     }
 
     #[test]

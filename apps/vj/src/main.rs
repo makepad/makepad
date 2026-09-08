@@ -8262,6 +8262,10 @@ pub struct App {
     /// When the room was last sampled, for the night's log.
     #[rust]
     room_watch: Option<std::time::Instant>,
+    /// What the search box holds, kept for the LOCAL listing, which has no
+    /// index to send it to and filters its own rows with it.
+    #[rust]
+    music_query: String,
     /// Every set list, the live one included. The ENGINE holds the live
     /// list; this holds the shelf it came off.
     #[rust]
@@ -23039,6 +23043,16 @@ p2 {}
                 Surface::Sfx => &self.sfx_model,
                 Surface::Mesh => &self.mesh_model,
             };
+            // The local listing is not the model's: it is filtered in the
+            // row builder, so the count has to come from the rows the
+            // operator can actually see rather than from a catalog that is
+            // not on screen.
+            if surface == Surface::Music && self.music_local {
+                let shown = self.music_rows.len();
+                let held = self.local_tracks.len();
+                self.ui.label(cx, label).set_text(cx, &format!("{shown} / {held}"));
+                continue;
+            }
             let mut text = format!("{} / {}", model.tiles().len(), model.total);
             if model.has_more() {
                 text.push_str(" +");
@@ -26491,7 +26505,21 @@ p2 {}
     /// both through the STEM/KRK header switches at the end.
     fn music_row_entries(&mut self) -> Vec<TrackRowEntry> {
         if self.music_local {
-            let paths = self.local_tracks.clone();
+            // The local listing filters itself: there is no index behind it
+            // to send the query to, and until now that meant it had no
+            // search at all — four hundred dropped files, four hundred rows.
+            // A file's own name is what an operator remembers, so the
+            // haystack is the filename and the directory it sits in.
+            let query = self.music_query.trim().to_string();
+            let paths: Vec<PathBuf> = self
+                .local_tracks
+                .iter()
+                .filter(|path| {
+                    query.is_empty()
+                        || music_view::local_row_matches(&query, &path.to_string_lossy())
+                })
+                .cloned()
+                .collect();
             let rows = paths
                 .iter()
                 .map(|path| {
@@ -30480,6 +30508,12 @@ impl MatchEvent for App {
                 // start from the newest query rather than resume wherever
                 // the last walk happened to stop.
                 self.search_recall.retain(|(held, _, _)| *held != surface);
+                if surface == Surface::Music {
+                    // The local listing has no index to send this to: it
+                    // filters its own rows, so it needs the words themselves.
+                    self.music_query = text.clone();
+                    self.music_rows_dirty = true;
+                }
                 self.pending_search = Some((surface, SearchBox::Text, text));
                 cx.stop_timer(self.search_timer);
                 self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
