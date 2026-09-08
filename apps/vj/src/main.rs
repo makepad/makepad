@@ -4895,6 +4895,88 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fadeout_learn), "fadeout"),
 ];
 
+/// One MIDI message, in words.
+///
+/// The console's troubleshooting story for a controller that does nothing
+/// has been "watch the deck and guess". This is what the monitor prints, so
+/// it has to say what the message IS -- not the three bytes, which anyone
+/// can read off a wire, but which of them are part of it and what they
+/// mean, since half the reports about a controller are really about a
+/// message being a different KIND from what its owner thought.
+fn describe_midi(data: [u8; 3]) -> String {
+    use makepad_widgets::makepad_platform::midi::{MidiData, MidiEvent};
+    let message = MidiData { data };
+    match message.decode() {
+        MidiEvent::Note(note) if note.is_on => {
+            format!("note on ch{} {} vel {}", note.channel, note.note_number, note.velocity)
+        }
+        // A note-on at velocity zero IS a note-off, and saying so is the
+        // point: a pad that "sends two presses" is usually sending this.
+        MidiEvent::Note(note) => format!(
+            "note off ch{} {}{}",
+            note.channel,
+            note.note_number,
+            if message.status() == 0x9 { " (on, velocity 0)" } else { "" },
+        ),
+        MidiEvent::ControlChange(cc) => format!(
+            "cc ch{} {} = {} ({:.2})",
+            cc.channel,
+            cc.param,
+            cc.value,
+            cc.value as f32 / 127.0
+        ),
+        MidiEvent::Aftertouch(at) => {
+            format!("aftertouch ch{} {} {}", at.channel, at.note_number, at.velocity)
+        }
+        MidiEvent::ChannelAftertouch(at) => {
+            format!("pressure ch{} {}", at.channel, at.value)
+        }
+        MidiEvent::ProgramChange(pc) => format!("program ch{} {}", pc.channel, pc.hi),
+        MidiEvent::PitchBend(pb) => format!("bend ch{} {}", pb.channel, pb.bend),
+        MidiEvent::System(_) => match data[0] {
+            0xf8 => "clock".to_string(),
+            0xfa => "start".to_string(),
+            0xfb => "continue".to_string(),
+            0xfc => "stop".to_string(),
+            0xfe => "active sensing".to_string(),
+            0xff => "reset".to_string(),
+            0xf0 => format!("sysex {:02x} {:02x}", data[1], data[2]),
+            other => format!("system {other:#04x}"),
+        },
+        MidiEvent::Unknown(_) => {
+            format!("raw {:02x} {:02x} {:02x}", data[0], data[1], data[2])
+        }
+    }
+}
+
+#[cfg(test)]
+mod midi_monitor_tests {
+    use super::describe_midi;
+
+    #[test]
+    fn a_message_is_described_by_what_it_is_not_by_its_bytes() {
+        assert_eq!(describe_midi([0x90, 32, 127]), "note on ch0 32 vel 127");
+        assert_eq!(describe_midi([0x83, 32, 0]), "note off ch3 32");
+        assert_eq!(describe_midi([0xb0, 15, 100]), "cc ch0 15 = 100 (0.79)");
+        assert_eq!(describe_midi([0xe0, 0, 64]), "bend ch0 8192");
+    }
+
+    /// The two that send people looking in the wrong place: a note-off
+    /// wearing a note-on's status, and a one-byte message whose padding
+    /// looks like data.
+    #[test]
+    fn the_confusing_ones_say_what_they_really_are() {
+        assert_eq!(describe_midi([0x90, 32, 0]), "note off ch0 32 (on, velocity 0)");
+        assert_eq!(describe_midi([0xf8, 0, 0]), "clock");
+        assert_eq!(describe_midi([0xfc, 0, 0]), "stop");
+        // Channel pressure carries ONE data byte; the third is not part of
+        // it and must not appear as though it were.
+        assert_eq!(describe_midi([0xd2, 64, 0x7f]), "pressure ch2 64");
+        // Program change likewise.
+        assert_eq!(describe_midi([0xc1, 5, 0x7f]), "program ch1 5");
+    }
+}
+
 /// How close a fader has to be to a value to count as holding it: one and
 /// a half steps of a 7-bit control, so a fader parked ON the value cannot
 /// be shaken off by rounding.
@@ -7623,6 +7705,19 @@ pub struct App {
     /// it — see [`fader_takes_over`].
     #[rust]
     hw_faders: HashMap<(u8, u8), f32>,
+    /// Every MIDI port the machine last reported, opened or not.
+    ///
+    /// The port set used to be read once and thrown away, keeping only the
+    /// ids of the surface's own ports -- so nothing could say which port a
+    /// message arrived on, or that a device was present at all.
+    #[rust]
+    midi_ports: Vec<MidiPortDesc>,
+    /// Print every MIDI message, in and out, to the app's own log — which
+    /// the console strip already shows, with a filter. Off by default; the
+    /// switch is `midi.monitor` in `midi.txt`, or `VJ_TRACE_LED` for a
+    /// bridge-driven run that cannot edit a file first.
+    #[rust]
+    midi_monitor: bool,
     /// Whether a fader must pick a value up before it may move it.
     ///
     /// OFF by default, which is what this console has always done: the next
@@ -12757,10 +12852,14 @@ p2 {}
     fn save_midi_settings(&self) {
         let mut store = crate::settings::Settings::new();
         store.set_bool("midi.soft_takeover", self.soft_takeover);
+        store.set_bool("midi.monitor", self.midi_monitor);
         let _ = crate::durable::write_file(&Self::midi_settings_path(), store.to_text());
     }
 
     fn load_midi_settings(&mut self) {
+        // Read once, not per frame: this used to be an environment lookup
+        // inside the LED writer, which runs twenty times a second.
+        self.midi_monitor = std::env::var_os("VJ_TRACE_LED").is_some();
         let Ok(body) = std::fs::read_to_string(Self::midi_settings_path()) else {
             // Written out on the first run so the switch can be FOUND. It
             // has no control on screen yet, and a setting that exists only
@@ -12771,6 +12870,7 @@ p2 {}
         let store = crate::settings::Settings::from_text(&body);
         // The default is what this console has always done.
         self.soft_takeover = store.bool("midi.soft_takeover", false);
+        self.midi_monitor |= store.bool("midi.monitor", false);
     }
 
     fn clock_settings_path() -> std::path::PathBuf {
@@ -14096,6 +14196,26 @@ p2 {}
         self.run_pad_cmds(cmds);
     }
 
+    /// The name the machine gave a port, for the monitor to print.
+    fn midi_port_name(&self, port: MidiPortId) -> &str {
+        self.midi_ports
+            .iter()
+            .find(|desc| desc.port_id == port)
+            .map(|desc| desc.name.as_str())
+            .unwrap_or("unknown port")
+    }
+
+    /// One line of the monitor. `took` is who the message went to, which is
+    /// the half of the answer a controller report usually needs: a knob
+    /// that does nothing has either not arrived, arrived on a port nobody
+    /// opened, or been claimed by a layer its owner forgot about.
+    fn note_midi_in(&self, port: MidiPortId, data: [u8; 3], took: &str) {
+        if !self.midi_monitor {
+            return;
+        }
+        log!("midi in [{}] {} -> {}", self.midi_port_name(port), describe_midi(data), took);
+    }
+
     fn pump_apc40(&mut self, cx: &mut Cx) {
         // A port set declared through the control bridge is adopted by the
         // SAME call the operating system's own port event runs, so a run
@@ -14116,21 +14236,25 @@ p2 {}
             match self.midi_learn.midi(data.data) {
                 Some(LearnEvent::Bound { control, channel, cc: number }) => {
                     log!("midi learn: {control} ← ch{channel} cc{number}");
+                    self.note_midi_in(port, data.data, &format!("learn: bound {control}"));
                     self.save_midi_map();
                     self.sync_midi_learn_ui(cx);
                     continue;
                 }
                 Some(LearnEvent::Value { control, channel, cc, value }) => {
+                    self.note_midi_in(port, data.data, &format!("learned {control}"));
                     self.apply_learned(cx, &control, (channel, cc), value);
                     continue;
                 }
                 None => {}
             }
             if !self.apc_input_ports.contains(&port) {
+                self.note_midi_in(port, data.data, "dropped: port not opened");
                 continue;
             }
             let claimed = self.apc.decode(data.data);
             if let Some(action) = claimed {
+                self.note_midi_in(port, data.data, &format!("surface: {action:?}"));
                 pad_touched |= matches!(action, ApcAction::Pad { .. });
                 actions.push(action);
             }
@@ -14145,9 +14269,13 @@ p2 {}
             // crossfader were never the desk's, whatever the decoder makes
             // of a particular note on a particular model.
             if claimed.is_none() && !is_vj_reserved_midi(data.data) {
-                if let Some(desk) = self.lighting.as_ref() {
-                    let _ = desk.handle_midi(data.data);
-                }
+                let outcome = match self.lighting.as_ref() {
+                    Some(desk) => format!("lighting: {:?}", desk.handle_midi(data.data)),
+                    None => "nobody (lighting is off)".to_string(),
+                };
+                self.note_midi_in(port, data.data, &outcome);
+            } else if claimed.is_none() {
+                self.note_midi_in(port, data.data, "nobody");
             }
         }
         for action in actions {
@@ -14178,7 +14306,7 @@ p2 {}
         // on the way out this is a frame nothing can watch: the surface it
         // lands on is gone by the time anybody could look, and the control
         // bridge's own record of what was sent dies with the process.
-        let trace = std::env::var_os("VJ_TRACE_LED").is_some();
+        let trace = self.midi_monitor;
         for message in self.apc_leds.all_dark() {
             if trace {
                 log!(
@@ -14265,7 +14393,7 @@ p2 {}
             .live_slot()
             .and_then(|slot| self.players[slot.index()].as_ref())
             .is_some_and(|player| !player.is_paused());
-        let trace = std::env::var_os("VJ_TRACE_LED").is_some();
+        let trace = self.midi_monitor;
         for message in self.apc_leds.update(frame) {
             if trace {
                 // ch = LED behaviour (solid/pulse/blink per the device's
@@ -30624,6 +30752,9 @@ impl MatchEvent for App {
         // stuck hold: the next press after the surface comes back would be
         // read as a repeat and swallowed.
         self.midi_gates.clear();
+        // Kept whole, opened or not: without this nothing could say which
+        // port a message came in on, or that a device was there at all.
+        self.midi_ports = ports.descs.clone();
         // The two mk2 surfaces share a palette but not their LED channel
         // meanings or their grid notes (see `ApcModel`), so one of them is
         // chosen and the other left alone: taking both and decoding them in
