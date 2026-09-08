@@ -234,6 +234,9 @@ pub struct DrawChip {
     hover: f32,
     #[live]
     down: f32,
+    /// Lit on the one chip the group's arrow keys are standing on.
+    #[live]
+    keyed: f32,
 }
 
 /// The tick a chosen chip carries and the cross a removable one carries,
@@ -334,6 +337,9 @@ script_mod! {
             color_bevel_2: uniform(theme.color_bevel_outset_2)
             /** 0 flat, 1 shade the fill left to right, 2 top to bottom 0..2 step 1 */
             gradient: uniform(0.0)
+            /** the ring marking where the arrow keys are standing */
+            color_keyed: uniform(theme.color_bevel_focus)
+            keyed: 0.0
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 // `sdf.box` draws twice the radius it is given, and a radius
@@ -356,6 +362,14 @@ script_mod! {
                 // chip has no face to bevel.
                 if self.bevel > 0.0 {
                     sdf.stroke_keep(mix(self.color_bevel_1, self.color_bevel_2, self.pos.y) * self.bevel * self.color.a, 1.0)
+                }
+                // Where the arrow keys are standing. Drawn as a ring around
+                // the pill rather than a change to its face, because the
+                // face already means chosen-or-not and a keyboard place is
+                // not an answer. Without it the arrows moved and nothing on
+                // screen moved with them.
+                if self.keyed > 0.0 {
+                    sdf.stroke(vec4(self.color_keyed.xyz, self.color_keyed.a * self.keyed), 1.5)
                 }
                 return sdf.result
             }
@@ -484,6 +498,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct Chip {
+    #[rust]
+    keyed: bool,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -625,11 +641,21 @@ impl Chip {
         }
     }
 
+    /// Mark this chip as the one a group's arrow keys are standing on.
+    /// The group owns this: a chip on its own has no arrows to stand under.
+    pub fn set_keyed(&mut self, cx: &mut Cx, keyed: bool) {
+        if self.keyed != keyed {
+            self.keyed = keyed;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
     /// Draw at `walk` and answer the rect drawn. Set, draw, RESTORE: the
     /// text's colour and size belong to the call site, so the role's ink
     /// and the size rung are laid over them per draw rather than written
     /// into them.
     pub fn draw_chip(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
+        self.draw_bg.keyed = if self.keyed { 1.0 } else { 0.0 };
         let colors = self.colors();
         let m = self.size.metrics();
         let (w, h) = self.extent(cx);
@@ -967,10 +993,29 @@ impl ChipGroup {
 
 impl Widget for ChipGroup {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // Marked BEFORE the chips draw. Set after, the flag lands on widgets
+        // that have already painted and the ring waits for a redraw that
+        // nothing asks for - the arrows moved and the row sat still.
+        //
+        // Exactly one chip carries it, and only while the row holds the
+        // keyboard: where the arrows are standing means nothing to someone
+        // using the mouse, and a ring left behind reads as a second kind of
+        // chosen.
+        let keyed = if cx.cx.cx.has_key_focus(self.area) {
+            Some(self.focused)
+        } else {
+            None
+        };
+        for (i, chip) in self.chips().into_iter().enumerate() {
+            if let Some(mut inner) = chip.borrow_mut::<Chip>() {
+                inner.set_keyed(cx.cx.cx, keyed == Some(i));
+            }
+        }
+
         let step = self.view.draw_walk(cx, scope, walk);
         // The view hands out a fresh area every redraw and migrates nothing,
         // so a key focus pointed at it stops matching the moment anything
-        // repaints — which is why the arrows had never once answered. The
+        // repaints - which is why the arrows had never once answered. The
         // group keeps its own handle and moves the focus along with it.
         self.area = cx.update_area_refs(self.area, self.view.area());
         // The doc above this type has always said the row is one tab stop.
@@ -1022,6 +1067,16 @@ impl Widget for ChipGroup {
         if let Event::MouseDown(e) = event {
             if !self.area.is_empty() && self.area.rect(cx).contains(e.abs) {
                 cx.set_key_focus(self.area);
+            }
+        }
+
+        // The ring is decided at draw time from who holds the keyboard, so
+        // the row has to be told when that changed - otherwise the focus
+        // leaves and the ring stays behind, still claiming a place the
+        // arrows no longer answer from.
+        if let Event::KeyFocus(kf) = event {
+            if kf.prev == self.area || kf.focus == self.area {
+                self.view.redraw(cx);
             }
         }
 
