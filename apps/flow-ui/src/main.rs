@@ -1908,7 +1908,7 @@ impl App {
                                 if let Some(mut queue) =
                                     self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
                                 {
-                                    queue.select(cx, &first.run_id);
+                                    QueueList::select(&mut queue, cx, &first.run_id);
                                 }
                                 self.fetch_run_snapshot();
                             }
@@ -3799,7 +3799,7 @@ impl App {
                 };
                 if let Some(edit) = edit {
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, None);
+                        FlowCanvas::select(&mut canvas, cx, None);
                     }
                     self.selected_node = None;
                     self.apply_edit(cx, edit);
@@ -3813,7 +3813,7 @@ impl App {
                     .current_graph()
                     .and_then(|graph| graph.nodes.first().map(|node| node.id.clone()));
                 if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                    canvas.select(cx, first.clone());
+                    FlowCanvas::select(&mut canvas, cx, first.clone());
                 }
                 self.selected_node = first;
                 self.refresh_inspector(cx);
@@ -3924,7 +3924,7 @@ impl App {
         self.preview_bytes = None;
         self.preview_digest = Some((value.digest.clone(), format!("{node}.{port}")));
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.select(cx, Some(node.to_string()));
+            FlowCanvas::select(&mut canvas, cx, Some(node.to_string()));
         }
         self.selected_node = Some(node.to_string());
         self.source_mode = false;
@@ -3970,7 +3970,7 @@ impl MatchEvent for App {
                         if let Some(mut canvas) =
                             self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
                         {
-                            canvas.select(cx, Some(node.clone()));
+                            FlowCanvas::select(&mut canvas, cx, Some(node.clone()));
                         }
                         self.refresh_inspector(cx);
                         self.refresh_models(true);
@@ -4301,7 +4301,7 @@ impl MatchEvent for App {
                     }
                     self.selected_node = Some(new_id.clone());
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, Some(new_id));
+                        FlowCanvas::select(&mut canvas, cx, Some(new_id));
                     }
                     self.put_graph(cx, graph);
                 }
@@ -4333,7 +4333,7 @@ impl MatchEvent for App {
                 InspectorAction::SelectNode(node) => {
                     self.selected_node = Some(node.clone());
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, Some(node));
+                        FlowCanvas::select(&mut canvas, cx, Some(node));
                     }
                     self.refresh_inspector(cx);
                     self.refresh_models(true);
@@ -5420,7 +5420,7 @@ mod layout_tests {
             assert!(test.camera().pan.length() > 1.0);
             assert!(test.input_rect().contains(test.title()));
             assert!(test.input_rect().contains(test.entry()));
-            test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+            test.app.with_canvas(&mut test.cx, |cx, canvas| FlowCanvas::select(canvas, cx, None));
             test.cx.new_actions.clear();
             test.menu_actions.clear();
             test.content_actions = 0;
@@ -5620,7 +5620,7 @@ mod layout_tests {
         let outside = test.input_rect().pos + test.input_rect().size - dvec2(10.0, 2.0);
         test.click(outside);
         assert_eq!(test.cx.key_focus(), test.input.area());
-        test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+        test.app.with_canvas(&mut test.cx, |cx, canvas| FlowCanvas::select(canvas, cx, None));
         test.cx.new_actions.clear();
         test.content_actions = 0;
         test.click(test.title());
