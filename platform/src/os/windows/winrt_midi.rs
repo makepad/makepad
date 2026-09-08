@@ -140,7 +140,13 @@ impl WinRTMidiAccess {
             // now lets watch device changes
             let query = MidiInPort::GetDeviceSelector().unwrap();
             let input_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
-            let query = MidiInPort::GetDeviceSelector().unwrap();
+            // The OUTPUT selector, which this asked for by name and then
+            // passed the input one to: both watchers watched inputs, so a
+            // device with no input end -- a synth, a lighting interface --
+            // arriving or leaving mid-session announced itself to nobody,
+            // and the enumeration below (which does list outputs) was never
+            // asked to run. A device with both ends masked it.
+            let query = MidiOutPort::GetDeviceSelector().unwrap();
             let output_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
 
             fn bind_watcher(watch_sender: mpsc::Sender<WinRTMidiEvent>, watcher: &DeviceWatcher) {
