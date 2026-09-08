@@ -364,11 +364,17 @@ impl Widget for TabStrip {
         let strip = cx.turtle().rect();
         self.hits.clear();
 
-        let count = self.tabs.len().max(1) as f64;
         let available = (strip.size.x - Self::LEFT_PAD - Self::PLUS_SIZE - 12.0).max(0.0);
-        let tab_width = (available / count)
-            .min(Self::TAB_MAX_WIDTH)
-            .max(Self::TAB_MIN_WIDTH.min(available.max(1.0)));
+        // The one rule that makes a strip read as tabs is shared with the
+        // library's own strip rather than kept as a second copy here: this
+        // chrome is where it was written, and `tab_width_for` is where it
+        // now lives, with the tests.
+        let tab_width = tab_width_for(
+            self.tabs.len(),
+            available,
+            Self::TAB_MAX_WIDTH,
+            Self::TAB_MIN_WIDTH,
+        );
         let tab_height = strip.size.y - Self::TOP_GAP;
         let mut x = strip.pos.x + Self::LEFT_PAD;
         let y = strip.pos.y + Self::TOP_GAP;
