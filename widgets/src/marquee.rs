@@ -45,6 +45,18 @@ script_mod! {
 
     use mod.widgets.*
 
+    mod.widgets.DrawMarqueeGroundBase = #(DrawMarqueeGround::script_component(vm))
+    set_type_default() do #(DrawMarqueeGround::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            // Nothing: the ground exists to own the strip's rect, not to
+            // paint it. A widget whose only drawn thing is text placed at
+            // absolute positions has no rect of its own to report, to
+            // redraw, or to be hovered on.
+            return vec4(0.0 0.0 0.0 0.0)
+        }
+    }
+
     mod.widgets.MarqueeBase = #(Marquee::register_widget(vm))
 
     /** A line of text that travels across its strip and loops without a
@@ -74,6 +86,13 @@ script_mod! {
     }
 }
 
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawMarqueeGround {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Marquee {
     #[uid]
@@ -84,7 +103,14 @@ pub struct Marquee {
     walk: Walk,
     #[layout]
     layout: Layout,
+    /// The strip's own rect, drawn as nothing. Every copy of the line is
+    /// placed absolutely and so contributes no rect for a turtle to
+    /// measure; without this the widget would report the last text run as
+    /// its area, which is the wrong thing to hover, to redraw and to find
+    /// in a snapshot.
     #[redraw]
+    #[live]
+    draw_bg: DrawMarqueeGround,
     #[live]
     pub draw_text: DrawText,
 
@@ -165,7 +191,8 @@ impl Widget for Marquee {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // Clipped, always: the whole point is that the copies run past both
         // edges and only the strip is seen.
-        cx.begin_turtle(
+        self.draw_bg.begin(
+            cx,
             walk,
             Layout {
                 clip_x: true,
@@ -219,7 +246,8 @@ impl Widget for Marquee {
             }
         }
 
-        cx.end_turtle_with_area(&mut self.area);
+        self.draw_bg.end(cx);
+        self.area = self.draw_bg.area();
         DrawStep::done()
     }
 
