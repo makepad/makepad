@@ -8127,6 +8127,19 @@ impl VjTrackList {
                 .iter()
                 .filter_map(|row| self.entries.get(*row).map(|entry| entry.key.clone()))
                 .collect();
+            // The shift anchor is a row number too, and it was only ever
+            // dropped when the picks emptied -- so a rebuild that kept the
+            // picks left the anchor measuring from whichever record had
+            // landed on that number, and the next shift-click selected a
+            // range nobody asked for.
+            let anchored =
+                self.anchor.and_then(|row| self.entries.get(row).map(|entry| entry.key.clone()));
+            // And so is the viewport's own top row: see `carried_top_row`.
+            let list = self.view.portal_list(cx, ids!(list));
+            let top = list.first_id();
+            let scroll = list.borrow().map(|held| held.first_scroll()).unwrap_or(0.0);
+            let carried = carried_top_row(&self.entries, top, &entries);
+
             self.entries = entries;
             self.selected = self
                 .entries
@@ -8135,8 +8148,17 @@ impl VjTrackList {
                 .filter(|(_, entry)| picked.contains(&entry.key))
                 .map(|(row, _)| row)
                 .collect();
+            self.anchor = anchored
+                .and_then(|key| self.entries.iter().position(|entry| entry.key == key));
             if self.selected.is_empty() {
                 self.anchor = None;
+            }
+            // Only when it actually moved. The listing is rebuilt constantly
+            // for reasons that change no order at all, and re-seating the
+            // viewport on every one of those would throw away the fraction
+            // of a row the operator had scrolled to.
+            if let Some(row) = carried.filter(|row| *row != top) {
+                list.set_first_id_and_scroll(row, scroll);
             }
             self.view.redraw(cx);
         }
@@ -8371,6 +8393,29 @@ pub const TRACK_DRAG_SLOP: f64 = 5.0;
 /// Peak travel, not the release's distance: a carry that goes out and
 /// comes back has still been a carry, and letting go over the row it
 /// started on must not read as a click on it.
+/// Which row the viewport should sit on after a re-listing, given the row it
+/// sat on before it, or `None` when nothing it was showing survived.
+///
+/// A viewport is a ROW NUMBER, and a row number means a different record
+/// every time the listing is rebuilt -- which the explorer does for every
+/// badge, every status change and every keystroke in the search box. Holding
+/// the number therefore holds the operator's PLACE only by accident; what
+/// they were actually looking at is the record.
+///
+/// When the record at the top is gone, the walk carries on DOWN the old
+/// order and takes the first one that did survive. Down rather than up
+/// because a narrowing listing is what usually causes this, and the records
+/// after the top one are the ones the operator had not scrolled past yet.
+pub fn carried_top_row(
+    was: &[TrackRowEntry],
+    top: usize,
+    now: &[TrackRowEntry],
+) -> Option<usize> {
+    was.get(top..)?
+        .iter()
+        .find_map(|entry| now.iter().position(|held| held.key == entry.key))
+}
+
 /// Where a list's viewport should land when the listing under it has
 /// changed size, or `None` to leave it exactly where the operator put it.
 ///
@@ -8646,6 +8691,43 @@ mod tests {
         // The two mark columns are a tick or nothing, never a word.
         assert_eq!(column_text(Column::Stem, &row), "✓");
         assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    fn listing(names: &[&str]) -> Vec<TrackRowEntry> {
+        names
+            .iter()
+            .map(|name| {
+                TrackRowEntry::blank(TrackKey::Local(PathBuf::from(*name)), name.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_viewport_follows_the_record_it_was_showing() {
+        let was = listing(&["a", "b", "c", "d", "e"]);
+        // The same records, reordered under it (a sort, or a badge change
+        // that re-sorted): the viewport was on "c" and stays on "c".
+        let now = listing(&["e", "d", "c", "b", "a"]);
+        assert_eq!(carried_top_row(&was, 2, &now), Some(2));
+        let now = listing(&["c", "a", "b"]);
+        assert_eq!(carried_top_row(&was, 2, &now), Some(0), "narrowed, and 'c' leads it");
+    }
+
+    #[test]
+    fn a_top_record_that_did_not_survive_hands_the_viewport_to_the_first_one_below_it_that_did() {
+        let was = listing(&["a", "b", "c", "d", "e"]);
+        // "c" is gone; "d" is the next thing the operator had not yet
+        // scrolled past, so the viewport lands on it rather than jumping.
+        let now = listing(&["a", "d", "e"]);
+        assert_eq!(carried_top_row(&was, 2, &now), Some(1));
+    }
+
+    #[test]
+    fn a_viewport_showing_nothing_that_survived_asks_for_nothing() {
+        let was = listing(&["a", "b", "c"]);
+        assert_eq!(carried_top_row(&was, 1, &listing(&["a"])), None, "b and c both gone");
+        assert_eq!(carried_top_row(&was, 9, &listing(&["a"])), None, "already past the end");
+        assert_eq!(carried_top_row(&was, 0, &[]), None, "nothing to land on at all");
     }
 
     #[test]

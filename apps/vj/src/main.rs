@@ -125,6 +125,7 @@ mod advisor;
 mod arc;
 mod mix_facts;
 mod pick;
+mod recent_searches;
 mod score_preview;
 mod set_history;
 // Which columns a track list shows and in what order — the operator's, not
@@ -183,6 +184,7 @@ use crate::loop_splat_view::{
 };
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
 use crate::arc::Curve;
+use crate::recent_searches::Recalls;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
@@ -8141,6 +8143,16 @@ pub struct App {
     pending_search: Option<(Surface, SearchBox, String)>,
     #[rust]
     search_timer: Timer,
+    /// What each search box has already been asked for, and where a recall
+    /// walk currently stands in it.
+    #[rust]
+    recent_searches: Recalls,
+    /// Which remembered query the box is showing, per lane, and the
+    /// unfinished text the walk started from. `None` is the draft itself:
+    /// stepping forward off the newest entry has to give it back, or the
+    /// walk eats what the operator was writing.
+    #[rust]
+    search_recall: Vec<(Surface, Option<usize>, String)>,
     /// A short head start for the catalog before `load_queue` asks it to
     /// resolve a saved store-asset line -- at `handle_startup` itself
     /// the store connection has not necessarily produced a single tile
@@ -16098,6 +16110,7 @@ p2 {}
                         self.load_gen_panel(cx);
                         self.load_autopilot_settings();
         self.load_set_history();
+        self.load_recent_searches();
         self.start_advisor();
                         self.load_loop_scan_settings();
                         self.sync_autopilot_panel(cx);
@@ -20096,6 +20109,87 @@ p2 {}
 
     fn queue_path() -> std::path::PathBuf {
         service::session_config_from_env().cache_parent.join("queue.txt")
+    }
+
+    fn recent_searches_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("recent-searches.txt")
+    }
+
+    /// The search boxes' own memory, one `lane query` line per query. A list
+    /// like the set list, so it gets a file rather than a line in with the
+    /// single-value settings.
+    fn save_recent_searches(&self) {
+        let _ =
+            crate::durable::write_file(&Self::recent_searches_path(), self.recent_searches.to_text());
+    }
+
+    fn load_recent_searches(&mut self) {
+        let text = std::fs::read_to_string(Self::recent_searches_path()).unwrap_or_default();
+        self.recent_searches = Recalls::from_text(&text);
+    }
+
+    /// Which remembered list a search row draws on. The lane names are the
+    /// file's keys, so they are frozen the way a settings slug is: renaming
+    /// one silently empties that box's memory on every machine that has a
+    /// file.
+    fn recall_lane(surface: Surface) -> &'static str {
+        match surface {
+            Surface::Music => "music",
+            Surface::Sfx => "sfx",
+            Surface::Mesh => "mesh",
+            Surface::Video => "video",
+        }
+    }
+
+    /// Remember a query the operator ASKED FOR, and forget where any recall
+    /// walk had got to.
+    ///
+    /// Only the two deliberate gestures reach here -- Enter and the search
+    /// button. Not the idle debounce: it fires on every pause in the typing,
+    /// so a memory fed from there would fill with "d", "dr", "dru" and push
+    /// the real queries off the end within one search.
+    fn note_search(&mut self, surface: Surface, text: &str) {
+        self.recent_searches.lane_mut(Self::recall_lane(surface)).note(text);
+        self.search_recall.retain(|(held, _, _)| *held != surface);
+        self.save_recent_searches();
+    }
+
+    /// Step one place through what this box has already been asked for and
+    /// put it in the box, running it on the same debounce as typing would.
+    ///
+    /// The unfinished text is kept as the walk starts and handed back when
+    /// the walk steps forward off the newest entry, so the query being
+    /// written is not the price of a glance at the last one.
+    fn recall_search(&mut self, cx: &mut Cx, surface: Surface, search: &[LiveId], older: bool) {
+        let lane = Self::recall_lane(surface);
+        let Some(list) = self.recent_searches.lane(lane) else { return };
+        if list.is_empty() {
+            return;
+        }
+        let at = self.search_recall.iter().position(|(held, _, _)| *held == surface);
+        let (was, draft) = match at {
+            Some(at) => (self.search_recall[at].1, self.search_recall[at].2.clone()),
+            None => (None, self.ui.text_input(cx, search).text()),
+        };
+        let now = list.step(was, older);
+        if now == was {
+            return;
+        }
+        let text = match now {
+            Some(now) => list.get(now).unwrap_or_default().to_string(),
+            None => draft.clone(),
+        };
+        match at {
+            Some(at) => self.search_recall[at].1 = now,
+            None => self.search_recall.push((surface, now, draft)),
+        }
+        self.ui.text_input(cx, search).set_text(cx, &text);
+        // The same road typing takes, so a recalled query and a typed one
+        // reach the catalog the same way and cannot disagree about which
+        // debounce is in flight.
+        self.pending_search = Some((surface, SearchBox::Text, text));
+        cx.stop_timer(self.search_timer);
+        self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
     }
 
     /// The queue's own file, one line per track in play order -- library-c11.
@@ -29792,6 +29886,11 @@ impl MatchEvent for App {
             // As-you-type, like the video filter above: the query fires
             // after a short idle; Enter (and the button) fire at once.
             if let Some(text) = self.ui.text_input(cx, search).changed(actions) {
+                // Typing abandons the walk: from here the box holds the
+                // operator's own text again, and a later step back has to
+                // start from the newest query rather than resume wherever
+                // the last walk happened to stop.
+                self.search_recall.retain(|(held, _, _)| *held != surface);
                 self.pending_search = Some((surface, SearchBox::Text, text));
                 cx.stop_timer(self.search_timer);
                 self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
@@ -29803,14 +29902,26 @@ impl MatchEvent for App {
             }
             if let Some((text, _)) = self.ui.text_input(cx, search).returned(actions) {
                 self.pending_search = None;
+                self.note_search(surface, &text);
                 cmds.extend(self.model(surface).set_text(text.trim().to_string()));
             }
             if let Some((text, _)) = self.ui.text_input(cx, category).returned(actions) {
                 self.pending_search = None;
                 cmds.extend(self.model(surface).set_category(text.trim().to_string()));
             }
+            // The recall walk: the box's own Up/Down, which a single-line
+            // input hands back unhandled because there is no row above or
+            // below to move the cursor to.
+            if let Some(key) = self.ui.text_input(cx, search).key_down_unhandled(actions) {
+                match key.key_code {
+                    KeyCode::ArrowUp => self.recall_search(cx, surface, search, true),
+                    KeyCode::ArrowDown => self.recall_search(cx, surface, search, false),
+                    _ => {}
+                }
+            }
             if self.ui.button(cx, go).clicked(actions) {
                 let text = self.ui.text_input(cx, search).text();
+                self.note_search(surface, &text);
                 let cat = self.ui.text_input(cx, category).text();
                 let model = self.model(surface);
                 model.text = text.trim().to_string();
