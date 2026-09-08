@@ -71,6 +71,16 @@ pub struct Modal {
 
     #[rust]
     is_open: bool,
+    /// The content's area, carried across redraws.
+    ///
+    /// Escape is tested against this area, and a view hands out a fresh one
+    /// on every redraw and migrates nothing — so without carrying it the
+    /// focus would stop matching the moment the modal repainted.
+    #[rust]
+    content_area: Area,
+    /// Set by `open`, spent by the first draw that gives the content an area.
+    #[rust]
+    wants_focus: bool,
     /// Whether the modal can be dismissed via an external interaction, including:
     /// clicking outside the content view, pressing Escape, or performing
     /// the back navigational gesture (e.g., on Android).
@@ -133,7 +143,7 @@ impl Widget for Modal {
 
         if self.can_dismiss {
             // This is fine, because we already let `content` handle this event above.
-            let content_area_hit = event.hits(cx, content.area());
+            let content_area_hit = event.hits(cx, self.content_area);
 
             // Close the modal if any of the following conditions occur:
             // * If the back navigational action/gesture was triggered (e.g., on Android),
@@ -193,6 +203,13 @@ impl Widget for Modal {
         // We must re-set the blocked scrolling area, as it might've changed after each draw.
         if self.is_open {
             let content_area = self.view.widget(cx, ids!(content)).area();
+            // Move the key focus along with the area, or Escape stops
+            // reaching a modal that has merely repainted.
+            self.content_area = cx.update_area_refs(self.content_area, content_area);
+            if self.wants_focus && !self.content_area.is_empty() {
+                self.wants_focus = false;
+                cx.set_key_focus(self.content_area);
+            }
             cx.block_scrolling_except_within(content_area);
         }
         DrawStep::done()
@@ -215,7 +232,12 @@ impl Modal {
         }
         self.draw_bg.redraw(cx);
         let content = self.view.widget(cx, ids!(content));
-        cx.set_key_focus(content.area());
+        // NOT the key focus here: at this point the content has never been
+        // drawn and its area is Empty, so the focus went to nothing at all —
+        // and Escape, which is tested against that area, had never once
+        // closed a modal. It is taken in `draw_walk`, where the content has
+        // an area to take it with.
+        self.wants_focus = true;
         content.set_scroll_pos(cx, Vec2d { x: 0.0, y: 0.0 });
     }
 
