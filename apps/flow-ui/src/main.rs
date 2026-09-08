@@ -982,7 +982,6 @@ pub struct App {
     menu_state_initialized: bool,
     /// Splitter position remembered while the left pane is collapsed.
     #[rust]
-    left_panel_align: Option<SplitterAlign>,
     #[rust]
     asset_store: Option<makepad_app_asset_server::embed::LocalStore>,
 }
@@ -3486,15 +3485,13 @@ impl App {
         self.ui
             .view(cx, ids!(source_overlay))
             .set_visible(cx, self.source_mode);
-        let left_split = self.ui.widget(cx, ids!(column_split));
-        if self.left_hidden {
-            if self.left_panel_align.is_none() {
-                self.left_panel_align = left_split.borrow::<Splitter>().map(|splitter| splitter.align());
-            }
-            left_split.as_splitter().set_align(cx, SplitterAlign::FromA(0.0));
-        } else if let Some(align) = self.left_panel_align.take() {
-            left_split.as_splitter().set_align(cx, align);
-        }
+        // The splitter keeps the fold as a state and never writes the
+        // align, so what comes back is the bar that went away — no
+        // remembered width here, and nothing to put back.
+        self.ui.widget(cx, ids!(column_split)).as_splitter().set_collapse(
+            cx,
+            if self.left_hidden { SplitterCollapse::A } else { SplitterCollapse::None },
+        );
         self.ui.view(cx, ids!(left_panel)).set_visible(cx, !self.left_hidden);
 
         self.ui.button(cx, ids!(side_btn)).set_text(
@@ -4107,12 +4104,6 @@ impl MatchEvent for App {
             .widget(cx, ids!(canvas_right_split))
             .borrow::<Splitter>()
             .is_some_and(|splitter| splitter.changed(actions).is_some());
-        if column_changed && self.left_hidden {
-            self.ui
-                .widget(cx, ids!(column_split))
-                .as_splitter()
-                .set_align(cx, SplitterAlign::FromA(0.0));
-        }
         if column_changed || right_changed {
             self.update_canvas_fit_insets(cx);
         }
