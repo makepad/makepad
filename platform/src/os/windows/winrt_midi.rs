@@ -198,7 +198,18 @@ impl WinRTMidiAccess {
             while let Ok(msg) = watch_receiver.recv() {
                 match msg {
                     WinRTMidiEvent::UpdateDevices => {
-                        ports_list = executor::block_on(Self::get_ports_list()).unwrap();
+                        // A device leaving mid-enumeration fails this. The
+                        // last list is better than no MIDI at all for the
+                        // rest of the session, which is what taking the
+                        // thread down means.
+                        let listed = executor::block_on(Self::get_ports_list());
+                        ports_list = match listed {
+                            Ok(list) => list,
+                            Err(error) => {
+                                crate::log!("midi: device list failed ({error:?}), keeping the last one");
+                                continue;
+                            }
+                        };
                         let mut descs = Vec::new();
                         for port in &ports_list {
                             descs.push(port.desc.clone());
@@ -243,8 +254,11 @@ impl WinRTMidiAccess {
                                 .find(|p| **p == midi_outputs[index].port_id)
                                 .is_none()
                             {
+                                // Closing a port whose device is already
+                                // gone fails, and the point of the call is
+                                // that we are done with it either way.
                                 let out = &midi_outputs[index];
-                                out.midi_output.Close().unwrap();
+                                let _ = out.midi_output.Close();
                                 midi_outputs.remove(index);
                             } else {
                                 index += 1;
@@ -316,10 +330,8 @@ impl WinRTMidiAccess {
                                 .is_none()
                             {
                                 let inp = &midi_inputs[index];
-                                inp.midi_input
-                                    .RemoveMessageReceived(inp.event_token)
-                                    .unwrap();
-                                inp.midi_input.Close().unwrap();
+                                let _ = inp.midi_input.RemoveMessageReceived(inp.event_token);
+                                let _ = inp.midi_input.Close();
                                 midi_inputs.remove(index);
                             } else {
                                 index += 1;
@@ -327,22 +339,37 @@ impl WinRTMidiAccess {
                         }
                     }
                     WinRTMidiEvent::SendMidi(port_id, midi_data) => {
-                        let writer = DataWriter::new().unwrap();
-                        // Only the bytes the status names. A `MidiData` is
-                        // always three wide; the wire is not, and this
-                        // backend writes exactly what it is handed.
-                        writer.WriteBytes(midi_data.wire()).unwrap();
-                        let buffer = writer.DetachBuffer().unwrap();
+                        // Nothing in here may panic. A surface unplugged
+                        // mid-set fails its next write, and the app writes
+                        // to it twenty times a second, so the window is
+                        // always open: this thread dying takes the app's
+                        // control calls with it, since those send down a
+                        // channel whose far end has just gone. The port is
+                        // dropped instead, and the removal that follows
+                        // tidies it up.
+                        let Ok(writer) = DataWriter::new() else { continue };
+                        if writer.WriteBytes(midi_data.wire()).is_err() {
+                            continue;
+                        }
+                        let Ok(buffer) = writer.DetachBuffer() else { continue };
+                        let mut lost = Vec::new();
                         for output in &mut midi_outputs {
-                            if port_id.is_none() || output.port_id == port_id.unwrap() {
-                                output.midi_output.SendBuffer(&buffer).unwrap();
+                            if port_id.is_some() && Some(output.port_id) != port_id {
+                                continue;
                             }
+                            if output.midi_output.SendBuffer(&buffer).is_err() {
+                                lost.push(output.port_id);
+                            }
+                        }
+                        if !lost.is_empty() {
+                            crate::log!("midi: {} port(s) stopped taking writes", lost.len());
+                            midi_outputs.retain(|out| !lost.contains(&out.port_id));
                         }
                     }
                 }
             }
-            input_watcher.Stop().unwrap();
-            output_watcher.Stop().unwrap();
+            let _ = input_watcher.Stop();
+            let _ = output_watcher.Stop();
         });
 
         //output_watcher.Start().unwrap();
@@ -370,16 +397,16 @@ impl WinRTMidiAccess {
             .unwrap();
     }
 
+    // These two run on the UI thread. If the MIDI thread is gone there is
+    // nobody to tell, and telling nobody is not a reason to take the app
+    // down in front of an audience -- which is exactly what it did, one
+    // port event after the surface was unplugged.
     pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        self.event_sender
-            .send(WinRTMidiEvent::UseMidiOutputs(ports.to_vec()))
-            .unwrap();
+        let _ = self.event_sender.send(WinRTMidiEvent::UseMidiOutputs(ports.to_vec()));
     }
 
     pub fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        self.event_sender
-            .send(WinRTMidiEvent::UseMidiInputs(ports.to_vec()))
-            .unwrap();
+        let _ = self.event_sender.send(WinRTMidiEvent::UseMidiInputs(ports.to_vec()));
     }
 
     pub fn get_updated_descs(&self) -> Vec<MidiPortDesc> {
