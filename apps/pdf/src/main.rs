@@ -97,40 +97,29 @@ script_mod! {
                                 }
                             }
 
-                            page_box := RectView{
+                            page_box := FieldWell{
                                 width: 44
                                 height: 22
                                 margin: Inset{left: 4 right: 4}
+                                padding: Inset{left: 4 right: 4 top: 3 bottom: 3}
+                                spacing: 0.0
                                 draw_bg +: {
-                                    color: mod.mpp.bg_light
-                                    border_color: mod.mpp.dim
                                     border_size: 1.0
                                     border_radius: 0.0
+                                    color: mod.mpp.bg_light
+                                    color_hover: mod.mpp.bg_light
+                                    color_focus: mod.mpp.bg_light
+                                    color_disabled: mod.mpp.bg_light
+                                    border_color: mod.mpp.dim
+                                    border_color_hover: mod.mpp.fg
+                                    // The box could not say it held the caret, while the
+                                    // document's own keys were switched off underneath it.
+                                    border_color_focus: mod.mpp.accent
+                                    border_color_disabled: mod.mpp.dim
                                 }
-                                page_field := TextInput{
-                                    width: Fill
+                                input: WellInput{
                                     height: Fill
-                                    margin: 0.0
-                                    padding: Inset{left: 4 right: 4 top: 3 bottom: 3}
                                     empty_text: "1"
-                                    draw_bg +: {
-                                        border_radius: uniform(0.0)
-                                        border_size: uniform(0.0)
-                                        color: mod.mpp.bg_light
-                                        color_hover: uniform(mod.mpp.bg_light)
-                                        color_focus: uniform(mod.mpp.bg_light)
-                                        color_down: uniform(mod.mpp.bg_light)
-                                        color_empty: uniform(mod.mpp.bg_light)
-                                        color_disabled: uniform(mod.mpp.bg_light)
-                                        color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-                                        border_color: uniform(mod.mpp.bg_light)
-                                        border_color_hover: uniform(mod.mpp.bg_light)
-                                        border_color_focus: uniform(mod.mpp.bg_light)
-                                        border_color_down: uniform(mod.mpp.bg_light)
-                                        border_color_empty: uniform(mod.mpp.bg_light)
-                                        border_color_disabled: uniform(mod.mpp.bg_light)
-                                        border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-                                    }
                                     draw_text +: {
                                         color: mod.mpp.fg
                                         color_hover: uniform(mod.mpp.fg)
@@ -293,7 +282,7 @@ impl MatchEvent for App {
         // Cmd+G is the one shortcut that belongs to the chrome rather than
         // to the document: it puts the caret in the page field.
         if e.key_code == KeyCode::KeyG && e.modifiers.is_primary() {
-            let page_field = self.ui.text_input(cx, ids!(page_field));
+            let page_field = self.ui.text_input(cx, ids!(page_box.input));
             page_field.take_key_focus(cx);
             if let Some(mut inner) = page_field.borrow_mut() {
                 inner.select_all(cx);
@@ -388,7 +377,7 @@ impl App {
     }
 
     fn handle_page_field(&mut self, cx: &mut Cx, actions: &Actions) {
-        let page_field = self.ui.text_input(cx, ids!(page_field));
+        let page_field = self.ui.text_input(cx, ids!(page_box.input));
         if let Some((text, _)) = page_field.returned(actions) {
             if let Ok(number) = text.trim().parse::<usize>() {
                 if number >= 1 {
@@ -428,7 +417,7 @@ impl App {
             } else {
                 format!("{}", status.page)
             };
-            self.ui.text_input(cx, ids!(page_field)).set_text(cx, &text);
+            self.ui.text_input(cx, ids!(page_box.input)).set_text(cx, &text);
         }
 
         self.ui
