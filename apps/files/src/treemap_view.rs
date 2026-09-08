@@ -2835,28 +2835,44 @@ impl TreemapView {
             .chain(self.zoom.iter().cloned())
             .collect();
         let last = names.len().saturating_sub(1);
-        for (depth, name) in names.iter().enumerate() {
-            let text = if depth == 0 {
-                name.clone()
-            } else {
-                format!("› {name}")
-            };
-            let width = text_width(&self.draw_bold, cx, &text);
-            if x + width > limit {
+        // Which crumbs fit is decided before any of them is drawn, by the
+        // same arithmetic the library's own trail uses. Drawing forward and
+        // stopping at the first one that overruns — which is what this did —
+        // drops the DEEPEST crumbs, so the folder you are actually looking
+        // at is the one that disappears from the trail naming it.
+        let texts: Vec<String> = names
+            .iter()
+            .enumerate()
+            .map(|(depth, name)| if depth == 0 { name.clone() } else { format!("› {name}") })
+            .collect();
+        let widths: Vec<f64> = texts
+            .iter()
+            .map(|text| text_width(&self.draw_bold, cx, text))
+            .collect();
+        let ellipsis_w = text_width(&self.draw_text, cx, "…");
+        let window = breadcrumb_window(&widths, 6.0, (limit - x).max(0.0), ellipsis_w);
+
+        let mut shown: Vec<usize> = (0..window.head.min(names.len())).collect();
+        shown.extend(window.tail_from..names.len());
+        let mut folded = window.hidden > 0;
+        for depth in shown {
+            if folded && depth >= window.tail_from {
                 self.draw_text.color = dim;
                 self.draw_text.draw_abs(cx, dvec2(x, strip.pos.y + 5.0), "…");
-                break;
+                x += ellipsis_w + 6.0;
+                folded = false;
             }
             self.draw_bold.color = if depth == last { bright } else { dim };
-            self.draw_bold.draw_abs(cx, dvec2(x, strip.pos.y + 4.0), &text);
+            self.draw_bold
+                .draw_abs(cx, dvec2(x, strip.pos.y + 4.0), &texts[depth]);
             self.crumbs.push(CrumbHit {
                 rect: Rect {
                     pos: dvec2(x, strip.pos.y),
-                    size: dvec2(width, strip.size.y),
+                    size: dvec2(widths[depth], strip.size.y),
                 },
                 depth,
             });
-            x += width + 6.0;
+            x += widths[depth] + 6.0;
         }
     }
 
