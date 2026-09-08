@@ -6091,6 +6091,27 @@ impl DeckEngine {
         Vec::new()
     }
 
+    /// A saved track back onto the tail, loading nothing.
+    ///
+    /// Restoring a set list has to reproduce the set list, and [`Self::enqueue`]
+    /// cannot do it: it pumps under `auto_load_queue`, which is on by default,
+    /// and the moment a saved list is read BOTH decks are empty. So the first
+    /// two records restored were pulled straight back off the queue onto the
+    /// decks -- and the shortened queue was then written over the very file it
+    /// had just been read from, so a set list came back two records shorter at
+    /// every launch, for good. Putting a record on a deck is the operator's
+    /// decision or the pump's; it is never a side effect of reading a file.
+    ///
+    /// Unlike [`Self::requeue`] this leaves the shuffle's recency window alone.
+    /// A record read out of a file has not been played, and sparing a whole
+    /// restored list from the next draw would leave the draw nothing to take.
+    pub fn restore_queue(&mut self, item: TrackItem) {
+        if self.queue.iter().any(|queued| queued.asset == item.asset) {
+            return;
+        }
+        self.queue.push(item);
+    }
+
     /// A finished track back onto the tail. Never pumps (the hand-back runs
     /// its single deliberate pump afterwards) and keeps the dedupe: a track
     /// the operator already re-queued is not doubled.
@@ -10168,6 +10189,66 @@ mod tests {
         engine.enqueue_next(item(4));
         assert_eq!(engine.queue().len(), 3, "moved, not duplicated");
         assert_eq!(engine.queue()[0].asset, item(4).asset);
+    }
+
+    /// The startup case, which every other queue test dodges by busying
+    /// both decks first: a set list is read back with NOTHING loaded, which
+    /// is precisely when an enqueue pumps.
+    #[test]
+    fn a_restored_set_list_comes_back_whole_rather_than_two_records_short() {
+        let mut engine = DeckEngine::new();
+        assert!(engine.auto_load_queue, "the shipped default is what the bug needed");
+
+        for seed in 1..=5 {
+            engine.restore_queue(item(seed));
+        }
+
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            (1..=5).map(|seed| item(seed).asset).collect::<Vec<_>>(),
+            "the list that was saved is the list that comes back, in its order",
+        );
+        for deck in [DeckId::A, DeckId::B] {
+            assert!(
+                matches!(engine.deck(deck).load, DeckLoad::Empty),
+                "reading a file put a record on deck {deck:?}",
+            );
+        }
+    }
+
+    /// The distinction from `requeue`, which is the other never-pumps door
+    /// onto the tail and would have been the tempting thing to reuse.
+    #[test]
+    fn restoring_a_set_list_does_not_spend_the_shuffles_recency_window() {
+        let mut engine = DeckEngine::new();
+        for seed in 1..=5 {
+            engine.restore_queue(item(seed));
+        }
+        assert!(
+            engine.recent_picks.is_empty(),
+            "a record read out of a file has not been played",
+        );
+
+        // And the proof that matters: a shuffle draw can still reach the
+        // restored records. Spending the window would have left every one
+        // of them inside it with nothing legal to draw.
+        engine.shuffle = true;
+        engine.seed_shuffle(7);
+        let cmds = engine.pump_queue();
+        assert!(!cmds.is_empty(), "the shuffle had nothing it was allowed to take");
+    }
+
+    #[test]
+    fn a_record_already_waiting_is_not_restored_a_second_time() {
+        let mut engine = DeckEngine::new();
+        engine.restore_queue(item(1));
+        engine.restore_queue(item(2));
+        engine.restore_queue(item(1));
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            vec![item(1).asset, item(2).asset],
+            "a file naming the same record twice still restores one row",
+        );
     }
 
     #[test]

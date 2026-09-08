@@ -20133,7 +20133,7 @@ p2 {}
     /// "refuse a position that parses but cannot mean one" rule the marks
     /// reader already follows. A local-file line does not depend on the
     /// catalog at all and always resolves if the file is still there.
-    fn load_queue(&mut self, cx: &mut Cx) {
+    fn load_queue(&mut self) {
         let Ok(body) = std::fs::read_to_string(Self::queue_path()) else { return };
         for line in body.lines() {
             let Some((kind, value)) = line.split_once(' ') else { continue };
@@ -20145,10 +20145,14 @@ p2 {}
                 _ => None,
             };
             if let Some(item) = resolved {
-                let cmds = self.decks.enqueue(item);
-                self.run_deck_cmds(cx, cmds);
+                // Restored, not enqueued: an enqueue pumps, and at this
+                // moment both decks are free, so enqueueing the file's own
+                // contents handed its first two records to the decks and
+                // dropped them from the list that was being restored.
+                self.decks.restore_queue(item);
             }
         }
+        self.queue_rows_dirty = true;
     }
 
     /// The columns dialog's twelve rows: show tick, name, and the pair that
@@ -32383,7 +32387,7 @@ impl AppMain for App {
             }
         }
         if self.queue_load_timer.is_event(event).is_some() {
-            self.load_queue(cx);
+            self.load_queue();
         }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {
