@@ -38,6 +38,7 @@ pub mod radiobutton;
 pub mod view;
 pub mod breadcrumb;
 pub mod field;
+pub mod code_view;
 pub mod modal;
 pub mod svg;
 pub mod splitter;
@@ -83,6 +84,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
+    code_view::script_mod(vm);
     modal::script_mod(vm);
     svg::script_mod(vm);
     splitter::script_mod(vm);
@@ -150,6 +152,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         view::STORIES,
         breadcrumb::STORIES,
         field::STORIES,
+        code_view::STORIES,
         modal::STORIES,
         svg::STORIES,
         splitter::STORIES,
