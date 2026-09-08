@@ -100,6 +100,7 @@ pub mod fold_header;
 pub mod glass_panel;
 pub mod loading_spinner;
 pub mod progress;
+pub mod marquee;
 pub mod spinner;
 
 pub mod bare_step;
@@ -244,6 +245,7 @@ pub use crate::{
     slide_panel::*,
     slider::*,
     slides_view::*,
+    marquee::*,
     spinner::*,
 
     splitter::*,
@@ -446,6 +448,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    crate::marquee::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
     crate::chip::script_mod(vm);
@@ -717,6 +720,27 @@ mod chip_registration_tests {
         assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
         assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
         assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod marquee_registration_tests {
+    /// The marquee registers after the view it draws inside and carries
+    /// exactly one preset. It draws text and no children on purpose, so it
+    /// must not grow a `#[deref] view` and start redrawing child widgets
+    /// several times a frame — see the module's own reasoning.
+    #[test]
+    fn test_marquee_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let marquee = include_str!("marquee.rs");
+        assert!(lib.contains("pub mod marquee;"));
+        assert!(lib.contains("marquee::*"));
+        let at = lib.find("crate::marquee::script_mod(vm);").expect("marquee registered");
+        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before marquee");
+        }
+        assert!(marquee.contains("mod.widgets.MarqueeBase = #(Marquee::register_widget(vm))"));
+        assert_eq!(marquee.matches("set_type_default() do mod.widgets.MarqueeBase").count(), 1);
     }
 }
 
