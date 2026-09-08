@@ -79,6 +79,7 @@ pub mod window_menu;
 mod window_voice_input;
 
 pub mod combo_box;
+pub mod field;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
@@ -199,6 +200,7 @@ pub use crate::{
     callout_tooltip::*,
     check_box::*,
     combo_box::*,
+    field::*,
     desktop_button::*,
     dock::*,
 
@@ -446,6 +448,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
+    crate::field::script_mod(vm);
 
     crate::splitter::script_mod(vm);
 
