@@ -334,6 +334,13 @@ pub struct RadioButton {
     #[live(false)]
     independent: bool,
 
+    /// Whether this radio is its own stop in the tab order. On for a radio
+    /// standing alone; a group that owns its rows turns it off and offers
+    /// ONE stop for the whole set, so Tab does not have to walk every
+    /// option to get past them.
+    #[live(true)]
+    nav_stop: bool,
+
     #[live]
     icon_walk: Walk,
     #[live]
@@ -370,7 +377,12 @@ impl RadioButton {
         self.draw_text
             .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        // A radio standing on its own is a tab stop. A row inside a group
+        // is not: the group is the one stop, and five rows would otherwise
+        // be five stops to walk past.
+        if self.nav_stop {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        }
         DrawStep::done()
     }
 
@@ -426,6 +438,14 @@ impl Widget for RadioButton {
 
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
+        }
+
+        // A disabled radio is not an answer. Checked after the animator so a
+        // radio disabled mid-press still settles, and before any hit so it
+        // cannot be pressed: without this it TAKES the choice off whichever
+        // enabled option had it, which is what it did.
+        if self.disabled(cx) {
+            return;
         }
 
         match event.hits(cx, self.draw_bg.area()) {
