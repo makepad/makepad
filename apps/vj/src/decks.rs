@@ -2110,6 +2110,12 @@ pub struct DeckEngine {
     queue: Vec<TrackItem>,
     /// Fill an idle deck from the queue as soon as one frees up.
     pub auto_load_queue: bool,
+    /// What the operator calls the list on the decks right now.
+    pub queue_name: String,
+    /// The list is a programme, not a working queue: nothing changes it and
+    /// nothing eats it. Guarded INSIDE the verbs rather than at the call
+    /// sites, so a mutation site added later cannot forget the lock.
+    pub queue_locked: bool,
     /// What each deck is currently airing, for the night's log. Private:
     /// nothing outside asks what is airing, only what has just finished.
     airing: [Option<Airing>; 2],
@@ -2180,6 +2186,8 @@ impl Default for DeckEngine {
             snap_beats: [SNAP_DEFAULT_BEATS; 2],
             queue: Vec::new(),
             auto_load_queue: true,
+            queue_name: crate::set_lists::DEFAULT_NAME.to_string(),
+            queue_locked: false,
             airing: [None, None],
             repeat: false,
             shuffle: false,
@@ -6168,6 +6176,9 @@ impl DeckEngine {
 
     /// Put a track at the back of the queue (no duplicates).
     pub fn enqueue(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        if self.queue_locked {
+            return Default::default();
+        }
         if self.queue.iter().any(|queued| queued.asset == item.asset) {
             return Vec::new();
         }
@@ -6183,6 +6194,9 @@ impl DeckEngine {
     /// than doubled, so "play this next" always means exactly one row, at
     /// the front, whether or not it was already queued somewhere else.
     pub fn enqueue_next(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        if self.queue_locked {
+            return Default::default();
+        }
         self.queue.retain(|queued| queued.asset != item.asset);
         self.queue.insert(0, item);
         if self.auto_load_queue {
@@ -6195,12 +6209,26 @@ impl DeckEngine {
     /// The operator's own "start over" gesture, not a merge with what was
     /// there -- a top-up would leave old picks the operator meant to drop.
     pub fn enqueue_replacing(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        if self.queue_locked {
+            return Default::default();
+        }
         self.queue.clear();
         self.queue.push(item);
         if self.auto_load_queue {
             return self.pump_queue();
         }
         Vec::new()
+    }
+
+    /// Empty the live list because a DIFFERENT list is taking its place.
+    ///
+    /// Not the operator's "clear" — that one is refused on a locked list,
+    /// and rightly. Switching lists is not changing a list: the one being
+    /// put away keeps everything it had, and the one arriving is what the
+    /// engine holds next. Guarding this would make a locked list impossible
+    /// to switch away from.
+    pub fn take_queue_for_switch(&mut self) -> Vec<TrackItem> {
+        std::mem::take(&mut self.queue)
     }
 
     /// A saved track back onto the tail, loading nothing.
@@ -6228,6 +6256,9 @@ impl DeckEngine {
     /// its single deliberate pump afterwards) and keeps the dedupe: a track
     /// the operator already re-queued is not doubled.
     pub fn requeue(&mut self, item: TrackItem) {
+        if self.queue_locked {
+            return Default::default();
+        }
         // Remembered whether or not the push happens: a track the operator
         // already re-queued mid-play must still be spared from the very
         // next shuffle draw.
@@ -6272,6 +6303,9 @@ impl DeckEngine {
     }
 
     pub fn dequeue(&mut self, index: usize) {
+        if self.queue_locked {
+            return Default::default();
+        }
         if index < self.queue.len() {
             self.queue.remove(index);
         }
@@ -6284,6 +6318,9 @@ impl DeckEngine {
     /// anything actually moved, so a drag can skip a redraw that would
     /// show the same rows.
     pub fn move_queued(&mut self, from: usize, to: usize) -> bool {
+        if self.queue_locked {
+            return Default::default();
+        }
         if from >= self.queue.len() || to >= self.queue.len() || from == to {
             return false;
         }
@@ -6293,6 +6330,9 @@ impl DeckEngine {
     }
 
     pub fn clear_queue(&mut self) {
+        if self.queue_locked {
+            return Default::default();
+        }
         self.queue.clear();
     }
 
@@ -6311,7 +6351,9 @@ impl DeckEngine {
     /// Load one queued track onto a free deck, if there is one of each.
     /// The head in order, or a shuffle draw.
     pub fn pump_queue(&mut self) -> Vec<DeckCmd> {
-        if self.queue.is_empty() {
+        // A locked list is a programme played FROM, never spent: an idle
+        // deck does not help itself to one.
+        if self.queue_locked || self.queue.is_empty() {
             return Vec::new();
         }
         let Some(deck) = self.free_deck() else {
@@ -6339,7 +6381,14 @@ impl DeckEngine {
         if let Some(deck) = self.load_refused(target) {
             return vec![DeckCmd::LoadRefused { deck }];
         }
-        let item = self.queue.remove(index);
+        // A LOCKED list is played FROM without being spent: the record goes
+        // to the deck and the row stays where it is. That is what a lock is
+        // for -- a running order played repeatedly that cannot be
+        // fat-fingered away.
+        let item = match self.queue_locked {
+            true => self.queue[index].clone(),
+            false => self.queue.remove(index),
+        };
         self.click(item, target)
     }
 }
@@ -10451,6 +10500,64 @@ mod tests {
         assert_eq!(gone[1].deck, DeckId::B);
         assert_eq!(gone[0].item.asset, item(1).asset);
         assert_eq!(gone[1].item.asset, item(2).asset);
+    }
+
+    #[test]
+    fn a_locked_set_list_refuses_every_hand_that_would_change_it() {
+        let mut engine = DeckEngine::new();
+        engine.auto_load_queue = false;
+        for seed in 1..=3 {
+            engine.restore_queue(item(seed));
+        }
+        let was: Vec<AssetId> = engine.queue().iter().map(|i| i.asset).collect();
+        engine.queue_locked = true;
+
+        // Every door into the list, tried in turn.
+        engine.enqueue(item(9));
+        engine.enqueue_next(item(9));
+        engine.enqueue_replacing(item(9));
+        engine.requeue(item(9));
+        engine.dequeue(0);
+        assert!(!engine.move_queued(0, 2), "and it says so rather than silently doing nothing");
+        engine.clear_queue();
+
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            was,
+            "a locked list is a programme: nothing changes it",
+        );
+    }
+
+    #[test]
+    fn a_locked_set_list_is_played_from_without_being_spent() {
+        let mut engine = DeckEngine::new();
+        engine.auto_load_queue = false;
+        for seed in 1..=3 {
+            engine.restore_queue(item(seed));
+        }
+        engine.queue_locked = true;
+
+        // The pump does not help itself to a frozen programme...
+        assert!(engine.pump_queue().is_empty(), "an idle deck does not eat a locked list");
+        assert_eq!(engine.queue().len(), 3);
+
+        // ...but a hand can still play a row off it, and the row stays.
+        let cmds = engine.load_queued(1, DeckTarget::A);
+        assert!(!cmds.is_empty(), "the record still reaches the deck");
+        assert_eq!(engine.queue().len(), 3, "and the running order is still whole");
+        assert_eq!(engine.queue()[1].asset, item(2).asset, "in its own order");
+    }
+
+    #[test]
+    fn an_unlocked_list_still_spends_the_row_it_plays() {
+        let mut engine = DeckEngine::new();
+        engine.auto_load_queue = false;
+        for seed in 1..=3 {
+            engine.restore_queue(item(seed));
+        }
+        engine.load_queued(1, DeckTarget::A);
+        assert_eq!(engine.queue().len(), 2, "a working queue is spent as it plays");
+        assert_eq!(engine.queue()[1].asset, item(3).asset);
     }
 
     #[test]

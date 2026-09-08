@@ -3746,8 +3746,13 @@ script_mod! {
                                 flow: Right
                                 spacing: 6
                                 align: Align{x: 0.0, y: 0.5}
-                                Label{
-                                    text: "QUEUE"
+                                // The list's own name, where the word QUEUE
+                                // used to be: a console with several set
+                                // lists has to say which one is on the decks,
+                                // and this costs the crowded header nothing.
+                                queue_name := Label{
+                                    width: Fit
+                                    text: "SET LIST"
                                     draw_text.color: #xff5c39
                                     draw_text.text_style: theme.font_bold{font_size: 10}
                                 }
@@ -3764,6 +3769,10 @@ script_mod! {
                                     height: 20
                                     text: "SHUFFLE"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/shuffle.svg") }
+                                }
+                                queue_lists := MusicChipButton{
+                                    height: 20
+                                    text: "LISTS"
                                 }
                                 queue_clear := MusicChipButton{
                                     height: 20
@@ -4572,6 +4581,141 @@ script_mod! {
                         align: Align{x: 1.0, y: 0.5}
                         prep_cols_reset := MusicButton{width: 80 height: 22 text: "Reset"}
                         prep_cols_close := MusicButton{width: 60 height: 22 text: "Close"}
+                    }
+                }
+            }
+        }
+
+
+        // The shelf. One list is on the decks; the rest wait here with their
+        // own names, locks and pick orders. Eight fixed rows, filled per
+        // open from the shelf itself -- the same fixed-slot idiom the
+        // columns dialog and the row menu use, because a DSL cannot grow a
+        // list at runtime.
+        set_lists_modal := Modal{
+            can_dismiss: true
+            content +: {
+                width: 460
+                height: Fit
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    padding: 20
+                    spacing: 6
+                    flow: Down
+                    draw_bg +: {
+                        color: #x16161b
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    Label{
+                        text: "SET LISTS"
+                        draw_text.color: #xff5c39
+                        draw_text.text_style: theme.font_bold{font_size: 10}
+                    }
+                    sl_note := MusicLabel{width: Fill text: ""}
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick0 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name0 := MusicLabel{width: Fill text: ""}
+                        sl_lock0 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop0 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick1 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name1 := MusicLabel{width: Fill text: ""}
+                        sl_lock1 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop1 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick2 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name2 := MusicLabel{width: Fill text: ""}
+                        sl_lock2 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop2 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick3 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name3 := MusicLabel{width: Fill text: ""}
+                        sl_lock3 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop3 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick4 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name4 := MusicLabel{width: Fill text: ""}
+                        sl_lock4 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop4 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick5 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name5 := MusicLabel{width: Fill text: ""}
+                        sl_lock5 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop5 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick6 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name6 := MusicLabel{width: Fill text: ""}
+                        sl_lock6 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop6 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_pick7 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        sl_name7 := MusicLabel{width: Fill text: ""}
+                        sl_lock7 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        sl_drop7 := MusicButton{width: 26 height: 20 text: "X"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        sl_rename := TextInput{
+                            width: Fill
+                            height: 22
+                            empty_text: "name this list&"
+                        }
+                        sl_new := MusicButton{width: 70 height: 22 text: "+ NEW"}
+                        sl_close := MusicButton{width: 60 height: 22 text: "Close"}
                     }
                 }
             }

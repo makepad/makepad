@@ -129,6 +129,7 @@ mod pick;
 mod recent_searches;
 mod score_preview;
 mod set_history;
+mod set_lists;
 mod track_menu;
 // Which columns a track list shows and in what order — the operator's, not
 // the template's.
@@ -188,6 +189,7 @@ use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoS
 use crate::arc::Curve;
 use crate::recent_searches::Recalls;
 use crate::set_history::SetHistory;
+use crate::set_lists::SetLists;
 use crate::blend::MixBrain;
 use crate::decks::{
     DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
@@ -6845,11 +6847,25 @@ const LIBRARY_CHIPS: [(&[LiveId], &str); 5] = [
     (ids!(music_autoplay), "AUTOPLAY"),
 ];
 /// The set list's own chips, measured against the set list's own width.
-const QUEUE_CHIPS: [(&[LiveId], &str); 3] = [
+const QUEUE_CHIPS: [(&[LiveId], &str); 4] = [
     (ids!(queue_repeat), "REPEAT"),
     (ids!(queue_shuffle), "SHUFFLE"),
+    (ids!(queue_lists), "LISTS"),
     (ids!(queue_clear), "Clear"),
 ];
+
+/// How many chips the shared width cache has to hold.
+///
+/// It was a bare `8` that happened to equal the two rows, and the set list's
+/// row is measured at a width where it is ALWAYS narrow -- so one more chip
+/// would have indexed past the end and panicked on the set list's ordinary
+/// path, not on some rare one. Named, and checked below, so it cannot drift
+/// again.
+const CHIP_SLOTS: usize = LIBRARY_CHIPS.len() + QUEUE_CHIPS.len();
+const _: () = assert!(
+    CHIP_SLOTS == 9,
+    "chip_wide is sized by hand: change it with this, or the next chip walks off the end",
+);
 /// Where the set list's chips give up their words. Lower than the listing's
 /// threshold because the set list is the narrower column by design: its
 /// three chips plus the word QUEUE and a count is about this much.
@@ -7890,7 +7906,7 @@ pub struct App {
     /// What each library chip measured while it still wore its word — the
     /// width to put back when the console widens again.
     #[rust]
-    chip_wide: [f64; 8],
+    chip_wide: [f64; 9],
     /// The crossfader sweeps tone as well as level while this is lit.
     #[rust]
     eq_fade: bool,
@@ -8246,6 +8262,17 @@ pub struct App {
     /// When the room was last sampled, for the night's log.
     #[rust]
     room_watch: Option<std::time::Instant>,
+    /// Every set list, the live one included. The ENGINE holds the live
+    /// list; this holds the shelf it came off.
+    #[rust]
+    set_lists: SetLists,
+    /// The shelf file held lines this build could not read.
+    #[rust]
+    set_lists_lossy: bool,
+    /// A hand has changed the shelf since it was read, which is what makes
+    /// it safe to write back over a file only partly understood.
+    #[rust]
+    set_lists_touched: bool,
     /// A record's menu while it is open: which list it came from, the row
     /// it names, and the verbs it offered.
     #[rust]
@@ -20573,26 +20600,171 @@ p2 {}
     /// session) decides which line a queued track gets: a local file's own
     /// path survives a restart on its own, a store asset's does not need
     /// to, because the catalog is the authority on it.
-    fn save_queue(&self) {
-        let path = Self::queue_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    /// The shelf dialog's eight fixed rows.
+    const SET_LIST_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
+        &'static [LiveId]); crate::set_lists::MAX_LISTS] = [
+        (ids!(sl_pick0), ids!(sl_name0), ids!(sl_lock0), ids!(sl_drop0)),
+        (ids!(sl_pick1), ids!(sl_name1), ids!(sl_lock1), ids!(sl_drop1)),
+        (ids!(sl_pick2), ids!(sl_name2), ids!(sl_lock2), ids!(sl_drop2)),
+        (ids!(sl_pick3), ids!(sl_name3), ids!(sl_lock3), ids!(sl_drop3)),
+        (ids!(sl_pick4), ids!(sl_name4), ids!(sl_lock4), ids!(sl_drop4)),
+        (ids!(sl_pick5), ids!(sl_name5), ids!(sl_lock5), ids!(sl_drop5)),
+        (ids!(sl_pick6), ids!(sl_name6), ids!(sl_lock6), ids!(sl_drop6)),
+        (ids!(sl_pick7), ids!(sl_name7), ids!(sl_lock7), ids!(sl_drop7)),
+    ];
+
+    /// Paint the shelf dialog from the shelf.
+    fn sync_set_lists_panel(&mut self, cx: &mut Cx) {
+        let names = self.set_lists.names();
+        let active = self.set_lists.active_index();
+        for (slot, (pick, name, lock, drop)) in Self::SET_LIST_ROWS.iter().enumerate() {
+            let held = names.get(slot);
+            for id in [pick, name, lock, drop] {
+                self.ui.widget(cx, id).set_visible(cx, held.is_some());
+            }
+            let Some((held_name, locked)) = held else { continue };
+            let live = slot == active;
+            let word = match live {
+                true => format!("{held_name}  ·  on the decks"),
+                false => held_name.clone(),
+            };
+            self.ui.label(cx, name).set_text(cx, &word);
+            self.paint_lit(cx, pick, live);
+            self.paint_lit(cx, lock, *locked);
+            // The last list cannot go, so it is not offered.
+            self.ui.button(cx, drop).set_visible(cx, names.len() > 1);
         }
-        let mut body = String::new();
+        let note = match self.set_lists.len() >= crate::set_lists::MAX_LISTS {
+            true => "the shelf is full".to_string(),
+            false => String::new(),
+        };
+        self.ui.label(cx, ids!(sl_note)).set_text(cx, &note);
+        self.ui
+            .text_input(cx, ids!(sl_rename))
+            .set_text(cx, &self.decks.queue_name.clone());
+    }
+
+    /// Put a different list on the decks, keeping everything the one being
+    /// put away had.
+    fn switch_set_list(&mut self, cx: &mut Cx, to: usize) {
+        // The live list is only in the engine, so it has to go back on the
+        // shelf before the shelf is asked for another one.
+        self.save_queue();
+        if !self.set_lists.switch_to(to) {
+            return;
+        }
+        self.set_lists_touched = true;
+        self.install_active_set_list();
+        self.sync_set_lists_panel(cx);
+        self.refresh_music_rows(cx);
+    }
+
+    fn handle_set_lists_modal(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(queue_lists)).clicked(actions) {
+            self.sync_set_lists_panel(cx);
+            self.ui.modal(cx, ids!(set_lists_modal)).open(cx);
+        }
+        if self.ui.button(cx, ids!(sl_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(set_lists_modal)).close(cx);
+        }
+        if self.ui.button(cx, ids!(sl_new)).clicked(actions) {
+            self.save_queue();
+            if self.set_lists.add(crate::set_lists::DEFAULT_NAME).is_some() {
+                self.set_lists_touched = true;
+                self.install_active_set_list();
+                self.sync_set_lists_panel(cx);
+                self.refresh_music_rows(cx);
+            }
+        }
+        if let Some((text, _)) = self.ui.text_input(cx, ids!(sl_rename)).returned(actions) {
+            self.set_lists.rename_active(&text);
+            self.decks.queue_name = self.set_lists.active().name.clone();
+            self.set_lists_touched = true;
+            self.save_queue();
+            self.sync_set_lists_panel(cx);
+            self.queue_rows_dirty = true;
+        }
+        // One press, one change: the rows are rebuilt by any of these, so
+        // acting on two clicks from the same frame would apply the second to
+        // a shelf it was never aimed at.
+        for (slot, (pick, _, lock, drop)) in Self::SET_LIST_ROWS.iter().enumerate() {
+            if self.ui.button(cx, pick).clicked(actions) {
+                self.switch_set_list(cx, slot);
+                return;
+            }
+            if self.ui.button(cx, lock).clicked(actions) {
+                let Some(list) = self.set_lists.get(slot) else { return };
+                let locked = !list.locked;
+                if slot == self.set_lists.active_index() {
+                    self.decks.queue_locked = locked;
+                }
+                if let Some(list) = self.set_lists.get_mut(slot) {
+                    list.locked = locked;
+                }
+                self.set_lists_touched = true;
+                self.save_queue();
+                self.sync_set_lists_panel(cx);
+                self.queue_rows_dirty = true;
+                return;
+            }
+            if self.ui.button(cx, drop).clicked(actions) {
+                self.save_queue();
+                if self.set_lists.drop_list(slot) {
+                    self.set_lists_touched = true;
+                    self.install_active_set_list();
+                    self.sync_set_lists_panel(cx);
+                    self.refresh_music_rows(cx);
+                }
+                return;
+            }
+        }
+    }
+
+    fn set_lists_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("set-lists.txt")
+    }
+
+    /// Copy the live list back onto the shelf, then write the shelf down.
+    ///
+    /// The engine holds ONE list — the live one — and the shelf holds the
+    /// rest. This is the single place the two meet, which is what lets every
+    /// existing queue verb keep working without a list selector threaded
+    /// through it.
+    ///
+    /// A local file's line is the host's to write: only it knows which asset
+    /// id stands for a path on this machine, and only it can resolve one back.
+    /// To the pure module those lines are exactly what an unreadable line is
+    /// — something to keep verbatim — so they ride the same lane.
+    fn save_queue(&mut self) {
+        let mut locals: Vec<String> = Vec::new();
+        let mut items = Vec::new();
         for item in self.decks.queue() {
             match self.local_by_asset.get(&item.asset) {
-                Some(local_path) => {
-                    body.push_str("local ");
-                    body.push_str(&local_path.to_string_lossy());
-                }
-                None => {
-                    body.push_str("asset ");
-                    body.push_str(&item.asset.to_string());
-                }
+                Some(path) => locals.push(format!("local {}", path.to_string_lossy())),
+                None => items.push(item.clone()),
             }
-            body.push('\n');
         }
-        let _ = crate::durable::write_file(&path, body);
+        let (name, locked, repeat, shuffle) = (
+            self.decks.queue_name.clone(),
+            self.decks.queue_locked,
+            self.decks.repeat,
+            self.decks.shuffle,
+        );
+        let live = self.set_lists.active_mut();
+        live.name = name;
+        live.locked = locked;
+        live.repeat = repeat;
+        live.shuffle = shuffle;
+        live.items = items;
+        live.unknown.retain(|line| !line.starts_with("local "));
+        live.unknown.extend(locals);
+        // A file this build only partly understood is not overwritten just
+        // because something redrew. Once a hand has changed the shelf, that
+        // change is the newer truth and it is written.
+        if !crate::set_lists::may_write_back(self.set_lists_lossy, self.set_lists_touched) {
+            return;
+        }
+        let _ = crate::durable::write_file(&Self::set_lists_path(), self.set_lists.to_text());
     }
 
     /// Read the queue back. Called once at startup, before the catalog
@@ -20601,25 +20773,54 @@ p2 {}
     /// "refuse a position that parses but cannot mean one" rule the marks
     /// reader already follows. A local-file line does not depend on the
     /// catalog at all and always resolves if the file is still there.
-    fn load_queue(&mut self) {
-        let Ok(body) = std::fs::read_to_string(Self::queue_path()) else { return };
-        for line in body.lines() {
-            let Some((kind, value)) = line.split_once(' ') else { continue };
-            let resolved = match kind {
-                "local" => self.local_track_item(Path::new(value)),
-                "asset" => {
-                    AssetId::from_str(value).ok().and_then(|asset| self.track_item_for_asset(asset))
-                }
-                _ => None,
-            };
-            if let Some(item) = resolved {
-                // Restored, not enqueued: an enqueue pumps, and at this
-                // moment both decks are free, so enqueueing the file's own
-                // contents handed its first two records to the decks and
-                // dropped them from the list that was being restored.
+    /// Read the shelf, and put its active list on the decks.
+    ///
+    /// The single-queue file this replaces is a VALID shelf file — bare
+    /// record lines with no `list` header attach to an implicit first list —
+    /// so an operator's existing set is adopted with no conversion step and
+    /// no chance of truncating it. `queue.txt` is then left alone forever,
+    /// never written again and never deleted: an older build reading its own
+    /// last known set is better than one reading a file it half understands.
+    fn load_set_lists(&mut self) {
+        let path = Self::set_lists_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => std::fs::read_to_string(Self::queue_path()).unwrap_or_default(),
+        };
+        let (lists, lossy) = crate::set_lists::SetLists::from_text(&text);
+        self.set_lists = lists;
+        self.set_lists_lossy = lossy > 0;
+        self.install_active_set_list();
+    }
+
+    /// Put the shelf's active list on the decks.
+    ///
+    /// Restored, never enqueued: an enqueue pumps, and the one moment a list
+    /// is restored is the one moment both decks are free, so enqueueing the
+    /// file's own contents handed its first two records to the decks and
+    /// dropped them from the list being restored.
+    fn install_active_set_list(&mut self) {
+        self.decks.take_queue_for_switch();
+        let list = self.set_lists.active().clone();
+        self.decks.queue_name = list.name;
+        // The lock goes on AFTER the records, or it would refuse them.
+        self.decks.queue_locked = false;
+        self.decks.repeat = list.repeat;
+        self.decks.shuffle = list.shuffle;
+        for item in list.items {
+            self.decks.restore_queue(item);
+        }
+        // A local record is a path only this host can resolve, kept in the
+        // list's own unreadable-lines lane. Resolving can fail — the file
+        // may be gone — and a line that does not resolve simply stays there
+        // for the next launch rather than being dropped.
+        for line in &list.unknown.clone() {
+            let Some(path) = line.strip_prefix("local ") else { continue };
+            if let Some(item) = self.local_track_item(Path::new(path)) {
                 self.decks.restore_queue(item);
             }
         }
+        self.decks.queue_locked = list.locked;
         self.queue_rows_dirty = true;
     }
 
@@ -26006,9 +26207,17 @@ p2 {}
                 list.set_entries(cx, queue);
             };
             let label = self.music_refs.queue_count.clone();
-            // Just the number: the header now also carries the set-policy
-            // controls, and the count reads on its own.
-            self.set_label(cx, 0xffff, &label, &format!("{count}"));
+            // The number, and the lock if there is one: a locked list
+            // refuses every hand that would change it, so an operator
+            // reaching for it during a set has to be able to see WHY
+            // nothing happened, on the list itself.
+            let reading = match self.decks.queue_locked {
+                true => format!("{count}  ·  LOCKED"),
+                false => format!("{count}"),
+            };
+            self.set_label(cx, 0xffff, &label, &reading);
+            let name = self.decks.queue_name.clone();
+            self.ui.label(cx, ids!(queue_name)).set_text(cx, &name);
             // Whichever of the queue's dozen mutation sites caused this,
             // this is the one place they all funnel through -- library-c11.
             self.save_queue();
@@ -30338,6 +30547,7 @@ impl MatchEvent for App {
         }
         // Before the rows: the menu is offered the press first, so a
         // press it takes must not also reach the listing underneath.
+        self.handle_set_lists_modal(cx, actions);
         self.handle_track_menu(cx, actions);
         self.handle_music_rows(cx, actions);
         self.handle_deck_tabs(cx, actions);
@@ -32899,7 +33109,7 @@ impl AppMain for App {
             }
         }
         if self.queue_load_timer.is_event(event).is_some() {
-            self.load_queue();
+            self.load_set_lists();
         }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {
