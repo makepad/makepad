@@ -805,6 +805,7 @@ impl CodeRuntime {
         // the retained call is the one without any cursor: continuations
         // compare against it after their own cursor is taken
         call.common.cursor = None;
+        let page_bytes = call.common.max_output_bytes.min(PAGE_BYTES);
         let mut rows = executed.rows;
         if let Some(text) = executed.text {
             rows.insert(0, json::obj(vec![("row", s("brief")), ("text", s(text))]));
@@ -814,17 +815,18 @@ impl CodeRuntime {
         envelope.cursor = Some("c0000000000-r0000000000-00000000".into());
         let overhead = envelope.json().to_json().len() + 32;
         envelope.cursor = None;
-        let budget = PAGE_BYTES.saturating_sub(overhead).max(512);
+        let budget = page_bytes.checked_sub(overhead).filter(|b| *b >= 512)
+            .ok_or_else(|| LaneError::new(LaneErrorKind::BudgetExceeded, "publication metadata leaves no room in max_output_bytes; increase it or narrow the scope"))?;
         let (page, mut rest) = fit_rows(rows, budget)?;
         envelope.rows = page;
         // the complete envelope, not only its rows, stays within the page
-        while envelope.json().to_json().len() > PAGE_BYTES && envelope.rows.len() > 1 {
+        while envelope.json().to_json().len() > page_bytes && envelope.rows.len() > 1 {
             let row = envelope.rows.pop().expect("non-empty");
             rest.insert(0, row);
         }
-        if envelope.json().to_json().len() > PAGE_BYTES {
+        if envelope.json().to_json().len() > page_bytes {
             envelope.rows.clear();
-            return Err(LaneError::new(LaneErrorKind::BudgetExceeded, format!("one row plus the envelope exceeds the {PAGE_BYTES}-byte page; narrow the scope or lower budget.sites")));
+            return Err(LaneError::new(LaneErrorKind::BudgetExceeded, format!("one row plus the envelope exceeds the {page_bytes}-byte page; increase max_output_bytes, narrow the scope or lower budget.sites")));
         }
         envelope.truncated = executed.truncated || !rest.is_empty() || executed.next.is_some();
         if !rest.is_empty() || executed.next.is_some() {
@@ -977,6 +979,10 @@ fn code_record(id: &str, tool: &str, args: &Value, worktree: &str, outcome: &str
         ("duration_ms", Value::Int(duration.as_millis().min(i64::MAX as u128) as i64)),
         ("truncated", Value::Bool(envelope.truncated)),
         ("rows", Value::Int(envelope.rows.len() as i64)),
+        (
+            "result_bytes",
+            Value::Int(envelope.json().to_json().len() as i64),
+        ),
     ];
     if let Some(error) = &envelope.error {
         fields.push(("error", s(error.kind.as_str())));
@@ -1011,8 +1017,14 @@ impl Host {
     #[allow(clippy::too_many_arguments)]
     fn code_call(&mut self, owner: &str, namespace: &str, id: &str, control: &Path, claimed: Option<PathBuf>, tool: &str, args: &Value) -> CodeOutcome {
         let started = Instant::now();
-        let outcome = self.code_call_inner(owner, namespace, id, control, claimed, tool, args);
-        if let CodeOutcome::Answered(envelope) = &outcome {
+        let mut outcome = self.code_call_inner(owner, namespace, id, control, claimed, tool, args);
+        if let CodeOutcome::Answered(envelope) = &mut outcome {
+            let bytes = args
+                .get("max_output_bytes")
+                .and_then(Value::as_u64)
+                .filter(|b| (4096..=PAGE_BYTES as u64).contains(b))
+                .unwrap_or(PAGE_BYTES as u64) as usize;
+            envelope.enforce_limit(bytes);
             let status = if envelope.is_error() { "error" } else { "ok" };
             let record = code_record(id, tool, args, &envelope.worktree, status, envelope, started.elapsed());
             if let Err(error) = code_trace(control, record) {
@@ -1060,7 +1072,8 @@ impl Host {
     /// Finish deferred calls: answer through the spool in the receipt
     /// namespace, trace, release the claimed request file.
     fn poll_code(&mut self) {
-        for (deferred, envelope) in self.code.poll() {
+        for (deferred, mut envelope) in self.code.poll() {
+            envelope.enforce_limit(deferred.call.common.max_output_bytes);
             let status = if envelope.is_error() { "error" } else { "ok" };
             let record = code_record(&envelope.request_id, &deferred.call.tool, &deferred.args, &envelope.worktree, status, &envelope, deferred.started.elapsed());
             let result = (|| {

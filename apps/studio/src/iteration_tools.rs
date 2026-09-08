@@ -3,8 +3,37 @@ use crate::{iteration, iteration_worker::Request};
 use makepad_ai_services::wire::{Risk, ServiceCall, ToolDef};
 use makepad_strict_json::{self as json, Value};
 
+/// The app AI bus supplies a lane explicitly; its terminal bridge obtains
+/// that identity from the session. Both surfaces execute the same code tool.
+const CODE_TOOLS: &[(&str, &str)] = &[
+    ("flow_code_context", "code_context"),
+    ("flow_code_read", "code_read"),
+    ("flow_code_brief", "code_brief"),
+];
+
 pub fn tool_defs() -> Vec<ToolDef> {
     let mut tools = iteration::tool_defs();
+    for (name, code_name) in CODE_TOOLS {
+        let tool = crate::atlas::registry::lane_tool(code_name).expect("registered code tool");
+        let mut schema = crate::atlas::registry::schema(tool);
+        if let Value::Obj(fields) = &mut schema {
+            for (key, value) in fields {
+                match (key.as_str(), value) {
+                    ("properties", Value::Obj(properties)) => properties.push((
+                        "flow".into(),
+                        json::obj(vec![
+                            ("type", json::s("string")),
+                            ("minLength", Value::Int(1)),
+                            ("maxLength", Value::Int(96)),
+                        ]),
+                    )),
+                    ("required", Value::Arr(required)) => required.push(json::s("flow")),
+                    _ => {}
+                }
+            }
+        }
+        tools.push(ToolDef::new(*name, format!("{} Select flow from Studio's lane list. Runs on the analyser worker; never opens or focuses an editor.", tool.description), &schema.to_json(), Risk::Read));
+    }
     for (name, description, names, risk) in [
         ("flow_git_inspect", "Inspect the flow's private local branch and source changes. Local is never pushed.", "flow", Risk::Read),
         ("flow_promotion_preview", "Preview a squash: local to work for a feature, or work to dev for a categorized milestone. Returns exact source/target hashes and merged tree. No branch moves or publication.", "flow,target", Risk::Read),
@@ -40,6 +69,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
 }
 pub fn handles(name: &str) -> bool {
     iteration::handles(name)
+        || CODE_TOOLS.iter().any(|(tool, _)| *tool == name)
         || matches!(
             name,
             "flow_git_inspect"
@@ -61,6 +91,32 @@ pub fn parse(call: &ServiceCall) -> Result<Request, String> {
         return Err("Flow tool arguments exceed their limit".into());
     }
     let args = json::parse(call.args.as_bytes()).map_err(str::to_owned)?;
+    if let Some((_, tool)) = CODE_TOOLS.iter().find(|(name, _)| *name == call.tool) {
+        let Value::Obj(mut fields) = args else {
+            return Err("Arguments must be an object".into());
+        };
+        let flow = fields
+            .iter()
+            .find(|(name, _)| name == "flow")
+            .and_then(|(_, value)| value.as_str())
+            .filter(|flow| {
+                !flow.is_empty()
+                    && flow.len() <= 96
+                    && flow
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            })
+            .ok_or("flow must be an active lane ID")?
+            .to_owned();
+        fields.retain(|(name, _)| name != "flow");
+        let args = Value::Obj(fields);
+        crate::atlas::registry::parse_lane_call(tool, &args).map_err(|error| error.message)?;
+        return Ok(Request::CodeTool {
+            flow,
+            tool: (*tool).into(),
+            args,
+        });
+    }
     if call.tool == "flow_test" {
         let action = crate::iteration_worker::parse_test_request(&args)?;
         let flow = args.get("flow").and_then(Value::as_str).ok_or("flow must be a string")?.to_owned();
