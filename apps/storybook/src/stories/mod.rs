@@ -40,6 +40,7 @@ pub mod breadcrumb;
 pub mod field;
 pub mod code_view;
 pub mod data_grid;
+pub mod dock;
 pub mod modal;
 pub mod svg;
 pub mod splitter;
@@ -87,6 +88,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     field::script_mod(vm);
     code_view::script_mod(vm);
     data_grid::script_mod(vm);
+    dock::script_mod(vm);
     modal::script_mod(vm);
     svg::script_mod(vm);
     splitter::script_mod(vm);
@@ -156,6 +158,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         field::STORIES,
         code_view::STORIES,
         data_grid::STORIES,
+        dock::STORIES,
         modal::STORIES,
         svg::STORIES,
         splitter::STORIES,
