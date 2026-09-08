@@ -620,11 +620,221 @@ fn check_labels(labels: &[String], what: &'static str) -> ServerResult<Vec<Strin
 
 // ---- tokenizer -------------------------------------------------------------
 
-/// Fold `text` into `tf`: lowercase ASCII-alphanumeric runs, each capped at
-/// MAX_TERM_BYTES (remainder of an overlong run ignored). Identical for
-/// indexing and querying — matching is by construction, not normalization
-/// tables that could drift.
+/// Rebuild every posting row from the annotations that produced them.
+///
+/// Needed once, when the tokenizer's law changes: the index holds terms, not
+/// the rule that made them, so a catalog written before the ASCII fold has
+/// no folded terms and an accented query would find nothing in it. Every
+/// input is still on the annotation row and in `search_labels`, so this
+/// needs no data the store does not already hold — it is a recomputation,
+/// not a repair, and running it twice is the same as running it once.
+///
+/// Deliberately does NOT enforce `max_search_index_terms`. These rows were
+/// admitted under that budget already, and failing a migration on a budget
+/// would leave a catalog that cannot be opened at all. A later write to an
+/// over-budget annotation still fails, where it can be seen and fixed.
+///
+/// `search_alias_postings` is untouched: an alias is `[a-z0-9_-]` by
+/// construction, so the fold is the identity on every one of them and
+/// rebuilding would be a whole-table cost for a guaranteed no-op.
+pub(crate) fn reindex_postings(db: &Db) -> ServerResult<()> {
+    db.prepare("clear postings", "DELETE FROM search_postings")?.run()?;
+    let mut s = db.prepare(
+        "read annotations for reindex",
+        "SELECT asset_id, kind, title, description, creator, generator, backend, model,
+                prompt, provenance
+         FROM search_annotations ORDER BY asset_id",
+    )?;
+    struct Row {
+        asset: Vec<u8>,
+        kind: String,
+        text: [String; 8],
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    while s.step()? {
+        rows.push(Row {
+            asset: s.column_blob(0),
+            kind: s.column_text(1),
+            text: [
+                s.column_text(2),
+                s.column_text(3),
+                s.column_text(4),
+                s.column_text(5),
+                s.column_text(6),
+                s.column_text(7),
+                s.column_text(8),
+                s.column_text(9),
+            ],
+        });
+    }
+    drop(s);
+    for row in &rows {
+        let mut categories: Vec<String> = Vec::new();
+        let mut tags: Vec<String> = Vec::new();
+        let mut labels = db.prepare(
+            "read labels for reindex",
+            "SELECT kind, label FROM search_labels WHERE asset_id = ?1 ORDER BY kind, label",
+        )?;
+        labels.bind_blob(1, &row.asset)?;
+        while labels.step()? {
+            match labels.column_text(0).as_str() {
+                "category" => categories.push(labels.column_text(1)),
+                _ => tags.push(labels.column_text(1)),
+            }
+        }
+        drop(labels);
+        let postings = build_postings(&PostingSource {
+            title: &row.text[0],
+            // The stored kind is the same word the writer indexed, so it is
+            // used as it stands rather than parsed and re-printed.
+            kind: (!row.kind.is_empty()).then_some(row.kind.as_str()),
+            categories: &categories,
+            tags: &tags,
+            creator: &row.text[2],
+            generator: &row.text[3],
+            backend: &row.text[4],
+            model: &row.text[5],
+            description: &row.text[1],
+            prompt: &row.text[6],
+            provenance: &row.text[7],
+        });
+        for (term, (w_pub, w_own)) in &postings {
+            let mut ins = db.prepare(
+                "insert reindexed posting",
+                "INSERT INTO search_postings(term, asset_id, weight_public, weight_owner)
+                 VALUES(?1,?2,?3,?4)",
+            )?;
+            ins.bind_text(1, term)?;
+            ins.bind_blob(2, &row.asset)?;
+            ins.bind_u64(3, *w_pub)?;
+            ins.bind_u64(4, *w_own)?;
+            ins.run()?;
+        }
+    }
+    // Every cursor cut before this refuses, because what it would page
+    // through is not the index it was cut against.
+    bump_generation(db)
+}
+
+/// Everything an asset's postings are built from.
+///
+/// Borrowed rather than owned because both callers already hold the strings:
+/// the writer has them off the annotation it is checking, and the reindex
+/// has them off the row it just read.
+pub(crate) struct PostingSource<'a> {
+    pub title: &'a str,
+    pub kind: Option<&'a str>,
+    pub categories: &'a [String],
+    pub tags: &'a [String],
+    pub creator: &'a str,
+    pub generator: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+    pub description: &'a str,
+    pub prompt: &'a str,
+    pub provenance: &'a str,
+}
+
+/// `term -> (weight_public, weight_owner)`, in deterministic order.
+///
+/// ONE builder for the writer and the reindex. They cannot be two, or a
+/// migration would quietly re-weight a catalog against the rows the writer
+/// goes on to add.
+pub(crate) fn build_postings(src: &PostingSource<'_>) -> BTreeMap<String, (u64, u64)> {
+    let mut postings: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut add = |text: &str, weight: u64, private: bool| {
+        let mut tf: BTreeMap<String, u64> = BTreeMap::new();
+        tokenize_into(text, &mut tf);
+        for (term, n) in tf {
+            let w = weight * n.min(TF_CAP);
+            let e = postings.entry(term).or_insert((0, 0));
+            if !private {
+                e.0 += w;
+            }
+            e.1 += w;
+        }
+    };
+    add(src.title, W_TITLE, false);
+    if let Some(kind) = src.kind {
+        add(kind, W_LABEL, false);
+    }
+    for c in src.categories {
+        add(c, W_LABEL, false);
+    }
+    for t in src.tags {
+        add(t, W_LABEL, false);
+    }
+    add(src.creator, W_CREATOR, false);
+    add(src.generator, W_GEN, false);
+    add(src.backend, W_GEN, false);
+    add(src.model, W_GEN, false);
+    add(src.description, W_DESCRIPTION, false);
+    add(src.prompt, W_PROMPT, true);
+    add(src.provenance, W_PROVENANCE, true);
+    postings
+}
+
+/// The terms an INDEXED text is found by: lowercase ASCII-alphanumeric runs,
+/// each capped at MAX_TERM_BYTES (remainder of an overlong run ignored),
+/// PLUS the same over the text folded to ASCII.
+///
+/// The two sides are deliberately asymmetric, and the whole law is one line:
+///
+/// ```text
+///   index(text) = tokenize(text) ∪ tokenize(fold(text))
+///   query(text) =                  tokenize(fold(text))
+/// ```
+///
+/// so `index ⊇ query` for every text, and folding is idempotent, which means
+/// two spellings of one word ask exactly one question. Accents are not
+/// separators to be stepped over: this tokenizer breaks a run at every
+/// non-ASCII character, so "café" is not one term to be normalised later —
+/// it is `caf` and `e`, two disjoint groups joined by AND, and there is no
+/// per-group place to hang a folded form. The fold therefore has to happen
+/// to the TEXT, before anything is tokenized at all.
+///
+/// A term found by both passes is counted once at its higher frequency, not
+/// summed: doubling a weight would move the ranking of every mixed-script
+/// field for a reason that has nothing to do with what the operator asked.
 fn tokenize_into(text: &str, tf: &mut BTreeMap<String, u64>) {
+    // For ASCII the fold is the identity as far as tokenization is
+    // concerned -- a-z0-9 pass through and every other ASCII byte becomes
+    // '-', which was already a separator -- so the whole existing catalog
+    // indexes bit-identically and costs nothing.
+    if text.is_ascii() {
+        tokenize_raw_into(text, tf);
+        return;
+    }
+    let mut raw = BTreeMap::new();
+    tokenize_raw_into(text, &mut raw);
+    let mut folded = BTreeMap::new();
+    tokenize_raw_into(&makepad_asset_data::fold::fold_to_ascii(text), &mut folded);
+    for (term, n) in folded {
+        let slot = raw.entry(term).or_insert(0);
+        *slot = (*slot).max(n);
+    }
+    // Accumulated with +=, because callers tokenize several fields into one
+    // map and the cross-call totals are what the weights are built from.
+    for (term, n) in raw {
+        *tf.entry(term).or_insert(0) += n;
+    }
+}
+
+/// The terms a QUERY asks for: the folded spelling only.
+///
+/// One spelling of the question, whichever spelling it was typed in, so the
+/// cursor fingerprint and the ranking cannot disagree between "café" and
+/// "cafe". A query of nothing but accented letters used to have no terms at
+/// all and was refused; it now folds to letters and answers.
+fn tokenize_query_into(text: &str, tf: &mut BTreeMap<String, u64>) {
+    if text.is_ascii() {
+        tokenize_raw_into(text, tf);
+        return;
+    }
+    tokenize_raw_into(&makepad_asset_data::fold::fold_to_ascii(text), tf);
+}
+
+fn tokenize_raw_into(text: &str, tf: &mut BTreeMap<String, u64>) {
     let mut cur = String::new();
     let mut skipping = false;
     for ch in text.chars() {
@@ -1208,39 +1418,19 @@ impl<'a> Search<'a> {
             return Err(ServerError::InvalidInput { what: "private annotation requires owner" });
         }
 
-        // Postings: term -> (weight_public, weight_owner), deterministic order.
-        let mut postings: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-        {
-            let mut add = |text: &str, weight: u64, private: bool| {
-                let mut tf: BTreeMap<String, u64> = BTreeMap::new();
-                tokenize_into(text, &mut tf);
-                for (term, n) in tf {
-                    let w = weight * n.min(TF_CAP);
-                    let e = postings.entry(term).or_insert((0, 0));
-                    if !private {
-                        e.0 += w;
-                    }
-                    e.1 += w;
-                }
-            };
-            add(&ann.title, W_TITLE, false);
-            if let Some(kind) = ann.kind {
-                add(kind_name(kind), W_LABEL, false);
-            }
-            for c in &categories {
-                add(c, W_LABEL, false);
-            }
-            for t in &tags {
-                add(t, W_LABEL, false);
-            }
-            add(&ann.creator, W_CREATOR, false);
-            add(&ann.generator, W_GEN, false);
-            add(&ann.backend, W_GEN, false);
-            add(&ann.model, W_GEN, false);
-            add(&ann.description, W_DESCRIPTION, false);
-            add(&ann.prompt, W_PROMPT, true);
-            add(&ann.provenance, W_PROVENANCE, true);
-        }
+        let postings = build_postings(&PostingSource {
+            title: &ann.title,
+            kind: ann.kind.map(kind_name),
+            categories: &categories,
+            tags: &tags,
+            creator: &ann.creator,
+            generator: &ann.generator,
+            backend: &ann.backend,
+            model: &ann.model,
+            description: &ann.description,
+            prompt: &ann.prompt,
+            provenance: &ann.provenance,
+        });
         if postings.len() as u64 > self.budgets.max_search_index_terms as u64 {
             return Err(ServerError::OverBudget {
                 what: "search index terms",
@@ -1562,7 +1752,7 @@ impl<'a> Search<'a> {
             });
         }
         let mut tf = BTreeMap::new();
-        tokenize_into(query.text, &mut tf);
+        tokenize_query_into(query.text, &mut tf);
         let terms: Vec<String> = tf.into_keys().collect();
         let browse = query.text.trim().is_empty();
         if !browse && terms.is_empty() {
@@ -1629,8 +1819,17 @@ impl<'a> Search<'a> {
         let groups = build_groups(&terms, query.expand);
         // Snippets may centre on an expansion match: it is what the row was
         // found by, and hiding it would explain the hit less, not more.
-        let snippet_terms: Vec<String> =
+        // Plus the query's own RAW spelling: a snippet is centred by
+        // looking for the term in the stored text, and an accented title
+        // does not contain the folded form the match was made on. Centring
+        // only -- what matched was decided above and is unaffected.
+        let mut snippet_terms: Vec<String> =
             groups.iter().flat_map(|g| g.all().cloned()).collect();
+        if !query.text.is_ascii() {
+            let mut raw = BTreeMap::new();
+            tokenize_raw_into(query.text, &mut raw);
+            snippet_terms.extend(raw.into_keys());
+        }
 
         // -- fingerprint the full query shape for cursor binding -------------
         let fp = fingerprint(
@@ -1864,6 +2063,86 @@ fn fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terms(text: &str) -> BTreeMap<String, u64> {
+        let mut tf = BTreeMap::new();
+        tokenize_into(text, &mut tf);
+        tf
+    }
+
+    fn query_terms(text: &str) -> Vec<String> {
+        let mut tf = BTreeMap::new();
+        tokenize_query_into(text, &mut tf);
+        tf.into_keys().collect()
+    }
+
+    /// The guard for the one failure here that would ship SILENTLY: two
+    /// passes over the same text produce the same terms for every ASCII
+    /// field, and a naive merge would double every weight in the catalog.
+    /// That changes no assertion about WHICH rows come back, only the order
+    /// they come back in.
+    #[test]
+    fn an_ascii_only_annotation_indexes_exactly_the_postings_it_did_before() {
+        for text in ["Deep House", "a a a b", "CAFE cafe Cafe", "", "one-two_three"] {
+            let mut raw = BTreeMap::new();
+            tokenize_raw_into(text, &mut raw);
+            assert_eq!(terms(text), raw, "{text:?} indexes differently than it used to");
+        }
+    }
+
+    #[test]
+    fn a_term_both_passes_find_is_counted_once_at_its_higher_frequency() {
+        // The raw pass sees "cafe" once (the other two words break at their
+        // accent); the folded pass sees it three times. The term is worth
+        // the higher of the two, 3 — never their sum, 4, which is the shape
+        // a naive merge would produce and which would re-weight every
+        // mixed-script field in the catalog.
+        let tf = terms("cafe café café");
+        assert_eq!(tf.get("cafe"), Some(&3), "summed instead of maxed: {tf:?}");
+        // And the raw run the old index held is still there at its own
+        // count, untouched by the merge — which is what keeps a query
+        // somebody built against the old truncation working.
+        assert_eq!(tf.get("caf"), Some(&2), "{tf:?}");
+    }
+
+    #[test]
+    fn an_accented_title_is_indexed_under_both_of_its_spellings() {
+        let tf = terms("Café del Mar");
+        assert!(tf.contains_key("cafe"), "the spelling somebody will type: {tf:?}");
+        assert!(tf.contains_key("caf"), "and the raw run it always had: {tf:?}");
+        assert!(tf.contains_key("mar"));
+    }
+
+    #[test]
+    fn a_query_asks_in_one_spelling_however_it_was_typed() {
+        assert_eq!(query_terms("café"), vec!["cafe".to_string()]);
+        assert_eq!(query_terms("cafe"), vec!["cafe".to_string()]);
+        assert_eq!(
+            query_terms("Straße"),
+            vec!["strasse".to_string()],
+            "and the letters no decomposition would answer",
+        );
+    }
+
+    /// The law the whole design rests on, checked as the containment it is.
+    #[test]
+    fn every_term_a_query_asks_for_is_a_term_the_index_holds() {
+        for text in ["Café del Mar", "Straße", "Ünïcödé sparkle", "plain ascii", "Björk"] {
+            let index = terms(text);
+            for term in query_terms(text) {
+                assert!(
+                    index.contains_key(&term),
+                    "index({text:?}) does not hold query term {term:?}: {index:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_of_nothing_but_accents_now_has_something_to_ask() {
+        // It used to tokenize to nothing at all and be refused as "no terms".
+        assert_eq!(query_terms("é"), vec!["e".to_string()]);
+    }
 
     /// The CREATE in `SEARCH_SCHEMA` and the v1 -> v2 ALTER must define the
     /// kind column identically: both embed `KIND_DDL` byte-for-byte.

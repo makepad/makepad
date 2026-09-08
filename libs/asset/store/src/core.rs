@@ -16,7 +16,7 @@ use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetManifest, AssetRevisionId, AssetRevisionRef,
 };
 
-pub const SERVER_SCHEMA_VERSION: i64 = 14;
+pub const SERVER_SCHEMA_VERSION: i64 = 15;
 
 // GC keeps reference-blob handling fail-closed even though embedded mode can
 // never create one. Keeping the empty table in the portable schema avoids a
@@ -82,7 +82,7 @@ impl CatalogCore {
             let mut stmt = db.prepare("get user_version", "PRAGMA user_version")?;
             if stmt.step()? { stmt.column_i64(0) } else { 0 }
         };
-        if version != 0 && version != 13 && version != SERVER_SCHEMA_VERSION {
+        if version != 0 && version != 13 && version != 14 && version != SERVER_SCHEMA_VERSION {
             return Err(ServerError::UnsupportedSchema { found: version });
         }
         db.tx(|db| {
@@ -105,7 +105,14 @@ impl CatalogCore {
                     }
                 }
             }
-            if version == 0 || version == 13 {
+            // v15 folds accented text in the search index, so a catalog
+            // written before it holds the wrong terms. Both older openable
+            // versions need the rebuild; a fresh root has no annotations to
+            // rebuild and skips it.
+            if version == 13 || version == 14 {
+                crate::search::reindex_postings(db)?;
+            }
+            if version == 0 || version == 13 || version == 14 {
                 db.exec(
                     "set user_version",
                     &format!("PRAGMA user_version={SERVER_SCHEMA_VERSION}"),
