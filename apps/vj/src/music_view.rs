@@ -109,6 +109,10 @@ fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
     lane.draw_vars.set_uniform(cx, live_id!(warn), &[warn.clamp(0.0, 1.0)]);
 }
 
+fn set_head_fraction_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, fraction: f32) {
+    lane.draw_vars.set_uniform(cx, live_id!(head_fraction), &[fraction]);
+}
+
 /// The drag preview band, same encoding and the same every-draw rule: the
 /// zoomed lanes push zeroes so an overview drag cannot bleed onto them.
 fn set_preview_span_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, span: Option<(f64, f64)>) {
@@ -625,6 +629,11 @@ script_mod! {
         // the loop IS and where release will put it.
         preview_span: uniform(#x00000000)
         color_head: uniform(#xf4f7fa)
+        // Where the playhead sits across the lane's width, 0..1. A
+        // uniform, not an instance: this shader is already at D3D11's
+        // vs_5_0 32-input ceiling (see the stem palette below), and one
+        // more instance field is "no waveform at all on Windows" again.
+        head_fraction: uniform(0.5)
         // The stem palette, pushed from STEM_COLORS every draw so the
         // waveform and the knobs cannot disagree. Uniforms, not instances:
         // they are per-draw constants, and as instances they blew the
@@ -4834,11 +4843,6 @@ pub struct DrawWaveLane {
     /// The tile column under the playhead.
     #[live]
     pub centre_col: f32,
-    /// Where the playhead sits across the lane's width, 0..1. 0.5 is the
-    /// centre and shows equal history and lookahead; lower moves it left
-    /// and trades history for a longer look at what is coming.
-    #[live(0.5)]
-    pub head_fraction: f32,
     /// Zoom: tile columns per screen pixel.
     #[live(1.0)]
     pub cols_per_px: f32,
@@ -6044,7 +6048,7 @@ impl Widget for VjWaveScroll {
             };
             self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = lane_cols;
-            self.draw_lane.head_fraction = self.head_fraction as f32;
+            set_head_fraction_uniform(&mut self.draw_lane, cx, self.head_fraction as f32);
             self.draw_lane.head_col = head as f32;
             self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
             set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
