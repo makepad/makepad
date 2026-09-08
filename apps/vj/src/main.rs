@@ -30418,25 +30418,22 @@ impl MatchEvent for App {
         // stuck hold: the next press after the surface comes back would be
         // read as a repeat and swallowed.
         self.midi_gates.clear();
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
-        let mut names = Vec::new();
         // The two mk2 surfaces share a palette but not their LED channel
-        // meanings (see `ApcModel`): light them in their own dialect.
-        let mut model = None;
-        for desc in &ports.descs {
-            let Some(found) = apc40::apc_model_for_port(&desc.name) else {
-                continue;
-            };
-            model = model.or(Some(found));
-            if desc.port_type.is_input() {
-                inputs.push(desc.port_id);
-                names.push(desc.name.clone());
-            }
-            if desc.port_type.is_output() {
-                outputs.push(desc.port_id);
-            }
-        }
+        // meanings or their grid notes (see `ApcModel`), so one of them is
+        // chosen and the other left alone: taking both and decoding them in
+        // whichever was named first lights one surface at random and reads
+        // its presses as the wrong pads.
+        let choice = apc40::choose_surface(
+            ports.descs.iter().map(|desc| (desc.name.as_str(), desc.port_type.is_input())),
+        )
+        .unwrap_or_default();
+        let port_at = |index: &usize| ports.descs[*index].port_id;
+        let inputs: Vec<_> = choice.inputs.iter().map(port_at).collect();
+        let outputs: Vec<_> = choice.outputs.iter().map(port_at).collect();
+        let names: Vec<_> =
+            choice.inputs.iter().map(|index| ports.descs[*index].name.clone()).collect();
+        let model = (!choice.inputs.is_empty() || !choice.outputs.is_empty())
+            .then_some(choice.model);
         self.all_output_ports = ports
             .descs
             .iter()
@@ -30462,14 +30459,29 @@ impl MatchEvent for App {
         self.midi_status = if self.apc_input_ports.is_empty() {
             "APC: not connected".to_string()
         } else {
+            // A surface that is plugged in and dark is a fault report
+            // waiting to happen, so the one that was passed over says so.
+            let passed_over = match choice.ignored.len() {
+                0 => String::new(),
+                _ => format!(
+                    ", not driving {}",
+                    choice
+                        .ignored
+                        .iter()
+                        .map(|index| ports.descs[*index].name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
             format!(
-                "{}: {} ({} LED out)",
+                "{}: {} ({} LED out){}",
                 match self.apc_leds.model {
                     apc40::ApcModel::Apc40Mk2 => "APC40 mkII",
                     apc40::ApcModel::ApcMiniMk2 => "APC mini mk2",
                 },
                 names.join(", "),
-                self.apc_output_ports.len()
+                self.apc_output_ports.len(),
+                passed_over,
             )
         };
         self.sync_apc_leds();

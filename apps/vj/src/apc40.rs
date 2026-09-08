@@ -747,6 +747,47 @@ pub fn is_apc40_port(name: &str) -> bool {
     apc_model_for_port(name).is_some()
 }
 
+/// Which ports of a set belong to ONE surface, by index into the set.
+///
+/// A machine can have both surfaces plugged in, and their protocols are not
+/// the same: the pad grid sits on different notes and the lamps speak a
+/// different channel. Taking every port that names A surface and then
+/// decoding all of them in whichever model happened to be named first
+/// lights the other one's pads at random and reads its presses as the wrong
+/// pads. So one surface is chosen -- the first that names itself -- and the
+/// other is left alone rather than half-driven.
+///
+/// Indices in, indices out: this module stays platform-free, so the caller
+/// keeps the port descriptors.
+#[derive(Debug, Default, PartialEq)]
+pub struct SurfaceChoice {
+    pub model: ApcModel,
+    pub inputs: Vec<usize>,
+    pub outputs: Vec<usize>,
+    /// Ports that named a DIFFERENT surface. Not opened, and worth saying
+    /// out loud: a surface that is plugged in and dark is a fault report
+    /// waiting to happen.
+    pub ignored: Vec<usize>,
+}
+
+pub fn choose_surface<'a>(ports: impl IntoIterator<Item = (&'a str, bool)>) -> Option<SurfaceChoice> {
+    let mut chosen: Option<SurfaceChoice> = None;
+    for (index, (name, is_input)) in ports.into_iter().enumerate() {
+        let Some(model) = apc_model_for_port(name) else { continue };
+        let choice = chosen.get_or_insert_with(|| SurfaceChoice { model, ..Default::default() });
+        if model != choice.model {
+            choice.ignored.push(index);
+            continue;
+        }
+        if is_input {
+            choice.inputs.push(index);
+        } else {
+            choice.outputs.push(index);
+        }
+    }
+    chosen
+}
+
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
@@ -1027,6 +1068,43 @@ mod tests {
         assert_eq!(lamps(ApcSurface::Video), (Some(127), Some(0)));
         assert_eq!(lamps(ApcSurface::Music), (Some(0), Some(127)));
         assert_eq!(lamps(ApcSurface::Sfx), (Some(127), Some(127)));
+    }
+
+    /// Both surfaces plugged in at once. Their protocols differ, so
+    /// driving them together means driving one of them wrongly: the second
+    /// is left alone, and named, rather than lit in a dialect that is not
+    /// its own.
+    #[test]
+    fn a_second_surface_is_left_alone_rather_than_driven_in_the_wrong_dialect() {
+        let ports = [
+            ("APC40 mkII", true),
+            ("APC40 mkII", false),
+            ("APC mini mk2", true),
+            ("APC mini mk2", false),
+            ("Some Synth", true),
+        ];
+        let choice = choose_surface(ports).expect("one of them names a surface");
+        assert_eq!(choice.model, ApcModel::Apc40Mk2, "the first to name itself");
+        assert_eq!(choice.inputs, vec![0]);
+        assert_eq!(choice.outputs, vec![1]);
+        assert_eq!(choice.ignored, vec![2, 3], "the other surface, by index");
+
+        // The other way round, so the answer is the ORDER and not a
+        // preference for one model.
+        let choice = choose_surface([("APC mini mk2", true), ("APC40 mkII", true)])
+            .expect("a surface");
+        assert_eq!(choice.model, ApcModel::ApcMiniMk2);
+        assert_eq!(choice.inputs, vec![0]);
+        assert_eq!(choice.ignored, vec![1]);
+
+        // A port set with no surface in it at all.
+        assert_eq!(choose_surface([("Some Synth", true)]), None);
+        // Ports that name nothing are not "ignored" -- they were never
+        // candidates, and saying so would fill the status line with the
+        // operator's whole studio.
+        let choice = choose_surface([("Some Synth", true), ("APC40 mkII", true)]).unwrap();
+        assert!(choice.ignored.is_empty());
+        assert_eq!(choice.inputs, vec![1]);
     }
 
     #[test]
