@@ -41,7 +41,7 @@ script_mod! {
         }
 
         StoryHeading{text: "The keyboard nobody had"}
-        StoryNote{text: "Click a destination, then use the arrow keys: they move the choice and choose as they go. Home and End go to the ends. The whole list is ONE tab stop — five destinations should be one Tab away, not five."}
+        StoryNote{text: "Tab into the list, then use the arrow keys: they move the choice and choose as they go, and Home and End reach the ends. The whole list is ONE tab stop, so Tab again leaves it rather than walking every destination on the way past."}
         StoryRow{
             keyed := NavBar{
                 width: Fill

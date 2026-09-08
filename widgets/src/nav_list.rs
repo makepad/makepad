@@ -24,8 +24,8 @@
 //! `flow: Right` over the same list.
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, radio_button::RadioButtonWidgetRefExt,
-    widget::*, widget_tree::CxWidgetExt,
+    animator::Animate, makepad_derive_widget::*, makepad_draw::*,
+    radio_button::RadioButtonWidgetRefExt, widget::*, widget_tree::CxWidgetExt,
 };
 use std::collections::HashMap;
 
@@ -84,6 +84,8 @@ script_mod! {
         destination := RadioButtonTab{
             width: Fill
             height: Fit
+            // The list is the tab stop, not each row.
+            nav_stop: false
         }
     }
 
@@ -105,6 +107,7 @@ script_mod! {
         destination := RadioButtonTab{
             width: Fit
             height: Fit
+            nav_stop: false
         }
     }
 }
@@ -286,17 +289,24 @@ impl Widget for NavList {
                 radio.set_text(&entry.label);
                 // Exactly one is lit. Said here, once, rather than in each
                 // of the six places that used to say it differently.
-                if selected == Some(entry.id) {
-                    radio.select(cx.cx.cx, scope);
-                } else {
-                    radio.unselect(cx.cx.cx);
-                }
+                // set_active, NOT select: `select` raises Clicked whenever
+                // it turns a row on, and this runs on every draw — so the
+                // first draw manufactured a press nobody made, which the
+                // handler below then answered by taking the key focus and
+                // reporting a choice. Three lists on one page fought over
+                // the focus at startup and one won.
+                radio.set_active(cx.cx.cx, selected == Some(entry.id), Animate::No);
                 let row_walk = widget.walk(cx.cx.cx);
                 let _ = widget.draw_walk(cx, scope, row_walk);
             }
         }
         self.draw_bg.end(cx);
         self.area = self.draw_bg.area();
+        // ONE stop for the whole list. The rows opt out (see the template's
+        // `nav_stop: false`), so Tab reaches the list, the arrows move
+        // inside it, and Tab again leaves it — rather than walking every
+        // destination on the way past.
+        cx.add_nav_stop(self.area, NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
@@ -305,18 +315,36 @@ impl Widget for NavList {
         for (_, widget) in &rows {
             widget.handle_event(cx, event, scope);
         }
+        // A press anywhere in the list leaves the focus with the LIST, not
+        // with the row that was pressed. Claimed here, after the rows have
+        // had the press, because a row takes the focus itself on FingerDown
+        // and a grouped radio that is pressed while already lit raises no
+        // action at all — so waiting for one left the focus stranded on the
+        // row, where the arrows no longer reached the list.
+        if let Event::MouseDown(me) = event {
+            if self.area.rect(cx).contains(me.abs) {
+                cx.set_key_focus(self.area);
+            }
+        }
         if let Event::Actions(actions) = event {
             for (id, widget) in &rows {
                 if widget.as_radio_button().clicked(actions) {
                     let uid = self.uid;
+                    let moved = self.selected != Some(*id);
                     self.select(cx, *id);
+                    // Taken back whether or not the answer changed: a
+                    // grouped radio does not toggle off, so re-pressing the
+                    // lit row raises nothing and the focus would be left on
+                    // the row, where the arrows no longer reach the list.
                     cx.set_key_focus(self.area);
-                    cx.widget_action(uid, NavAction::Selected(*id));
+                    if moved {
+                        cx.widget_action(uid, NavAction::Selected(*id));
+                    }
                 }
             }
         }
-        // One keyboard stop for the whole list, not one per row: a nav of
-        // five destinations should be one Tab away, not five.
+        // The list holds the focus, and the rows have opted out of the tab
+        // order, so a nav of five destinations is one stop and not five.
         match event.hits(cx, self.area) {
             Hit::FingerDown(_) => cx.set_key_focus(self.area),
             Hit::KeyDown(ke) => {
