@@ -27,6 +27,23 @@ script_mod! {
         bar_side_margin: 3.0
         /** shortest the handle may shrink, in pixels 8..120 step 1 */
         min_handle_size: 30.0
+
+        // The kinetics. A list carrying a bar shows these as its own
+        // `scroll_bar.` rows, which is the one place they are reachable.
+        /** the slowest release that still throws the view 0.05..2 step 0.05 */
+        flick_scroll_minimum: 0.2
+        /** the fastest a hard flick may throw it 20..600 step 10 */
+        flick_scroll_maximum: 240.0
+        /** how fast a flick runs down, per millisecond 0.98..0.9999 step 0.0005 */
+        fling_decel: #(crate::scroll_motion::FLING_DECEL_RATE_PER_MS)
+        /** rubber-band past the start edge 0..1 step 1 */
+        bounce_at_start: true
+        /** rubber-band past the end edge 0..1 step 1 */
+        bounce_at_end: true
+        /** DEAD: the fling speed comes from the measured release now */
+        flick_scroll_scaling: 0.005
+        /** DEAD: the run-down rate is fling_decel now */
+        flick_scroll_decay: 0.97
         /** The handle material: one rounded bar along the scroll axis. */
         draw_bg +: {
             /** dragging mix 0..1 step 0.01 */
