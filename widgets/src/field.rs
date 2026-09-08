@@ -31,7 +31,7 @@
 //! caller at all. A well with three slots is the piece that is actually
 //! asked for eight times.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, text_input::TextInputWidgetRefExt, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, text_input::TextInputWidgetRefExt, widget::*, CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -40,26 +40,6 @@ script_mod! {
     mod.widgets.DrawFieldWellBase = #(DrawFieldWell::script_component(vm))
     set_type_default() do #(DrawFieldWell::script_shader(vm)){
         ..mod.draw.DrawQuad
-        // Plain floats, not instance(): these three have Rust fields on the
-        // draw struct, so the struct's own layout is the instance buffer and
-        // the Rust side sets them each pass. instance() is for a shader
-        // value with no field behind it.
-        hover: 0.0
-        focus: 0.0
-        disabled: 0.0
-
-        border_size: uniform(theme.beveling)
-        border_radius: uniform(theme.corner_radius)
-
-        color: uniform(theme.color_inset)
-        color_hover: uniform(theme.color_inset_hover)
-        color_focus: uniform(theme.color_inset_focus)
-        color_disabled: uniform(theme.color_inset_disabled)
-
-        border_color: uniform(theme.color_bevel)
-        border_color_hover: uniform(theme.color_bevel_hover)
-        border_color_focus: uniform(theme.color_bevel_focus)
-        border_color_disabled: uniform(theme.color_bevel_disabled)
 
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -98,6 +78,11 @@ script_mod! {
     mod.widgets.WellInput = TextInput{
         width: Fill
         height: Fit
+        // The well's padding is the box's padding. A second set inside it
+        // pushes the text off the centre of a short field, and every caller
+        // that noticed had to zero this at its own call site.
+        padding: 0.0
+        margin: 0.0
         draw_bg +: {
             border_radius: uniform(0.0)
             border_size: uniform(0.0)
@@ -130,6 +115,37 @@ script_mod! {
         /** nothing in the well answers 0..1 step 1 */
         disabled: false
 
+        /** The well itself: an inset SDF box with a bevel stroke.
+         *
+         * Every value here is plain, and every one has a field on the draw
+         * struct behind it. No uniform(): a caller that dresses the well in
+         * its own palette overrides these, and overriding a uniform on a
+         * draw type that also carries Rust instance fields regenerates the
+         * shader's value table out from under them - the box then read a
+         * border thickness of garbage and drew as one flat slab of the
+         * border colour. Plain values are per-draw-call data, so a caller
+         * is only passing different numbers to the same shader. */
+        draw_bg +: {
+            hover: 0.0
+            focus: 0.0
+            disabled: 0.0
+
+            /** bevel border thickness in pixels 0..4 step 0.5 */
+            border_size: theme.beveling
+            /** corner rounding radius 0..24 step 0.5 */
+            border_radius: theme.corner_radius
+
+            color: theme.color_inset
+            color_hover: theme.color_inset_hover
+            color_focus: theme.color_inset_focus
+            color_disabled: theme.color_inset_disabled
+
+            border_color: theme.color_bevel
+            border_color_hover: theme.color_bevel_hover
+            border_color_focus: theme.color_bevel_focus
+            border_color_disabled: theme.color_bevel_disabled
+        }
+
         // Bare slots, not named instances: a slot takes a value, so a caller
         // writes `input: TextInput{}` and not `input := TextInput{}`.
         leading: View{width: Fit height: Fit}
@@ -149,6 +165,26 @@ pub struct DrawFieldWell {
     focus: f32,
     #[live]
     disabled: f32,
+    #[live]
+    border_size: f32,
+    #[live]
+    border_radius: f32,
+    #[live]
+    color: Vec4f,
+    #[live]
+    color_hover: Vec4f,
+    #[live]
+    color_focus: Vec4f,
+    #[live]
+    color_disabled: Vec4f,
+    #[live]
+    border_color: Vec4f,
+    #[live]
+    border_color_hover: Vec4f,
+    #[live]
+    border_color_focus: Vec4f,
+    #[live]
+    border_color_disabled: Vec4f,
 }
 
 #[derive(Script, Widget)]
@@ -236,7 +272,16 @@ impl Widget for FieldWell {
         self.draw_bg.disabled = if self.disabled { 1.0 } else { 0.0 };
 
         self.draw_bg.begin(cx, walk, self.layout);
-        for slot in [&mut self.leading, &mut self.input, &mut self.trailing] {
+        for (name, slot) in [
+            (live_id!(leading), &mut self.leading),
+            (live_id!(input), &mut self.input),
+            (live_id!(trailing), &mut self.trailing),
+        ] {
+            // The slots are drawn here rather than by a container, so nothing
+            // else puts them in the tree: without this a host could not reach
+            // ids!(well.input) at all, and the app that tried wired its Enter
+            // handler to an empty ref and never moved a page.
+            cx.widget_tree_insert_child(self.uid, name, slot.clone());
             let slot_walk = slot.walk(cx.cx.cx);
             let _ = slot.draw_walk(cx, scope, slot_walk);
         }
