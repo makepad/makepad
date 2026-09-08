@@ -48,6 +48,7 @@ pub mod accordion;
 pub mod dialog;
 pub mod drawer;
 pub mod toast;
+pub mod breadcrumb;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -178,6 +179,7 @@ pub use crate::{
     divider::*,
     animated_image_gif::*,
     badge::*,
+    breadcrumb::*,
     button_group::*,
     chip::*,
     menu::*,
@@ -448,6 +450,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    crate::breadcrumb::script_mod(vm);
     crate::marquee::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
@@ -720,6 +723,28 @@ mod chip_registration_tests {
         assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
         assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
         assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod breadcrumb_registration_tests {
+    /// The trail registers after the view and label it draws with, and
+    /// carries exactly one preset.
+    #[test]
+    fn test_breadcrumb_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let breadcrumb = include_str!("breadcrumb.rs");
+        assert!(lib.contains("pub mod breadcrumb;"));
+        assert!(lib.contains("breadcrumb::*"));
+        let at = lib.find("crate::breadcrumb::script_mod(vm);").expect("breadcrumb registered");
+        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before breadcrumb");
+        }
+        assert!(breadcrumb.contains("mod.widgets.BreadcrumbBase = #(Breadcrumb::register_widget(vm))"));
+        assert_eq!(
+            breadcrumb.matches("set_type_default() do mod.widgets.BreadcrumbBase").count(),
+            1
+        );
     }
 }
 
