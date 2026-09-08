@@ -129,13 +129,26 @@ impl Apc40State {
                 return None;
             }
             return match note {
+                // Two buttons, three surfaces. The pad surface has no
+                // button of its own -- note 0x59 (USER) belongs to the
+                // lighting desk's POWER and cannot be taken -- so it is
+                // reached by pressing the mode button that is already lit,
+                // and left by pressing either. Without this the pad surface
+                // was a one-way door: the hardware could leave it and only
+                // the mouse or a restart could go back in.
                 NOTE_PAN => {
-                    self.surface = ApcSurface::Video;
+                    self.surface = match self.surface {
+                        ApcSurface::Video => ApcSurface::Sfx,
+                        _ => ApcSurface::Video,
+                    };
                     self.bank = 0;
                     Some(ApcAction::Surface(self.surface))
                 }
                 NOTE_SENDS => {
-                    self.surface = ApcSurface::Music;
+                    self.surface = match self.surface {
+                        ApcSurface::Music => ApcSurface::Sfx,
+                        _ => ApcSurface::Music,
+                    };
                     self.bank = 0;
                     Some(ApcAction::Surface(self.surface))
                 }
@@ -667,7 +680,12 @@ impl LedDiff {
         ] {
             let changed = self.last.as_ref().is_none_or(|last| last.surface != next.surface);
             if changed {
-                out.push([0x90, note, if next.surface == surface { 127 } else { 0 }]);
+                // The pad surface has no lamp of its own, so it wears BOTH
+                // -- which is also how the surface says "press either of us
+                // to leave". It used to wear neither, and a surface that
+                // lights nothing looks exactly like a surface that is off.
+                let lit = next.surface == surface || next.surface == ApcSurface::Sfx;
+                out.push([0x90, note, if lit { 127 } else { 0 }]);
             }
         }
         if self
@@ -683,6 +701,27 @@ impl LedDiff {
 
     pub fn invalidate(&mut self) {
         self.last = None;
+    }
+
+    /// Every lamp out, whatever the diff believes.
+    ///
+    /// Not a frame: the diff's belief is worth nothing at the moment it
+    /// stops owning a surface, so a stale "already dark" would send no
+    /// bytes and leave the pads lit. This restates the whole surface, and
+    /// forgets afterwards -- because the app does not always die after
+    /// sending it. It goes out on pause and on backgrounding too, and if
+    /// the app comes back the next frame has to restate everything rather
+    /// than trust a darkness the surface may not still be in.
+    pub fn all_dark(&mut self) -> Vec<[u8; 3]> {
+        let mut out = Vec::new();
+        for index in 0..PAD_COUNT {
+            out.push(PadLed::Off.message(self.model, self.model.pad_note(index)));
+        }
+        for note in [NOTE_PAN, NOTE_SENDS, NOTE_PLAY] {
+            out.push([0x90, note, 0]);
+        }
+        self.last = None;
+        out
     }
 }
 
@@ -725,29 +764,43 @@ mod shutdown_tests {
         }
         let _ = leds.update(live);
 
-        // Invalidated first, exactly as the quit path does: the diff's idea
-        // of the surface is worth nothing once it is about to stop owning it.
-        leds.invalidate();
-        let dark = LedFrame {
-            pads: [PadLed::Off; PAD_COUNT],
-            surface: ApcSurface::Sfx,
-            video_playing: false,
-        };
-        let out = leds.update(dark);
+        let out = leds.all_dark();
 
         // Every pad restated as off...
         for index in 0..PAD_COUNT {
             let note = leds.model.pad_note(index);
+            let sent = out.iter().filter(|m| m[1] == note).count();
+            assert_eq!(sent, 1, "pad {index} (note {note}) was not restated exactly once");
             let lit = out.iter().any(|m| m[1] == note && m[2] != 0);
             assert!(!lit, "pad {index} (note {note}) was left lit");
         }
-        // ...and BOTH mode lamps dark, which is why the frame names the
-        // surface the diff does not lamp.
+        // ...and every lamp with it.
         for note in [NOTE_PAN, NOTE_SENDS, NOTE_PLAY] {
+            let sent = out.iter().filter(|m| m[1] == note).count();
+            assert_eq!(sent, 1, "lamp {note:#x} was not restated exactly once");
             let lit = out.iter().any(|m| m[1] == note && m[2] != 0);
             assert!(!lit, "lamp {note:#x} was left lit");
         }
         assert!(!out.is_empty(), "a quit that sends nothing cannot darken anything");
+    }
+
+    /// The app can keep running after this frame -- it goes out on pause
+    /// and on backgrounding too -- so the diff must not believe the surface
+    /// is dark when it comes back.
+    #[test]
+    fn a_darkened_surface_is_restated_in_full_if_the_app_carries_on() {
+        let mut leds = LedDiff::default();
+        let live = LedFrame { surface: ApcSurface::Music, ..Default::default() };
+        let _ = leds.update(live);
+        let _ = leds.all_dark();
+        // The SAME frame as before the darkening: nothing changed, so a
+        // diff that trusted its own memory would send nothing at all.
+        let again = leds.update(LedFrame { surface: ApcSurface::Music, ..Default::default() });
+        assert_eq!(
+            again.len(),
+            PAD_COUNT + 3,
+            "coming back has to restate every pad and every lamp",
+        );
     }
 }
 
@@ -911,11 +964,14 @@ mod tests {
                 pressed: false,
             })
         );
-        // Flat lists (SFX): ▼ = 40, ▶ = 8.
+        // Flat lists (SFX): ▼ = 40, ▶ = 8. Reached the way the
+        // hardware reaches it: SENDS to the music surface, SENDS again to
+        // the pads. The second press homes the bank, which is the rule the
+        // old `state.bank = 0` here used to hide.
         state.decode([0x90, NOTE_SENDS, 127]);
         state.decode([0x90, NOTE_SENDS, 127]);
-        state.surface = ApcSurface::Sfx;
-        state.bank = 0;
+        assert_eq!(state.surface, ApcSurface::Sfx);
+        assert_eq!(state.bank, 0);
         state.decode([0x90, NOTE_DOWN, 127]);
         assert_eq!(state.bank, 40);
         state.decode([0x90, NOTE_RIGHT, 127]);
@@ -929,6 +985,48 @@ mod tests {
         assert_eq!(state.decode([0x90, NOTE_LEFT, 127]), Some(ApcAction::BankLeft));
         assert_eq!(state.decode([0x90, NOTE_RIGHT, 127]), Some(ApcAction::BankRight));
         assert_eq!(state.bank, 0);
+    }
+
+    /// Two buttons, three surfaces, and every surface reachable in at
+    /// most two presses. The pad surface used to be a one-way door: the
+    /// hardware could leave it and nothing but the mouse could go back.
+    #[test]
+    fn every_surface_is_reachable_from_the_hardware() {
+        let mut state = Apc40State::default();
+        assert_eq!(state.surface, ApcSurface::Video, "the default");
+        // The lit button again reaches the pads; either button leaves.
+        state.decode([0x90, NOTE_PAN, 127]);
+        assert_eq!(state.surface, ApcSurface::Sfx);
+        state.decode([0x90, NOTE_PAN, 127]);
+        assert_eq!(state.surface, ApcSurface::Video);
+        // The other way in, and out through the other button.
+        state.decode([0x90, NOTE_SENDS, 127]);
+        assert_eq!(state.surface, ApcSurface::Music);
+        state.decode([0x90, NOTE_SENDS, 127]);
+        assert_eq!(state.surface, ApcSurface::Sfx);
+        state.decode([0x90, NOTE_PAN, 127]);
+        assert_eq!(state.surface, ApcSurface::Video);
+        // And crossing straight over is still one press.
+        state.decode([0x90, NOTE_SENDS, 127]);
+        assert_eq!(state.surface, ApcSurface::Music);
+        state.decode([0x90, NOTE_PAN, 127]);
+        assert_eq!(state.surface, ApcSurface::Video);
+    }
+
+    /// A surface that lights nothing looks exactly like a surface that is
+    /// off, so the pad surface wears both lamps -- which is also how it
+    /// says that either button leaves it.
+    #[test]
+    fn the_pad_surface_lights_both_mode_lamps() {
+        let lamps = |surface| {
+            let mut leds = LedDiff::default();
+            let out = leds.update(LedFrame { surface, ..Default::default() });
+            let of = |note| out.iter().find(|m| m[1] == note).map(|m| m[2]);
+            (of(NOTE_PAN), of(NOTE_SENDS))
+        };
+        assert_eq!(lamps(ApcSurface::Video), (Some(127), Some(0)));
+        assert_eq!(lamps(ApcSurface::Music), (Some(0), Some(127)));
+        assert_eq!(lamps(ApcSurface::Sfx), (Some(127), Some(127)));
     }
 
     #[test]

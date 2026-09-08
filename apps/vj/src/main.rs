@@ -13958,31 +13958,23 @@ p2 {}
 
     /// Put every lamp on the control surface out.
     ///
-    /// The diff is INVALIDATED first, on purpose. It only emits what it
-    /// believes changed, and at quit its belief about a surface it is about
-    /// to stop owning is worth nothing — a stale "already dark" would send
-    /// no bytes and leave the pads lit. Invalidating restates the whole
-    /// frame, which is the one moment that is worth the extra messages.
-    ///
-    /// A frame whose surface is the pad one darkens BOTH mode lamps, because
-    /// the diff only lights the two it knows and this is neither.
+    /// Not a frame: the diff only emits what it believes changed, and its
+    /// belief about a surface it is about to stop owning is worth nothing
+    /// — a stale "already dark" would send no bytes and leave the pads
+    /// lit. `all_dark` restates the whole surface and then forgets, so if
+    /// the app carries on — this runs on pause and on backgrounding, not
+    /// only on the way out — the next frame restates everything rather
+    /// than trusting a darkness the surface may not still be in.
     fn darken_control_surface(&mut self) {
         if self.apc_output_ports.is_empty() {
             return;
         }
-        self.apc_leds.invalidate();
-        let frame = apc40::LedFrame {
-            pads: [apc40::PadLed::Off; apc40::PAD_COUNT],
-            surface: ApcSurface::Sfx,
-            video_playing: false,
-        };
         // Traced under the same switch the ordinary frames are, because
-        // this is the one frame nothing can watch: it goes out as the app
-        // is leaving, so the surface it lands on is gone by the time
-        // anybody could look, and the control bridge's own record of what
-        // was sent dies with the process.
+        // on the way out this is a frame nothing can watch: the surface it
+        // lands on is gone by the time anybody could look, and the control
+        // bridge's own record of what was sent dies with the process.
         let trace = std::env::var_os("VJ_TRACE_LED").is_some();
-        for message in self.apc_leds.update(frame) {
+        for message in self.apc_leds.all_dark() {
             if trace {
                 log!(
                     "led out: ch{} note {} vel {}",
