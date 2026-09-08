@@ -322,7 +322,10 @@ impl WinRTMidiAccess {
                     }
                     WinRTMidiEvent::SendMidi(port_id, midi_data) => {
                         let writer = DataWriter::new().unwrap();
-                        writer.WriteBytes(&midi_data.data).unwrap();
+                        // Only the bytes the status names. A `MidiData` is
+                        // always three wide; the wire is not, and this
+                        // backend writes exactly what it is handed.
+                        writer.WriteBytes(midi_data.wire()).unwrap();
                         let buffer = writer.DetachBuffer().unwrap();
                         for output in &mut midi_outputs {
                             if port_id.is_none() || output.port_id == port_id.unwrap() {
