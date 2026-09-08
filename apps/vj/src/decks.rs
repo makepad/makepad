@@ -170,6 +170,15 @@ fn shoulder(x: f32, from: f32, to: f32) -> f32 {
 /// equal-power curve at the far end gives cos(PI/2), which in f32 is a
 /// tiny NEGATIVE number, and an abs() test would call that silent for the
 /// wrong reason.
+/// The most a channel's own gain can be: half again over unity, so a quiet
+/// record can be brought UP rather than only pushed down.
+///
+/// One number, named, because it is asserted in four places that have to
+/// agree -- the engine's two clamps, the mixer's, and the faders' declared
+/// range -- and they did not: the mixer used to stop at unity, which
+/// silently discarded the top third of both faders.
+pub const MAX_DECK_GAIN: f32 = 1.5;
+
 pub const AUDIBLE_FLOOR: f32 = 0.01;
 
 /// How long a record has to sound before the night counts it as played.
@@ -1655,7 +1664,7 @@ impl DeckState {
 
     pub fn effective_gain(&self, normalise: bool) -> f32 {
         if normalise {
-            (self.gain * self.norm_gain).clamp(0.0, 1.5)
+            (self.gain * self.norm_gain).clamp(0.0, MAX_DECK_GAIN)
         } else {
             self.gain
         }
@@ -3513,7 +3522,7 @@ impl DeckEngine {
     }
 
     pub fn set_gain(&mut self, deck: DeckId, gain: f32) -> Vec<DeckCmd> {
-        let gain = gain.clamp(0.0, 1.5);
+        let gain = gain.clamp(0.0, MAX_DECK_GAIN);
         self.deck_mut(deck).gain = gain;
         let gain = self.deck(deck).effective_gain(self.normalise);
         vec![DeckCmd::SetGain { deck, gain }]
@@ -10500,6 +10509,27 @@ mod tests {
         assert_eq!(gone[1].deck, DeckId::B);
         assert_eq!(gone[0].item.asset, item(1).asset);
         assert_eq!(gone[1].item.asset, item(2).asset);
+    }
+
+    /// Normalisation multiplies by up to four, and while the mixer's own
+    /// ceiling sat at unity it could only ever turn a record DOWN -- a quiet
+    /// one could never be brought up to meet the others.
+    #[test]
+    fn loudness_normalisation_can_lift_a_quiet_record_and_not_only_lower_a_loud_one() {
+        let mut engine = DeckEngine::new();
+        engine.normalise = true;
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck, gen, 100.0);
+        let asked = engine
+            .set_norm_gain(DeckId::A, 1.4)
+            .iter()
+            .find_map(|cmd| match cmd {
+                DeckCmd::SetGain { gain, .. } => Some(*gain),
+                _ => None,
+            })
+            .expect("a gain command");
+        assert!(asked > 1.0, "a quiet record asked for {asked}, which is no lift at all");
+        assert!(asked <= MAX_DECK_GAIN, "and never past the one named ceiling");
     }
 
     #[test]

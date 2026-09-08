@@ -3963,8 +3963,22 @@ impl Mixer {
         });
     }
 
+    /// A channel's own gain, up to half again over unity.
+    ///
+    /// The ceiling is the DECK ENGINE's, and it has to be: the engine clamps
+    /// to 1.5 in two places, both channel faders declare `max: 1.5`, and the
+    /// control surface's channel fader sends its position times 1.5. This
+    /// clamped at 1.0, so the top third of either fader moved nothing the
+    /// room could hear, and loudness normalisation — which multiplies by up
+    /// to 4 — could only ever turn a record DOWN, never bring a quiet one
+    /// up. The console's own idea of what is audible disagreed with the
+    /// audio too, because `deck_strip_gain` reports the unclamped product.
+    ///
+    /// Above unity is not a hazard here: the master limiter's ceiling
+    /// clamps every sample below full, which is what it is for, and the
+    /// master itself already accepts 1.2 while the stem lanes are uncapped.
     pub fn set_deck_gain(&self, deck: DeckId, gain: f32) {
-        let Some(gain) = knob(gain, 0.0, 1.0) else { return };
+        let Some(gain) = knob(gain, 0.0, crate::decks::MAX_DECK_GAIN) else { return };
         self.run_cmd(MixCmd::SetGain { deck, gain });
     }
 
@@ -8083,6 +8097,29 @@ mod tests {
         let mut buffer = AudioBuffer::new_with_size(frames, 2);
         mixer.cue_ring().consume(state, cue_rate, &mut buffer);
         buffer
+    }
+
+    /// The top third of a channel fader used to move nothing the room could
+    /// hear: the engine computed up to 1.5 and the mixer clamped it to 1.0.
+    #[test]
+    fn a_channel_fader_above_unity_is_actually_louder() {
+        let level = |gain: f32| {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            // A quiet source, so half again over unity is nowhere near the
+            // limiter and the difference is the gain's alone.
+            mixer.install_deck(DeckId::A, const_pcm(6_553, 48_000 * 4, 48_000)); // 0.2 amp
+            mixer.set_deck_playing(DeckId::A, true);
+            mixer.set_deck_gain(DeckId::A, gain);
+            render(&mixer, 48_000.0, 8_192);
+            render(&mixer, 48_000.0, 512).channel(0)[256].abs()
+        };
+        let unity = level(1.0);
+        let over = level(crate::decks::MAX_DECK_GAIN);
+        assert!(
+            over > unity * 1.4,
+            "the fader's top third moved nothing: unity {unity}, full {over}",
+        );
     }
 
     #[test]
