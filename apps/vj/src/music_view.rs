@@ -8234,6 +8234,12 @@ impl Widget for VjTrackList {
             let Some(mut list) = list_ref.borrow_mut() else { continue };
             if self.entries.is_empty() {
                 list.set_item_range(cx, 0, 1);
+                // Without this the listing that emptied under a scrolled
+                // viewport hides its own "no tracks" line too, so a search
+                // that found nothing and a search that broke look alike.
+                if let Some(top) = stranded_viewport_lands_at(list.first_id(), 1) {
+                    list.set_first_id_and_scroll(top, 0.0);
+                }
                 while let Some(row_id) = list.next_visible_item(cx) {
                     if row_id >= 1 {
                         continue;
@@ -8244,6 +8250,9 @@ impl Widget for VjTrackList {
                 continue;
             }
             list.set_item_range(cx, 0, self.entries.len());
+            if let Some(top) = stranded_viewport_lands_at(list.first_id(), self.entries.len()) {
+                list.set_first_id_and_scroll(top, 0.0);
+            }
             // INLINE placement: the previewing row wears the player
             // template; every other row (and every row in the other two
             // placements) stays the plain one.
@@ -8362,6 +8371,27 @@ pub const TRACK_DRAG_SLOP: f64 = 5.0;
 /// Peak travel, not the release's distance: a carry that goes out and
 /// comes back has still been a carry, and letting go over the row it
 /// started on must not read as a click on it.
+/// Where a list's viewport should land when the listing under it has
+/// changed size, or `None` to leave it exactly where the operator put it.
+///
+/// The list widget re-seats itself only while drawing rows that EXIST, and
+/// a row id past the end of the listing draws nothing at all. So a viewport
+/// scrolled deep into a long listing that then shrank under it -- the
+/// ordinary result of typing into the search box, or of a filter chip --
+/// asked for rows that were not there, got none, and left the panel BLANK
+/// until the operator thought to scroll back up. During a set, on the
+/// surface they are looking at to find the next record.
+///
+/// Two decisions, both deliberate. It fires ONLY when the viewport is
+/// genuinely past the end, so a listing that merely lost a row does not
+/// yank the operator somewhere they did not ask to be. And it lands on the
+/// TOP rather than on the last row: a stranded position refers to records
+/// that are gone, so there is nothing to be near, and a narrowed listing
+/// wants to be read from its first row.
+pub fn stranded_viewport_lands_at(first_id: usize, rows: usize) -> Option<usize> {
+    (first_id >= rows).then_some(0)
+}
+
 /// Whether a press on a row body carries that row: picks it, drags it, or
 /// loads a deck from it on release.
 ///
@@ -8616,6 +8646,30 @@ mod tests {
         // The two mark columns are a tick or nothing, never a word.
         assert_eq!(column_text(Column::Stem, &row), "✓");
         assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    #[test]
+    fn a_viewport_still_inside_its_listing_is_left_where_the_operator_put_it() {
+        assert_eq!(stranded_viewport_lands_at(0, 10), None);
+        assert_eq!(stranded_viewport_lands_at(5, 10), None);
+        assert_eq!(
+            stranded_viewport_lands_at(9, 10),
+            None,
+            "the last row is still a row; a listing that lost one must not yank the viewport",
+        );
+    }
+
+    #[test]
+    fn a_viewport_past_the_end_of_a_shrunken_listing_lands_on_the_top() {
+        assert_eq!(
+            stranded_viewport_lands_at(10, 10),
+            Some(0),
+            "one past the last row is already asking for a row that is not there",
+        );
+        assert_eq!(stranded_viewport_lands_at(40, 3), Some(0));
+        // The listing that emptied: its placeholder is the one row of a
+        // range of one, and it has to be reachable too.
+        assert_eq!(stranded_viewport_lands_at(40, 1), Some(0));
     }
 
     #[test]
