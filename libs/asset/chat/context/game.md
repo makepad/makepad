@@ -145,22 +145,44 @@ world (they are deterministic from seed):
   the water, and REGISTERS it so every corridor bridges it; kind "canal" =
   straight walled cut, one flat navigable level (boats fit under bridges).
   game.lake({pos, radius, depth}) digs a lake the same way.
-- game.racetrack({seed, size, width, bank, sweep, max_grade, complexity,
-  design_speed, runoff, path?}) -> {slots, checkpoints, start, waypoints,
-  speed_limits}: a race is racetrack + game.racecar per slot +
+- game.racetrack({seed, layout, size, width, bank, sweep, max_grade, complexity,
+  design_speed, speed_mode, runoff, path?}) -> {slots, checkpoints, start,
+  waypoints, speed_limits, rated_speed, actual_grade, layout, speed_mode}:
+  a race is racetrack + game.racecar per slot +
   game.autodrive (rivals) + game.race({laps}). Size is overall span in
   METRES, not cells or lap length; width/runoff are metres, bank degrees,
-  design_speed m/s, max_grade rise/run. Start with terrain size 500 and
-  track {size:300, width:10, bank:8, sweep:0.85, max_grade:0.06,
-  design_speed:25, runoff:7}. Turns are smooth and the bank is real rendered
-  AND physical geometry. Infeasible speed/space is refused: enlarge terrain
-  and course or lower speed. Art-kit availability never changes the course.
-  Optional path is 6–64 periodic XZ control points; elevation stays graded
-  to terrain. Scale/min_straight are deprecated. Raised edge barriers and
+  design_speed m/s, max_grade rise/run (0.30 = 30%, not degrees).
+  For a varied race use terrain size 500 and track {layout:"circuit",
+  size:360, width:10, bank:8, max_grade:0.30, speed_mode:"profile",
+  design_speed:25, runoff:7}. "circuit" adds an infield bend and broad
+  sweepers; "technical" adds multiple esses and tighter bends. "oval"
+  preserves the legacy elliptical generator; increasing its complexity
+  alone does not create a technical circuit. Seed changes each family's
+  variation. The returned eval_log reports candidate simplification.
+  Ranges: size 60..2000, width 7..20, runoff 0..30, bank 0..15 degrees,
+  max_grade 0..0.30, speed 5..60, grip 0.4..1.3, sweep 0..1, complexity 0..24.
+  speed_mode:"profile" permits slow corners and returns their speed limits;
+  always pass them to autodrive. "minimum" requires EVERY corner to support
+  design_speed. Profile is the default for circuit/technical/explicit path;
+  the legacy oval defaults to minimum. rated_speed is the slowest corner,
+  actual_grade the steepest built slope, and max_grade is only an allowance.
+  Optional path is 6–64 distinct periodic XZ control points in travel order;
+  do not repeat the first point. Explicit path has its own dimensions:
+  changing size does not scale it. Elevation stays graded to terrain.
+  Geometry failures name the bend/coordinates or conflicting feature;
+  repair those points or width/runoff rather than guessing unrelated knobs.
+  Turns, banks and sloped approaches from runoff to terrain share the same
+  rendered/physical geometry. Leave the approach margins clear of buildings
+  and water. Scale/min_straight
+  are deprecated. Raised edge barriers and
   road/river crossing structures are not generated; conflicting routes refuse.
-  HILLY WORKS: on game.terrain({relief:"hilly"}) the deck rides the hills
-  (cut into crests, bridged over dips) and the car drives the track, not
-  the ground. The PLAYER is a game.racecar (SIM tier) placed on slots[0];
+  Native generator omissions remain in world.get_plan diagnostics even
+  after rollback. Read generation.refused and the FIRST failure before
+  secondary nil errors. A handled nil fallback may succeed with warnings;
+  check diagnostics and eval_log before claiming the requested feature exists.
+  HILLY WORKS: on game.terrain({relief:"hilly"}) the deck follows a graded
+  profile with terrain cut/fill and connected runoff approaches. Cars ride
+  the shared surface mesh. The PLAYER is a game.racecar (SIM tier) placed on slots[0];
   it can flip. Rivals: a game.racecar per other slot + game.autodrive(id,
   {points: T.waypoints, speed_limits: T.speed_limits}) for a course named T.
   The driver cycles cameras with C (chase, cockpit,
