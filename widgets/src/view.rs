@@ -575,6 +575,41 @@ mod contextual_size_tests {
         assert_eq!(resized.height.to_fixed(), Some(23.0));
         cx.end_turtle();
     }
+
+    #[test]
+    fn texture_snapshot_detaches_only_a_completed_cache() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut view = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            View::script_new_with_default(vm)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let pass_id = pass.draw_pass_id();
+        let texture = Texture::new(&mut cx);
+        let texture_id = texture.texture_id();
+        view.texture_cache = Some(ViewTextureCache {
+            pass,
+            _depth_texture: Texture::new(&mut cx),
+            color_texture: texture,
+        });
+
+        cx.passes[pass_id].paint_dirty = true;
+        assert!(view.take_texture_snapshot(&mut cx).is_none());
+        assert!(view.texture_cache.is_some());
+
+        cx.passes[pass_id].paint_dirty = false;
+        cx.passes[pass_id].live_with_parent = true;
+        let snapshot = view.take_texture_snapshot(&mut cx).unwrap();
+        assert_eq!(snapshot.texture().texture_id(), texture_id);
+        assert!(view.texture_cache.is_none());
+        assert!(view.force_texture_redraw);
+        assert!(cx.passes[pass_id].main_draw_list_id.is_none());
+        assert!(matches!(
+            cx.passes[pass_id].parent,
+            CxDrawPassParent::None
+        ));
+        assert!(!cx.passes[pass_id].live_with_parent);
+    }
 }
 
 impl ViewSet {
@@ -1291,6 +1326,44 @@ impl View {
     pub fn redraw_texture_cache(&mut self) {
         self.force_texture_redraw = true;
         self.view_size = None;
+    }
+
+    /// Draw the current texture cache into `rect` without walking the view's children again.
+    ///
+    /// This is useful when a compositor needs the same cached surface in another pass during the
+    /// current frame. Keeping the cache pass attached ensures a pending repaint still reaches the
+    /// texture before it is sampled.
+    pub fn draw_cached_texture(&mut self, cx: &mut Cx2d, rect: Rect) -> bool {
+        let Some(texture_cache) = &self.texture_cache else {
+            return false;
+        };
+        self.draw_bg
+            .draw_vars
+            .set_texture(0, &texture_cache.color_texture);
+        self.draw_bg.draw_abs(cx, rect);
+        cx.make_child_pass(&texture_cache.pass);
+        true
+    }
+
+    /// Detach a completed texture cache so its framebuffer can be retained as a frozen snapshot.
+    ///
+    /// A dirty pass has not reached the GPU yet and cannot safely be detached. Once detached, the
+    /// next draw builds a new cache while the returned snapshot keeps the old pass and attachments
+    /// alive for compositing.
+    pub fn take_texture_snapshot(&mut self, cx: &mut Cx) -> Option<ViewTextureSnapshot> {
+        let texture_cache = self.texture_cache.take()?;
+        let pass = &mut cx.passes[texture_cache.pass.draw_pass_id()];
+        if pass.paint_dirty {
+            self.texture_cache = Some(texture_cache);
+            return None;
+        }
+        pass.main_draw_list_id = None;
+        pass.parent = CxDrawPassParent::None;
+        pass.live_with_parent = false;
+        self.force_texture_redraw = true;
+        Some(ViewTextureSnapshot {
+            cache: texture_cache,
+        })
     }
 
     /// Caps the offscreen texture's height when this view is in Texture mode. `None` (the default)

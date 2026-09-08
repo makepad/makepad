@@ -973,6 +973,7 @@ impl AssetStore {
             exclude_tag: None,
             creator: None,
             live_only: false,
+            newest: true,
             // The SAME page size for every page of a walk: a cursor is
             // bound to the exact query shape that minted it, page size
             // included, so a "bigger continuation page" is a refused cursor.

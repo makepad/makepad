@@ -383,7 +383,7 @@ fn daily_life(
             let mut txn = Transaction::new(
                 if rng.chance(15) { accounts.cash } else { accounts.card },
                 day,
-                rng.pick(&SUPERMARKETS),
+                *rng.pick(&SUPERMARKETS),
                 -amount,
             );
             txn.category = Some(cats.groceries);
@@ -392,7 +392,7 @@ fn daily_life(
         // Coffee on working days.
         if weekday < 5 && rng.chance(55) {
             let mut txn =
-                Transaction::new(accounts.card, day, rng.pick(&CAFES), -rng.between(280, 720));
+                Transaction::new(accounts.card, day, *rng.pick(&CAFES), -rng.between(280, 720));
             txn.category = Some(cats.coffee);
             txns.push(txn);
         }
@@ -402,7 +402,7 @@ fn daily_life(
             let mut txn = Transaction::new(
                 accounts.card,
                 day,
-                rng.pick(&RESTAURANTS),
+                *rng.pick(&RESTAURANTS),
                 -rng.between(2_200, 8_900),
             );
             txn.category = Some(cats.restaurants);
