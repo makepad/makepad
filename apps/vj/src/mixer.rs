@@ -61,6 +61,27 @@ use std::sync::Arc;
 const FP_ONE: u64 = 1 << 32;
 /// Default parameter slew, seconds — fast enough to feel instant, slow
 /// enough to never click.
+/// The most the master can be turned up: a fifth over unity.
+///
+/// Named because three places have to agree about it and did not — the
+/// clamp here, the on-screen slider's declared range, and every hand that
+/// maps a 0..1 control onto it. A control surface's master fader was passed
+/// through RAW, so its full stop reached only five sixths of the range,
+/// while the same fader adopted through learn was scaled and could reach
+/// all of it: one piece of plastic with two meanings, decided by which code
+/// path claimed it.
+pub const MAX_MASTER_GAIN: f32 = 1.2;
+
+/// Where a 0..1 control sets the master.
+///
+/// A function rather than a multiplication written out twice, because
+/// written out twice is exactly how the two paths came to disagree: one
+/// scaled and one did not. Every hand that holds a normalised control and
+/// wants the master goes through here.
+pub fn master_from_control(position: f32) -> f32 {
+    position.clamp(0.0, 1.0) * MAX_MASTER_GAIN
+}
+
 const SLEW_SECS: f32 = 0.008;
 /// Autopilot blend moves: fast enough to read as a cut on the bar, slow
 /// enough never to click.
@@ -4029,7 +4050,7 @@ impl Mixer {
     }
 
     pub fn set_master(&self, gain: f32) {
-        let Some(gain) = knob(gain, 0.0, 1.2) else { return };
+        let Some(gain) = knob(gain, 0.0, MAX_MASTER_GAIN) else { return };
         self.run_cmd(MixCmd::SetMaster(gain));
     }
 
@@ -8097,6 +8118,24 @@ mod tests {
         let mut buffer = AudioBuffer::new_with_size(frames, 2);
         mixer.cue_ring().consume(state, cue_rate, &mut buffer);
         buffer
+    }
+
+    #[test]
+    fn a_control_at_its_stop_reaches_the_top_of_the_master() {
+        // The defect this replaces: one path scaled a 0..1 control onto the
+        // master's range and the other passed it through raw, so the same
+        // fader at the same stop meant two different things depending on
+        // which code claimed it — and the raw one could not reach the last
+        // sixth of the range at all.
+        assert_eq!(master_from_control(1.0), MAX_MASTER_GAIN, "a stop is the top");
+        assert_eq!(master_from_control(0.0), 0.0);
+        assert!(master_from_control(0.5) < MAX_MASTER_GAIN);
+        // And the mixer's own clamp agrees with it, so a full-travel control
+        // is never quietly trimmed on the way in.
+        assert_eq!(
+            knob(master_from_control(1.0), 0.0, MAX_MASTER_GAIN),
+            Some(MAX_MASTER_GAIN),
+        );
     }
 
     /// The top third of a channel fader used to move nothing the room could

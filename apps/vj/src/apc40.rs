@@ -709,6 +709,49 @@ pub fn is_apc40_port(name: &str) -> bool {
 }
 
 #[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// The frame a quit sends. Closing the app used to touch MIDI not at
+    /// all, so every pad and the mode lamp stayed lit on a surface no
+    /// software owned any more, until it was unplugged.
+    #[test]
+    fn the_frame_a_quit_sends_puts_every_lamp_out() {
+        let mut leds = LedDiff::default();
+        // A surface that is lit: pads on, and a mode lamp.
+        let mut live = LedFrame { surface: ApcSurface::Music, video_playing: true, ..Default::default() };
+        for pad in live.pads.iter_mut() {
+            *pad = PadLed::Live;
+        }
+        let _ = leds.update(live);
+
+        // Invalidated first, exactly as the quit path does: the diff's idea
+        // of the surface is worth nothing once it is about to stop owning it.
+        leds.invalidate();
+        let dark = LedFrame {
+            pads: [PadLed::Off; PAD_COUNT],
+            surface: ApcSurface::Sfx,
+            video_playing: false,
+        };
+        let out = leds.update(dark);
+
+        // Every pad restated as off...
+        for index in 0..PAD_COUNT {
+            let note = leds.model.pad_note(index);
+            let lit = out.iter().any(|m| m[1] == note && m[2] != 0);
+            assert!(!lit, "pad {index} (note {note}) was left lit");
+        }
+        // ...and BOTH mode lamps dark, which is why the frame names the
+        // surface the diff does not lamp.
+        for note in [NOTE_PAN, NOTE_SENDS, NOTE_PLAY] {
+            let lit = out.iter().any(|m| m[1] == note && m[2] != 0);
+            assert!(!lit, "lamp {note:#x} was left lit");
+        }
+        assert!(!out.is_empty(), "a quit that sends nothing cannot darken anything");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::loop_splat::SplatPart;

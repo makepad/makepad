@@ -284,6 +284,11 @@ impl Default for ClockShare {
 /// at a time, and everything slaved to it would wobble.
 pub struct ClockSender {
     share: std::sync::Arc<std::sync::Mutex<ClockShare>>,
+    /// Kept so a shutdown can WAIT for the stop byte. Closing only asks the
+    /// thread to stop; the byte goes out when it next wakes, and at quit the
+    /// process can be gone by then -- which leaves anything slaved to this
+    /// clock hanging on the last tick instead of getting a stop.
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Never sleep longer than this, so a stop or a tempo change is acted on
@@ -300,7 +305,7 @@ impl ClockSender {
         share: std::sync::Arc<std::sync::Mutex<ClockShare>>,
     ) -> ClockSender {
         let thread_share = share.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let mut ticker = ClockTicker::new();
             loop {
                 let now = std::time::Instant::now();
@@ -346,7 +351,7 @@ impl ClockSender {
                 std::thread::sleep(wait.clamp(SENDER_MIN_SLEEP, SENDER_MAX_SLEEP));
             }
         });
-        ClockSender { share }
+        ClockSender { share, thread: Some(thread) }
     }
 
     /// Tell the sender where the beat is. Cheap enough for every pump: a
@@ -363,9 +368,16 @@ impl ClockSender {
     }
 
     /// Stop sending and let the thread go.
-    pub fn close(&self) {
+    /// Ask the sender to stop, and WAIT until it has: the thread sends the
+    /// stop byte on its way out, and a caller that does not wait cannot know
+    /// whether it went. Bounded by the thread's own maximum sleep, so this
+    /// costs a few milliseconds at most.
+    pub fn close_and_wait(mut self) {
         if let Ok(mut share) = self.share.lock() {
             share.closed = true;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }

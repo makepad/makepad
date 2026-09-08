@@ -9441,7 +9441,7 @@ impl App {
                 }
             }
             "master" => {
-                let value = v * 1.2;
+                let value = crate::mixer::master_from_control(v);
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
@@ -12472,7 +12472,7 @@ p2 {}
         self.clock_out = on;
         if !on {
             if let Some(sender) = self.clock_sender.take() {
-                sender.close();
+                sender.close_and_wait();
             }
             // Back to the APC's own ports, which is what the LED writer
             // needs and all it needs.
@@ -13730,6 +13730,12 @@ p2 {}
             ApcAction::VideoPlayPause => self.toggle_video_playback(cx),
             ApcAction::VideoStop => self.stop_video_playback(cx),
             ApcAction::Master(value) => {
+                // Scaled onto the master's own range, exactly as a learned
+                // binding is. Passed through raw, a fader at its stop asked
+                // for 1.0 and the master sat at five sixths, with the last
+                // of its travel unreachable from the hardware -- while the
+                // same fader adopted through learn could reach all of it.
+                let value = crate::mixer::master_from_control(value);
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
@@ -13866,6 +13872,33 @@ p2 {}
             self.apc_leds.invalidate();
         }
         self.sync_apc_leds();
+    }
+
+    /// Put every lamp on the control surface out.
+    ///
+    /// The diff is INVALIDATED first, on purpose. It only emits what it
+    /// believes changed, and at quit its belief about a surface it is about
+    /// to stop owning is worth nothing — a stale "already dark" would send
+    /// no bytes and leave the pads lit. Invalidating restates the whole
+    /// frame, which is the one moment that is worth the extra messages.
+    ///
+    /// A frame whose surface is the pad one darkens BOTH mode lamps, because
+    /// the diff only lights the two it knows and this is neither.
+    fn darken_control_surface(&mut self) {
+        if self.apc_output_ports.is_empty() {
+            return;
+        }
+        self.apc_leds.invalidate();
+        let frame = apc40::LedFrame {
+            pads: [apc40::PadLed::Off; apc40::PAD_COUNT],
+            surface: ApcSurface::Sfx,
+            video_playing: false,
+        };
+        for message in self.apc_leds.update(frame) {
+            for port in &self.apc_output_ports {
+                self.midi_output.send(Some(*port), MidiData { data: message });
+            }
+        }
     }
 
     fn sync_apc_leds(&mut self) {
@@ -33101,6 +33134,18 @@ impl AppMain for App {
                 self.latch_lighting_blackout();
                 self.sync_lighting_controls_ui(cx);
                 self.publish_program_lighting(self.program_mix);
+                // The lamps go out with the lights. Nothing here used to
+                // touch MIDI at all, so closing the app left every pad and
+                // the mode lamp lit on a surface no software owned any more
+                // -- until it was unplugged -- and left anything slaved to
+                // the house clock hanging on the last tick it ever got.
+                self.darken_control_surface();
+                if let Some(sender) = self.clock_sender.take() {
+                    // Waited on, not merely asked: the stop byte is sent by
+                    // the sender's own thread as it leaves, and a quit that
+                    // does not wait can be gone before it goes.
+                    sender.close_and_wait();
+                }
             }
             _ => {}
         }
