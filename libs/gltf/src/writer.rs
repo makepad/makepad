@@ -690,7 +690,10 @@ pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
             b.f32_accessor(&normal_values, 3, "VEC3", false, Some(34962));
         let mut color_values = Vec::with_capacity(local_positions.len() * 3);
         for _ in &local_positions {
-            color_values.extend_from_slice(&part.color[..3]);
+            // The authored color lives in baseColorFactor below. glTF
+            // multiplies COLOR_0 by that factor; repeating the tint here
+            // squares it and turns dark painted parts almost black.
+            color_values.extend_from_slice(&[1.0, 1.0, 1.0]);
         }
         let color_accessor =
             b.f32_accessor(&color_values, 3, "VEC3", false, Some(34962));

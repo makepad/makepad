@@ -38,6 +38,8 @@ use crate::providers::fleet_http;
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::time::{Duration, Instant};
+#[path = "qwen_vision.rs"]
+mod vision;
 
 /// Transport seam so the provider is deterministic under test. The real
 /// implementation is [`HttpFleetTransport`]; tests script one.
@@ -357,6 +359,9 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// history strips thinking for storage and display; this mirror exists
     /// because the KV cannot (the recurrent layers never rewind).
     wire: Vec<WireTurn>,
+    images: Vec<crate::providers::provider::ToolImage>,
+    vision: Option<vision::VisionTurn>,
+    vision_base: Option<String>,
 }
 
 /// One wire turn: the session-history role it mirrors, and the exact text
@@ -418,6 +423,9 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             home: None,
             conversation: Self::conversation_id(),
             wire: Vec::new(),
+            images: Vec::new(),
+            vision: None,
+            vision_base: None,
         }
     }
 
@@ -590,7 +598,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // never its own request. Absence is meaningful (one lane), so it is
         // recorded as absence.
         let lanes = parse_lanes(&health);
-        let tier = match lanes {
+        let mut tier = match lanes {
             Some((active, total)) if active < total => HomeTier::FreeLane,
             Some(_) => HomeTier::FullLanes,
             None => HomeTier::NoLanes,
@@ -608,6 +616,16 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             reasons.push(format!("{base}: malformed models response"));
             return None;
         };
+        // A cold chat load evicts the separate vision model on this node.
+        // Prefer another eligible node before tearing down a warm image worker.
+        if tier == HomeTier::NoLanes
+            && rows.iter().any(|row| {
+                row.get("domain").and_then(Value::as_str) == Some("vision")
+                    && row.get("state").and_then(Value::as_str) == Some("loaded")
+            })
+        {
+            tier = HomeTier::VisionResident;
+        }
         if !has_chat {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
@@ -828,6 +846,7 @@ struct PickLadder {
     free: Option<(String, String, bool)>,
     full: Option<(String, String, bool)>,
     laneless: Option<(String, String, bool)>,
+    vision: Option<(String, String, bool)>,
 }
 
 impl PickLadder {
@@ -836,12 +855,16 @@ impl PickLadder {
             HomeTier::FreeLane if self.free.is_none() => self.free = Some(pick),
             HomeTier::FullLanes if self.full.is_none() => self.full = Some(pick),
             HomeTier::NoLanes if self.laneless.is_none() => self.laneless = Some(pick),
+            HomeTier::VisionResident if self.vision.is_none() => self.vision = Some(pick),
             _ => {}
         }
     }
 
     fn best(self) -> Option<(String, String, bool)> {
-        self.free.or(self.full).or(self.laneless)
+        self.free
+            .or(self.full)
+            .or(self.laneless)
+            .or(self.vision)
     }
 }
 
@@ -853,6 +876,7 @@ enum HomeTier {
     FreeLane,
     FullLanes,
     NoLanes,
+    VisionResident,
 }
 
 fn preferred_rank(id: &str) -> usize {
@@ -911,7 +935,32 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
     }
 
+    fn attach_tool_images(&mut self, images: Vec<crate::providers::provider::ToolImage>) -> Result<(), String> {
+        crate::providers::provider::validate_tool_images(&images)?;
+        if self.vision.is_some() { return Err("vision review is still running".into()); }
+        self.images = images;
+        Ok(())
+    }
+
     fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
+        if self.vision.is_some() { return Err("vision review is still running".into()); }
+        if !self.images.is_empty() {
+            if self.active.is_some() || self.pending.is_some() { return Err("a turn is already in flight".into()); }
+            // Prefer the node that actually completed the last visual review.
+            // Keep chat routing independent; switching its model just to review
+            // another frame would discard a warm vision worker on small cards.
+            let mut bases = self.bases.clone();
+            if let Some(index) = self.vision_base.as_ref().and_then(|base| bases.iter().position(|b| b == base)) { bases.swap(0, index); }
+            let chat_base = self.probe().ok().map(|pick| pick.0);
+            self.vision = Some(vision::VisionTurn::new(
+                input.clone(),
+                std::mem::take(&mut self.images),
+                bases,
+                self.conversation.clone(),
+                chat_base,
+            ));
+            return Ok(());
+        }
         if self.active.is_some() || self.pending.is_some() {
             return Err("a turn is already in flight".to_string());
         }
@@ -1027,6 +1076,19 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         if self.cancelled() {
             self.cancel();
             return Vec::new();
+        }
+        if let Some(mut vision) = self.vision.take() {
+            match vision.poll(&mut self.transport) {
+                vision::Poll::Pending(event) => { self.vision = Some(vision); return event.into_iter().collect(); }
+                vision::Poll::Failed(message) => return vec![ProviderEvent::Error(message)],
+                vision::Poll::Ready(input, base) => {
+                    self.vision_base = base;
+                    return match self.begin_turn(&input) {
+                        Ok(()) => vec![ProviderEvent::Status { note: "local vision complete · continuing with Qwen".into(), permille: 0 }],
+                        Err(message) => vec![ProviderEvent::Error(message)],
+                    };
+                }
+            }
         }
         if self.pending.is_some() {
             return self.poll_submission();
@@ -1227,6 +1289,8 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
     }
 
     fn cancel(&mut self) {
+        self.images.clear();
+        if let Some(mut vision) = self.vision.take() { vision.cancel(&mut self.transport); }
         self.pending = None;
         // The next history can replace the unsubmitted user/tool tail.
         // Rebuild it cold instead of reusing that tail by role alone.
