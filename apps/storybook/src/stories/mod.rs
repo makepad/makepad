@@ -38,6 +38,7 @@ pub mod radiobutton;
 pub mod view;
 pub mod breadcrumb;
 pub mod field;
+pub mod splitter;
 pub mod floating_panel;
 pub mod layout;
 pub mod nav_list;
@@ -80,6 +81,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
+    splitter::script_mod(vm);
     floating_panel::script_mod(vm);
     layout::script_mod(vm);
     nav_list::script_mod(vm);
@@ -144,6 +146,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         view::STORIES,
         breadcrumb::STORIES,
         field::STORIES,
+        splitter::STORIES,
         floating_panel::STORIES,
         layout::STORIES,
         nav_list::STORIES,
