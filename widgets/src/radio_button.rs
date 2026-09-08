@@ -485,6 +485,22 @@ impl Widget for RadioButton {
                 }
                 // A radio in a GROUP does not toggle off when clicked again.
             }
+            // A radio registers a tab stop and draws a focus ring, and until
+            // now no key did anything once you were standing on it: Space,
+            // Return and the arrows were all dead, so it could be reached and
+            // never answered. Space and Return do exactly what a release
+            // does, down to the toggle-off an independent one allows.
+            Hit::KeyDown(ke)
+                if matches!(ke.key_code, KeyCode::Space | KeyCode::ReturnKey) =>
+            {
+                if self.animator_in_state(cx, ids!(active.off)) {
+                    self.animator_play(cx, ids!(active.on));
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                } else if self.independent {
+                    self.animator_play(cx, ids!(active.off));
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                }
+            }
             Hit::FingerMove(_fe) => {}
             _ => (),
         }
