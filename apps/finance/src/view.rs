@@ -83,15 +83,20 @@ script_mod! {
 
     // A flat button that reads as a row, not a control: the whole nav is
     // made of these and a stack of bevels would be noise.
-    let NavItem = Button{
+    let NavItem = RadioButtonTabFlat{
         width: Fill
         height: 34
         align: Align{x: 0.0, y: 0.5}
         padding: Inset{left: 12, right: 10, top: 6, bottom: 6}
+        label_walk +: {margin: Inset{left: 0., right: 0.}}
         draw_bg +: {
             color: #x00000000
             color_hover: mod.finance.raised
             color_down: mod.finance.accent_soft
+            // The lit state, which a Button does not have. Without it the
+            // strip cannot say which destination you are at, and the tab
+            // bar - the only navigation below 700 points - said nothing.
+            color_active: #x1f3a63
             color_focus: #x00000000
             border_radius: 6.0
             border_size: 0.0
@@ -100,6 +105,7 @@ script_mod! {
             color: mod.finance.fg_dim
             color_hover: mod.finance.fg
             color_down: mod.finance.fg
+            color_active: #xe6edf3
             color_focus: mod.finance.fg_dim
             text_style: theme.font_regular{font_size: 10}
         }
@@ -336,11 +342,11 @@ script_mod! {
                     text: "Finance"
                 }
 
-                nav_overview := NavItem{ text: "Overview" }
-                nav_ledger := NavItem{ text: "Transactions" }
-                nav_budget := NavItem{ text: "Budget" }
-                nav_reports := NavItem{ text: "Reports" }
-                nav_import := NavItem{ text: "Import" }
+                sidebar_nav := NavRail{
+                    width: Fill
+                    height: Fit
+                    destination := NavItem{}
+                }
 
                 Hr{ height: 18 }
 
@@ -574,11 +580,11 @@ script_mod! {
             align: Align{x: 0.5, y: 0.5}
             padding: Inset{left: 6, right: 6}
             spacing: 2
-            tab_overview := NavItem{ height: Fill, text: "Overview" }
-            tab_ledger := NavItem{ height: Fill, text: "Ledger" }
-            tab_budget := NavItem{ height: Fill, text: "Budget" }
-            tab_reports := NavItem{ height: Fill, text: "Reports" }
-            tab_import := NavItem{ height: Fill, text: "Import" }
+            tab_nav := NavBar{
+                width: Fill
+                height: Fill
+                destination := NavItem{width: Fit height: Fill}
+            }
         }
     }
 }
@@ -604,6 +610,15 @@ impl Screen {
             Screen::Budget => "Budget",
             Screen::Reports => "Reports",
             Screen::Import => "Import",
+        }
+    }
+
+    /// The shorter name the tab bar uses: it has a fifth of the width the
+    /// sidebar does, and "Transactions" does not fit in it.
+    fn tab_title(self) -> &'static str {
+        match self {
+            Screen::Ledger => "Ledger",
+            other => other.title(),
         }
     }
 
@@ -809,9 +824,7 @@ impl Finance {
         self.today = started.today;
         self.ledger = started.ledger;
         self.status = started.status;
-        let has_import = self.backend.has_import();
-        self.widget(cx, ids!(nav_import)).set_visible(cx, has_import);
-        self.widget(cx, ids!(tab_import)).set_visible(cx, has_import);
+        self.refresh_nav(cx);
         self.view(cx, ids!(import)).set_visible(cx, false);
 
         self.budget_month = date::month_key(self.today);
@@ -890,6 +903,41 @@ impl Finance {
         self.redraw(cx);
     }
 
+    /// The destinations, in `Screen::ALL` order, minus Import when this
+    /// backend has none to offer. Import is last, so dropping it never
+    /// shifts another screen's place and an index is still a screen.
+    fn nav_destinations(&self, sidebar: bool) -> Vec<Destination> {
+        let has_import = self.backend.has_import();
+        Screen::ALL
+            .iter()
+            .filter(|screen| **screen != Screen::Import || has_import)
+            .enumerate()
+            .map(|(i, screen)| {
+                let label = if sidebar { screen.title() } else { screen.tab_title() };
+                Destination::new(LiveId(i as u64 + 1), label)
+            })
+            .collect()
+    }
+
+    /// Which screen a destination stands for.
+    fn screen_at(id: LiveId) -> Option<Screen> {
+        Screen::ALL.get(id.0.checked_sub(1)? as usize).copied()
+    }
+
+    /// Both strips show the same five places and the same one lit. They are
+    /// one model shown twice, which is why the tab bar can no longer be the
+    /// one that forgets to say where you are.
+    fn refresh_nav(&mut self, cx: &mut Cx) {
+        let at = LiveId(
+            Screen::ALL.iter().position(|s| *s == self.screen).unwrap_or(0) as u64 + 1,
+        );
+        for (id, sidebar) in [(ids!(sidebar_nav), true), (ids!(tab_nav), false)] {
+            let list = self.nav_list(cx, id);
+            list.set_destinations(cx, self.nav_destinations(sidebar));
+            list.select(cx, at);
+        }
+    }
+
     /// The five screens are siblings in one `flow: Overlay`, so exactly one
     /// may be visible at a time — otherwise they draw on top of each other.
     fn show_only_current_screen(&mut self, cx: &mut Cx) {
@@ -931,22 +979,7 @@ impl Finance {
         let range = self.range();
 
         self.label(cx, ids!(screen_title)).set_text(cx, self.screen.title());
-        for (screen, id) in Screen::ALL.iter().zip([
-            ids!(nav_overview),
-            ids!(nav_ledger),
-            ids!(nav_budget),
-            ids!(nav_reports),
-            ids!(nav_import),
-        ]) {
-            let active = *screen == self.screen;
-            let mut item = self.button(cx, id);
-            let color = if active { theme::rgb(0xe6edf3) } else { theme::rgb(0x9aa7b4) };
-            let bg = if active { theme::rgb(0x1f3a63) } else { Vec4f::default() };
-            script_apply_eval!(cx, item, {
-                draw_bg +: { color: #(bg) }
-                draw_text +: { color: #(color) }
-            });
-        }
+        self.refresh_nav(cx);
 
         let worth = self.ledger.net_worth_on(today);
         self.label(cx, ids!(net_worth_value))
@@ -1491,21 +1524,12 @@ impl Widget for Finance {
 impl WidgetMatchEvent for Finance {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         // Navigation: the sidebar and the tab bar drive the same screens.
-        for (screen, nav, tab) in [
-            (Screen::Overview, ids!(nav_overview), ids!(tab_overview)),
-            (Screen::Ledger, ids!(nav_ledger), ids!(tab_ledger)),
-            (Screen::Budget, ids!(nav_budget), ids!(tab_budget)),
-            (Screen::Reports, ids!(nav_reports), ids!(tab_reports)),
-        ] {
-            if self.button(cx, nav).clicked(actions) || self.button(cx, tab).clicked(actions) {
-                self.set_screen(cx, screen);
+        for id in [ids!(sidebar_nav), ids!(tab_nav)] {
+            if let Some(chosen) = self.nav_list(cx, id).chosen(actions) {
+                if let Some(screen) = Self::screen_at(chosen) {
+                    self.set_screen(cx, screen);
+                }
             }
-        }
-        if self.backend.has_import()
-            && (self.button(cx, ids!(nav_import)).clicked(actions)
-                || self.button(cx, ids!(tab_import)).clicked(actions))
-        {
-            self.set_screen(cx, Screen::Import);
         }
 
         for (range, id) in [
