@@ -7875,6 +7875,10 @@ pub enum TrackListHit {
     /// extends a range. A press only ever PICKS — the hand that pressed may
     /// still be about to carry the row off to a deck.
     Pick(usize, KeyModifiers),
+    /// Row body pressed with the SECONDARY button: the operator is asking
+    /// what this record can do, not moving it. Carries where the press
+    /// landed, because that is where the menu belongs.
+    Menu(usize, DVec2),
     /// Row body released where it went down: NOW it is a click, and a deck
     /// target loads it. Carries the modifiers so a set-building release
     /// still loads nothing.
@@ -8549,6 +8553,17 @@ pub fn press_carries_a_row(device: &DigitDevice) -> bool {
     device.is_primary_hit()
 }
 
+/// Whether a press on a row body is asking for that record's own menu.
+///
+/// The secondary button, and only it. A touch has no second button to offer
+/// and must keep carrying rows -- the long-press twin that would give a
+/// touch console the same menu competes with the row carry, which is how
+/// records reach a deck by hand, so it is a separate decision and not made
+/// here.
+pub fn press_asks_for_a_menu(device: &DigitDevice) -> bool {
+    device.mouse_button().is_some_and(|button| button.contains(MouseButton::SECONDARY))
+}
+
 pub fn track_list_hits(
     ui: &WidgetRef,
     cx: &mut Cx,
@@ -8591,10 +8606,13 @@ pub fn track_list_hits(
         } else if item.button(cx, ids!(hp_queue)).clicked(actions) {
             TrackListHit::PreviewQueue
         } else if let Some(down) = body.finger_down(actions) {
-            if !press_carries_a_row(&down.device) {
+            if press_asks_for_a_menu(&down.device) {
+                TrackListHit::Menu(row_id, down.abs)
+            } else if !press_carries_a_row(&down.device) {
                 continue;
+            } else {
+                TrackListHit::Pick(row_id, down.modifiers)
             }
-            TrackListHit::Pick(row_id, down.modifiers)
         } else if let Some(moved) = body.finger_move(actions) {
             if !press_carries_a_row(&moved.device) {
                 continue;

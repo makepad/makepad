@@ -129,6 +129,7 @@ mod pick;
 mod recent_searches;
 mod score_preview;
 mod set_history;
+mod track_menu;
 // Which columns a track list shows and in what order — the operator's, not
 // the template's.
 mod columns;
@@ -332,6 +333,47 @@ script_mod! {
     // The lamp at the right end has its own ground, which the bar never
     // reaches. An overload warning drawn ON the bar would have to be read
     // against a bar that is loud -- which is exactly the moment it lights.
+    // One line of a record's menu: an optional rule above it, then the verb
+    // and the modifier that reaches the same verb from the row's own chip.
+    // The whole line is hidden when the open menu is shorter than the shell.
+    let TrackMenuRow = View{
+        visible: false
+        width: Fill
+        height: Fit
+        flow: Down
+        tmenu_line := SolidView{
+            visible: false
+            width: Fill
+            height: 1
+            margin: Inset{left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
+            draw_bg +: { color: #xffffff1f }
+        }
+        tmenu_body := SolidView{
+            width: Fill
+            height: 26
+            flow: Right
+            spacing: 12
+            padding: Inset{left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+            align: Align{x: 0.0, y: 0.5}
+            // Without a cursor a plain View emits no finger actions at all,
+            // so this is also what makes the row clickable.
+            cursor: MouseCursor.Hand
+            draw_bg +: { color: #x16161b }
+            tmenu_label := Label{
+                width: Fill
+                text: ""
+                draw_text.color: #xd6dee6
+                draw_text.text_style.font_size: 10
+            }
+            tmenu_hint := Label{
+                width: Fit
+                text: ""
+                draw_text.color: #x6f7b87
+                draw_text.text_style.font_size: 9
+            }
+        }
+    }
+
     let MasterMeter = SolidView{
         width: 68
         height: 11
@@ -3551,6 +3593,42 @@ script_mod! {
                             }
                         }
                     }
+                    // A record's own verbs, opened by the secondary button
+                    // on a row. Declared next-to-last on purpose: the event
+                    // order walks the overlay's children backwards, so this
+                    // is offered the press before every panel underneath it
+                    // and can take it before the library row it covers sees
+                    // one. The tooltip host stays last -- it captures
+                    // nothing, so it costs the menu no press, and it keeps
+                    // the position its own comment claims.
+                    track_menu := RoundedView{
+                        visible: false
+                        width: 236
+                        height: Fit
+                        flow: Down
+                        padding: Inset{left: 0.0 right: 0.0 top: 5.0 bottom: 5.0}
+                        draw_bg +: {
+                            color: #x16161bf5
+                            border_color: #xff5c39
+                            border_size: 1.5
+                            border_radius: 6.0
+                        }
+                        // TEN SLOTS, not one per verb: which verb a slot
+                        // carries is decided per open from what is true
+                        // about the record, so a menu that gates a row away
+                        // closes up rather than leaving a gap. The count is
+                        // pinned against the model by a test.
+                        tmenu0 := TrackMenuRow{}
+                        tmenu1 := TrackMenuRow{}
+                        tmenu2 := TrackMenuRow{}
+                        tmenu3 := TrackMenuRow{}
+                        tmenu4 := TrackMenuRow{}
+                        tmenu5 := TrackMenuRow{}
+                        tmenu6 := TrackMenuRow{}
+                        tmenu7 := TrackMenuRow{}
+                        tmenu8 := TrackMenuRow{}
+                        tmenu9 := TrackMenuRow{}
+                    }
                     // The system tooltip host: LAST in the overlay stack,
                     // draws on the overlay layer over every panel.
                     tip_layer := TipLayer{}
@@ -4500,6 +4578,17 @@ enum Surface {
     Music,
     Sfx,
     Mesh,
+}
+
+/// A record's menu while it is open.
+#[derive(Clone, Debug)]
+struct TrackMenuOpen {
+    /// Opened from the set list rather than the listing: the two answer
+    /// the same verbs through different doors, because a queued row is
+    /// addressed by its place in the queue.
+    from_set_list: bool,
+    row: usize,
+    rows: Vec<crate::track_menu::TrackMenuRow>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -8154,6 +8243,10 @@ pub struct App {
     /// walk eats what the operator was writing.
     #[rust]
     search_recall: Vec<(Surface, Option<usize>, String)>,
+    /// A record's menu while it is open: which list it came from, the row
+    /// it names, and the verbs it offered.
+    #[rust]
+    track_menu: Option<TrackMenuOpen>,
     /// A short head start for the catalog before `load_queue` asks it to
     /// resolve a saved store-asset line -- at `handle_startup` itself
     /// the store connection has not necessarily produced a single tile
@@ -20142,6 +20235,160 @@ p2 {}
         }
     }
 
+    /// The ten declared menu slots, in order.
+    const TRACK_MENU_SLOTS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
+        &'static [LiveId], &'static [LiveId]); crate::track_menu::MAX_ROWS] = [
+        (ids!(tmenu0), ids!(tmenu0.tmenu_line), ids!(tmenu0.tmenu_body), ids!(tmenu0.tmenu_body.tmenu_label), ids!(tmenu0.tmenu_body.tmenu_hint)),
+        (ids!(tmenu1), ids!(tmenu1.tmenu_line), ids!(tmenu1.tmenu_body), ids!(tmenu1.tmenu_body.tmenu_label), ids!(tmenu1.tmenu_body.tmenu_hint)),
+        (ids!(tmenu2), ids!(tmenu2.tmenu_line), ids!(tmenu2.tmenu_body), ids!(tmenu2.tmenu_body.tmenu_label), ids!(tmenu2.tmenu_body.tmenu_hint)),
+        (ids!(tmenu3), ids!(tmenu3.tmenu_line), ids!(tmenu3.tmenu_body), ids!(tmenu3.tmenu_body.tmenu_label), ids!(tmenu3.tmenu_body.tmenu_hint)),
+        (ids!(tmenu4), ids!(tmenu4.tmenu_line), ids!(tmenu4.tmenu_body), ids!(tmenu4.tmenu_body.tmenu_label), ids!(tmenu4.tmenu_body.tmenu_hint)),
+        (ids!(tmenu5), ids!(tmenu5.tmenu_line), ids!(tmenu5.tmenu_body), ids!(tmenu5.tmenu_body.tmenu_label), ids!(tmenu5.tmenu_body.tmenu_hint)),
+        (ids!(tmenu6), ids!(tmenu6.tmenu_line), ids!(tmenu6.tmenu_body), ids!(tmenu6.tmenu_body.tmenu_label), ids!(tmenu6.tmenu_body.tmenu_hint)),
+        (ids!(tmenu7), ids!(tmenu7.tmenu_line), ids!(tmenu7.tmenu_body), ids!(tmenu7.tmenu_body.tmenu_label), ids!(tmenu7.tmenu_body.tmenu_hint)),
+        (ids!(tmenu8), ids!(tmenu8.tmenu_line), ids!(tmenu8.tmenu_body), ids!(tmenu8.tmenu_body.tmenu_label), ids!(tmenu8.tmenu_body.tmenu_hint)),
+        (ids!(tmenu9), ids!(tmenu9.tmenu_line), ids!(tmenu9.tmenu_body), ids!(tmenu9.tmenu_body.tmenu_label), ids!(tmenu9.tmenu_body.tmenu_hint)),
+    ];
+
+    /// The record a menu row is about, by the list it was opened from.
+    fn menu_row_key(&self, from_set_list: bool, row: usize) -> Option<TrackKey> {
+        let rows = match from_set_list {
+            true => &self.queue_rows,
+            false => &self.music_rows,
+        };
+        rows.get(row).map(|entry| entry.key.clone())
+    }
+
+    /// Open a record's own menu where the press landed.
+    fn open_track_menu(&mut self, cx: &mut Cx, from_set_list: bool, row: usize, at: DVec2) {
+        let Some(key) = self.menu_row_key(from_set_list, row) else { return };
+        let queued = match &key {
+            TrackKey::Asset(asset) => {
+                self.decks.queue().iter().any(|queued| queued.asset == *asset)
+            }
+            TrackKey::Local(_) => false,
+        };
+        let facts = crate::track_menu::TrackMenuFacts {
+            from_set_list,
+            on_deck: self.deck_holding(&key),
+            queued,
+            set_len: self.decks.queue().len(),
+            previewing: self.preview_active.as_ref() == Some(&key),
+        };
+        let rows = crate::track_menu::track_menu(facts);
+        for (slot, (line, rule, _, label, hint)) in Self::TRACK_MENU_SLOTS.iter().enumerate() {
+            let held = rows.get(slot);
+            self.ui.widget(cx, line).set_visible(cx, held.is_some());
+            let Some(held) = held else { continue };
+            self.ui.widget(cx, rule).set_visible(cx, held.separator);
+            self.ui.label(cx, label).set_text(cx, &held.label);
+            self.ui.label(cx, hint).set_text(cx, held.hint);
+        }
+        // Placed at the press, then pulled back inside the window: a menu
+        // opened near the right or bottom edge would otherwise hang off it,
+        // which is where the longest menus get opened from -- the set list
+        // lives at the right edge.
+        let root = self.ui.widget(cx, ids!(main_window)).area().rect(cx);
+        let menu = self.ui.widget(cx, ids!(track_menu));
+        let size = menu.area().rect(cx).size;
+        let width = if size.x > 1.0 { size.x } else { 236.0 };
+        let height = if size.y > 1.0 { size.y } else { 26.0 * rows.len() as f64 + 10.0 };
+        let x = at.x.min(root.pos.x + root.size.x - width - 8.0).max(root.pos.x + 4.0);
+        let y = at.y.min(root.pos.y + root.size.y - height - 8.0).max(root.pos.y + 4.0);
+        if let Some(mut view) = menu.borrow_mut::<View>() {
+            view.walk.abs_pos = Some(dvec2(x, y));
+        }
+        menu.set_visible(cx, true);
+        self.track_menu = Some(TrackMenuOpen { from_set_list, row, rows });
+        self.ui.redraw(cx);
+    }
+
+    fn close_track_menu(&mut self, cx: &mut Cx) {
+        if self.track_menu.take().is_none() {
+            return;
+        }
+        self.ui.widget(cx, ids!(track_menu)).set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    /// A press on one of the menu's rows, or anywhere else while it is open.
+    fn handle_track_menu(&mut self, cx: &mut Cx, actions: &Actions) {
+        let Some(open) = self.track_menu.clone() else { return };
+        for (slot, (_, _, body, _, _)) in Self::TRACK_MENU_SLOTS.iter().enumerate() {
+            let Some(row) = open.rows.get(slot) else { break };
+            // On the PRESS, not the release. The press is also what
+            // dismisses a menu, and the two arrive in separate passes: a
+            // menu that acted on the release had already been closed by
+            // its own press before the release could reach it.
+            if self.ui.view(cx, body).finger_down(actions).is_none() {
+                continue;
+            }
+            self.close_track_menu(cx);
+            self.run_track_verb(cx, open.from_set_list, open.row, row.verb);
+            return;
+        }
+        // Anything else that was a press closes it. The menu is offered the
+        // press first, so a press that reached anything at all is a press
+        // that was not on the menu.
+        let pressed = actions.iter().any(|action| {
+            action
+                .as_widget_action()
+                .is_some_and(|wa| matches!(wa.cast(), ViewAction::FingerDown(_)))
+        });
+        if pressed {
+            self.close_track_menu(cx);
+        }
+    }
+
+    fn run_track_verb(
+        &mut self,
+        cx: &mut Cx,
+        from_set_list: bool,
+        row: usize,
+        verb: crate::track_menu::TrackVerb,
+    ) {
+        use crate::library_nav::QueueHow;
+        use crate::track_menu::TrackVerb;
+        // The set list's own rows are reached by their own handlers; the
+        // listing's by the shared verbs the keyboard also uses.
+        if from_set_list {
+            match verb {
+                TrackVerb::LoadDeck(DeckId::A) => self.load_queued_row(cx, row, DeckTarget::A),
+                TrackVerb::LoadDeck(DeckId::B) => self.load_queued_row(cx, row, DeckTarget::B),
+                TrackVerb::Unqueue => self.unqueue_row(cx, row),
+                TrackVerb::Preview => self.toggle_preview(cx, PhonesList::Queue, row),
+                _ => {}
+            }
+            return;
+        }
+        match verb {
+            TrackVerb::LoadDeck(DeckId::A) => self.load_track_row(cx, row, DeckTarget::A),
+            TrackVerb::LoadDeck(DeckId::B) => self.load_track_row(cx, row, DeckTarget::B),
+            TrackVerb::Queue => self.queue_track_row(cx, row, QueueHow::Tail),
+            TrackVerb::PlayNext => self.queue_track_row(cx, row, QueueHow::Next),
+            TrackVerb::ReplaceSet => self.queue_track_row(cx, row, QueueHow::Replace),
+            TrackVerb::Preview => self.toggle_preview(cx, PhonesList::Explorer, row),
+            TrackVerb::Unqueue => {}
+        }
+    }
+
+    /// Put a SET LIST row on a deck. Its own body, not the listing's: a
+    /// queued row is loaded by its position in the queue, which spends it.
+    fn load_queued_row(&mut self, cx: &mut Cx, row: usize, target: DeckTarget) {
+        self.deck_hands_on();
+        let cmds = self.decks.load_queued(row, target);
+        self.run_deck_cmds(cx, cmds);
+        self.queue_rows_dirty = true;
+    }
+
+    fn unqueue_row(&mut self, cx: &mut Cx, row: usize) {
+        self.decks.dequeue(row);
+        self.queue_rows_dirty = true;
+        // A track pulled out of the set list while it is in the phones gets
+        // its `+` back on the player.
+        self.sync_phones_player_ui(cx);
+    }
+
     /// Put an explorer row on a deck. The body a click and a key share, so
     /// the two cannot drift into meaning different things.
     fn load_track_row(&mut self, cx: &mut Cx, index: usize, target: DeckTarget) {
@@ -25730,6 +25977,22 @@ p2 {}
     }
 
     /// Where a track already is, for the row badge.
+    /// Which deck, if either, is holding this record. The same comparison
+    /// `deck_badge` makes to draw the row's mark, answered as a deck rather
+    /// than as a letter so the menu can gate on it.
+    fn deck_holding(&self, key: &TrackKey) -> Option<DeckId> {
+        [DeckId::A, DeckId::B].into_iter().find(|deck| {
+            let state = self.decks.deck(*deck);
+            let Some(item) = state.item() else { return false };
+            match key {
+                TrackKey::Asset(asset) => item.asset == *asset,
+                TrackKey::Local(path) => {
+                    self.local_by_asset.get(&item.asset).is_some_and(|known| known == path)
+                }
+            }
+        })
+    }
+
     fn deck_badge(&self, key: &TrackKey) -> (String, bool) {
         for deck in [DeckId::A, DeckId::B] {
             let state = self.decks.deck(deck);
@@ -29364,6 +29627,10 @@ p2 {}
                     self.queue_preview(cx);
                     continue;
                 }
+                TrackListHit::Menu(index, at) => {
+                    self.open_track_menu(cx, false, index, at);
+                    continue;
+                }
                 TrackListHit::Drag(index) => {
                     self.start_track_drag(cx, index);
                     continue;
@@ -29379,18 +29646,10 @@ p2 {}
         {
             match hit {
                 TrackListHit::Load(index, _) => {
-                    self.deck_hands_on();
-                    let cmds = self.decks.load_queued(index, self.deck_target);
-                    self.run_deck_cmds(cx, cmds);
-                    self.queue_rows_dirty = true;
+                    self.load_queued_row(cx, index, self.deck_target)
                 }
-                TrackListHit::Unqueue(index) => {
-                    self.decks.dequeue(index);
-                    self.queue_rows_dirty = true;
-                    // A track pulled out of the set list while it is in the
-                    // phones gets its `+` back on the player.
-                    self.sync_phones_player_ui(cx);
-                }
+                TrackListHit::Menu(index, at) => self.open_track_menu(cx, true, index, at),
+                TrackListHit::Unqueue(index) => self.unqueue_row(cx, index),
                 TrackListHit::Drag(index) => self.start_queue_drag(cx, index),
                 TrackListHit::Preview(index) => {
                     self.toggle_preview(cx, PhonesList::Queue, index);
@@ -30036,6 +30295,9 @@ impl MatchEvent for App {
         for (asset, modifiers) in video_down {
             self.video_tile_clicked(cx, asset, modifiers.shift);
         }
+        // Before the rows: the menu is offered the press first, so a
+        // press it takes must not also reach the listing underneath.
+        self.handle_track_menu(cx, actions);
         self.handle_music_rows(cx, actions);
         self.handle_deck_tabs(cx, actions);
         self.handle_deck_sections(cx, actions);
