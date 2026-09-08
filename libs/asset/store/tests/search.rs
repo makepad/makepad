@@ -764,6 +764,59 @@ fn unicode_survives_admission_snippets_and_search() {
 }
 
 #[test]
+fn the_ascii_spelling_of_an_accented_title_finds_the_record() {
+    let (_root, core) = open_core("fold-ascii-query");
+    let search = core.search();
+    let id = reg(&core, 1, "rik2");
+    search.set_annotation(&id, &ann("Café del Mar"), NOW).unwrap();
+    // The whole point: the accent a name happens to be written with stops
+    // deciding whether an operator typing plainly can find it.
+    assert_eq!(search.search(&q("cafe"), &ANYONE, None).unwrap().total, 1);
+    assert_eq!(search.search(&q("Cafe"), &ANYONE, None).unwrap().total, 1);
+}
+
+#[test]
+fn an_accented_query_finds_the_plain_spelling_and_the_plain_query_the_accented_one() {
+    let (_root, core) = open_core("fold-both-ways");
+    let search = core.search();
+    let plain = reg(&core, 1, "rik2");
+    let fancy = reg(&core, 2, "rik2");
+    search.set_annotation(&plain, &ann("Cafe Sessions"), NOW).unwrap();
+    search.set_annotation(&fancy, &ann("Café Nights"), NOW).unwrap();
+    // One question, however it is spelled: both spellings reach both rows.
+    assert_eq!(search.search(&q("cafe"), &ANYONE, None).unwrap().total, 2);
+    assert_eq!(search.search(&q("café"), &ANYONE, None).unwrap().total, 2);
+}
+
+#[test]
+fn an_accented_query_still_finds_the_accented_title_it_always_did() {
+    let (_root, core) = open_core("fold-no-regress");
+    let search = core.search();
+    let id = reg(&core, 1, "rik2");
+    search.set_annotation(&id, &ann("Straße Musik"), NOW).unwrap();
+    assert_eq!(search.search(&q("Straße"), &ANYONE, None).unwrap().total, 1);
+    assert_eq!(search.search(&q("strasse"), &ANYONE, None).unwrap().total, 1);
+    // And the raw run the old index would have held still answers, so a
+    // query somebody learned against the old truncation keeps working.
+    assert_eq!(search.search(&q("stra"), &ANYONE, None).unwrap().total, 1);
+}
+
+#[test]
+fn an_accented_query_still_centres_the_snippet_on_the_word_it_matched() {
+    let (_root, core) = open_core("fold-snippet");
+    let search = core.search();
+    let id = reg(&core, 1, "rik2");
+    let mut a = ann("Sessions");
+    a.description = format!("{} café {}", "padding ".repeat(60), "tail ".repeat(60));
+    search.set_annotation(&id, &a, NOW).unwrap();
+    // The stored text holds "café", not the folded term the match was made
+    // on, so centring has to know the raw spelling too.
+    let page = search.search(&q("café"), &ANYONE, None).unwrap();
+    assert_eq!(page.total, 1);
+    assert!(page.hits[0].snippet.contains("café"), "{}", page.hits[0].snippet);
+}
+
+#[test]
 fn snippets_are_normalized_bounded_and_term_centered() {
     let (_root, core) = open_core("snippets");
     let search = core.search();

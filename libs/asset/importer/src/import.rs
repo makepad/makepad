@@ -709,27 +709,12 @@ pub(crate) fn alias_slug(raw: &str, budget: usize) -> String {
 
 /// One lowercase char into a slug: ASCII alphanumerics as themselves, the
 /// common accented Latin letters folded to ASCII, everything else a `-`.
+/// The alias slugger's fold, which now lives beside the search index's, so
+/// the two cannot answer the same question differently: the alias a record
+/// is filed under and the terms it is found by fold by construction rather
+/// than by two tables happening to agree.
 fn push_folded(out: &mut String, c: char) {
-    let folded = match c {
-        'a'..='z' | '0'..='9' => {
-            out.push(c);
-            return;
-        }
-        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => "a",
-        'æ' => "ae",
-        'ç' => "c",
-        'è' | 'é' | 'ê' | 'ë' => "e",
-        'ì' | 'í' | 'î' | 'ï' => "i",
-        'ð' => "d",
-        'ñ' => "n",
-        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' => "o",
-        'ù' | 'ú' | 'û' | 'ü' => "u",
-        'ý' | 'ÿ' => "y",
-        'þ' => "th",
-        'ß' => "ss",
-        _ => "-",
-    };
-    out.push_str(folded);
+    makepad_asset_data::fold::push_ascii_fold(out, c);
 }
 
 /// Longest catalog label the server accepts, so the run tag is cut to fit

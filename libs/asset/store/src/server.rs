@@ -267,6 +267,10 @@ fn migrate(db: &Db, cas: &FsCas, budgets: &Budgets) -> ServerResult<()> {
                         }
                     }
                 }
+                // v15: the search index folds accented text to ASCII, so the
+                // terms already on disk are the wrong ones -- every posting
+                // row is rebuilt from the annotations that produced it.
+                14 => crate::search::reindex_postings(db)?,
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }
             db.exec("set user_version", &format!("PRAGMA user_version={}", version + 1))

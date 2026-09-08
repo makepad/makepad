@@ -32,6 +32,7 @@ pub mod content_set;
 pub mod derived;
 pub mod dimensions;
 pub mod error;
+pub mod fold;
 pub mod game;
 pub mod geom;
 pub mod id;
