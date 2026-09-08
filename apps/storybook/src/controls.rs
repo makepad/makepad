@@ -22,8 +22,8 @@ script_mod! {
         name := Label{width: 110. text: ""}
     }
 
-    mod.widgets.ControlsPanelBase = #(ControlsPanel::register_widget(vm))
-    mod.widgets.ControlsPanel = set_type_default() do mod.widgets.ControlsPanelBase{
+    mod.storybook.ControlsPanelBase = #(ControlsPanel::register_widget(vm))
+    mod.storybook.ControlsPanel = set_type_default() do mod.storybook.ControlsPanelBase{
         width: Fill
         height: Fill
         flow: Down

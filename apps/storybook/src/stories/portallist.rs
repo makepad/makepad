@@ -20,9 +20,9 @@ script_mod! {
         }
     }
 
-    mod.widgets.StoryNewsFeedBase = #(StoryNewsFeed::register_widget(vm))
+    mod.storybook.StoryNewsFeedBase = #(StoryNewsFeed::register_widget(vm))
 
-    mod.widgets.StoryNewsFeed = set_type_default() do mod.widgets.StoryNewsFeedBase{
+    mod.storybook.StoryNewsFeed = set_type_default() do mod.storybook.StoryNewsFeedBase{
         list := PortalList{
             scroll_bar: ScrollBar{}
             TopSpace := View{height: 0.}
@@ -37,7 +37,7 @@ script_mod! {
     }
 
     mod.stories.PortalListOverview = StoryPage{
-        news_feed := mod.widgets.StoryNewsFeed{}
+        news_feed := mod.storybook.StoryNewsFeed{}
     }
 }
 

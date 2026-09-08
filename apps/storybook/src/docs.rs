@@ -24,8 +24,8 @@ script_mod! {
         doc := Label{width: Fill text: ""}
     }
 
-    mod.widgets.DocsPanelBase = #(DocsPanel::register_widget(vm))
-    mod.widgets.DocsPanel = set_type_default() do mod.widgets.DocsPanelBase{
+    mod.storybook.DocsPanelBase = #(DocsPanel::register_widget(vm))
+    mod.storybook.DocsPanel = set_type_default() do mod.storybook.DocsPanelBase{
         width: Fill
         height: Fill
         flow: Down

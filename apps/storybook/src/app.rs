@@ -52,7 +52,7 @@ script_mod! {
             a: View{
                 width: Fill
                 height: Fill
-                navigator := StoryNavigator{}
+                navigator := mod.storybook.StoryNavigator{}
             }
             b: Splitter{
                 axis: SplitterAxis.Horizontal
@@ -61,7 +61,7 @@ script_mod! {
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
-                    canvas := StoryCanvas{}
+                    canvas := mod.storybook.StoryCanvas{}
                 }
                 b: View{
                     width: Fill
@@ -88,9 +88,9 @@ script_mod! {
                         width: Fill
                         height: Fill
                         active_page: @docs
-                        docs := DocsPanel{}
-                        controls := ControlsPanel{}
-                        actions := ActionsPanel{}
+                        docs := mod.storybook.DocsPanel{}
+                        controls := mod.storybook.ControlsPanel{}
+                        actions := mod.storybook.ActionsPanel{}
                     }
                 }
             }

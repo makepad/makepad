@@ -22,8 +22,8 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.StoryCanvasBase = #(StoryCanvas::register_widget(vm))
-    mod.widgets.StoryCanvas = set_type_default() do mod.widgets.StoryCanvasBase{
+    mod.storybook.StoryCanvasBase = #(StoryCanvas::register_widget(vm))
+    mod.storybook.StoryCanvas = set_type_default() do mod.storybook.StoryCanvasBase{
         width: Fill
         height: Fill
     }

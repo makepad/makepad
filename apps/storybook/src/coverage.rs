@@ -42,8 +42,8 @@ script_mod! {
         Labelbold{width: 90. text: "story"}
     }
 
-    mod.widgets.StoryCoverageBase = #(StoryCoverage::register_widget(vm))
-    mod.widgets.StoryCoverage = set_type_default() do mod.widgets.StoryCoverageBase{
+    mod.storybook.StoryCoverageBase = #(StoryCoverage::register_widget(vm))
+    mod.storybook.StoryCoverage = set_type_default() do mod.storybook.StoryCoverageBase{
         width: Fill
         height: Fill
         flow: Down
@@ -59,7 +59,7 @@ script_mod! {
     }
 
     mod.stories.Coverage = StoryPage{
-        mod.widgets.StoryCoverage{}
+        mod.storybook.StoryCoverage{}
     }
 }
 

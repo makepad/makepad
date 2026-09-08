@@ -17,15 +17,15 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.widgets.StoryFileTreeBase = #(StoryFileTree::register_widget(vm))
+    mod.storybook.StoryFileTreeBase = #(StoryFileTree::register_widget(vm))
 
-    mod.widgets.StoryFileTree = set_type_default() do mod.widgets.StoryFileTreeBase{
+    mod.storybook.StoryFileTree = set_type_default() do mod.storybook.StoryFileTreeBase{
         file_tree: FileTree{}
     }
 
     mod.stories.FileTreeOverview = StoryPage{
         StoryNote{text: "The working directory read into a tree. The status dots are cycled for the demonstration rather than read from the repository, so all five kinds are on screen: none, new, modified, deleted and mixed."}
-        mod.widgets.StoryFileTree{file_tree +: {width: Fill height: Fill}}
+        mod.storybook.StoryFileTree{file_tree +: {width: Fill height: Fill}}
     }
 }
 

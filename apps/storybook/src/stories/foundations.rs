@@ -14,9 +14,9 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.widgets.TokenTableBase = #(TokenTable::register_widget(vm))
+    mod.storybook.TokenTableBase = #(TokenTable::register_widget(vm))
     /** Every theme token whose name starts with one of `prefixes`, in that order: a swatch or a bar, the name, the value and where the theme defines it. */
-    mod.widgets.TokenTable = set_type_default() do mod.widgets.TokenTableBase{
+    mod.storybook.TokenTable = set_type_default() do mod.storybook.TokenTableBase{
         width: Fill
         height: Fit
         draw_swatch +: {
@@ -34,7 +34,7 @@ script_mod! {
 
     mod.stories.FoundationsColorRoles = StoryPage{
         StoryNote{text: "The accent families and the four intents. Each has a base, the colour that reads on it, a container and the colour that reads on the container."}
-        mod.widgets.TokenTable{prefixes: [
+        mod.storybook.TokenTable{prefixes: [
             "color_primary" "color_on_primary" "color_secondary" "color_on_secondary"
             "color_tertiary" "color_on_tertiary" "color_error" "color_on_error"
             "color_warning" "color_on_warning" "color_success" "color_on_success"
@@ -44,7 +44,7 @@ script_mod! {
 
     mod.stories.FoundationsColorSurfaces = StoryPage{
         StoryNote{text: "The surface ladder, what reads on it, the outlines, the inverse pair and the scrim."}
-        mod.widgets.TokenTable{prefixes: [
+        mod.storybook.TokenTable{prefixes: [
             "color_surface" "color_on_surface" "color_outline" "color_inverse_surface"
             "color_inverse_on_surface" "color_scrim" "color_elevation"
         ]}
@@ -52,12 +52,12 @@ script_mod! {
 
     mod.stories.FoundationsColorStatus = StoryPage{
         StoryNote{text: "Presence and placeholder colours: a status is never colour alone, but these are the colours it uses."}
-        mod.widgets.TokenTable{prefixes: ["color_presence_" "color_placeholder"]}
+        mod.storybook.TokenTable{prefixes: ["color_presence_" "color_placeholder"]}
     }
 
     mod.stories.FoundationsColorPalette = StoryPage{
         StoryNote{text: "Every colour the theme defines, roles and legacy tokens alike, in the order the theme file declares them."}
-        mod.widgets.TokenTable{prefixes: ["color_"]}
+        mod.storybook.TokenTable{prefixes: ["color_"]}
     }
 
     mod.stories.FoundationsShapeRadius = StoryPage{
@@ -71,7 +71,7 @@ script_mod! {
             RoundedView{width: 64. height: 44. draw_bg +: {color: theme.color_primary_container border_radius: theme.radius_xl}}
             RoundedView{width: 64. height: 44. draw_bg +: {color: theme.color_primary_container border_radius: theme.radius_full}}
         }
-        mod.widgets.TokenTable{prefixes: ["radius_"]}
+        mod.storybook.TokenTable{prefixes: ["radius_"]}
     }
 
     mod.stories.FoundationsElevationLevels = StoryPage{
@@ -85,7 +85,7 @@ script_mod! {
             ElevatedView4{width: 88. height: 60. align: Align{x: 0.5 y: 0.5} draw_bg +: {color: theme.color_surface_container border_radius: theme.radius_m} Label{text: "4"}}
             ElevatedView5{width: 88. height: 60. align: Align{x: 0.5 y: 0.5} draw_bg +: {color: theme.color_surface_container border_radius: theme.radius_m} Label{text: "5"}}
         }
-        mod.widgets.TokenTable{prefixes: ["elevation_" "color_elevation"]}
+        mod.storybook.TokenTable{prefixes: ["elevation_" "color_elevation"]}
     }
 
     mod.stories.FoundationsMotionOverview = StoryPage{
@@ -103,22 +103,22 @@ script_mod! {
             Button{text: "spring" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_spring apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
         }
         StoryHeading{text: "Durations"}
-        mod.widgets.TokenTable{prefixes: ["motion_"]}
+        mod.storybook.TokenTable{prefixes: ["motion_"]}
     }
 
     mod.stories.FoundationsStateLayers = StoryPage{
         StoryNote{text: "The opacity a state layer adds over a surface: hover, focus, press, drag, the two disabled strengths and the scrim. The chip shows the text colour at that opacity."}
-        mod.widgets.TokenTable{prefixes: ["state_"]}
+        mod.storybook.TokenTable{prefixes: ["state_"]}
     }
 
     mod.stories.FoundationsSpacingScale = StoryPage{
         StoryNote{text: "The spacing ladder and the factor it is built from. Every bar is the token's length."}
-        mod.widgets.TokenTable{prefixes: ["space_"]}
+        mod.storybook.TokenTable{prefixes: ["space_"]}
     }
 
     mod.stories.FoundationsSizeScale = StoryPage{
         StoryNote{text: "Control heights, icon sizes, the touch target and the hairlines. Every bar is the token's length."}
-        mod.widgets.TokenTable{prefixes: ["size_"]}
+        mod.storybook.TokenTable{prefixes: ["size_"]}
     }
 
     mod.stories.FoundationsTypeScale = StoryPage{
@@ -134,7 +134,7 @@ script_mod! {
             Label{text: "Label M: the quick brown fox jumps over the lazy dog" draw_text +: {text_style: theme.font_label_m}}
             Label{text: "Label S: the quick brown fox jumps over the lazy dog" draw_text +: {text_style: theme.font_label_s}}
         }
-        mod.widgets.TokenTable{prefixes: ["type_" "font_size_"]}
+        mod.storybook.TokenTable{prefixes: ["type_" "font_size_"]}
     }
 }
 

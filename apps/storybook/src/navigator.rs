@@ -15,8 +15,8 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.StoryNavigatorBase = #(StoryNavigator::register_widget(vm))
-    mod.widgets.StoryNavigator = set_type_default() do mod.widgets.StoryNavigatorBase{
+    mod.storybook.StoryNavigatorBase = #(StoryNavigator::register_widget(vm))
+    mod.storybook.StoryNavigator = set_type_default() do mod.storybook.StoryNavigatorBase{
         file_tree: FileTree{}
     }
 }

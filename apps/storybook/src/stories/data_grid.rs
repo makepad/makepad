@@ -8,9 +8,9 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.widgets.StoryDataGridBase = #(StoryDataGrid::register_widget(vm))
+    mod.storybook.StoryDataGridBase = #(StoryDataGrid::register_widget(vm))
 
-    mod.widgets.StoryDataGrid = set_type_default() do mod.widgets.StoryDataGridBase{
+    mod.storybook.StoryDataGrid = set_type_default() do mod.storybook.StoryDataGridBase{
         width: Fill
         height: Fit
         flow: Down
@@ -61,7 +61,7 @@ script_mod! {
 
         StoryHeading{text: "Three columns of people"}
         StoryNote{text: "Click a cell, shift-click another for a rectangle, click a row number for the row, a column header for the column. Arrow keys move and shift extends. Drag a column edge to resize it, and a column header to move it somewhere else."}
-        demo := mod.widgets.StoryDataGrid{}
+        demo := mod.storybook.StoryDataGrid{}
     }
 }
 

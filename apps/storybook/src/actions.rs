@@ -6,8 +6,8 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.ActionsPanelBase = #(ActionsPanel::register_widget(vm))
-    mod.widgets.ActionsPanel = set_type_default() do mod.widgets.ActionsPanelBase{
+    mod.storybook.ActionsPanelBase = #(ActionsPanel::register_widget(vm))
+    mod.storybook.ActionsPanel = set_type_default() do mod.storybook.ActionsPanelBase{
         width: Fill
         height: Fill
         flow: Down
