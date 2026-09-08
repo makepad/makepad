@@ -23,6 +23,15 @@ script_mod! {
             state := Label{text: "none open"}
         }
 
+        StoryHeading{text: "Where a sheet rests"}
+        StoryNote{text: "A sheet's grabber is a handle. Drag it to move the panel between a peek, half the room and the whole of what its size asks for, and drag it below the peek to send it back. These open it at a rung, so the three can be seen without dragging. The page is behind the scrim while a sheet is out, so send it back before choosing another."}
+        StoryRow{
+            sheet_peek := Button{text: "Peek"}
+            sheet_half := Button{text: "Half"}
+            sheet_full := Button{text: "Full"}
+            sheet_rung := Label{text: "shut"}
+        }
+
         StoryNote{text: "The page stays unreachable while a drawer is out, and Escape or a press on the scrim sends it back."}
         StoryRow{
             under := Button{text: "Behind the drawer"}
@@ -63,9 +72,14 @@ script_mod! {
 
         sheet := BottomSheet{
             title: "Choices"
+            // Full, so the three rungs are three places. A sheet whose size
+            // is smaller than half the window has no room for a half rung —
+            // it clamps into the full one, correctly, and then a page with
+            // three buttons on it would be showing two.
+            size: Full
             content +: {
                 body +: {
-                    P{text: "A sheet is a drawer from the bottom with a grabber, which says the panel can be dragged."}
+                    P{text: "A sheet is a drawer from the bottom with a grabber. Drag it: the panel follows, settles at the nearest rung, and goes back if you pull it below the lowest one."}
                 }
             }
         }
@@ -87,6 +101,35 @@ fn drawer_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     if root.button(cx, ids!(under)).clicked(actions) {
         let n = crate::stories::bump(live_id!(drawer_under));
         root.label(cx, ids!(under_note)).set_text(cx, &format!("pressed {n} times"));
+    }
+
+    // The rungs, reachable without a drag: a page that can only be read
+    // shows one of the three, and the point is that there are three.
+    let sheet = root.drawer(cx, ids!(sheet));
+    for (button_id, rung) in [
+        (ids!(sheet_peek), SheetDetent::Collapsed),
+        (ids!(sheet_half), SheetDetent::Half),
+        (ids!(sheet_full), SheetDetent::Expanded),
+    ] {
+        if root.button(cx, button_id).clicked(actions) {
+            if !sheet.is_open() {
+                sheet.open(cx);
+            }
+            sheet.set_detent(cx, rung);
+        }
+    }
+    let rung = if sheet.is_open() {
+        match sheet.detent() {
+            SheetDetent::Collapsed => "resting at the peek",
+            SheetDetent::Half => "resting at half the room",
+            SheetDetent::Expanded => "resting at its full size",
+        }
+    } else {
+        "shut"
+    };
+    let rung_label = root.label(cx, ids!(sheet_rung));
+    if rung_label.text() != rung {
+        rung_label.set_text(cx, rung);
     }
 
     let open: Vec<&str> = drawers
@@ -113,7 +156,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "DrawerOverview",
     added: "2026-09-05",
     tags: &["new"],
-    doc: "# Drawer\n\nA drawer is a dialog that has chosen a side. It stops the work the same way — scrim, pointer taken, keyboard taken — but it arrives from an edge and is shaped by that edge. Navigation, filters and a long list of settings belong here rather than in a centred card, because they are places rather than questions.\n\n`side` picks the edge and decides the shape: a left or right drawer is a column whose `size` is a width, a top or bottom one is a row whose `size` is a height, which is why the rungs are named for how much room they take rather than for a number.\n\n`SideSheet` is a drawer from the right, for the detail of whatever is selected. `BottomSheet` is one from the bottom with a grabber, and that grabber is the only difference the library makes, because it is the only one that matters: it says the panel can be dragged, and a drawer that cannot be dragged should not draw one.\n\nThe panel slides in from its edge rather than appearing, because on a panel this large the movement is what says where it came from. Escape and a press on the scrim both send it back, through the same claim every other overlay uses.",
+    doc: "# Drawer\n\nA drawer is a dialog that has chosen a side. It stops the work the same way — scrim, pointer taken, keyboard taken — but it arrives from an edge and is shaped by that edge. Navigation, filters and a long list of settings belong here rather than in a centred card, because they are places rather than questions.\n\n`side` picks the edge and decides the shape: a left or right drawer is a column whose `size` is a width, a top or bottom one is a row whose `size` is a height, which is why the rungs are named for how much room they take rather than for a number.\n\n`SideSheet` is a drawer from the right, for the detail of whatever is selected. `BottomSheet` is one from the bottom with a grabber, and that grabber is the only difference the library makes, because it is the only one that matters: it is the handle. Dragging it moves the panel between three rungs — `SheetDetent.Collapsed` for a peek, `Half` for half the room, `Expanded` for the whole of what `size` asks for — and a drag below the lowest rung sends the sheet back the way it came. `detent` picks the rung it opens at, and a sheet that has been dragged reports where it settled. A drawer with no grabber has no rungs: it is open or it is shut, and it should not draw a handle for a thing it cannot do.\n\nThe panel slides in from its edge rather than appearing, because on a panel this large the movement is what says where it came from. Escape and a press on the scrim both send it back, through the same claim every other overlay uses.",
     subject: "nav",
     feature: None,
     controls: &[],
