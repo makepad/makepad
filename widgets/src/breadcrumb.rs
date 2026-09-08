@@ -94,6 +94,11 @@ pub fn breadcrumb_window(widths: &[f64], gap: f64, room: f64, ellipsis: f64) -> 
     BreadcrumbWindow { head, hidden, tail_from }
 }
 
+/// The line box a crumb is drawn in — the same 14 points the tab strip
+/// uses. A text run has no height of its own to centre by until it is laid
+/// out, so the box is given one.
+const LINE_HEIGHT: f64 = 14.0;
+
 /// What a trail reports: the crumb that was picked, by its index in the
 /// trail the host handed over.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -251,13 +256,25 @@ impl Widget for Breadcrumb {
         // The room is whatever the turtle actually resolved to, which is the
         // only honest answer for a Fill trail.
         let window = breadcrumb_window(&widths, sep_w, strip.size.x, ellipsis_w);
+        // A line box centred in the strip. The crumbs are placed absolutely,
+        // and an absolute placement ignores a parent's `align`, so the trail
+        // has to centre itself or it sits at the top of whatever it is given.
+        let line = LINE_HEIGHT.min(strip.size.y);
+        let text_y = strip.pos.y + (strip.size.y - line) * 0.5;
+        let place = |x: f64, w: f64| Walk {
+            abs_pos: Some(dvec2(x, text_y)),
+            width: Size::Fixed(w),
+            height: Size::Fixed(line),
+            ..Walk::default()
+        };
+        let mid = Align { x: 0.0, y: 0.5 };
         self.segments.clear();
 
         let mut x = strip.pos.x;
         let mut first = true;
         let mut draw_one = |cx: &mut Cx2d, this: &mut Self, index: usize, x: &mut f64, first: &mut bool| {
             if !*first {
-                this.draw_text.draw_abs(cx, dvec2(*x, strip.pos.y + 4.0), &sep);
+                this.draw_text.draw_walk(cx, place(*x, sep_w), mid, &sep);
                 *x += sep_w;
             }
             *first = false;
@@ -272,7 +289,7 @@ impl Widget for Breadcrumb {
             } else {
                 &mut this.draw_text
             };
-            target.draw_abs(cx, dvec2(*x, strip.pos.y + 4.0), &name);
+            target.draw_walk(cx, place(*x, w), mid, &name);
             this.segments.push((index, Rect { pos: dvec2(*x, strip.pos.y), size: dvec2(w, strip.size.y) }));
             *x += w;
         };
@@ -282,11 +299,11 @@ impl Widget for Breadcrumb {
         }
         if window.hidden > 0 {
             if !first {
-                self.draw_text.draw_abs(cx, dvec2(x, strip.pos.y + 4.0), &sep);
+                self.draw_text.draw_walk(cx, place(x, sep_w), mid, &sep);
                 x += sep_w;
             }
             first = false;
-            self.draw_text.draw_abs(cx, dvec2(x, strip.pos.y + 4.0), "\u{2026}");
+            self.draw_text.draw_walk(cx, place(x, ellipsis_w), mid, "\u{2026}");
             x += ellipsis_w;
         }
         for i in window.tail_from..self.trail.len() {
