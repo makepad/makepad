@@ -206,10 +206,17 @@ fn resolve_split_position(
     min_a: f64,
     min_b: f64,
     collapse: SplitterCollapse,
+    bar: f64,
 ) -> f64 {
     match collapse {
         SplitterCollapse::A => 0.0,
-        SplitterCollapse::B => room.max(0.0),
+        // The room LESS the bar, not the whole room. The bar is laid out
+        // after the first pane and takes its width from what is left, so a
+        // first pane given everything leaves the bar nothing and it is not
+        // drawn at all: the panel closes and the handle that would open it
+        // again goes with it. Folding the first pane never had this problem
+        // because a zero-width pane leaves the bar its width by itself.
+        SplitterCollapse::B => (room - bar).max(0.0),
         SplitterCollapse::None => clamp_split_position(align_pos, room, min_a, min_b),
     }
 }
@@ -490,6 +497,7 @@ impl Splitter {
             min_a,
             min_b,
             self.collapse,
+            self.size,
         );
 
         let walk = match self.axis {
@@ -715,15 +723,16 @@ mod tests {
     #[test]
     fn a_folded_pane_goes_to_the_edge_past_any_floor() {
         let (room, min_a, min_b) = (900.0, 180.0, 50.0);
+        let bar = 6.0;
         assert_eq!(
-            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::A),
+            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::A, bar),
             0.0,
             "folding the first pane leaves it nothing, floor or no floor"
         );
         assert_eq!(
-            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::B),
-            room,
-            "folding the second gives the first the whole room"
+            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::B, bar),
+            room - bar,
+            "folding the second gives the first everything except the bar,              which has to stay: it is the only way back"
         );
     }
 
@@ -737,11 +746,11 @@ mod tests {
         // position that comes back is the one that went away. This is what
         // three apps each keep a remembered-width field to achieve.
         assert_eq!(
-            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::A),
+            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::A, 6.0),
             0.0
         );
         assert_eq!(
-            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::None),
+            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::None, 6.0),
             left_at
         );
     }
