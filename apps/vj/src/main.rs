@@ -16391,6 +16391,8 @@ p2 {}
                         alias: h.alias.map(|a| a.as_str().to_string()),
                         live: h.live,
                         kind: h.kind,
+                        artist: h.artist,
+                        album: h.album,
                     })
                     .collect();
                 self.thumb_stats.pages += 1;
@@ -25665,9 +25667,23 @@ p2 {}
             let secs = self.row_summary(key)?.duration_secs;
             track_tags::bitrate_from_size(bytes, secs)
         });
+        // A store track whose bytes are not here yet has no file to read
+        // tags from at all -- `row_tags` above already said so with two
+        // blank strings. The catalog's own hit carried an artist and an
+        // album alongside it, so the row is not left blank for however
+        // long the preprocessing lane takes to fetch the file.
+        let (artist, album) = match key {
+            TrackKey::Asset(asset) if tags.artist.is_empty() && tags.album.is_empty() => {
+                match self.music_model_tile(*asset) {
+                    Some(tile) => (tile.artist.clone(), tile.album.clone()),
+                    None => (tags.artist, tags.album),
+                }
+            }
+            _ => (tags.artist, tags.album),
+        };
         (
-            tags.artist,
-            tags.album,
+            artist,
+            album,
             tags.genre,
             tags.year,
             bitrate.map(|rate| format!("{rate}k")).unwrap_or_default(),
