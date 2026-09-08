@@ -138,8 +138,8 @@ pub const STORIES: &[Story] = &[Story {
     also: &[],
     name: "Overview",
     dsl: "SplitterOverview",
-    added: "2026-09-08",
-    tags: &["new", "layout"],
+    added: "2025-05-06",
+    tags: &["layout"],
     doc: "# Splitter
 
 Two panes with a bar between them that a person can drag.

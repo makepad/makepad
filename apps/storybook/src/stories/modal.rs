@@ -93,8 +93,8 @@ pub const STORIES: &[Story] = &[Story {
     also: &[],
     name: "Overview",
     dsl: "ModalOverview",
-    added: "2026-09-08",
-    tags: &["new", "overlay"],
+    added: "2025-05-06",
+    tags: &["overlay"],
     doc: "# Modal
 
 A dimming layer over the whole window with `content` on top of it. It is the container the dialog and the command palette are built on, and twelve places in this repository use one.
