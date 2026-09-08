@@ -4895,6 +4895,125 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fadeout_learn), "fadeout"),
 ];
 
+/// How close a fader has to be to a value to count as holding it: one and
+/// a half steps of a 7-bit control, so a fader parked ON the value cannot
+/// be shaken off by rounding.
+const FADER_NEAR: f32 = 1.5 / 127.0;
+
+/// The surface's own crossfader, named the way a learned control is, so one
+/// table of remembered positions covers both routes to the same value.
+const HW_CROSSFADER: (u8, u8) = (0, apc40::CC_CROSSFADER);
+
+/// Whether a physical fader may drive the value it is pointed at.
+///
+/// A fader is a position, not a change: it says where it is, and if the
+/// software value has moved somewhere else since it was last touched --
+/// a tab click that re-points it at the other mix, an automatic fade, a
+/// deck swap, the on-screen fader being dragged -- then obeying the next
+/// message means jumping the sound to wherever the physical fader happens
+/// to be sitting. In a room that is the worst sound the console makes.
+///
+/// So the fader has to pick the value up before it may move it. There is no
+/// arming and no timer, only a comparison: it drives while it AGREES with
+/// where the value is, and after they have parted it must cross over --
+/// which a 7-bit fader may do without ever landing exactly on it -- or come
+/// within a step of it. The first message from a fader nothing has heard
+/// from is a position report and nothing else.
+///
+/// `near` is how close counts as agreement, in the same units as the value.
+fn fader_takes_over(previous: Option<f32>, destination: f32, incoming: f32, near: f32) -> bool {
+    let Some(previous) = previous else { return false };
+    if (previous - destination).abs() <= near {
+        // This fader put the value where it is, so it still holds it.
+        return true;
+    }
+    // They have parted. Only crossing over, or arriving beside it, takes it
+    // back -- and a crossing is told by the SIDE changing, not by a
+    // subtraction, so a value sitting exactly on the destination cannot be
+    // read as being on both sides of it at once.
+    (previous < destination) != (incoming < destination)
+        || (incoming - destination).abs() <= near
+}
+
+#[cfg(test)]
+mod fader_takeover_tests {
+    use super::fader_takes_over;
+
+    /// One step of a 7-bit fader, with the same slack the console uses.
+    const NEAR: f32 = 1.5 / 127.0;
+
+    #[test]
+    fn a_fader_nothing_has_heard_from_reports_its_position_and_moves_nothing() {
+        assert!(!fader_takes_over(None, 0.0, 1.0, NEAR));
+        assert!(!fader_takes_over(None, 0.5, 0.5, NEAR), "not even where it agrees");
+    }
+
+    #[test]
+    fn a_fader_that_holds_the_value_goes_on_holding_it() {
+        // A fader resting at the bottom, on a value that is also at the
+        // bottom, swept all the way up. Its first message moves nothing --
+        // nothing has been heard from it yet -- and every message after
+        // that drives, because each one lands on the value it asked for
+        // last time.
+        let mut destination = 0.0f32;
+        let mut previous = None;
+        let mut moved_on_first = false;
+        for step in 0..=127 {
+            let incoming = step as f32 / 127.0;
+            if fader_takes_over(previous, destination, incoming, NEAR) {
+                moved_on_first |= previous.is_none();
+                destination = incoming;
+            }
+            previous = Some(incoming);
+        }
+        assert!(!moved_on_first, "the first message is a position report");
+        assert!((destination - 1.0).abs() < 1e-6, "and the rest of the sweep drives");
+    }
+
+    /// The defect this exists for: something else moved the value, and the
+    /// fader is no longer where it is.
+    #[test]
+    fn a_value_moved_by_something_else_is_not_jumped_to_the_fader() {
+        // The fader is at the bottom; a tab click re-points it at a value
+        // near the top.
+        assert!(!fader_takes_over(Some(0.0), 0.9, 0.02, NEAR), "a nudge must not grab");
+        assert!(!fader_takes_over(Some(0.0), 0.9, 0.5, NEAR), "nor half way");
+        // Crossing it hands it back, and so does arriving beside it.
+        assert!(fader_takes_over(Some(0.0), 0.9, 0.95, NEAR), "crossed over");
+        assert!(fader_takes_over(Some(0.0), 0.9, 0.9, NEAR), "landed on it");
+        assert!(
+            fader_takes_over(Some(0.0), 0.9, 0.9 - NEAR, NEAR),
+            "within a step counts as arriving",
+        );
+    }
+
+    /// The console samples its controls twenty times a second, not once
+    /// per message, so a fader swept quickly arrives far from where it was
+    /// last seen. It can pass the value it has to pick up in one jump and
+    /// never be measured anywhere near it -- which is the whole reason the
+    /// rule asks which SIDE of the value the fader is on, rather than how
+    /// far from it.
+    #[test]
+    fn a_fast_sweep_picks_the_value_up_by_passing_it() {
+        let destination = 0.5f32;
+        // One 50 ms drain: bottom to nearly the top.
+        assert!(fader_takes_over(Some(0.02), destination, 0.95, NEAR), "swept past it");
+        // The same jump on the same side of the value takes nothing.
+        assert!(!fader_takes_over(Some(0.02), destination, 0.40, NEAR), "stopped short");
+        // And back down through it.
+        assert!(fader_takes_over(Some(0.95), destination, 0.02, NEAR));
+    }
+
+    /// Both ends of the travel, which is where a fader spends most of a
+    /// set: parked at the bottom on a value that is also at the bottom, it
+    /// holds that value and may throw it all the way across.
+    #[test]
+    fn a_fader_parked_at_an_end_still_holds_a_value_that_is_there_too() {
+        assert!(fader_takes_over(Some(0.0), 0.0, 1.0, NEAR), "it holds the bottom");
+        assert!(fader_takes_over(Some(1.0), 1.0, 0.0, NEAR), "and the top");
+    }
+}
+
 /// Whether a learned button's value begins a press.
 ///
 /// A pad repeats its CC while it is held, so a press is the 0 to 1
@@ -7499,6 +7618,20 @@ pub struct App {
     /// swallows the new pad's first press.
     #[rust]
     midi_gates: HashMap<String, ((u8, u8), bool)>,
+    /// Where each physical fader was when it last spoke, by (channel, CC).
+    /// A fader has to agree with the value it points at before it may move
+    /// it — see [`fader_takes_over`].
+    #[rust]
+    hw_faders: HashMap<(u8, u8), f32>,
+    /// Whether a fader must pick a value up before it may move it.
+    ///
+    /// OFF by default, which is what this console has always done: the next
+    /// message wins whatever else moved the value. On, a fader that has been
+    /// left behind waits until it crosses back. It changes what an operator
+    /// feels under their hand, so it is theirs to turn on, and it lives in
+    /// `midi.txt` until the MIDI device list has a page to put it on.
+    #[rust]
+    soft_takeover: bool,
     /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
     #[rust]
     midi_learn: MidiLearn,
@@ -9442,6 +9575,28 @@ impl App {
 
     /// A learned CC's value lands on its control — the same state changes
     /// the pointer path makes, plus the widget mirror.
+    /// Where the surface's crossfader is pointed on a given page.
+    fn crossfader_target(&self, surface: ApcSurface) -> f32 {
+        match surface {
+            ApcSurface::Music => self.decks.crossfader,
+            _ => self.program_mix,
+        }
+    }
+
+    /// Remember where a physical fader is, and say whether it may move the
+    /// value it points at. See [`fader_takes_over`] for the rule.
+    ///
+    /// The position is remembered whether the rule is on or off, so turning
+    /// it on mid-set starts from where the fader actually is instead of
+    /// treating the next message as a first sighting.
+    fn fader_may_drive(&mut self, source: (u8, u8), destination: f32, incoming: f32) -> bool {
+        let previous = self.hw_faders.insert(source, incoming);
+        if !self.soft_takeover {
+            return true;
+        }
+        fader_takes_over(previous, destination, incoming, FADER_NEAR)
+    }
+
     /// Rising-edge detector for learned BUTTON controls (pads repeat CCs;
     /// a press is the 0→1 crossing only). See [`learned_press_begins`] for
     /// the rule; this only carries the remembered level.
@@ -9461,6 +9616,12 @@ impl App {
                     .set_text(cx, &format!("{secs:.1}s"));
             }
             "xfader" => {
+                // A learned fader is a physical fader too, and it is
+                // remembered under its own CC: two faders pointed at one
+                // value each have to pick it up for themselves.
+                if !self.fader_may_drive(source, self.program_mix, v) {
+                    return;
+                }
                 // The hand always wins — a mapped fader IS the hand.
                 self.auto_fade.cancel();
                 self.sync_autofade_ui(cx);
@@ -12589,6 +12750,29 @@ p2 {}
         sender.publish(running, bpm, position, &self.clock_out_ports);
     }
 
+    fn midi_settings_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("midi.txt")
+    }
+
+    fn save_midi_settings(&self) {
+        let mut store = crate::settings::Settings::new();
+        store.set_bool("midi.soft_takeover", self.soft_takeover);
+        let _ = crate::durable::write_file(&Self::midi_settings_path(), store.to_text());
+    }
+
+    fn load_midi_settings(&mut self) {
+        let Ok(body) = std::fs::read_to_string(Self::midi_settings_path()) else {
+            // Written out on the first run so the switch can be FOUND. It
+            // has no control on screen yet, and a setting that exists only
+            // in a source file is a setting nobody has.
+            self.save_midi_settings();
+            return;
+        };
+        let store = crate::settings::Settings::from_text(&body);
+        // The default is what this console has always done.
+        self.soft_takeover = store.bool("midi.soft_takeover", false);
+    }
+
     fn clock_settings_path() -> std::path::PathBuf {
         service::session_config_from_env().cache_parent.join("clock.txt")
     }
@@ -13817,10 +14001,15 @@ p2 {}
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
-            ApcAction::Crossfader(value) => {
+            ApcAction::Crossfader { surface, value } => {
                 // On the music surface the hardware crossfader IS the deck
-                // crossfader; everywhere else it stays the visual mix.
-                if self.apc.surface == ApcSurface::Music {
+                // crossfader; everywhere else it stays the visual mix. The
+                // surface is the one the message was DECODED on, because a
+                // batch can change it between here and there.
+                if !self.fader_may_drive(HW_CROSSFADER, self.crossfader_target(surface), value) {
+                    return;
+                }
+                if surface == ApcSurface::Music {
                     // The hand always wins: a running timed fade must not
                     // fight the hardware fader (same rule as the on-screen
                     // fader's drag handler).
@@ -30338,6 +30527,7 @@ impl MatchEvent for App {
         // The clock's own switch, after the ports event has been seen at
         // least once -- and harmless before it, since the sender simply
         // has nowhere to send until one arrives.
+        self.load_midi_settings();
         self.load_clock_settings(cx);
         self.sync_midi_learn_ui(cx);
         self.sync_slot_controls_ui(cx);

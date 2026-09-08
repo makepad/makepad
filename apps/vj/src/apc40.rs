@@ -66,7 +66,10 @@ pub enum ApcAction {
     VideoPlayPause,
     VideoStop,
     Master(f32),
-    Crossfader(f32),
+    /// The surface travels with it for the same reason it does with a pad:
+    /// messages are decoded in one loop and dispatched in another, and the
+    /// surface can change in between.
+    Crossfader { surface: ApcSurface, value: f32 },
     /// One of the eight channel volume faders.
     ChannelFader { channel: usize, value: f32 },
     /// Top knob row.
@@ -201,7 +204,7 @@ impl Apc40State {
             let strip = self.surface == ApcSurface::Music;
             return match data[1] {
                 CC_MASTER => Some(ApcAction::Master(value)),
-                CC_CROSSFADER => Some(ApcAction::Crossfader(value)),
+                CC_CROSSFADER => Some(ApcAction::Crossfader { surface: self.surface, value }),
                 CC_CHANNEL_FADER if strip && channel < KNOB_ROW => {
                     Some(ApcAction::ChannelFader { channel, value })
                 }
@@ -1001,7 +1004,7 @@ mod tests {
         assert_eq!(state.decode([0xb0, CC_MASTER, 127]), Some(ApcAction::Master(1.0)));
         assert_eq!(
             state.decode([0xb0, CC_CROSSFADER, 0]),
-            Some(ApcAction::Crossfader(0.0))
+            Some(ApcAction::Crossfader { surface: ApcSurface::Music, value: 0.0 })
         );
         // An unmapped controller stays unmapped.
         assert_eq!(state.decode([0xb0, 0x22, 100]), None);
@@ -1025,7 +1028,7 @@ mod tests {
             assert_eq!(state.decode([0xb0, CC_MASTER, 127]), Some(ApcAction::Master(1.0)));
             assert_eq!(
                 state.decode([0xb0, CC_CROSSFADER, 0]),
-                Some(ApcAction::Crossfader(0.0)),
+                Some(ApcAction::Crossfader { surface, value: 0.0 }),
             );
             assert!(
                 matches!(state.decode([0x90, 7, 127]), Some(ApcAction::Pad { .. })),
@@ -1222,7 +1225,10 @@ mod tests {
             Some(ApcAction::Surface(ApcSurface::Music))
         );
         assert_eq!(state.surface, ApcSurface::Music);
-        assert_eq!(state.decode([0xb0, CC_CROSSFADER, 127]), Some(ApcAction::Crossfader(1.0)));
+        assert_eq!(
+            state.decode([0xb0, CC_CROSSFADER, 127]),
+            Some(ApcAction::Crossfader { surface: ApcSurface::Music, value: 1.0 })
+        );
         assert_eq!(state.decode([0xb0, CC_MASTER, 0]), Some(ApcAction::Master(0.0)));
     }
 
