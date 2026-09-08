@@ -84,8 +84,6 @@ script_mod! {
         destination := RadioButtonTab{
             width: Fill
             height: Fit
-            // The list is the tab stop, not each row.
-            nav_stop: false
         }
     }
 
@@ -107,7 +105,6 @@ script_mod! {
         destination := RadioButtonTab{
             width: Fit
             height: Fit
-            nav_stop: false
         }
     }
 }
@@ -257,6 +254,11 @@ impl NavList {
         let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, value));
         // A tree node under the list, so the design overlay can pick a row
         // and style the template it came from.
+        // The list owns the tab stop, so the ROWS are taken out of the tab
+        // order here rather than in the template. A caller supplying its own
+        // `destination` cannot be expected to remember a flag, and the one
+        // that did forget put a stop back on every row of a real app.
+        widget.as_radio_button().set_nav_stop(false);
         cx.widget_tree_insert_child(self.uid, id, widget.clone());
         self.rows.push((id, widget.clone()));
         Some(widget)

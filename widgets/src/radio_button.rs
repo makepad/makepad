@@ -379,8 +379,10 @@ impl RadioButton {
         self.draw_bg.end(cx);
         // A radio standing on its own is a tab stop. A row inside a group
         // is not: the group is the one stop, and five rows would otherwise
-        // be five stops to walk past.
-        if self.nav_stop {
+        // be five stops to walk past. Nor is a DISABLED one — it draws no
+        // focus ring, so a stop there is a press where the focus simply
+        // disappears with nothing on screen to say where it went.
+        if self.nav_stop && !self.disabled(cx.cx.cx) {
             cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         }
         DrawStep::done()
@@ -527,6 +529,16 @@ impl RadioButtonRef {
                     RadioButtonAction::Clicked,
                 );
             }
+        }
+    }
+
+    /// Take this radio out of the tab order, or put it back. A group that
+    /// offers one stop for the whole set calls this on every row it owns —
+    /// it is not left to the caller's template to remember, because a
+    /// template that forgets silently restores a stop per row.
+    pub fn set_nav_stop(&self, nav_stop: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.nav_stop = nav_stop;
         }
     }
 
