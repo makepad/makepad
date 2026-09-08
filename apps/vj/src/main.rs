@@ -124,6 +124,7 @@ mod music_view;
 mod advisor;
 mod arc;
 mod mix_facts;
+mod library_nav;
 mod pick;
 mod recent_searches;
 mod score_preview;
@@ -20141,6 +20142,93 @@ p2 {}
         }
     }
 
+    /// Put an explorer row on a deck. The body a click and a key share, so
+    /// the two cannot drift into meaning different things.
+    fn load_track_row(&mut self, cx: &mut Cx, index: usize, target: DeckTarget) {
+        let Some(item) = self.track_item_at(index) else { return };
+        self.deck_hands_on();
+        let cmds = self.decks.click(item, target);
+        self.run_deck_cmds(cx, cmds);
+        self.arm_autoplay();
+        self.music_rows_dirty = true;
+    }
+
+    /// Put an explorer row on the set list, at the end the gesture asked for.
+    fn queue_track_row(&mut self, cx: &mut Cx, index: usize, how: crate::library_nav::QueueHow) {
+        use crate::library_nav::QueueHow;
+        let Some(item) = self.track_item_at(index) else { return };
+        let cmds = match how {
+            QueueHow::Replace => self.decks.enqueue_replacing(item),
+            QueueHow::Next => self.decks.enqueue_next(item),
+            QueueHow::Tail => self.decks.enqueue(item),
+        };
+        self.run_deck_cmds(cx, cmds);
+        self.queue_rows_dirty = true;
+    }
+
+    /// The explorer listing's own area, which is what the library keys are
+    /// gated on holding focus.
+    fn library_area(&self, cx: &mut Cx) -> Area {
+        self.ui.widget(cx, ids!(music_tracks)).area()
+    }
+
+    /// A key press, if the library is the thing it was meant for.
+    ///
+    /// Three gates, all of them positive: the music page is up, the listing
+    /// has actually been laid out, and the listing holds key focus. Positive
+    /// focus rather than a list of text fields to exclude -- one area cannot
+    /// be broken by a field somebody adds next month, and "focus is nowhere"
+    /// is not usable here because a widget that reads no keys parks focus on
+    /// itself elsewhere in this app.
+    fn library_key(&mut self, cx: &mut Cx, key: &KeyEvent) -> bool {
+        if self.console_page != live_id!(music_page) {
+            return false;
+        }
+        let area = self.library_area(cx);
+        if !area.is_valid(cx) || !cx.has_key_focus(area) {
+            return false;
+        }
+        let Some(cmd) = crate::library_nav::command_for_key(key.key_code, key.modifiers) else {
+            return false;
+        };
+        self.run_library_cmd(cx, cmd);
+        true
+    }
+
+    fn run_library_cmd(&mut self, cx: &mut Cx, cmd: crate::library_nav::LibraryCmd) {
+        use crate::library_nav::{LibraryCmd, QueueHow};
+        let tracks = self.music_refs.tracks.clone();
+        if let LibraryCmd::Cursor { step, extend } = cmd {
+            if let Some(mut list) = tracks.borrow_mut::<VjTrackList>() {
+                list.move_cursor(cx, step, extend);
+            }
+            return;
+        }
+        if let LibraryCmd::FocusSearch = cmd {
+            // Never into a field nobody can see: the whole catalog row,
+            // search box included, is hidden while the local listing is up.
+            // Never into a field nobody can see: the whole catalog row,
+            // search box included, is hidden while the local listing is up.
+            if !self.music_local {
+                self.ui.text_input(cx, ids!(music_search)).take_key_focus(cx);
+            }
+            return;
+        }
+        let Some(row) = tracks.borrow::<VjTrackList>().and_then(|list| list.cursor()) else {
+            return;
+        };
+        match cmd {
+            // A named deck OVERRIDES the target chip, including when it
+            // reads OFF: OFF means "a click loads nothing, so a row can be
+            // dragged", and a key that says A said A.
+            LibraryCmd::LoadDeck(DeckId::A) => self.load_track_row(cx, row, DeckTarget::A),
+            LibraryCmd::LoadDeck(DeckId::B) => self.load_track_row(cx, row, DeckTarget::B),
+            LibraryCmd::LoadTarget => self.load_track_row(cx, row, self.deck_target),
+            LibraryCmd::PlayNext => self.queue_track_row(cx, row, QueueHow::Next),
+            LibraryCmd::Cursor { .. } | LibraryCmd::FocusSearch => {}
+        }
+    }
+
     /// Remember a query the operator ASKED FOR, and forget where any recall
     /// walk had got to.
     ///
@@ -29210,9 +29298,21 @@ p2 {}
                 .map(|wa| matches!(wa.cast(), views::VjBeatsDropAction::Picked(_)))
                 .unwrap_or(false)
         });
-        for hit in
-            track_list_hits(&self.ui, cx, ids!(music_tracks), actions, self.press_travel)
-        {
+        let explorer_hits =
+            track_list_hits(&self.ui, cx, ids!(music_tracks), actions, self.press_travel);
+        // Once the hand has touched the library, the library has the keys.
+        // It has to be re-taken HERE rather than left to the widgets: a row
+        // body and every row chip both grab focus by default during
+        // `handle_event`, and a row is recycled by the list, so focus parked
+        // on one dies the first time the listing scrolls. This runs on the
+        // later actions pass, so it is the last word.
+        if !explorer_hits.is_empty() {
+            let area = self.library_area(cx);
+            if area.is_valid(cx) {
+                cx.set_key_focus(area);
+            }
+        }
+        for hit in explorer_hits {
             let index = match hit {
                 TrackListHit::Pick(index, modifiers) => {
                     if picked_a_rung {
@@ -29238,21 +29338,7 @@ p2 {}
                     index
                 }
                 TrackListHit::Queue(index, modifiers) => {
-                    if let Some(item) = self.track_item_at(index) {
-                        // Shift: play this one next, ahead of whatever is
-                        // already waiting. Control: drop the rest of the
-                        // queue and start over with just this track. Plain:
-                        // the queue's ordinary tail add.
-                        let cmds = if modifiers.control {
-                            self.decks.enqueue_replacing(item)
-                        } else if modifiers.shift {
-                            self.decks.enqueue_next(item)
-                        } else {
-                            self.decks.enqueue(item)
-                        };
-                        self.run_deck_cmds(cx, cmds);
-                        self.queue_rows_dirty = true;
-                    }
+                    self.queue_track_row(cx, index, crate::library_nav::queue_how(modifiers));
                     continue;
                 }
                 // The explorer carries no remove chip — the set list is the
@@ -29283,13 +29369,7 @@ p2 {}
                     continue;
                 }
             };
-            if let Some(item) = self.track_item_at(index) {
-                self.deck_hands_on();
-                let cmds = self.decks.click(item, self.deck_target);
-                self.run_deck_cmds(cx, cmds);
-                self.arm_autoplay();
-                self.music_rows_dirty = true;
-            }
+            self.load_track_row(cx, index, self.deck_target);
         }
         // The queue's own carry: rows rearrange the set list rather than
         // going anywhere else. A carried row never reaches the Load arm —
@@ -29904,6 +29984,21 @@ impl MatchEvent for App {
                 self.pending_search = None;
                 self.note_search(surface, &text);
                 cmds.extend(self.model(surface).set_text(text.trim().to_string()));
+                // Hand the keys back to the listing, so '/' is a round trip
+                // rather than a one-way door: a text input drops focus to
+                // nowhere, and the library keys are gated on holding it.
+                if surface == Surface::Music {
+                    let area = self.library_area(cx);
+                    if area.is_valid(cx) {
+                        cx.set_key_focus(area);
+                    }
+                }
+            }
+            if self.ui.text_input(cx, search).escaped(actions) && surface == Surface::Music {
+                let area = self.library_area(cx);
+                if area.is_valid(cx) {
+                    cx.set_key_focus(area);
+                }
             }
             if let Some((text, _)) = self.ui.text_input(cx, category).returned(actions) {
                 self.pending_search = None;
@@ -32230,6 +32325,9 @@ impl AppMain for App {
                 cx.perf_monitor.set_enabled(on);
                 self.ui.redraw(cx);
             }
+            // Repeats are NOT filtered: holding an arrow should walk the
+            // listing, the way holding it walks any other list.
+            self.library_key(cx, ke);
         }
         // Caption-less main window: the visible dot-grid GRIPPER at the
         // bar's far left is the one drag handle. The old answer was "bar

@@ -1454,10 +1454,15 @@ script_mod! {
                     color_sel: #x2c3a4e
                     // The row that IS in the hand: the ghost's own accent.
                     color_carry: #xff5c39
+                    // Where the KEYS are standing. Cooler than the carry
+                    // accent and quieter than the pick's fill: it says
+                    // "an arrow moves from here", not "this is chosen".
+                    color_cursor: #x8fb4ff
                     live: instance(0.0)
                     odd: instance(0.0)
                     sel: instance(0.0)
                     carry: instance(0.0)
+                    cursor: instance(0.0)
                     border_radius: 3.0
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -1476,15 +1481,26 @@ script_mod! {
                             .mix(self.color_live, self.live)
                             .mix(self.color_sel, self.sel)
                             .mix(self.color_sel, self.carry))
-                        // The carried row wears the outline. The order
-                        // rearranges live under the pointer, so this one
-                        // mark answers both questions at once: what is in
-                        // the hand, and where letting go would leave it.
+                        // ONE outline, two things it can mean. The carried
+                        // row wears it because the order rearranges live
+                        // under the pointer, so the mark answers both what
+                        // is in the hand and where letting go would leave
+                        // it; otherwise it marks where the keys are
+                        // standing. The carry wins when both are true --
+                        // what is in the hand beats where the keys are.
                         sdf.stroke(
                             vec4(
-                                self.color_carry.x,
-                                self.color_carry.y,
-                                self.color_carry.z,
+                                self.color_cursor.x,
+                                self.color_cursor.y,
+                                self.color_cursor.z,
+                                self.cursor
+                            ).mix(
+                                vec4(
+                                    self.color_carry.x,
+                                    self.color_carry.y,
+                                    self.color_carry.z,
+                                    self.carry
+                                ),
                                 self.carry
                             ),
                             1.5
@@ -1505,6 +1521,13 @@ script_mod! {
                 draw_bg +: {
                     color: #x1d2a2a
                     border_radius: 3.0
+                    // This template carries none of the plain row's stripe
+                    // instances, so the cursor cannot be drawn the same way
+                    // -- and the previewing row is exactly the one an
+                    // operator walking the library is most likely standing
+                    // on. A plain border, transparent until the keys are
+                    // here, says it without a second shader.
+                    border_size: 1.5
                 }
                 row_body := TrackRowBody{}
                 View{
@@ -7902,6 +7925,13 @@ pub struct VjTrackList {
     /// Where a shift-range measures from — the last row picked outright.
     #[rust]
     anchor: Option<usize>,
+    /// Where the KEYS are standing. A pick says what the hand is about to
+    /// drag; the cursor says which row an arrow moves from and which row a
+    /// named load acts on. They travel together for a plain move — one idea
+    /// on screen, not two — and part only under shift, which walks the
+    /// cursor while dragging the pick out behind it.
+    #[rust]
+    cursor: Option<usize>,
     /// The row riding the pointer during a reorder, outlined so the hand
     /// can see what it holds.
     #[rust]
@@ -8134,6 +8164,9 @@ impl VjTrackList {
             // range nobody asked for.
             let anchored =
                 self.anchor.and_then(|row| self.entries.get(row).map(|entry| entry.key.clone()));
+            // And so is the cursor, for the same reason.
+            let stood_on =
+                self.cursor.and_then(|row| self.entries.get(row).map(|entry| entry.key.clone()));
             // And so is the viewport's own top row: see `carried_top_row`.
             let list = self.view.portal_list(cx, ids!(list));
             let top = list.first_id();
@@ -8149,6 +8182,8 @@ impl VjTrackList {
                 .map(|(row, _)| row)
                 .collect();
             self.anchor = anchored
+                .and_then(|key| self.entries.iter().position(|entry| entry.key == key));
+            self.cursor = stood_on
                 .and_then(|key| self.entries.iter().position(|entry| entry.key == key));
             if self.selected.is_empty() {
                 self.anchor = None;
@@ -8202,6 +8237,9 @@ impl VjTrackList {
         if row >= self.entries.len() {
             return;
         }
+        // The keys carry on from wherever the hand last was, so a click and
+        // then an arrow is one continuous gesture rather than two.
+        self.cursor = Some(row);
         if modifiers.shift {
             let from = self.anchor.unwrap_or(row);
             let (lo, hi) = if from <= row { (from, row) } else { (row, from) };
@@ -8237,6 +8275,48 @@ impl VjTrackList {
         }
         self.selected.clear();
         self.anchor = None;
+        self.cursor = None;
+        self.view.redraw(cx);
+    }
+
+    pub fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
+    /// Move where the keys are standing, and carry the view to it.
+    ///
+    /// A plain move IS the pick, so an arrow walk leaves exactly one idea on
+    /// screen rather than a cursor and a selection disagreeing about which
+    /// record the operator means. Under `extend` the cursor walks on its own
+    /// and drags the range out behind it from the anchor, which is the same
+    /// thing a shift-click does with the mouse.
+    pub fn move_cursor(&mut self, cx: &mut Cx, step: crate::library_nav::CursorMove, extend: bool) {
+        let list = self.view.portal_list(cx, ids!(list));
+        // Measured from the rows the list actually drew, because they are
+        // not a uniform height: the previewing row wears a taller template.
+        let drawn = list.borrow().map(|held| held.visible_items()).unwrap_or(0);
+        let page = crate::library_nav::page_rows(drawn);
+        let Some(row) =
+            crate::library_nav::step_cursor(self.cursor, self.entries.len(), page, step)
+        else {
+            return;
+        };
+        self.cursor = Some(row);
+        match extend {
+            true => {
+                let from = self.anchor.unwrap_or(row);
+                let (lo, hi) = if from <= row { (from, row) } else { (row, from) };
+                self.selected = (lo..=hi).collect();
+            }
+            false => {
+                self.selected = vec![row];
+                self.anchor = Some(row);
+            }
+        }
+        // No-ops when the row is already on screen, so a row-by-row walk in
+        // the middle of the listing never animates and only a step off the
+        // edge moves the view.
+        list.smooth_scroll_to(cx, row, TRACK_SCROLL_SPEED, None, 0.0);
         self.view.redraw(cx);
     }
     /// The header measured the width; the rows follow it.
@@ -8342,7 +8422,15 @@ impl Widget for VjTrackList {
                     if expanded == Some(row_id) {
                         // The unfolded player: face from the pushed line.
                         // The plain template's bg instances do not exist on
-                        // this one, so the stripe apply is skipped whole.
+                        // this one, so the stripe apply is skipped whole --
+                        // all except where the keys are standing, which this
+                        // row says with its border instead.
+                        let edge: u32 =
+                            if self.cursor == Some(row_id) { 0x8fb4ffff } else { 0x00000000 };
+                        let edge = Vec4f::from_u32(edge);
+                        script_apply_eval!(cx, item, {
+                            draw_bg +: { border_color: #(edge) }
+                        });
                         item.label(cx, ids!(hp_title)).set_text(cx, &self.preview_line.title);
                         item.label(cx, ids!(hp_time)).set_text(cx, &self.preview_line.time);
                         item.button(cx, ids!(hp_play))
@@ -8365,8 +8453,12 @@ impl Widget for VjTrackList {
                         let sel =
                             if self.selected.contains(&row_id) { 1.0f32 } else { 0.0 };
                         let carry = if self.carry == Some(row_id) { 1.0f32 } else { 0.0 };
+                        let cursor = if self.cursor == Some(row_id) { 1.0f32 } else { 0.0 };
                         script_apply_eval!(cx, item, {
-                            draw_bg +: { live: #(live) odd: #(odd) sel: #(sel) carry: #(carry) }
+                            draw_bg +: {
+                                live: #(live) odd: #(odd) sel: #(sel)
+                                carry: #(carry) cursor: #(cursor)
+                            }
                         });
                     }
                 }
@@ -8385,6 +8477,12 @@ impl Widget for VjTrackList {
 /// the operator can see — a row now riding the pointer — is exactly what
 /// decides whether letting go loads a deck.
 pub const TRACK_DRAG_SLOP: f64 = 5.0;
+
+/// How fast the listing travels when a key walks the cursor off the edge of
+/// it. Only an edge step scrolls at all -- a walk through rows that are
+/// already on screen does not move the view -- so this is the speed of
+/// following the cursor, not of browsing.
+pub const TRACK_SCROLL_SPEED: f64 = 90.0;
 
 /// Read row clicks out of a frame's actions, the same way the tile grids do.
 ///
