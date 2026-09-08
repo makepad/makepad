@@ -36,6 +36,7 @@ pub mod slider;
 pub mod textinput;
 pub mod radiobutton;
 pub mod view;
+pub mod breadcrumb;
 pub mod layout;
 pub mod marquee;
 pub mod grid;
@@ -73,6 +74,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     view::script_mod(vm);
+    breadcrumb::script_mod(vm);
     layout::script_mod(vm);
     marquee::script_mod(vm);
     grid::script_mod(vm);
@@ -132,6 +134,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         textinput::STORIES,
         radiobutton::STORIES,
         view::STORIES,
+        breadcrumb::STORIES,
         layout::STORIES,
         marquee::STORIES,
         grid::STORIES,
