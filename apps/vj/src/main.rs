@@ -4895,6 +4895,65 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fadeout_learn), "fadeout"),
 ];
 
+/// Whether a learned button's value begins a press.
+///
+/// A pad repeats its CC while it is held, so a press is the 0 to 1
+/// crossing and nothing else. The level the last message left is
+/// remembered per control — but a level is only a valid "previous" for the
+/// SOURCE that set it. Re-learn a button onto another pad while the old
+/// one is still held down and the remembered "down" belongs to a pad that
+/// is no longer bound to anything; read as this pad's own past, it
+/// swallows the new pad's first press, and nothing ever clears it because
+/// clearing a binding does not clear a level.
+///
+/// So the rule is: a press begins unless THIS source already had it down.
+fn learned_press_begins(prev: Option<((u8, u8), bool)>, source: (u8, u8), v: f32) -> bool {
+    v >= 0.5 && !matches!(prev, Some((was, true)) if was == source)
+}
+
+#[cfg(test)]
+mod learned_button_tests {
+    use super::learned_press_begins;
+
+    #[test]
+    fn a_held_pad_presses_once_and_a_release_rearms_it() {
+        let pad = (0u8, 20u8);
+        // Nothing remembered: the first message down is a press.
+        assert!(learned_press_begins(None, pad, 1.0));
+        // Held: the repeats are not presses.
+        assert!(!learned_press_begins(Some((pad, true)), pad, 1.0));
+        // Released, then pressed again.
+        assert!(!learned_press_begins(Some((pad, true)), pad, 0.0), "a release is not a press");
+        assert!(learned_press_begins(Some((pad, false)), pad, 1.0));
+    }
+
+    /// The defect this rule exists for: a level left by a pad that is no
+    /// longer bound must not hold back the pad that is.
+    #[test]
+    fn a_level_left_by_another_source_cannot_swallow_the_first_press() {
+        let old_pad = (0u8, 20u8);
+        let new_pad = (0u8, 21u8);
+        // The old pad is held when the control is re-learned onto the new
+        // one, so the remembered level says "down" and belongs to nobody.
+        assert!(
+            learned_press_begins(Some((old_pad, true)), new_pad, 1.0),
+            "the new pad's first press is a press",
+        );
+        // A different CHANNEL is a different source too.
+        assert!(learned_press_begins(Some(((1, 20), true)), old_pad, 1.0));
+    }
+
+    /// Halfway is down: a pad that reports anything but zero is pressed,
+    /// and the threshold has to be the same one the release uses or a
+    /// button can latch on a value that is neither.
+    #[test]
+    fn half_is_down() {
+        let pad = (0u8, 20u8);
+        assert!(learned_press_begins(None, pad, 0.5));
+        assert!(!learned_press_begins(None, pad, 0.49));
+    }
+}
+
 /// The lower region's page. Persisted as a number, so a settings file
 /// written before the archive page existed (0 / 1) reads unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -7429,10 +7488,17 @@ pub struct App {
     /// The lane chip the explorer is on (one at a time; ALL default).
     #[rust]
     grid_lane: GridLane,
-    /// Last on/off level per learned BUTTON control, so a held pad sends
-    /// one press (rising edge), not a press per CC repeat.
+    /// Last on/off level per learned BUTTON control, WITH the CC it came
+    /// from, so a held pad sends one press (rising edge) and not a press
+    /// per CC repeat.
+    ///
+    /// The source is half the key because a level is only a valid
+    /// "previous" for the control that set it. Re-learn a button onto
+    /// another pad while the old one is held and the remembered "down"
+    /// belongs to a pad that is no longer bound; without the source it
+    /// swallows the new pad's first press.
     #[rust]
-    midi_gates: HashMap<String, bool>,
+    midi_gates: HashMap<String, ((u8, u8), bool)>,
     /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
     #[rust]
     midi_learn: MidiLearn,
@@ -9344,6 +9410,13 @@ impl App {
     fn load_midi_map(&mut self) {
         if let Ok(body) = std::fs::read_to_string(Self::midi_map_path()) {
             self.midi_learn = MidiLearn::decode(&body);
+            // A map file outlives the build that wrote it. A line naming a
+            // control this build does not have would otherwise keep
+            // claiming its CC -- invisibly, since no wrapper exists to show
+            // or clear it. Dropped in memory; the file is left alone, so an
+            // older build cannot silently delete a newer one's work.
+            self.midi_learn
+                .retain_controls(|control| LEARNABLES.iter().any(|(_, name)| *name == control));
         }
     }
 
@@ -9370,14 +9443,14 @@ impl App {
     /// A learned CC's value lands on its control — the same state changes
     /// the pointer path makes, plus the widget mirror.
     /// Rising-edge detector for learned BUTTON controls (pads repeat CCs;
-    /// a press is the 0→1 crossing only).
-    fn midi_edge(&mut self, control: &str, v: f32) -> bool {
-        let down = v >= 0.5;
-        let prev = self.midi_gates.insert(control.to_string(), down).unwrap_or(false);
-        down && !prev
+    /// a press is the 0→1 crossing only). See [`learned_press_begins`] for
+    /// the rule; this only carries the remembered level.
+    fn midi_edge(&mut self, control: &str, source: (u8, u8), v: f32) -> bool {
+        let prev = self.midi_gates.insert(control.to_string(), (source, v >= 0.5));
+        learned_press_begins(prev, source, v)
     }
 
-    fn apply_learned(&mut self, cx: &mut Cx, control: &str, v: f32) {
+    fn apply_learned(&mut self, cx: &mut Cx, control: &str, source: (u8, u8), v: f32) {
         match control {
             "video_fade" => {
                 let secs = 0.05 + v * (5.0 - 0.05);
@@ -9398,7 +9471,7 @@ impl App {
             }
             "autofade" => {
                 // A pad press = one click of the AUTOFADE latch.
-                if self.midi_edge(control, v) {
+                if self.midi_edge(control, source, v) {
                     self.fx_slots.click_autofade = !self.fx_slots.click_autofade;
                     self.save_fx_slots();
                     self.sync_autofade_ui(cx);
@@ -9407,7 +9480,7 @@ impl App {
             "deck_a_play" | "deck_b_play" => {
                 let slot = if control == "deck_a_play" { SlotId::A } else { SlotId::B };
                 // Empty-slot law holds for hardware too.
-                if self.midi_edge(control, v)
+                if self.midi_edge(control, source, v)
                     && self.slot_media[slot.index()] != SlotMedia::Empty
                 {
                     let playing = self.slot_is_playing(cx, slot);
@@ -13853,8 +13926,8 @@ p2 {}
                     self.sync_midi_learn_ui(cx);
                     continue;
                 }
-                Some(LearnEvent::Value { control, value }) => {
-                    self.apply_learned(cx, &control, value);
+                Some(LearnEvent::Value { control, channel, cc, value }) => {
+                    self.apply_learned(cx, &control, (channel, cc), value);
                     continue;
                 }
                 None => {}
@@ -30348,6 +30421,11 @@ impl MatchEvent for App {
         for pad in 0..PAD_COUNT {
             self.release_apc_sfx_pad(pad);
         }
+        // A learned pad held through an unplug cannot deliver its release
+        // either, and a remembered "down" is the same kind of lie as a
+        // stuck hold: the next press after the surface comes back would be
+        // read as a repeat and swallowed.
+        self.midi_gates.clear();
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         let mut names = Vec::new();

@@ -85,8 +85,13 @@ script_mod! {
 pub enum LearnEvent {
     /// The armed control just bound to this CC.
     Bound { control: String, channel: u8, cc: u8 },
-    /// A bound control's new value, 0..1.
-    Value { control: String, value: f32 },
+    /// A bound control's new value, 0..1, and the CC it came from.
+    ///
+    /// The source travels with the value because a button's edge detector
+    /// has to know whether the level it remembers was set by the control
+    /// that is speaking now. Re-learn a pad onto a different button and the
+    /// old level is not a previous state, it is a different pad.
+    Value { control: String, channel: u8, cc: u8, value: f32 },
 }
 
 #[derive(Default)]
@@ -165,6 +170,24 @@ impl MidiLearn {
         }
     }
 
+    /// Drop every binding whose control is not one the app still has.
+    ///
+    /// The map is a file, and a file outlives the build that wrote it. A
+    /// control that has since been renamed or removed leaves a line naming
+    /// it, and that line is not merely dead: the reverse map still holds
+    /// its CC, so `midi` CLAIMS every message on that CC and the caller
+    /// consumes it -- a knob that silently does nothing, on a binding no
+    /// surface can show and therefore no gesture can clear.
+    ///
+    /// Dropped in memory only. The file is left exactly as it was, because
+    /// a build that does not know a control today may be an older build
+    /// than the one that wrote it, and quietly deleting the newer build's
+    /// work would be worse than ignoring it.
+    pub fn retain_controls(&mut self, known: impl Fn(&str) -> bool) {
+        self.bindings.retain(|control, _| known(control));
+        self.reverse.retain(|_, control| known(control));
+    }
+
     /// A raw MIDI message. CC messages bind the armed control or drive a
     /// bound one; everything else is not ours. The caller CONSUMES a
     /// message this returns Some for — a learned CC overrides whatever the
@@ -188,7 +211,7 @@ impl MidiLearn {
             return Some(LearnEvent::Bound { control, channel, cc });
         }
         let control = self.reverse.get(&(channel, cc))?.clone();
-        Some(LearnEvent::Value { control, value })
+        Some(LearnEvent::Value { control, channel, cc, value })
     }
 
     /// `midi-map.txt` body: one `control channel cc` line per binding.
@@ -394,7 +417,12 @@ mod tests {
         // From now on that CC drives the control.
         assert_eq!(
             m.midi(cc(2, 48, 127)),
-            Some(LearnEvent::Value { control: "video_fade".into(), value: 1.0 })
+            Some(LearnEvent::Value {
+                control: "video_fade".into(),
+                channel: 2,
+                cc: 48,
+                value: 1.0
+            })
         );
         // Other messages are not ours.
         assert_eq!(m.midi(cc(2, 49, 10)), None);
@@ -460,9 +488,61 @@ mod tests {
         let mut decoded = decoded;
         assert_eq!(
             decoded.midi(cc(0, 16, 127)),
-            Some(LearnEvent::Value { control: "fx_a_spd".into(), value: 1.0 })
+            Some(LearnEvent::Value {
+                control: "fx_a_spd".into(),
+                channel: 0,
+                cc: 16,
+                value: 1.0
+            })
         );
         assert!(MidiLearn::decode("junk\nx y z").binding("x").is_none());
         assert!(MidiLearn::decode("v1\nbad 99 300\n").binding("bad").is_none());
+    }
+    /// A value says which CC it came from, so a re-learn is visible to a
+    /// caller that caches anything per control.
+    #[test]
+    fn a_value_names_the_source_it_came_from() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("autofade", true);
+        m.midi(cc(0, 20, 0));
+        assert_eq!(
+            m.midi(cc(0, 20, 127)),
+            Some(LearnEvent::Value {
+                control: "autofade".into(),
+                channel: 0,
+                cc: 20,
+                value: 1.0
+            })
+        );
+        // Re-learn onto another pad: the same control, a different source.
+        m.control_clicked("autofade", true);
+        m.midi(cc(0, 21, 0));
+        assert_eq!(
+            m.midi(cc(0, 21, 127)),
+            Some(LearnEvent::Value {
+                control: "autofade".into(),
+                channel: 0,
+                cc: 21,
+                value: 1.0
+            })
+        );
+        assert_eq!(m.midi(cc(0, 20, 127)), None, "the old pad is nobody's now");
+    }
+
+    /// A line naming a control this build does not have is not merely dead:
+    /// its CC is still claimed, so the knob does nothing and there is no
+    /// surface on which to clear it.
+    #[test]
+    fn a_binding_for_a_control_that_is_gone_stops_eating_its_cc() {
+        let mut m = MidiLearn::decode("v1\nvideo_fade 0 20\nghost_control 0 21\n");
+        assert_eq!(m.binding("ghost_control"), Some((0, 21)));
+        assert!(
+            matches!(m.midi(cc(0, 21, 127)), Some(LearnEvent::Value { .. })),
+            "without the sweep the ghost claims the message"
+        );
+        m.retain_controls(|control| control == "video_fade");
+        assert_eq!(m.binding("ghost_control"), None);
+        assert_eq!(m.midi(cc(0, 21, 127)), None, "the CC is free for the surface");
+        assert_eq!(m.binding("video_fade"), Some((0, 20)), "the real one is untouched");
     }
 }
