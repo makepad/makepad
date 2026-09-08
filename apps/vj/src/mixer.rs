@@ -2547,6 +2547,12 @@ struct Shared {
     meters: [AtomicU32; 5],
     /// Pre-fader deck peaks, for the channel VU meters.
     deck_meters: [AtomicU32; 2],
+    /// The most the limiter has had to pull the master back, in decibels,
+    /// since this was last read. Kept the same way the peaks are and for
+    /// the same reason: the limiter resets its figure every block, so a
+    /// glance twenty times a second at a hundred blocks a second would see
+    /// four fifths of nothing.
+    limiter_reduction: AtomicU32,
     transition: TransitionAtomics,
     device_frames: AtomicU64,
     device_rate_bits: AtomicU64,
@@ -2669,6 +2675,7 @@ impl Mixer {
                 AtomicU32::new(0),
             ],
             deck_meters: [AtomicU32::new(0), AtomicU32::new(0)],
+            limiter_reduction: AtomicU32::new(0),
             transition: TransitionAtomics::new(),
             device_frames: AtomicU64::new(0),
             device_rate_bits: AtomicU64::new(0),
@@ -4076,6 +4083,20 @@ impl Mixer {
     /// Pre-fader peak levels for the two deck VU meters. `meters()` reports
     /// what reaches the master; these report what the channel is doing,
     /// which is what an operator sets gain against.
+    /// The most the limiter pulled the master back since this was last
+    /// called, in decibels. Zero means it never had to.
+    ///
+    /// This is what stands in for a clip light on a limited output. A clip
+    /// light on this master would never come on: the ceiling clamps every
+    /// sample below full scale, so the peak meter cannot reach it. What an
+    /// operator needs to know is that the mix is being held down, which is
+    /// this.
+    ///
+    /// Reading takes it, for the reason `meters` gives.
+    pub fn limiter_reduction_db(&self) -> f32 {
+        f32::from_bits(self.shared.limiter_reduction.swap(0, Ordering::Relaxed))
+    }
+
     /// Reading takes them, for the reason `meters` gives.
     pub fn deck_levels(&self) -> [f32; 2] {
         [
@@ -6211,6 +6232,14 @@ impl MixEngine {
         for (i, p) in deck_peaks.iter().enumerate() {
             shared.deck_meters[i].fetch_max(audible(*p).to_bits(), Ordering::Relaxed);
         }
+        // How hard the master was leaned on. The master CANNOT clip -- the
+        // ceiling is a guarantee -- so the honest warning is not "it
+        // clipped" but "it had to be held back", and this is the only place
+        // that says so.
+        shared.limiter_reduction.fetch_max(
+            audible(s.program_mix.master_snapshot().limiter_reduction_db.max(0.0)).to_bits(),
+            Ordering::Relaxed,
+        );
         if peaks[METER_MASTER] > f32::EPSILON
             && shared
                 .first_non_silent
@@ -6743,6 +6772,71 @@ mod tests {
             decibels(killed / open) < -40.0,
             "killing the high band left {:.1} dB of 10 kHz",
             decibels(killed / open)
+        );
+    }
+
+    /// The master cannot clip -- the ceiling clamps every sample below full
+    /// scale -- so a clip light on it would be a light that never comes on.
+    /// What the operator needs to know is that the mix is being HELD DOWN,
+    /// and this is the only number that says so.
+    #[test]
+    fn the_master_reports_how_hard_the_limiter_had_to_work() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.2);
+        mixer.set_crossfader(0.0);
+        let frames = vec![[i16::MAX, i16::MAX]; 48_000 / 5];
+        mixer.install_deck(
+            DeckId::A,
+            Arc::new(TrackPcm { frames, sample_rate: 48_000 }),
+        );
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        flush_bus(&mixer, 48_000.0);
+        let _ = mixer.limiter_reduction_db();
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+
+        let held = mixer.limiter_reduction_db();
+        assert!(held > 0.5, "full scale into a 1.2 master must be held back: {held}");
+        assert!(held.is_finite() && held < 60.0, "and by a believable amount: {held}");
+        // Reading takes it, so the next look is about the next stretch of
+        // time. A reading that never cleared would latch the warning on the
+        // first loud moment of the night and stay there.
+        mixer.set_deck_playing(DeckId::A, false);
+        // Long enough for the stop ramp AND the limiter's own release --
+        // the reading covers every buffer since the last read, so draining
+        // before the tail has gone would only measure the tail.
+        for _ in 0..200 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let _ = mixer.limiter_reduction_db();
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let quiet = mixer.limiter_reduction_db();
+        assert!(quiet < 0.01, "silence is not being held back: {quiet}");
+    }
+
+    /// And a mix that stays inside the ceiling is never reported as held
+    /// back, or the warning means nothing.
+    #[test]
+    fn an_ordinary_level_is_not_reported_as_held_back() {
+        let mixer = TestMixer::new();
+        mixer.set_master(0.5);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, tone_pcm(1_000.0, 48_000, 0.5));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        flush_bus(&mixer, 48_000.0);
+        let _ = mixer.limiter_reduction_db();
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let held = mixer.limiter_reduction_db();
+        assert!(
+            held < crate::console::OVERLOAD_DB,
+            "a mix inside the ceiling is not an overload: {held}"
         );
     }
 

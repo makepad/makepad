@@ -39,6 +39,16 @@ pub const STEM_COLORS: [[f32; 4]; 4] = [
 /// A killed lane's knob: the same hue, drained of it.
 pub const STEM_COLOR_KILLED: [f32; 4] = [0.35, 0.38, 0.42, 1.0];
 
+/// How far a phrase stub stays off each end of the strip: the chip rows
+/// are 11 points tall at rest and grow to 17 under the pointer, so this is
+/// the grown height and the stub is clear even while a chip is being read.
+pub const CHANGE_CLEAR: f64 = 18.0;
+
+/// The closest two turns may be drawn. A build-up can turn every few
+/// seconds, which on a whole-track strip is a hatch that hides the drop it
+/// is marking; past this they are one turn, which is what they look like.
+pub const CHANGE_MIN_PX: f64 = 5.0;
+
 /// Deepest pyramid level built: 2^15 finest columns is about five minutes
 /// in one texel, past which a level holds a single column.
 const MAX_WAVE_LEVELS: usize = 16;
@@ -97,6 +107,10 @@ fn set_loop_span_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, span: Option<(f64, 
 /// so, or the last value sticks to whatever is drawn next.
 fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
     lane.draw_vars.set_uniform(cx, live_id!(warn), &[warn.clamp(0.0, 1.0)]);
+}
+
+fn set_head_fraction_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, fraction: f32) {
+    lane.draw_vars.set_uniform(cx, live_id!(head_fraction), &[fraction]);
 }
 
 /// The drag preview band, same encoding and the same every-draw rule: the
@@ -169,6 +183,35 @@ fn found_marker_hit(found: &[(f64, f64)], secs: f64, tol: f64) -> Option<MarkerH
         .map(|(index, _)| MarkerHit::Found(index))
 }
 
+/// The time a hovered mark sits at, so the hover readout can show WHEN
+/// as well as WHERE. A shape edge is structure, not a placed mark, and
+/// reads nothing here.
+fn mark_time(
+    hit: MarkerHit,
+    loop_span: Option<(f64, f64)>,
+    loop_slots: &[(u16, f64, f64, u32)],
+    found_loops: &[(f64, f64)],
+    cue_secs: f64,
+) -> Option<f64> {
+    match hit {
+        MarkerHit::Save => loop_span.map(|(start, _)| start),
+        MarkerHit::Recall(slot) => {
+            loop_slots.iter().find(|entry| entry.0 == slot).map(|entry| entry.1)
+        }
+        MarkerHit::Found(index) => found_loops.get(index).map(|span| span.0),
+        MarkerHit::Cue => Some(cue_secs),
+        MarkerHit::Shape(_) => None,
+    }
+}
+
+/// Whether a seek release at `finger_y` has left the strip's own band by
+/// more than the abort margin — above or below it, not along it. The
+/// strip is thin and sits among other controls, so a hand lifting off to
+/// reach for something else should not also relocate the playhead.
+fn seek_release_aborted(finger_y: f64, strip_y: f64, strip_h: f64) -> bool {
+    finger_y < strip_y - SEEK_ABORT_PX || finger_y > strip_y + strip_h + SEEK_ABORT_PX
+}
+
 /// How far outside the loop band, in PIXELS, a grab still counts as
 /// grabbing it. A one-beat loop is under two pixels on a whole-track
 /// strip, so without some forgiveness the band would be uncatchable at
@@ -185,6 +228,11 @@ const MARKER_GRAB_PX: f64 = 6.0;
 /// How far a blue marker must be dragged from home before letting go
 /// DELETES it instead of recalling it.
 const MARKER_DELETE_PX: f64 = 50.0;
+/// A seek drag released this far off the strip -- above or below it,
+/// not along it -- does not commit. The strip is thin and sits among
+/// other controls; a hand that lifted off to reach for something else
+/// should not also relocate the playhead.
+const SEEK_ABORT_PX: f64 = 60.0;
 /// How far one notch of the wheel moves a mark it is hovering.
 ///
 /// Ten milliseconds is about a third of the shortest gap a hand can hear
@@ -274,15 +322,25 @@ pub fn stem_color_killed() -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
-/// Zoom limits, seconds of audio across the full lane width.
 /// How long before the end of a record the lane starts warning, in
 /// seconds. Half a minute: long enough to find the next track and get it
 /// on a deck without hurrying, short enough that it is not lit through
-/// most of an outro.
-pub const WAVE_WARN_SECS: f64 = 30.0;
+/// most of an outro. 0.0 is the operator's off switch (see `warn_at`).
+pub const WARN_SECS_MIN: f64 = 0.0;
+pub const WARN_SECS_MAX: f64 = 90.0;
+pub const WARN_SECS_DEFAULT: f64 = 30.0;
+
+/// Zoom limits, seconds of audio across the full lane width.
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
+
+/// Where the playhead sits across the lane's width. Kept well off both
+/// edges -- a head pinned at 0 or 1 would show only history or only
+/// lookahead, which is a scroll, not a deck.
+pub const HEAD_FRACTION_MIN: f64 = 0.15;
+pub const HEAD_FRACTION_MAX: f64 = 0.85;
+pub const HEAD_FRACTION_DEFAULT: f64 = 0.5;
 /// A pointer that has not moved for this long is holding the record still.
 const SCRATCH_IDLE_SECS: f64 = 0.045;
 
@@ -544,6 +602,9 @@ script_mod! {
         // Before separation a wave is grey peaks and nothing else: colour
         // in this view always means a real separated stem.
         color_grey: uniform(#x8b98a6)
+        // How much colour a band reading may carry. Mirrored in Rust as
+        // BAND_CHROMA, where the reasoning and the measurements live.
+        band_chroma: uniform(0.24)
         color_grid: uniform(#xffffff1e)
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
@@ -568,6 +629,11 @@ script_mod! {
         // the loop IS and where release will put it.
         preview_span: uniform(#x00000000)
         color_head: uniform(#xf4f7fa)
+        // Where the playhead sits across the lane's width, 0..1. A
+        // uniform, not an instance: this shader is already at D3D11's
+        // vs_5_0 32-input ceiling (see the stem palette below), and one
+        // more instance field is "no waveform at all on Windows" again.
+        head_fraction: uniform(0.5)
         // The stem palette, pushed from STEM_COLORS every draw so the
         // waveform and the knobs cannot disagree. Uniforms, not instances:
         // they are per-draw constants, and as instances they blew the
@@ -685,7 +751,7 @@ script_mod! {
 
         pixel: fn() {
             let px = self.pos.x * self.rect_size.x
-            let column = self.centre_col + (px - self.rect_size.x * 0.5) * self.cols_per_px
+            let column = self.centre_col + (px - self.rect_size.x * self.head_fraction) * self.cols_per_px
             let bg = self.color_bg
             // No track: a quiet centre rule where the waveform will be.
             if self.cols < 1.0 {
@@ -729,10 +795,42 @@ script_mod! {
             let e2 = mix(grey_h, s_bass + s_drums + s_vocals, separated)
             let e3 = mix(grey_h, s_bass + s_drums + s_vocals + s_other, separated)
 
-            let c0 = self.color_grey.mix(self.color_bass, separated)
-            let c1 = self.color_grey.mix(self.color_drums, separated)
-            let c2 = self.color_grey.mix(self.color_vocals, separated)
-            let c3 = self.color_grey.mix(self.color_other, separated)
+            // A column the separator has NOT reached is coloured by its
+            // three bands, which have been in this texture all along and
+            // ignored: red is low, green is mid, blue is high. The balance
+            // of the three picks a hue; the hue is all it says.
+            //
+            // Held at the grey's own brightness, because brightness in this
+            // lane already means played-or-coming and active-or-parked, and
+            // capped well short of the stem palette's colourfulness, because
+            // the one thing this must never do is let an unseparated record
+            // pass for a separated one. The other half of that is structural
+            // and stronger: a separated column is a STACK of up to four
+            // colours with edges, and this is one flat tone from the centre
+            // to the tip.
+            let top = max(t.x, max(t.y, t.z))
+            let unit = vec3(t.x, t.y, t.z) / max(top, 0.0001)
+            let mid = unit.x * 0.299 + unit.y * 0.587 + unit.z * 0.114
+            let off = unit - vec3(mid, mid, mid)
+            let spread = max(off.x, max(off.y, off.z)) - min(off.x, min(off.y, off.z))
+            let grey_y = self.color_grey.x * 0.299
+                + self.color_grey.y * 0.587
+                + self.color_grey.z * 0.114
+            let toned = vec3(grey_y, grey_y, grey_y)
+                + off * min(1.0, self.band_chroma / max(spread, 0.0001))
+            // Nothing measured, nothing to say: the old grey stands.
+            let measured = step(0.004, top) * step(0.000001, spread)
+            let plain = vec4(
+                mix(self.color_grey.x, toned.x, measured),
+                mix(self.color_grey.y, toned.y, measured),
+                mix(self.color_grey.z, toned.z, measured),
+                1.0
+            )
+
+            let c0 = plain.mix(self.color_bass, separated)
+            let c1 = plain.mix(self.color_drums, separated)
+            let c2 = plain.mix(self.color_vocals, separated)
+            let c3 = plain.mix(self.color_other, separated)
 
             // Half-pixel feathering: the envelope edge stays smooth while
             // the whole thing scrolls, instead of crawling pixel to pixel.
@@ -798,6 +896,7 @@ script_mod! {
             color: #x8e9aa7
             text_style: theme.font_bold{font_size: 8}
         }
+        draw_body_edge +: { color: #xb4c0cd }
         draw_mark_top +: {
             color: #xe5484d
             pixel: fn() {
@@ -958,6 +1057,15 @@ script_mod! {
         // it is a fact about the recording rather than a mark anybody put
         // there, and every chip draws over it.
         draw_edge_sound +: { color: #x6b7683 }
+        // Where the BODY starts and ends, which is what the automation
+        // aims at -- brighter than the two that only say where the
+        // recording makes a noise.
+        draw_edge_body +: { color: #xb4c0cd }
+        // Where the arrangement turns. A stub rather than a rule, because
+        // the difference that has to survive a glance at a loud passage is
+        // a difference in SHAPE: three greys separated only by lightness
+        // all read as "a dark hairline" over a bright waveform.
+        draw_change +: { color: #x8e9aa8 }
         draw_marker_found +: {
             color: uniform(#xf5c542)
             pixel: fn() {
@@ -975,6 +1083,11 @@ script_mod! {
                 sdf.stroke(#x00000066, 1.0)
                 return sdf.result
             }
+        }
+        // The seek target while dragging, and a hovered mark's time.
+        draw_text +: {
+            color: #xf4f7fa
+            text_style: theme.font_bold{font_size: 9}
         }
     }
 
@@ -1051,6 +1164,7 @@ script_mod! {
         row_col9 := TrackText{width: 0}
         row_col10 := TrackText{width: 0}
         row_col11 := TrackText{width: 0}
+        row_col12 := TrackText{width: 0}
         }
         row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
         row_time := TrackText{width: 52 draw_text.color: #x9fabb7}
@@ -2546,66 +2660,60 @@ script_mod! {
                             }
                         }
                     }
-                    // The deck's own transport, at the foot of its column. Two
-                    // explicit wrapping rows keep every primary control large
-                    // without letting either line escape the fixed deck panel.
+                    // The deck's own transport, at the foot of its column. One
+                    // row, sized to hold every primary control without
+                    // escaping the fixed deck panel -- see MusicTransportButton
+                    // and MusicTransportIconButton's own overrides below for
+                    // the sizing this row specifically needs.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Down
-                        spacing: 5
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 0.0, y: 0.5}
-                            deck_a_play := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
-                            }
-                            deck_a_cue := MusicTransportButton{width: 52 text: "CUE"}
-                            // One beat either way -- the nudge a hand makes
-                            // when the drop lands a hair off -- and held, they
-                            // BEND the record rather than stepping it. A beat
-                            // is a measured one where the analysis found beats
-                            // and a second where it did not, so they always
-                            // step something.
-                            //
-                            // They point at the TRACK, not at the playhead: <
-                            // sends the track a beat FORWARD past the head, >
-                            // a beat back, which is the same convention as a
-                            // hand on the platter. NOT mirrored on deck B: the
-                            // sense is the same whichever deck it is.
-                            deck_a_beat_fwd := MusicTransportButton{width: 36 text: "<"}
-                            deck_a_beat_back := MusicTransportButton{width: 36 text: ">"}
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        spacing: 3
+                        wrap_spacing: 3
+                        align: Align{x: 0.0, y: 0.5}
+                        deck_a_play := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 0.0, y: 0.5}
-                            deck_a_loop := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                            }
-                            deck_a_loop_halve := MusicTransportButton{width: 36 text: "<"}
-                            deck_a_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
-                                draw_bg +: {arrow: 0.0}
-                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
-                            }
-                            deck_a_loop_double := MusicTransportButton{width: 36 text: ">"}
-                            // The loop pair, in glyphs that read as the marks
-                            // they set: `[` in, `]` out. The loop icon left of the
-                            // stepper is RELOOP/EXIT; the sparkle past them opens the
-                            // scanner, which is also where marks go to be forgotten.
-                            deck_a_loop_in := MusicTransportButton{width: 36 text: "["}
-                            deck_a_loop_out := MusicTransportButton{width: 36 text: "]"}
-                            deck_a_loop_scan := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
-                            }
+                        deck_a_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        // One beat either way -- the nudge a hand makes
+                        // when the drop lands a hair off -- and held, they
+                        // BEND the record rather than stepping it. A beat
+                        // is a measured one where the analysis found beats
+                        // and a second where it did not, so they always
+                        // step something.
+                        //
+                        // They point at the TRACK, not at the playhead: <
+                        // sends the track a beat FORWARD past the head, >
+                        // a beat back, which is the same convention as a
+                        // hand on the platter. NOT mirrored on deck B: the
+                        // sense is the same whichever deck it is.
+                        deck_a_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        deck_a_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        deck_a_loop := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                        }
+                        deck_a_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        deck_a_loop_len := VjBeatsDrop{
+                            width: 30 height: 34 loop_rows: true
+                            draw_bg +: {arrow: 0.0}
+                            draw_text +: {text_style: theme.font_bold{font_size: 10}}
+                        }
+                        deck_a_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        // The loop pair, in glyphs that read as the marks
+                        // they set: `[` in, `]` out. The loop icon left of the
+                        // stepper is RELOOP/EXIT; the sparkle past them opens the
+                        // scanner, which is also where marks go to be forgotten.
+                        deck_a_loop_in := MusicTransportButton{width: 22 text: "["}
+                        deck_a_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        deck_a_loop_scan := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
                         }
                     }
                 }
@@ -3114,52 +3222,44 @@ script_mod! {
                             }
                         }
                     }
-                    // Deck B mirrors both transport rows across the waveforms.
+                    // Deck B mirrors the transport row across the waveforms.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Down
-                        spacing: 5
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 1.0, y: 0.5}
-                            // NOT mirrored, exactly as the loop marks are not:
-                            // the chevrons read the same on both decks.
-                            deck_b_beat_fwd := MusicTransportButton{width: 36 text: "<"}
-                            deck_b_beat_back := MusicTransportButton{width: 36 text: ">"}
-                            deck_b_cue := MusicTransportButton{width: 52 text: "CUE"}
-                            deck_b_play := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
-                            }
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        spacing: 3
+                        wrap_spacing: 3
+                        align: Align{x: 1.0, y: 0.5}
+                        // NOT mirrored, exactly as the loop marks are not:
+                        // the chevrons read the same on both decks.
+                        deck_b_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        deck_b_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        deck_b_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        deck_b_play := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 1.0, y: 0.5}
-                            // The sparkle stays outermost. IN then OUT keeps the
-                            // gesture's temporal order on either deck.
-                            deck_b_loop_scan := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
-                            }
-                            deck_b_loop_in := MusicTransportButton{width: 36 text: "["}
-                            deck_b_loop_out := MusicTransportButton{width: 36 text: "]"}
-                            deck_b_loop_halve := MusicTransportButton{width: 36 text: "<"}
-                            deck_b_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
-                                draw_bg +: {arrow: 0.0}
-                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
-                            }
-                            deck_b_loop_double := MusicTransportButton{width: 36 text: ">"}
-                            deck_b_loop := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                            }
+                        // The sparkle stays outermost. IN then OUT keeps the
+                        // gesture's temporal order on either deck.
+                        deck_b_loop_scan := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        }
+                        deck_b_loop_in := MusicTransportButton{width: 22 text: "["}
+                        deck_b_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        deck_b_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        deck_b_loop_len := VjBeatsDrop{
+                            width: 30 height: 34 loop_rows: true
+                            draw_bg +: {arrow: 0.0}
+                            draw_text +: {text_style: theme.font_bold{font_size: 10}}
+                        }
+                        deck_b_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        deck_b_loop := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
                     }
                 }
@@ -3514,6 +3614,7 @@ script_mod! {
                                 th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
                                 th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
                                 th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
+                                th_cell12 := View{width: 0 height: Fit th_head12 := MusicColHead{width: Fill text: ""}}
                                 }
                                 // Stands in for the row's headphone + queue
                                 // chips, so a head sits over its own column
@@ -3912,6 +4013,18 @@ script_mod! {
                         auto_bad := MusicButton{width: 30 height: 22 text: "-"}
                         auto_go := MusicButton{width: 42 height: 22 text: "GO"}
                         auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
+                    }
+                    // Three verbs that act on the queue and the pending
+                    // transition directly, rather than configuring how
+                    // future ones get planned.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        auto_fade_now := MusicButton{width: 100 height: 22 text: "FADE NOW"}
+                        auto_skip := MusicButton{width: 78 height: 22 text: "SKIP"}
+                        auto_add_random := MusicButton{width: 100 height: 22 text: "+ RANDOM"}
                     }
                     View{
                         width: Fill
@@ -4422,6 +4535,17 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show12 := CheckBox{width: 26 text: ""}
+                        prep_col_label12 := MusicLabel{width: Fill text: ""}
+                        prep_col_up12 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down12 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
                         align: Align{x: 1.0, y: 0.5}
                         prep_cols_reset := MusicButton{width: 80 height: 22 text: "Reset"}
                         prep_cols_close := MusicButton{width: 60 height: 22 text: "Close"}
@@ -4727,7 +4851,7 @@ pub struct DrawWaveLane {
     pub hi_scale: f32,
     #[live]
     pub lod_blend: f32,
-    /// The tile column under the centre playhead.
+    /// The tile column under the playhead.
     #[live]
     pub centre_col: f32,
     /// Zoom: tile columns per screen pixel.
@@ -4830,13 +4954,61 @@ impl WavePyramid {
     }
 }
 
+/// How a pair of columns becomes one, a level up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reduce {
+    /// Every channel takes the larger of the two.
+    PerChannel,
+    /// The alpha still takes the larger — heights must not change — but the
+    /// other three come from whichever column was LOUDER.
+    ///
+    /// For channels that describe what a column SOUNDED LIKE, a per-channel
+    /// maximum is a lie: it takes the bass from one instant and the treble
+    /// from another and reports a moment that never happened. Pulled back far
+    /// enough every band reaches its own ceiling somewhere in the span, so
+    /// they all converge and the description dissolves into grey. Measured
+    /// over the analysed library, half the columns lose their colouring by
+    /// four reductions and two thirds by eight — which is the whole-track
+    /// strip, the view most often glanced at.
+    BandsOfTheLouder,
+}
+
+/// One level up: pairs of columns become one, by the given rule.
+pub fn reduce_once(below: &[[u8; 4]], reduce: Reduce) -> Vec<[u8; 4]> {
+    let mut level = Vec::with_capacity(below.len().div_ceil(2));
+    for pair in below.chunks(2) {
+        let mut column = pair[0];
+        if let Some(second) = pair.get(1) {
+            match reduce {
+                Reduce::PerChannel => {
+                    for channel in 0..4 {
+                        column[channel] = column[channel].max(second[channel]);
+                    }
+                }
+                Reduce::BandsOfTheLouder => {
+                    if second[3] > column[3] {
+                        column = *second;
+                    }
+                    column[3] = pair[0][3].max(second[3]);
+                }
+            }
+        }
+        level.push(column);
+    }
+    level
+}
+
 /// Build a pyramid from four-channel columns.
 ///
-/// Level 0 is the source resolution; each level above is a MAX reduction of
-/// the pair below it — peaks survive all the way up, which is what makes a
-/// pulled-back view read as music instead of mush, and what stops a
-/// zoomed-out waveform aliasing.
-pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
+/// Level 0 is the source resolution; each level above reduces the pair below
+/// it — the alpha always by MAX, so peaks survive all the way up, which is
+/// what makes a pulled-back view read as music instead of mush and what stops
+/// a zoomed-out waveform aliasing.
+pub fn build_pyramid_with(
+    cx: &mut Cx,
+    columns: &[[u8; 4]],
+    reduce: Reduce,
+) -> Option<WavePyramid> {
     if columns.is_empty() {
         return None;
     }
@@ -4846,17 +5018,7 @@ pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
         && pyramid.len() < MAX_WAVE_LEVELS
     {
         let below = pyramid.last().expect("checked");
-        let mut level = Vec::with_capacity(below.len().div_ceil(2));
-        for pair in below.chunks(2) {
-            let mut column = pair[0];
-            if let Some(second) = pair.get(1) {
-                for channel in 0..4 {
-                    column[channel] = column[channel].max(second[channel]);
-                }
-            }
-            level.push(column);
-        }
-        pyramid.push(level);
+        pyramid.push(reduce_once(below, reduce));
     }
 
     let mut levels = Vec::with_capacity(pyramid.len());
@@ -4893,14 +5055,17 @@ pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
 /// alpha = the column's level against the whole track, which is the only
 /// channel that decides how tall a column draws.
 pub fn zoom_texture(cx: &mut Cx, tiles: &WaveTiles) -> Option<WavePyramid> {
-    build_pyramid(cx, &tiles.zoom)
+    build_pyramid_with(cx, &tiles.zoom, Reduce::BandsOfTheLouder)
 }
 
 /// The stem-share pyramid, laid out identically to the band one so the
 /// shader can sample both with the same level selection: red = vocals,
 /// green = drums, blue = bass, alpha = other.
 pub fn stem_texture(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
-    build_pyramid(cx, columns)
+    // Per channel here, because these four are shares of one column rather
+    // than a description plus a level: there is no "louder of the two" to
+    // take the rest from.
+    build_pyramid_with(cx, columns, Reduce::PerChannel)
 }
 
 /// What one separated column is MADE of, from the four stems' RMS.
@@ -4937,6 +5102,62 @@ pub fn stem_column_shares(rms: [f64; 4]) -> [u8; 4] {
 /// the proof.
 pub fn column_height(tile: [u8; 4]) -> f32 {
     (tile[3] as f32 / 255.0).clamp(0.0, 1.0) * WAVE_ENVELOPE
+}
+
+/// The unseparated wave's grey, as the shader declares it.
+pub const WAVE_GREY: [f32; 3] = [0.545, 0.596, 0.651];
+
+/// The most colour a band reading is allowed to carry.
+///
+/// This is the number that keeps a band-coloured column from being mistaken
+/// for a separated one, and it is a CAP rather than a hope: whatever the
+/// three bands do, the drawn colour cannot pass it. Measured over the
+/// analysed library it holds every column at or under 0.39 saturation, while
+/// the least colourful of the four stem colours is 0.62 and the other three
+/// are above 0.82. The closest any real column ever comes to a stem it could
+/// be confused with is 0.27 of saturation away.
+pub const BAND_CHROMA: f32 = 0.24;
+
+/// What one unseparated column is COLOURED like, from its three bands.
+///
+/// The bands are already on the GPU — the level channel beside them is what
+/// decides height — and until now the colour ignored them, so a record the
+/// separator had not reached drew as one flat grey and said nothing about
+/// where its bass was.
+///
+/// Three properties, in the order they matter:
+///
+/// * **Brightness never moves.** Every colour this returns has the grey's
+///   own luma. Brightness in this lane already says two other things — what
+///   has been played, and whether the deck is the active one — and a third
+///   meaning would collide with both.
+/// * **Colourfulness is capped**, at [`BAND_CHROMA`], so the reading can
+///   never climb into the range the stem colours live in.
+/// * **Hue carries the whole message**: which band is loudest, on the
+///   texture's own red-green-blue = low-mid-high axis. A column with its
+///   three bands level has nothing to say and draws neutral.
+pub fn band_tint(tile: [u8; 4]) -> [f32; 3] {
+    let luma = |c: [f32; 3]| c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
+    let grey_y = luma(WAVE_GREY);
+    let band = [tile[0] as f32 / 255.0, tile[1] as f32 / 255.0, tile[2] as f32 / 255.0];
+    let top = band[0].max(band[1]).max(band[2]);
+    // Nothing measured here at all: keep the grey rather than invent a hue
+    // for a column that has no content to describe.
+    if top < 0.004 {
+        return WAVE_GREY;
+    }
+    // Against the column's own loudest band, so the hue is the BALANCE of
+    // the three and not their loudness — loudness is the level channel's
+    // job, and this must not say it twice.
+    let unit = [band[0] / top, band[1] / top, band[2] / top];
+    let mid = luma(unit);
+    let off = [unit[0] - mid, unit[1] - mid, unit[2] - mid];
+    let spread = off[0].max(off[1]).max(off[2]) - off[0].min(off[1]).min(off[2]);
+    if spread < 1e-6 {
+        return [grey_y, grey_y, grey_y];
+    }
+    let scale = (BAND_CHROMA / spread).min(1.0);
+    [grey_y + off[0] * scale, grey_y + off[1] * scale, grey_y + off[2] * scale]
 }
 
 /// The same column drawn as separated stems: the cumulative edges of the
@@ -4978,6 +5199,14 @@ pub struct WaveLane {
     pub loop_span: Option<(f64, f64)>,
     /// One-based loop slot shown at the overlay's top-left.
     pub loop_slot: Option<u8>,
+    /// Where the body of the record begins and ends, in source seconds --
+    /// the two edges the automation aims at. `None` when the analysis did
+    /// not actually find them: the fallback it hands back in that case is a
+    /// fraction of the duration, and a rule drawn across the lane saying
+    /// "the intro ends here" would be a measurement that never happened.
+    /// The strip still draws the guess, where it sits among the whole
+    /// record and reads as one.
+    pub body: Option<(f64, f64)>,
     /// The operator's own marks, in source seconds — the tile timebase,
     /// like `loop_span`. The cue, the saved slots with the colour each
     /// is wearing, and the loops the finder offered. Named apart from
@@ -5033,24 +5262,26 @@ impl WaveLane {
 
     /// How hard the end-of-track warning should show, 0..1.
     ///
-    /// A ramp over the last [`WAVE_WARN_SECS`], times a one-per-second
-    /// pulse that never quite reaches nothing -- a warning that blinked
-    /// fully out would be invisible exactly half the time, and the point
-    /// is to be caught out of the corner of an eye while looking at the
-    /// other deck.
+    /// A ramp over the last `warn_secs`, times a one-per-second pulse
+    /// that never quite reaches nothing -- a warning that blinked fully
+    /// out would be invisible exactly half the time, and the point is to
+    /// be caught out of the corner of an eye while looking at the other
+    /// deck. `warn_secs <= 0.0` is the operator's off switch: the ramp's
+    /// own window is then empty and never contains anything, so this
+    /// needs no separate enabled flag.
     ///
     /// Computed HERE, at draw time, from the same `now` the playhead
     /// uses. Worked out by the host at pump cadence instead, the pulse
     /// would judder against a scroll that is smooth.
-    pub fn warn_at(&self, now: f64) -> f32 {
+    pub fn warn_at(&self, now: f64, warn_secs: f64) -> f32 {
         if !self.playing || self.duration_secs <= 0.0 {
             return 0.0;
         }
         let left = self.duration_secs - self.position_at(now);
-        if !(0.0..WAVE_WARN_SECS).contains(&left) {
+        if !(0.0..warn_secs).contains(&left) {
             return 0.0;
         }
-        let ramp = (WAVE_WARN_SECS - left) / WAVE_WARN_SECS;
+        let ramp = (warn_secs - left) / warn_secs;
         let phase = now.rem_euclid(1.0);
         let pulse = 0.45 + 0.55 * (1.0 - (phase * 2.0 - 1.0).abs());
         (ramp * pulse).clamp(0.0, 1.0) as f32
@@ -5064,6 +5295,33 @@ impl WaveLane {
     /// The tile column under the playhead at `now`.
     pub fn head_column_at(&self, now: f64) -> f64 {
         self.position_at(now) * ZOOM_COLS_PER_SEC
+    }
+
+    /// The nearest mark strictly ahead of `at_secs` -- the cue, every
+    /// saved loop's start, every found loop's start -- or `None` when
+    /// nothing left in the record is marked. Source seconds, the same
+    /// space `position_secs` lives in.
+    pub fn next_mark_secs(&self, at_secs: f64) -> Option<f64> {
+        std::iter::once(self.cue_secs)
+            .chain(self.saved_slots.iter().map(|entry| entry.1))
+            .chain(self.found_loops.iter().map(|span| span.0))
+            .filter(|&secs| secs > at_secs)
+            .fold(None, |best: Option<f64>, secs| Some(best.map_or(secs, |b| b.min(secs))))
+    }
+
+    /// What to show next to the playhead for the nearest mark ahead of
+    /// it: beats when the grid can count them (what a DJ actually plans
+    /// around -- "two bars to the cue"), seconds when it cannot.
+    pub fn next_mark_label(&self, now: f64) -> Option<String> {
+        let at = self.position_at(now);
+        let next = self.next_mark_secs(at)?;
+        match self.grid.filter(|grid| grid.has_grid()) {
+            Some(grid) => {
+                let beats = (grid.beat_at(next) - grid.beat_at(at)).max(0.0);
+                Some(format!("{beats:.0} beats"))
+            }
+            None => Some(crate::clock::countdown(next - at)),
+        }
     }
 
     /// The zoom for ONE lane, from the shared one.
@@ -5124,6 +5382,38 @@ impl WaveLane {
     }
 }
 
+/// The eight directions a text outline is stamped in. Same geometry the
+/// karaoke reader's line outline uses (`views.rs`), kept as its own copy
+/// here rather than shared: the two are unrelated widgets that happen to
+/// need the same ring, not one feature split across two files.
+const WAVE_TEXT_OUTLINE_RING: [(f64, f64); 8] = [
+    (-1.0, 0.0),
+    (1.0, 0.0),
+    (0.0, -1.0),
+    (0.0, 1.0),
+    (-0.7, -0.7),
+    (0.7, -0.7),
+    (-0.7, 0.7),
+    (0.7, 0.7),
+];
+
+/// A bar number, loop-slot number or seek readout drawn directly on the
+/// wave has to survive whatever colour the waveform happens to be under
+/// it -- a bright peak reads as no number at all for a flat-coloured
+/// glyph. A dark ring stamped under the fill, no depth step needed: this
+/// is plain 2D overlay drawing, so draw ORDER already puts the ring
+/// under the fill, unlike the karaoke line's own outline which shares a
+/// depth-tested pass with video and needs one.
+fn draw_outlined_text(draw_text: &mut DrawText, cx: &mut Cx2d, pos: DVec2, text: &str, fill: Vec4f) {
+    let ring = (draw_text.text_style.font_size as f64 * 0.09).max(1.0);
+    draw_text.color = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.85 };
+    for (dx, dy) in WAVE_TEXT_OUTLINE_RING {
+        draw_text.draw_abs(cx, dvec2(pos.x + dx * ring, pos.y + dy * ring), text);
+    }
+    draw_text.color = fill;
+    draw_text.draw_abs(cx, pos, text);
+}
+
 /// What the surface reports back to the host.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaveEvent {
@@ -5165,6 +5455,11 @@ pub struct VjWaveScroll {
     /// top edge and a chip standing on the bottom one. The colour is a
     /// per-instance field, so one drawer serves the cue and every saved
     /// slot's own hue without a uniform lingering between draws.
+    /// The body edges. A rule the full height of the lane rather than a
+    /// chip, because nobody placed it and nothing can be done to it: it is
+    /// a fact about the record, like the ruling it crosses.
+    #[live]
+    draw_body_edge: DrawColor,
     #[live]
     draw_mark_top: DrawColor,
     #[live]
@@ -5177,6 +5472,10 @@ pub struct VjWaveScroll {
     lanes: [WaveLane; 2],
     #[rust(ZOOM_DEFAULT_SECS)]
     zoom_secs: f64,
+    #[rust(HEAD_FRACTION_DEFAULT)]
+    head_fraction: f64,
+    #[rust(WARN_SECS_DEFAULT)]
+    warn_secs: f64,
     #[rust]
     lane_rects: [Rect; 2],
     /// The viewport centre captured when a loop becomes active. The wave
@@ -5405,6 +5704,15 @@ impl VjWaveScroll {
     /// knob comes down and vanishes when it is killed.
     /// The marks for one deck. Named as the strip's are, so the two
     /// surfaces read the same at the call site.
+    pub fn set_body(&mut self, cx: &mut Cx, deck: DeckId, body: Option<(f64, f64)>) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.body == body {
+            return;
+        }
+        lane.body = body;
+        self.area.redraw(cx);
+    }
+
     pub fn set_cue_marker(&mut self, cx: &mut Cx, deck: DeckId, secs: f64) {
         let lane = &mut self.lanes[deck.index()];
         if (lane.cue_secs - secs).abs() < 1e-9 {
@@ -5449,6 +5757,28 @@ impl VjWaveScroll {
         let secs = secs.clamp(ZOOM_MIN_SECS, ZOOM_MAX_SECS);
         if (secs - self.zoom_secs).abs() > 1e-9 {
             self.zoom_secs = secs;
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Set once from the settings file at startup, not a live gesture: an
+    /// operator's preferred balance of history against lookahead is a
+    /// thing decided once, not dragged mid-set the way zoom is.
+    pub fn set_head_fraction(&mut self, cx: &mut Cx, fraction: f64) {
+        let fraction = fraction.clamp(HEAD_FRACTION_MIN, HEAD_FRACTION_MAX);
+        if (fraction - self.head_fraction).abs() > 1e-9 {
+            self.head_fraction = fraction;
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Set once from the settings file at startup, same as the head
+    /// position: how long before the end of a record the lane starts
+    /// warning, or 0.0 to turn the warning off entirely.
+    pub fn set_warn_secs(&mut self, cx: &mut Cx, secs: f64) {
+        let secs = secs.clamp(WARN_SECS_MIN, WARN_SECS_MAX);
+        if (secs - self.warn_secs).abs() > 1e-9 {
+            self.warn_secs = secs;
             self.area.redraw(cx);
         }
     }
@@ -5729,6 +6059,7 @@ impl Widget for VjWaveScroll {
             };
             self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = lane_cols;
+            set_head_fraction_uniform(&mut self.draw_lane, cx, self.head_fraction as f32);
             self.draw_lane.head_col = head as f32;
             self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
             set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
@@ -5738,7 +6069,7 @@ impl Widget for VjWaveScroll {
             self.draw_lane.beat_cols = beat_cols as f32;
             self.draw_lane.beat_phase = phase as f32;
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
-            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now));
+            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now, self.warn_secs));
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
@@ -5769,7 +6100,7 @@ impl Widget for VjWaveScroll {
                 .unwrap_or_else(|| self.lanes[index].head_column_at(now));
             let lane_rect = self.lane_rects[index];
             let (chip_w, chip_h) = (9.0f64, 11.0f64);
-            let middle_x = rect.pos.x + rect.size.x * 0.5;
+            let middle_x = rect.pos.x + rect.size.x * self.head_fraction;
             let x_of = |secs: f64| WaveLane::mark_x(secs, centre, lane_cols, middle_x);
             // Off the lane is SKIPPED, never clamped: a chip parked at the
             // edge would claim a mark is there when it is seconds away.
@@ -5793,6 +6124,24 @@ impl Widget for VjWaveScroll {
                 ),
                 size: dvec2(chip_w, chip_h),
             };
+
+            // Where the body begins and ends, under everything a hand
+            // placed: this is a fact the analysis noticed, and it must not
+            // sit on top of a mark somebody put there on purpose.
+            if let Some((intro_end, outro_start)) = self.lanes[index].body {
+                for at in [intro_end, outro_start] {
+                    let x = x_of(at);
+                    if x >= lane_rect.pos.x && x <= lane_rect.pos.x + lane_rect.size.x {
+                        self.draw_body_edge.draw_abs(
+                            cx,
+                            Rect {
+                                pos: dvec2(x.round(), lane_rect.pos.y),
+                                size: dvec2(1.0, lane_rect.size.y.max(1.0)),
+                            },
+                        );
+                    }
+                }
+            }
 
             for k in 0..self.lanes[index].found_loops.len() {
                 let (start, _) = self.lanes[index].found_loops[k];
@@ -5825,25 +6174,26 @@ impl Widget for VjWaveScroll {
             let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
             let Some((start, end)) = lane.loop_columns() else { continue };
             let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
-            let start_x = rect.pos.x + rect.size.x * 0.5
+            let start_x = rect.pos.x + rect.size.x * self.head_fraction
                 + (start - centre) / lane_cols.max(1e-4) as f64;
-            let end_x = rect.pos.x + rect.size.x * 0.5
+            let end_x = rect.pos.x + rect.size.x * self.head_fraction
                 + (end - centre) / lane_cols.max(1e-4) as f64;
             let lane_rect = self.lane_rects[index];
             if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
                 continue;
             }
-            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
             self.draw_text.text_style.font_size = 9.0;
-            self.draw_text.draw_abs(
+            draw_outlined_text(
+                &mut self.draw_text,
                 cx,
                 dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
                 &slot.to_string(),
+                Vec4f::from_u32(0xf4f7faff),
             );
         }
 
         // Bar numbers, ruled off whichever deck is leading the view.
-        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
+        let bar_number_color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
@@ -5870,13 +6220,15 @@ impl Widget for VjWaveScroll {
                 while bar <= last as i64 {
                     if bar >= 0 && bar % stride == 0 {
                         let col = phase + bar as f64 * bar_cols;
-                        let x = rect.pos.x + rect.size.x * 0.5
+                        let x = rect.pos.x + rect.size.x * self.head_fraction
                             + (col - centre) / lane_cols.max(1e-4) as f64;
                         if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
-                            self.draw_text.draw_abs(
+                            draw_outlined_text(
+                                &mut self.draw_text,
                                 cx,
                                 dvec2(x + 2.0, rect.pos.y + lane_h + 1.0),
                                 &format!("{}", bar + 1),
+                                bar_number_color,
                             );
                         }
                     }
@@ -5910,7 +6262,7 @@ impl Widget for VjWaveScroll {
             self.draw_head.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
+                    pos: dvec2(rect.pos.x + rect.size.x * self.head_fraction - 6.0, rect.pos.y),
                     size: dvec2(12.0, rect.size.y),
                 },
             );
@@ -5923,11 +6275,29 @@ impl Widget for VjWaveScroll {
                 self.draw_head.draw_abs(
                     cx,
                     Rect {
-                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * 0.5 - 6.0, lane_rect.pos.y),
+                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * self.head_fraction - 6.0, lane_rect.pos.y),
                         size: dvec2(12.0, lane_rect.size.y),
                     },
                 );
             }
+        }
+        // What's coming: beats or time to the nearest mark ahead of the
+        // playhead, right beside the head line rather than back at the
+        // strip -- the strip answers WHERE in the whole record, this
+        // answers HOW SOON, which is the question actually asked while
+        // playing.
+        for index in 0..2 {
+            let Some(label) = self.lanes[index].next_mark_label(now) else { continue };
+            let lane_rect = self.lane_rects[index];
+            let head_x = lane_rect.pos.x + lane_rect.size.x * self.head_fraction;
+            self.draw_text.text_style.font_size = 9.0;
+            draw_outlined_text(
+                &mut self.draw_text,
+                cx,
+                dvec2(head_x + 9.0, lane_rect.pos.y + 2.0),
+                &label,
+                Vec4f::from_u32(0xf4f7faff),
+            );
         }
         DrawStep::done()
     }
@@ -6046,6 +6416,10 @@ pub struct VjWaveOverview {
     /// track that opens with silence.
     #[rust]
     sound: Option<(f64, f64)>,
+    /// Where the arrangement turns, in seconds. The analysis has always
+    /// worked these out and only the automation ever saw them.
+    #[rust]
+    changes: Vec<f64>,
     /// The record's shape: the four edges, in order. Drawn under every
     /// chip and moved by the wheel over the strip's middle band, which
     /// nothing else claims.
@@ -6081,6 +6455,10 @@ pub struct VjWaveOverview {
     draw_edge_found: DrawColor,
     #[live]
     draw_edge_sound: DrawColor,
+    #[live]
+    draw_edge_body: DrawColor,
+    #[live]
+    draw_change: DrawColor,
     /// The red chip at CUE's landing — the track start — so the button's
     /// destination is visible at a glance.
     #[live]
@@ -6092,6 +6470,10 @@ pub struct VjWaveOverview {
     /// The red chip's hover face: white, so the hand knows it is live.
     #[live]
     draw_marker_cue_hot: DrawQuad,
+    /// The seek target while dragging, and a hovered mark's time. Never
+    /// both at once -- a drag owns the readout while it runs.
+    #[live]
+    draw_text: DrawText,
     /// The landing a drag-in-progress would commit, shown as a dimmer band
     /// beside the ghost. `None` outside a loop drag.
     #[rust]
@@ -6198,6 +6580,14 @@ impl VjWaveOverview {
     }
 
     /// The record's four edges, diffed like the rest.
+    pub fn set_changes(&mut self, cx: &mut Cx, changes: &[f64]) {
+        if self.changes == changes {
+            return;
+        }
+        self.changes = changes.to_vec();
+        self.area.redraw(cx);
+    }
+
     pub fn set_shape(&mut self, cx: &mut Cx, shape: Option<[f64; 4]>) {
         if self.shape == shape {
             return;
@@ -6267,13 +6657,27 @@ impl VjWaveOverview {
         std::mem::take(&mut self.events)
     }
 
-    fn seek_at(&mut self, cx: &mut Cx, x: f64) {
-        let rect = self.area.rect(cx);
-        if rect.size.x <= 1.0 {
-            return;
-        }
-        let fraction = ((x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0);
-        self.events.push(OverviewEvent::Seek { fraction });
+    /// One step of a plain seek: preview where the finger is pointing.
+    /// Commits on release, same as the snapped ghost seek below -- a
+    /// plain drag used to commit on every `FingerMove`, which on a strip
+    /// this thin meant one jittery pixel could retarget the deck before
+    /// the hand had aimed.
+    fn preview_seek(&mut self, cx: &mut Cx, x: f64) {
+        let Some((secs, _)) = self.secs_at(cx, x) else { return };
+        self.preview = Some((secs, secs + 2.0 / ZOOM_COLS_PER_SEC));
+        self.preview_raw = Some(secs);
+        self.area.redraw(cx);
+    }
+
+    /// The time a hovered mark sits at, for the hover readout.
+    fn hover_mark_secs(&self) -> Option<f64> {
+        mark_time(
+            self.hover_marker?,
+            self.loop_span,
+            &self.loop_slots,
+            &self.found_loops,
+            self.cue_secs,
+        )
     }
 
     /// Source seconds under a pointer at `x`, plus how many seconds one
@@ -6396,11 +6800,11 @@ impl Widget for VjWaveOverview {
                     self.preview_ghost_seek(cx, fe.abs.x);
                 } else {
                     self.drag = Some(OverviewDrag::Seek);
-                    self.seek_at(cx, fe.abs.x);
+                    self.preview_seek(cx, fe.abs.x);
                 }
             }
             Hit::FingerMove(fe) => match self.drag {
-                Some(OverviewDrag::Seek) => self.seek_at(cx, fe.abs.x),
+                Some(OverviewDrag::Seek) => self.preview_seek(cx, fe.abs.x),
                 Some(OverviewDrag::Marker { hit, origin, .. }) => {
                     self.drag = Some(OverviewDrag::Marker { hit, origin, at: fe.abs });
                     self.area.redraw(cx);
@@ -6421,7 +6825,12 @@ impl Widget for VjWaveOverview {
                 }
                 None => {}
             },
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) => {
+                // A release far off the strip's own band -- above or
+                // below it, not along it -- abandons a seek rather than
+                // committing wherever the finger happened to end up.
+                let rect = self.area.rect(cx);
+                let seek_aborted = seek_release_aborted(fe.abs.y, rect.pos.y, rect.size.y);
                 match (self.drag, self.preview_raw, self.preview) {
                     (Some(OverviewDrag::Marker { hit, origin, at }), _, _) => {
                         let travelled = (at - origin).length();
@@ -6480,9 +6889,15 @@ impl Widget for VjWaveOverview {
                             self.events.push(OverviewEvent::MoveLoop { start_secs: raw });
                         }
                     }
-                    (Some(OverviewDrag::GhostSeek), Some(raw), _) => {
+                    (Some(OverviewDrag::GhostSeek), Some(raw), _) if !seek_aborted => {
                         // The RAW finger position: the engine's snap is the
                         // authority, with its sync-aware reference.
+                        let duration = self.cols.max(1) as f64 / ZOOM_COLS_PER_SEC;
+                        self.events.push(OverviewEvent::Seek {
+                            fraction: (raw / duration).clamp(0.0, 1.0),
+                        });
+                    }
+                    (Some(OverviewDrag::Seek), Some(raw), _) if !seek_aborted => {
                         let duration = self.cols.max(1) as f64 / ZOOM_COLS_PER_SEC;
                         self.events.push(OverviewEvent::Seek {
                             fraction: (raw / duration).clamp(0.0, 1.0),
@@ -6724,12 +7139,36 @@ impl Widget for VjWaveOverview {
                 Some(edges) => edges.to_vec(),
                 None => self.sound.map(|(a, b)| vec![a, b]).unwrap_or_default(),
             };
-            for at in edges {
-                self.draw_edge_sound.draw_abs(
+            for (index, at) in edges.iter().copied().enumerate() {
+                // With four edges the middle two are the body's; with two
+                // there is only the recording's own extent to show.
+                let body = edges.len() == 4 && (index == 1 || index == 2);
+                let edge = if body { &mut self.draw_edge_body } else { &mut self.draw_edge_sound };
+                edge.draw_abs(
                     cx,
                     Rect {
                         pos: dvec2(centre_of(at) - 0.75, rect.pos.y),
                         size: dvec2(1.5, rect.size.y),
+                    },
+                );
+            }
+            // The turns, in the strip's middle band so they stay clear of
+            // both chip rows, and thinned: a build-up can put changes a few
+            // seconds apart, which on a whole-track strip is a picket fence
+            // that hides the drop it is marking rather than showing it.
+            let band = (rect.size.y - CHANGE_CLEAR * 2.0).max(2.0);
+            let mut last_x = f64::NEG_INFINITY;
+            for at in self.changes.iter().copied() {
+                let x = centre_of(at).round();
+                if x - last_x < CHANGE_MIN_PX {
+                    continue;
+                }
+                last_x = x;
+                self.draw_change.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(x, rect.pos.y + CHANGE_CLEAR),
+                        size: dvec2(1.0, band),
                     },
                 );
             }
@@ -6782,6 +7221,44 @@ impl Widget for VjWaveOverview {
                 if !saved {
                     self.draw_marker_live
                         .draw_abs(cx, chip_sized(centre_of(start), grown(MarkerHit::Save)));
+                }
+            }
+            // The seek target while a plain or ghost seek is being
+            // dragged: the absolute time it would land on and how far
+            // that is from where the deck is now, neither of which a
+            // strip this thin can make obvious by eye alone.
+            if let (Some(OverviewDrag::Seek | OverviewDrag::GhostSeek), Some((target_secs, _))) =
+                (self.drag, self.preview)
+            {
+                let head_secs = self.head * duration;
+                self.draw_text.text_style.font_size = 9.0;
+                let label = format!(
+                    "{} ({})",
+                    crate::clock::playhead(target_secs),
+                    crate::clock::offset(target_secs - head_secs)
+                );
+                let x = centre_of(target_secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 84.0);
+                draw_outlined_text(
+                    &mut self.draw_text,
+                    cx,
+                    dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
+                    &label,
+                    Vec4f::from_u32(0xf4f7faff),
+                );
+            } else if self.drag.is_none() {
+                // Hovering (not dragging) a mark answers WHEN: the strip
+                // already shows WHERE with its hairlines, but a chip's
+                // own x position is a few pixels of precision at best.
+                if let Some(secs) = self.hover_mark_secs() {
+                    self.draw_text.text_style.font_size = 9.0;
+                    let x = centre_of(secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 48.0);
+                    draw_outlined_text(
+                        &mut self.draw_text,
+                        cx,
+                        dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
+                        &crate::clock::playhead(secs),
+                        Vec4f::from_u32(0xf4f7faff),
+                    );
                 }
             }
         }
@@ -6842,6 +7319,11 @@ pub struct TrackRowEntry {
     pub duration: String,
     pub license: String,
     pub tags: String,
+    /// `YYYY-MM-DD`, blank for a track this machine has no timestamp for.
+    /// A calendar-day string sorts chronologically as plain text, so the
+    /// ADDED column needs no separate machine-sortable field the way KEY
+    /// does.
+    pub added: String,
     /// The store holds this track's four separated stems.
     pub stem: bool,
     /// The store holds this track's word-aligned transcript.
@@ -6869,6 +7351,7 @@ impl TrackRowEntry {
             duration: String::new(),
             license: String::new(),
             tags: String::new(),
+            added: String::new(),
             stem: false,
             krk: false,
             badge: String::new(),
@@ -7373,8 +7856,10 @@ pub enum TrackListHit {
     /// target loads it. Carries the modifiers so a set-building release
     /// still loads nothing.
     Load(usize, KeyModifiers),
-    /// The row's `+` button: queue it.
-    Queue(usize),
+    /// The row's `+` button: queue it. Carries the modifiers so Shift
+    /// (play next) and Control (replace the queue) reach the host --
+    /// same treatment as the row body's own `Pick`/`Load`.
+    Queue(usize, KeyModifiers),
     /// The queue row's minus button: take it back off the set list.
     Unqueue(usize),
     /// The row's headphones button: pre-listen it on the phones bus.
@@ -7453,8 +7938,8 @@ pub struct PhonesLine {
 
 /// The most columns a row or a header can carry. The templates declare this
 /// many generic cells; a layout is never longer, because it is a permutation
-/// of the twelve that exist.
-pub const MAX_COLUMNS: usize = 12;
+/// of the thirteen that exist.
+pub const MAX_COLUMNS: usize = 13;
 
 /// The cell ids in the row template, in declaration order. A column's place
 /// in the operator's layout picks the cell it draws into, which is what makes
@@ -7472,6 +7957,7 @@ pub const ROW_CELLS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(row_col9),
     ids!(row_col10),
     ids!(row_col11),
+    ids!(row_col12),
 ];
 
 /// The header's boxes and the heads inside them, same order as [`ROW_CELLS`].
@@ -7488,6 +7974,7 @@ pub const HEAD_CELLS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(th_cell9),
     ids!(th_cell10),
     ids!(th_cell11),
+    ids!(th_cell12),
 ];
 
 pub const HEAD_BUTTONS: [&[LiveId]; MAX_COLUMNS] = [
@@ -7503,6 +7990,7 @@ pub const HEAD_BUTTONS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(th_head9),
     ids!(th_head10),
     ids!(th_head11),
+    ids!(th_head12),
 ];
 
 /// What one column reads for one row. The tick columns are a mark rather
@@ -7521,6 +8009,7 @@ pub fn column_text(column: Column, entry: &TrackRowEntry) -> String {
         Column::Stem => if entry.stem { "✓" } else { "" }.to_string(),
         Column::Krk => if entry.krk { "✓" } else { "" }.to_string(),
         Column::Tags => entry.tags.clone(),
+        Column::Added => entry.added.clone(),
     }
 }
 
@@ -7896,8 +8385,8 @@ pub fn track_list_hits(
         // press is one load, whatever the list reports.
         let hit = if item.button(cx, ids!(row_hp)).clicked(actions) {
             TrackListHit::Preview(row_id)
-        } else if item.button(cx, ids!(row_queue)).clicked(actions) {
-            TrackListHit::Queue(row_id)
+        } else if let Some(modifiers) = item.button(cx, ids!(row_queue)).clicked_modifiers(actions) {
+            TrackListHit::Queue(row_id, modifiers)
         } else if item.button(cx, ids!(row_unqueue)).clicked(actions) {
             TrackListHit::Unqueue(row_id)
         } else if item.button(cx, ids!(hp_play)).clicked(actions)
@@ -7955,6 +8444,31 @@ pub fn format_duration(secs: f64) -> String {
     }
     let total = secs.round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// `YYYY-MM-DD` for a millisecond Unix timestamp, blank for `0` or earlier
+/// (the sentinel for "this machine has no timestamp for this track").
+///
+/// No calendar crate in this workspace, so this is the whole of one:
+/// days-since-epoch to a civil year/month/day, Howard Hinnant's
+/// `civil_from_days` (public-domain algorithm, not tied to any particular
+/// implementation), good over any date this column will ever show.
+pub fn format_added_date(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}")
 }
 
 /// A deck's tempo readout: the grid's BPM scaled by the playback rate.
@@ -8047,6 +8561,7 @@ mod tests {
             key_fit: None,
             duration: "3:16".into(),
             tags: "Tags".into(),
+            added: "2026-09-08".into(),
             stem: true,
             krk: false,
             badge: String::new(),
@@ -8071,12 +8586,32 @@ mod tests {
             (Column::Key, "8A"),
             (Column::Time, "3:16"),
             (Column::Tags, "Tags"),
+            (Column::Added, "2026-09-08"),
         ] {
             assert_eq!(column_text(column, &row), expect, "{column:?}");
         }
         // The two mark columns are a tick or nothing, never a word.
         assert_eq!(column_text(Column::Stem, &row), "✓");
         assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    #[test]
+    fn format_added_date_reads_a_millisecond_stamp_as_a_calendar_day() {
+        // Known-good dates, computed independently (`date -u -d ... +%s`),
+        // including a leap day and a leap CENTURY (2000 is divisible by
+        // 400, so it is one) to exercise the era correction.
+        assert_eq!(format_added_date(1_788_825_600_000), "2026-09-08");
+        assert_eq!(format_added_date(86_400_000), "1970-01-02");
+        assert_eq!(format_added_date(1_835_395_200_000), "2028-02-29");
+        assert_eq!(format_added_date(951_782_400_000), "2000-02-29");
+        // A time within the day still floors to that day.
+        assert_eq!(format_added_date(1_788_825_600_000 + 12 * 3_600_000), "2026-09-08");
+    }
+
+    #[test]
+    fn format_added_date_is_blank_for_the_zero_and_negative_sentinel() {
+        assert_eq!(format_added_date(0), "", "no timestamp reads as no timestamp, not epoch");
+        assert_eq!(format_added_date(-86_400_000), "");
     }
 
     #[test]
@@ -8508,6 +9043,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hovered_mark_answers_when_and_a_shape_edge_answers_nothing() {
+        let saved = [(3_u16, 40.0, 44.0, 0xff0000ffu32)];
+        let found = [(60.0, 64.0)];
+        let running = Some((10.0, 12.0));
+        assert_eq!(mark_time(MarkerHit::Save, running, &saved, &found, 5.0), Some(10.0));
+        assert_eq!(mark_time(MarkerHit::Recall(3), running, &saved, &found, 5.0), Some(40.0));
+        // A slot number that is not on the strip has nothing to answer.
+        assert_eq!(mark_time(MarkerHit::Recall(9), running, &saved, &found, 5.0), None);
+        assert_eq!(mark_time(MarkerHit::Found(0), running, &saved, &found, 5.0), Some(60.0));
+        assert_eq!(mark_time(MarkerHit::Cue, running, &saved, &found, 5.0), Some(5.0));
+        // The record's own shape is structure, not a mark someone placed.
+        assert_eq!(mark_time(MarkerHit::Shape(1), running, &saved, &found, 5.0), None);
+    }
+
+    #[test]
+    fn a_seek_release_only_aborts_off_the_strips_own_band() {
+        // Squarely inside the band: commits.
+        assert!(!seek_release_aborted(50.0, 40.0, 20.0));
+        // Just past the top and bottom edges, still within the margin:
+        // a hand lifting slightly off the strip is still aiming at it.
+        assert!(!seek_release_aborted(40.0 - SEEK_ABORT_PX + 1.0, 40.0, 20.0));
+        assert!(!seek_release_aborted(60.0 + SEEK_ABORT_PX - 1.0, 40.0, 20.0));
+        // Well past either edge: the hand let go of the idea, not just the pixel.
+        assert!(seek_release_aborted(40.0 - SEEK_ABORT_PX - 1.0, 40.0, 20.0));
+        assert!(seek_release_aborted(60.0 + SEEK_ABORT_PX + 1.0, 40.0, 20.0));
+    }
+
+    #[test]
     fn the_preview_steps_in_whole_units_against_the_ghost() {
         let g = grid(120.0, 0.25, 0); // 0.5 s a beat
         let span = Some((10.25, 12.25));
@@ -8624,6 +9187,17 @@ mod tests {
         assert!(wider < ahead && wider > middle, "{wider} against {ahead}");
     }
 
+    /// The default has to be the exact value that used to be hardcoded
+    /// (`rect.size.x * 0.5`) -- this is a config knob added to existing,
+    /// working behaviour, not a change to it, and every session before
+    /// this one gets the identical picture it always had.
+    #[test]
+    fn the_head_fraction_default_is_dead_centre() {
+        assert_eq!(HEAD_FRACTION_DEFAULT, 0.5);
+        assert!(HEAD_FRACTION_MIN < HEAD_FRACTION_DEFAULT);
+        assert!(HEAD_FRACTION_DEFAULT < HEAD_FRACTION_MAX);
+    }
+
     #[test]
     fn no_grid_means_no_ruling() {
         let mut lane = lane(120.0, 1.0);
@@ -8702,29 +9276,29 @@ mod tests {
 
         // Nothing to say in the middle of a record.
         lane.position_secs = 100.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         // Nor with no length known, nor stopped.
         lane.position_secs = 290.0;
         lane.duration_secs = 0.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         lane.duration_secs = 300.0;
         lane.playing = false;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
         lane.playing = true;
 
         // Inside the window it shows, and it shows harder as the end
         // comes -- sampled at the same point of the pulse both times, or
         // the pulse rather than the ramp would be under test.
-        let far = lane.warn_at(100.0);
+        let far = lane.warn_at(100.0, WARN_SECS_DEFAULT);
         lane.position_secs = 299.0;
-        let near = lane.warn_at(100.0);
+        let near = lane.warn_at(100.0, WARN_SECS_DEFAULT);
         assert!(far > 0.0, "twenty seconds out is already warning");
         assert!(near > far, "{near} at one second out beats {far} at ten");
 
         // Armed, it pulses -- but never all the way to nothing, or it
         // would be invisible half of every second.
         let over_a_second: Vec<f32> =
-            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1)).collect();
+            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1, WARN_SECS_DEFAULT)).collect();
         let low = over_a_second.iter().cloned().fold(f32::MAX, f32::min);
         let high = over_a_second.iter().cloned().fold(0.0f32, f32::max);
         assert!(low > 0.0, "never fully out: {low}");
@@ -8732,7 +9306,60 @@ mod tests {
 
         // Past the end there is nothing left to warn about.
         lane.position_secs = 301.0;
-        assert_eq!(lane.warn_at(100.0), 0.0);
+        assert_eq!(lane.warn_at(100.0, WARN_SECS_DEFAULT), 0.0);
+    }
+
+    /// `warn_secs` of 0.0 is the operator's off switch, not a special
+    /// case in `warn_at` -- the ramp's own window (`0.0..0.0`) is empty
+    /// and never contains a real "seconds left", at any point in the
+    /// record, playing or not.
+    #[test]
+    fn a_warn_window_of_zero_never_warns() {
+        let mut lane = lane(120.0, 0.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        lane.duration_secs = 300.0;
+        lane.position_secs = 299.999;
+        assert_eq!(lane.warn_at(100.0, 0.0), 0.0);
+
+        // A smaller, non-zero window still works, just over its own
+        // shorter span -- the value is a real threshold, not a toggle
+        // that only understands its default.
+        assert_eq!(lane.warn_at(100.0, 0.0005), 0.0, "outside a half-second window");
+        lane.position_secs = 299.9999;
+        assert!(lane.warn_at(100.0, 0.0005) > 0.0, "inside it");
+    }
+
+    #[test]
+    fn the_next_mark_is_the_nearest_one_still_ahead() {
+        let mut lane = lane(120.0, 10.0);
+        lane.cue_secs = 5.0; // behind the playhead: not a candidate
+        lane.saved_slots = vec![(1, 40.0, 44.0, 0), (2, 15.0, 16.0, 0)];
+        lane.found_loops = vec![(12.0, 12.5)];
+        // Nearest of the three ahead of 10.0 is the found loop at 12.0,
+        // not the saved slot that is merely first in the list.
+        assert_eq!(lane.next_mark_secs(10.0), Some(12.0));
+        // Once the playhead passes it, the next saved slot takes over.
+        assert_eq!(lane.next_mark_secs(13.0), Some(15.0));
+        // Past everything, there is nothing left to point at.
+        assert_eq!(lane.next_mark_secs(41.0), None);
+    }
+
+    #[test]
+    fn the_next_mark_label_counts_beats_with_a_grid_and_seconds_without() {
+        let mut with_grid = lane(120.0, 10.0); // 0.5s a beat
+        with_grid.saved_slots = vec![(1, 12.0, 13.0, 0)];
+        // Two seconds at 120bpm is exactly four beats.
+        assert_eq!(with_grid.next_mark_label(10.0), Some("4 beats".to_string()));
+
+        let mut no_grid = with_grid.clone();
+        no_grid.grid = None;
+        assert_eq!(no_grid.next_mark_label(10.0), Some(crate::clock::countdown(2.0)));
+
+        // Nothing ahead: nothing to say next to the playhead at all.
+        let mut nothing_ahead = with_grid.clone();
+        nothing_ahead.saved_slots.clear();
+        assert_eq!(nothing_ahead.next_mark_label(10.0), None);
     }
 
     #[test]
@@ -8931,6 +9558,189 @@ mod tests {
         assert!(cols > 1_000, "{cols} columns");
         // A quarter and three quarters in: the middle of each half.
         (analysis.tiles, stems, rate, cols / 4, cols * 3 / 4)
+    }
+
+    fn luma(c: [f32; 3]) -> f32 {
+        c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114
+    }
+
+    fn saturation(c: [f32; 3]) -> f32 {
+        let top = c[0].max(c[1]).max(c[2]);
+        let low = c[0].min(c[1]).min(c[2]);
+        if top <= 1e-6 { 0.0 } else { (top - low) / top }
+    }
+
+    /// A build-up can turn every few seconds. Across a whole record that is
+    /// a hatch that hides the drop it is marking rather than showing it.
+    #[test]
+    fn turns_too_close_together_are_drawn_as_one() {
+        // The rule the strip draws by, in the same order.
+        let thin = |xs: &[f64]| {
+            let mut out = Vec::new();
+            let mut last = f64::NEG_INFINITY;
+            for x in xs.iter().copied() {
+                if x - last >= CHANGE_MIN_PX {
+                    out.push(x);
+                    last = x;
+                }
+            }
+            out
+        };
+        // A build-up: eight turns inside twelve pixels.
+        let fence: Vec<f64> = (0..8).map(|i| 100.0 + i as f64 * 1.5).collect();
+        let drawn = thin(&fence);
+        assert!(drawn.len() <= 3, "a picket fence survived: {drawn:?}");
+        assert_eq!(drawn[0], 100.0, "and the first turn is always kept");
+        // An ordinary arrangement is untouched: nothing is thinned away
+        // that the operator could have seen.
+        let phrases: Vec<f64> = (0..12).map(|i| i as f64 * 21.0).collect();
+        assert_eq!(thin(&phrases), phrases, "a real arrangement must survive whole");
+    }
+
+    /// The stub has to clear both chip rows even while one is being read:
+    /// a chip grows under the pointer.
+    #[test]
+    fn a_turn_stays_clear_of_both_chip_rows() {
+        // The grown chip height, from the strip's own chip_bottom.
+        let grown_chip = 17.0;
+        assert!(
+            CHANGE_CLEAR >= grown_chip,
+            "a turn would run under a chip being hovered: {CHANGE_CLEAR} vs {grown_chip}"
+        );
+        // And on a strip too short to hold the band, the stub still has a
+        // height rather than a negative one.
+        for height in [2.0f64, 8.0, 24.0, 40.0, 120.0] {
+            let band = (height - CHANGE_CLEAR * 2.0).max(2.0);
+            assert!(band >= 2.0, "height {height} gave a band of {band}");
+        }
+    }
+
+    /// When the analysis cannot find a body it still hands back numbers, and
+    /// on a long record that guess looks exactly like a real intro.
+    #[test]
+    fn a_guessed_shape_never_reaches_the_mixing_lane() {
+        let measured = crate::track_shape::TrackShape {
+            intro_start_secs: 0.0,
+            intro_end_secs: 30.0,
+            outro_start_secs: 240.0,
+            outro_end_secs: 300.0,
+            detected: true,
+        };
+        let guessed = crate::track_shape::TrackShape { detected: false, ..measured };
+        // The lane takes the pair only from a shape that was really found.
+        let body = |shape: crate::track_shape::TrackShape| {
+            Some(shape)
+                .filter(|s| s.detected)
+                .map(|s| (s.intro_end_secs, s.outro_start_secs))
+        };
+        assert_eq!(body(measured), Some((30.0, 240.0)));
+        assert_eq!(body(guessed), None, "a guess must not draw as a measurement");
+    }
+
+    /// Brightness in this lane already says what has been played and which
+    /// deck is active. A colouring that moved it would be a third meaning on
+    /// a channel that has two.
+    #[test]
+    fn colouring_a_column_never_changes_how_bright_it_is() {
+        let grey_y = luma(WAVE_GREY);
+        for tile in [
+            [255, 83, 60, 255],
+            [94, 255, 255, 234],
+            [227, 198, 168, 244],
+            [150, 150, 150, 200],
+            [255, 40, 20, 220],
+            [30, 60, 255, 180],
+            [40, 255, 40, 200],
+            [1, 0, 0, 12],
+        ] {
+            let got = luma(band_tint(tile));
+            assert!(
+                (got - grey_y).abs() < 1e-4,
+                "{tile:?} drew at brightness {got}, the grey is {grey_y}"
+            );
+        }
+    }
+
+    /// The one outcome that would make this colouring a net loss: an
+    /// operator believing a record is separated when it is not.
+    #[test]
+    fn a_band_colour_can_never_be_as_strong_as_a_stem_colour() {
+        // The least colourful of the four, which is the one to clear.
+        let weakest_stem = STEM_COLORS
+            .iter()
+            .map(|c| saturation([c[0], c[1], c[2]]))
+            .fold(f32::INFINITY, f32::min);
+        assert!(weakest_stem > 0.6, "the stem palette moved: {weakest_stem}");
+        // Every corner and edge of the band cube, not a sample of it: the
+        // cap has to hold for anything the analysis can produce.
+        let mut worst = 0.0f32;
+        for low in (0..=255).step_by(15) {
+            for mid in (0..=255).step_by(15) {
+                for high in (0..=255).step_by(15) {
+                    let s = saturation(band_tint([low, mid, high, 255]));
+                    worst = worst.max(s);
+                }
+            }
+        }
+        assert!(
+            worst < weakest_stem - 0.2,
+            "a band colour reached {worst} against the palest stem at {weakest_stem}"
+        );
+    }
+
+    /// And it has to be worth drawing: a cap that made everything grey would
+    /// pass the test above and deliver nothing.
+    #[test]
+    fn a_column_that_leans_on_one_band_is_visibly_coloured() {
+        let flat = saturation(WAVE_GREY);
+        for (name, tile) in [
+            ("bass", [255, 40, 20, 220]),
+            ("air", [30, 60, 255, 180]),
+            ("mid", [40, 255, 40, 200]),
+        ] {
+            let s = saturation(band_tint(tile));
+            assert!(
+                s > flat * 1.5,
+                "a {name}-heavy column drew at {s}, barely past the plain grey {flat}"
+            );
+        }
+        // Three bands level is a column with nothing to say, and it says so.
+        let level = saturation(band_tint([150, 150, 150, 200]));
+        assert!(level < 0.02, "a balanced column should be neutral, drew {level}");
+        // And the hues really are different readings, not one tint.
+        let bass = band_tint([255, 40, 20, 220]);
+        let air = band_tint([30, 60, 255, 180]);
+        assert!(bass[0] > bass[2] + 0.15, "bass must read warm: {bass:?}");
+        assert!(air[2] > air[0] + 0.15, "air must read cool: {air:?}");
+    }
+
+    /// Nothing about a colouring may change the shape of the wave.
+    #[test]
+    fn keeping_a_columns_bands_together_leaves_every_height_alone() {
+        let columns: Vec<[u8; 4]> = (0..1000)
+            .map(|i| {
+                let n = i as u8;
+                [n.wrapping_mul(7), n.wrapping_mul(13), n.wrapping_mul(29), n.wrapping_mul(3)]
+            })
+            .collect();
+        let mut per_channel = vec![columns.clone()];
+        let mut louder = vec![columns.clone()];
+        for _ in 0..8 {
+            per_channel.push(reduce_once(per_channel.last().unwrap(), Reduce::PerChannel));
+            louder.push(reduce_once(louder.last().unwrap(), Reduce::BandsOfTheLouder));
+        }
+        for (level, (a, b)) in per_channel.iter().zip(louder.iter()).enumerate() {
+            let heights_a: Vec<u8> = a.iter().map(|c| c[3]).collect();
+            let heights_b: Vec<u8> = b.iter().map(|c| c[3]).collect();
+            assert_eq!(heights_a, heights_b, "level {level} changed a height");
+        }
+        // And it does what it is for: the bands of a reduced column are a
+        // real column's bands, not three maxima from three different moments.
+        let pair = [[255u8, 0, 0, 10], [0, 0, 255, 200]];
+        let one = reduce_once(&pair, Reduce::BandsOfTheLouder);
+        assert_eq!(one[0], [0, 0, 255, 200], "the louder column's own bands");
+        let both = reduce_once(&pair, Reduce::PerChannel);
+        assert_eq!(both[0], [255, 0, 255, 200], "which the old rule never was");
     }
 
     #[test]

@@ -258,6 +258,7 @@ use makepad_show_control::{
 use makepad_show_control::LightSample;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -314,6 +315,77 @@ script_mod! {
             color_focus: #xd6dee6
             color_hover: #xfffaf4
             text_style: theme.font_regular{font_size: 10}
+        }
+    }
+
+    // THE MASTER LEVEL, in the chrome beside the control that sets it.
+    //
+    // Lying on its side because this bar is 28 points tall: a column here
+    // would have four segments and be a lamp pretending to be a meter. It
+    // wears the deck columns' own colours and the same pale peak mark, so
+    // the three read as one family and a glance between them needs no
+    // translation.
+    //
+    // The lamp at the right end has its own ground, which the bar never
+    // reaches. An overload warning drawn ON the bar would have to be read
+    // against a bar that is loud -- which is exactly the moment it lights.
+    let MasterMeter = SolidView{
+        width: 68
+        height: 11
+        // Also what makes it clickable at all: a plain View emits no finger
+        // actions until it is given a cursor. The click clears the lamp.
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            level: uniform(0.0)
+            hold: uniform(0.0)
+            over: uniform(0.0)
+            color: uniform(#x1d222a)
+            color_lit: uniform(#xff5c39)
+            color_hot: uniform(#xff5a4e)
+            color_mark: uniform(#xffffffcc)
+            color_lamp_off: uniform(#x2a3038)
+            color_lamp: uniform(#xffe14d)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let lamp_w = 7.0
+                let bar_w = w - lamp_w - 3.0
+                sdf.box(0.0, 0.0, bar_w, h, 3.0)
+                sdf.fill(self.color)
+                // Across the bar's own width, not the widget's, so the
+                // reading is not quietly compressed by the lamp's room.
+                let x = self.pos.x * w / bar_w
+                let on = step(x, self.level)
+                let hot = smoothstep(0.72, 0.95, x)
+                let seg = step(0.35, fract(self.pos.x * w / 4.0))
+                let c = self.color_lit.mix(self.color_hot, hot)
+                let lit_w = max(1.0, bar_w * self.level - 3.0)
+                sdf.box(1.5, 1.5, lit_w, h - 3.0, 2.0)
+                sdf.fill(vec4(c.x, c.y, c.z, c.w * on * seg))
+                // The peak mark, on a whole pixel for the reason the deck
+                // columns' is: a two-pixel line at a fraction lands across
+                // two rows at half weight and flickers as the level moves.
+                let mark_w = 2.0
+                let mark_x = floor(clamp(
+                    self.hold * bar_w - mark_w * 0.5,
+                    0.0,
+                    bar_w - mark_w
+                ))
+                sdf.box(mark_x, 1.5, mark_w, h - 3.0, 0.5)
+                sdf.fill(vec4(
+                    self.color_mark.x,
+                    self.color_mark.y,
+                    self.color_mark.z,
+                    self.color_mark.w * step(0.002, self.hold)
+                ))
+                // The lamp. Yellow because everything else here is orange:
+                // a red one would be the bar's own top colour, and the one
+                // thing this must not do is blend in.
+                sdf.box(w - lamp_w, 1.0, lamp_w, h - 2.0, 2.0)
+                sdf.fill(self.color_lamp_off.mix(self.color_lamp, step(0.5, self.over)))
+                return sdf.result
+            }
         }
     }
 
@@ -911,6 +983,12 @@ script_mod! {
                             }
                             Tip{ text: "Output window"
                                 open_output := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/monitor.svg") } }
+                            }
+                            // The level, immediately before the control
+                            // that sets it: the number and the knob for one
+                            // quantity belong beside each other.
+                            Tip{ text: "Master level — click to clear the overload lamp"
+                                master_vu := MasterMeter{}
                             }
                             // MASTER VOLUME as a DROPDOWN SLIDER: the chip
                             // is a plain click target (no drag in the bar —
@@ -5333,12 +5411,6 @@ fn side_channel_refs_of(files: &[makepad_asset_data::AssetFile]) -> TrackSideCha
     }
 }
 
-fn format_time(secs: f64) -> String {
-    let secs = secs.max(0.0);
-    let minutes = (secs / 60.0).floor() as u64;
-    format!("{minutes}:{:04.1}", secs - minutes as f64 * 60.0)
-}
-
 // ---------------------------------------------------------------------------
 // system-audio capture + beat-quantized scheduling
 // ---------------------------------------------------------------------------
@@ -7706,6 +7778,11 @@ pub struct App {
     /// Same for the set list; see [`App::music_rows_dirty`].
     #[rust]
     queue_rows_dirty: bool,
+    /// SKIP pressed: consumed and cleared on the next `pump_autopilot`,
+    /// which is the one place that already has a fresh `AutoObs` built to
+    /// hand `AutoPilot::skip_next` -- building a second one just for the
+    /// click would duplicate what that function already does every pump.
+    auto_skip_requested: bool,
     /// Browsing local audio files instead of the store catalog.
     #[rust]
     music_local: bool,
@@ -7800,6 +7877,15 @@ pub struct App {
     /// the playhead.
     #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
     wave_zoom_secs: f64,
+    /// Where the playhead sits across the zoomed lane, 0..1. Set once at
+    /// startup from the settings file -- a preference decided once, not a
+    /// live gesture like zoom.
+    #[rust(crate::music_view::HEAD_FRACTION_DEFAULT)]
+    wave_head_fraction: f64,
+    /// How long before a record ends the lane starts warning, or 0.0 for
+    /// off. Same startup-only treatment as the two settings above it.
+    #[rust(crate::music_view::WARN_SECS_DEFAULT)]
+    wave_warn_secs: f64,
     /// Pushed into the widget once, when the surface first has one. Not
     /// every frame: the wheel moves the widget first and reports after,
     /// so re-asserting the stored value each pass would undo the notch
@@ -7817,6 +7903,10 @@ pub struct App {
     /// whatever is drawing at whatever rate it draws at.
     #[rust]
     meter_ballistics: [crate::console::MeterBallistics; 3],
+    /// What the chrome lamp was last told, so it is only redrawn when the
+    /// latch actually turns over.
+    #[rust]
+    master_lamp_lit: bool,
     /// When they were last ticked. The poll is a 20 Hz timer that Windows
     /// services late and coalesces, and it stops entirely while another
     /// window is up, so the meters are given the time that actually passed
@@ -8051,6 +8141,11 @@ pub struct App {
     pending_search: Option<(Surface, SearchBox, String)>,
     #[rust]
     search_timer: Timer,
+    /// A short head start for the catalog before `load_queue` asks it to
+    /// resolve a saved store-asset line -- at `handle_startup` itself
+    /// the store connection has not necessarily produced a single tile
+    /// yet, and a line that cannot resolve is dropped, not retried.
+    queue_load_timer: Timer,
     #[rust]
     video_pump: NextFrame,
     /// Finished decodes the operator is WAITING for (the clicked cue, a
@@ -8241,6 +8336,11 @@ const EVENT_REFRESH_COOLDOWN_S: f64 = 3.0;
 /// Idle time after the last keystroke before the pad filter re-queries the
 /// server. Short enough to feel live, long enough not to search per key.
 const FILTER_DEBOUNCE_S: f64 = 0.3;
+/// How long the saved queue waits for the catalog before asking it to
+/// resolve a store-asset line. Long enough that an ordinary store
+/// connection has had its first sync; a line that still cannot resolve
+/// after this is dropped, not retried further.
+const QUEUE_LOAD_DELAY_SECS: f64 = 2.5;
 
 /// Which box of a search row a debounced keystroke belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9056,7 +9156,7 @@ impl App {
             };
             let fraction = if dur > 0.0 { (pos / dur).clamp(0.0, 1.0) } else { 0.0 };
             let position = if dur > 0.0 {
-                format!("{}:{:04.1}", (pos / 60.0) as u32, pos % 60.0)
+                crate::clock::playhead(pos)
             } else {
                 "—".to_string()
             };
@@ -15588,9 +15688,32 @@ p2 {}
         // level as measured -- the square-root taper below is for a column
         // of pixels, and would read half again too loud as a number.
         let master = self.meter_ballistics[0].amplitude();
-        self.console_clip.saw(meters[crate::mixer::METER_MASTER]);
+        // What the limiter had to do, not what the peak reached: the
+        // ceiling means the peak can never reach full scale.
+        self.console_clip.saw(self.mixer.limiter_reduction_db());
         let line = crate::console::summary_line(&health, master, self.console_clip.lit());
         self.set_status_label(cx, ids!(console_line), &line);
+        // The chrome meter, which is up on every page -- so unlike the deck
+        // columns it is fed here rather than from the deck surface. Same
+        // deadband, same reason: pushing a uniform marks the pass for
+        // repaint, and a meter that reports every poll would repaint the
+        // window twenty times a second with nothing playing.
+        let lit = self.console_clip.lit();
+        if let Some((level, hold)) = self.meter_ballistics[0].take_push() {
+            let vu = self.ui.view(cx, ids!(master_vu));
+            vu.set_uniform(cx, live_id!(level), &[level]);
+            vu.set_uniform(cx, live_id!(hold), &[hold]);
+            vu.set_uniform(cx, live_id!(over), &[if lit { 1.0 } else { 0.0 }]);
+            vu.redraw(cx);
+            self.master_lamp_lit = lit;
+        } else if lit != self.master_lamp_lit {
+            // The lamp can change while the meter itself is still: it
+            // latches on a moment the level need not have moved through.
+            let vu = self.ui.view(cx, ids!(master_vu));
+            vu.set_uniform(cx, live_id!(over), &[if lit { 1.0 } else { 0.0 }]);
+            vu.redraw(cx);
+            self.master_lamp_lit = lit;
+        }
         // The opened pane is the same numbers with the room to lay them out.
         if self.console.panes().0 {
             let decks = self.mixer.deck_levels();
@@ -16268,6 +16391,8 @@ p2 {}
                         alias: h.alias.map(|a| a.as_str().to_string()),
                         live: h.live,
                         kind: h.kind,
+                        artist: h.artist,
+                        album: h.album,
                     })
                     .collect();
                 self.thumb_stats.pages += 1;
@@ -18973,6 +19098,12 @@ p2 {}
         if grip.finger_down(actions).is_some() {
             self.splitter_grab = Some(self.lists_extent(cx));
         }
+        // Clearing the overload lamp is an acknowledgement, so it is an
+        // act. It does not time out: a warning that puts itself out is a
+        // warning nobody ever sees, which is the whole reason it latches.
+        if self.ui.view(cx, ids!(master_vu)).finger_down(actions).is_some() {
+            self.console_clip.clear();
+        }
         if let Some(moved) = grip.finger_move(actions) {
             let Some(start) = self.splitter_grab else { return };
             // The lists lie AFTER the grip, so dragging towards them makes
@@ -19963,10 +20094,67 @@ p2 {}
         service::session_config_from_env().cache_parent.join("preprocess.txt")
     }
 
+    fn queue_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("queue.txt")
+    }
+
+    /// The queue's own file, one line per track in play order -- library-c11.
+    /// A list, not a setting, so it rides beside the marks and the MIDI map
+    /// rather than in with preprocess.txt's single values. `local_by_asset`
+    /// (populated whenever a local file passed through the explorer this
+    /// session) decides which line a queued track gets: a local file's own
+    /// path survives a restart on its own, a store asset's does not need
+    /// to, because the catalog is the authority on it.
+    fn save_queue(&self) {
+        let path = Self::queue_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut body = String::new();
+        for item in self.decks.queue() {
+            match self.local_by_asset.get(&item.asset) {
+                Some(local_path) => {
+                    body.push_str("local ");
+                    body.push_str(&local_path.to_string_lossy());
+                }
+                None => {
+                    body.push_str("asset ");
+                    body.push_str(&item.asset.to_string());
+                }
+            }
+            body.push('\n');
+        }
+        let _ = crate::durable::write_file(&path, body);
+    }
+
+    /// Read the queue back. Called once at startup, before the catalog
+    /// necessarily has anything loaded -- a store-asset line that cannot
+    /// resolve yet is silently dropped rather than retried, the same
+    /// "refuse a position that parses but cannot mean one" rule the marks
+    /// reader already follows. A local-file line does not depend on the
+    /// catalog at all and always resolves if the file is still there.
+    fn load_queue(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::queue_path()) else { return };
+        for line in body.lines() {
+            let Some((kind, value)) = line.split_once(' ') else { continue };
+            let resolved = match kind {
+                "local" => self.local_track_item(Path::new(value)),
+                "asset" => {
+                    AssetId::from_str(value).ok().and_then(|asset| self.track_item_for_asset(asset))
+                }
+                _ => None,
+            };
+            if let Some(item) = resolved {
+                let cmds = self.decks.enqueue(item);
+                self.run_deck_cmds(cx, cmds);
+            }
+        }
+    }
+
     /// The columns dialog's twelve rows: show tick, name, and the pair that
     /// moves it. One row per column, in the edited list's current order.
     const PREP_COL_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
-        &'static [LiveId]); 12] = [
+        &'static [LiveId]); 13] = [
         (ids!(prep_col_show0), ids!(prep_col_label0), ids!(prep_col_up0), ids!(prep_col_down0)),
         (ids!(prep_col_show1), ids!(prep_col_label1), ids!(prep_col_up1), ids!(prep_col_down1)),
         (ids!(prep_col_show2), ids!(prep_col_label2), ids!(prep_col_up2), ids!(prep_col_down2)),
@@ -19988,6 +20176,12 @@ p2 {}
             ids!(prep_col_label11),
             ids!(prep_col_up11),
             ids!(prep_col_down11),
+        ),
+        (
+            ids!(prep_col_show12),
+            ids!(prep_col_label12),
+            ids!(prep_col_up12),
+            ids!(prep_col_down12),
         ),
     ];
 
@@ -20402,12 +20596,14 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\nwave_head {}\nwave_warn {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
             self.key_notation.index(),
             self.wave_zoom_secs,
+            self.wave_head_fraction,
+            self.wave_warn_secs,
             self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
@@ -20441,6 +20637,26 @@ p2 {}
                             .clamp(
                                 crate::music_view::ZOOM_MIN_SECS,
                                 crate::music_view::ZOOM_MAX_SECS,
+                            )
+                    }
+                    "wave_head" => {
+                        self.wave_head_fraction = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::HEAD_FRACTION_DEFAULT)
+                            .clamp(
+                                crate::music_view::HEAD_FRACTION_MIN,
+                                crate::music_view::HEAD_FRACTION_MAX,
+                            )
+                    }
+                    "wave_warn" => {
+                        self.wave_warn_secs = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::WARN_SECS_DEFAULT)
+                            .clamp(
+                                crate::music_view::WARN_SECS_MIN,
+                                crate::music_view::WARN_SECS_MAX,
                             )
                     }
                     _ => self.console.apply_line(key, value),
@@ -24158,6 +24374,21 @@ p2 {}
     /// own marks differently would be a bug nobody could explain, and the
     /// binding path and the per-frame path are two callers of the same
     /// question.
+    /// The two edges the automation aims at, or nothing.
+    ///
+    /// `detected` is the whole of it. When the analysis cannot find a body
+    /// it still hands back numbers -- a fraction of the duration -- and on
+    /// a five minute record that guess looks exactly like a real intro and
+    /// outro. The strip draws it anyway, among the whole record where it
+    /// reads as one shape among four; a rule across the mixing lane saying
+    /// "the intro ends here" would be a measurement nobody took.
+    fn deck_body(state: &crate::decks::DeckState) -> Option<(f64, f64)> {
+        state
+            .shape
+            .filter(|shape| shape.detected)
+            .map(|shape| (shape.intro_end_secs, shape.outro_start_secs))
+    }
+
     fn deck_marks(
         state: &crate::decks::DeckState,
     ) -> (f64, Vec<(u16, f64, f64, u32)>, Vec<(f64, f64)>) {
@@ -24193,7 +24424,9 @@ p2 {}
             .unwrap_or(0);
         let state = self.decks.deck(deck);
         let (cue_secs, saved_slots, found_loops) = Self::deck_marks(state);
+        let body = Self::deck_body(state);
         let lane = WaveLane {
+            body,
             pyramid,
             stem_pyramid,
             cols,
@@ -24229,6 +24462,14 @@ p2 {}
         };
         // The strip is the same store at its deepest levels: one pyramid,
         // both views.
+        //
+        // The turns are bound here rather than pushed every frame because
+        // they are a fact about the record, settled when its analysis
+        // lands and never again -- and this runs when it lands.
+        let changes: Vec<f64> = self.deck_analysis[index]
+            .as_ref()
+            .map(|analysis| analysis.changes_secs.clone())
+            .unwrap_or_default();
         let strip_widget = self.ui.widget(cx, Self::overview_path(deck));
         if let Some(mut strip) = strip_widget.borrow_mut::<VjWaveOverview>() {
             strip.set_track(
@@ -24237,6 +24478,11 @@ p2 {}
                 self.deck_stem_tex[index].clone(),
                 cols,
             );
+            // Where the arrangement turns. The analysis has always worked
+            // these out and handed them to the automation alone, so a
+            // transition that bailed on a phrase boundary looked arbitrary
+            // -- the operator could not see the boundary it landed on.
+            strip.set_changes(cx, &changes);
         };
     }
 
@@ -24461,6 +24707,10 @@ p2 {}
             };
             let loop_on = state.loop_on();
             let (cue_secs, loop_slots, found_loops) = Self::deck_marks(state);
+            // Taken here with the rest, not read again further down: the
+            // loop makes `&mut self` calls after this point, and one more
+            // touch of `state` would hold its borrow across them.
+            let body = Self::deck_body(state);
             let loop_beats = state.loop_ticks;
             let loop_armed = state.loop_armed.is_some();
             let refined_by_beats = self.deck_analysis[index]
@@ -24547,8 +24797,8 @@ p2 {}
                 &refs.time,
                 &format!(
                     "{} / -{}",
-                    format_time(position),
-                    format_time((duration - position).max(0.0))
+                    crate::clock::playhead(position),
+                    crate::clock::playhead((duration - position).max(0.0))
                 ),
             );
             // This deck's QUANT chip mirrors the engine every pass
@@ -24744,6 +24994,8 @@ p2 {}
                 if !self.wave_zoom_applied {
                     self.wave_zoom_applied = true;
                     scroll.set_zoom(cx, self.wave_zoom_secs);
+                    scroll.set_head_fraction(cx, self.wave_head_fraction);
+                    scroll.set_warn_secs(cx, self.wave_warn_secs);
                 }
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
@@ -24751,6 +25003,7 @@ p2 {}
                 // The same marks the strip gets, from the same locals: the
                 // lane is the surface an operator actually mixes against,
                 // and it was the one that could not show them.
+                scroll.set_body(cx, deck, body);
                 scroll.set_cue_marker(cx, deck, cue_secs);
                 scroll.set_loop_slots(cx, deck, &loop_slots);
                 scroll.set_found_loops(cx, deck, &found_loops);
@@ -25245,6 +25498,7 @@ p2 {}
                 let (bpm, musical_key, key_order, key_fit, duration) =
                     self.row_analysis_cells(&key);
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                let added = self.row_added(&key);
                 let side = self
                     .music_model_tile(asset)
                     .and_then(|tile| tile.revision)
@@ -25264,6 +25518,7 @@ p2 {}
                     key_fit,
                     duration,
                     tags: String::new(),
+                    added,
                     stem: side.is_some_and(|side| side.stems.is_some()),
                     krk: side.is_some_and(|side| side.lyrics.is_some()),
                     badge: format!("{}", index + 1),
@@ -25282,6 +25537,9 @@ p2 {}
             // Just the number: the header now also carries the set-policy
             // controls, and the count reads on its own.
             self.set_label(cx, 0xffff, &label, &format!("{count}"));
+            // Whichever of the queue's dozen mutation sites caused this,
+            // this is the one place they all funnel through -- library-c11.
+            self.save_queue();
         }
     }
 
@@ -25409,13 +25667,45 @@ p2 {}
             let secs = self.row_summary(key)?.duration_secs;
             track_tags::bitrate_from_size(bytes, secs)
         });
+        // A store track whose bytes are not here yet has no file to read
+        // tags from at all -- `row_tags` above already said so with two
+        // blank strings. The catalog's own hit carried an artist and an
+        // album alongside it, so the row is not left blank for however
+        // long the preprocessing lane takes to fetch the file.
+        let (artist, album) = match key {
+            TrackKey::Asset(asset) if tags.artist.is_empty() && tags.album.is_empty() => {
+                match self.music_model_tile(*asset) {
+                    Some(tile) => (tile.artist.clone(), tile.album.clone()),
+                    None => (tags.artist, tags.album),
+                }
+            }
+            _ => (tags.artist, tags.album),
+        };
         (
-            tags.artist,
-            tags.album,
+            artist,
+            album,
             tags.genre,
             tags.year,
             bitrate.map(|rate| format!("{rate}k")).unwrap_or_default(),
         )
+    }
+
+    /// When this row's track was added, `YYYY-MM-DD`: a local file's own
+    /// filesystem timestamp, or the catalog's `updated_ms` for a store
+    /// track. Blank when this machine has neither — a store tile whose
+    /// hit has not resolved yet, or a local file whose metadata call
+    /// failed.
+    fn row_added(&self, key: &TrackKey) -> String {
+        let ms = match key {
+            TrackKey::Local(path) => std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(0),
+            TrackKey::Asset(asset) => self.music_model.updated_ms(*asset) as i64,
+        };
+        crate::music_view::format_added_date(ms)
     }
 
     /// The two analysed columns as the cells want them: blank when nothing
@@ -25513,6 +25803,7 @@ p2 {}
                     let (bpm, musical_key, key_order, key_fit, duration) =
                     self.row_analysis_cells(&key);
                     let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                    let added = self.row_added(&key);
                     // The file's own title tag beats its filename — the
                     // filename is a naming convention, the tag is what the
                     // record says it is.
@@ -25538,6 +25829,7 @@ p2 {}
                             .parent()
                             .map(|dir| dir.to_string_lossy().to_string())
                             .unwrap_or_default(),
+                        added,
                         // A local file's stems/transcript are keyed by a
                         // digest this machine only learns on decode; the
                         // marks stay blank rather than guess.
@@ -25589,6 +25881,7 @@ p2 {}
                     }
                 }
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                let added = self.row_added(&key);
                 TrackRowEntry {
                     key,
                     license: String::new(),
@@ -25604,6 +25897,7 @@ p2 {}
                     key_fit,
                     duration,
                     tags: alias.unwrap_or_default(),
+                    added,
                     stem,
                     krk,
                     badge,
@@ -25689,6 +25983,9 @@ p2 {}
             Some(Column::Stem) => rows.sort_by_key(|row| row.stem),
             Some(Column::Krk) => rows.sort_by_key(|row| row.krk),
             Some(Column::Tags) => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
+            // `YYYY-MM-DD` sorts chronologically as plain text — no
+            // separate machine-sortable field needed the way KEY has one.
+            Some(Column::Added) => rows.sort_by(|a, b| text(&a.added, &b.added)),
         }
         if self.music_sort_desc {
             rows.reverse();
@@ -27612,6 +27909,17 @@ p2 {}
             // suggestion by cancelling it would be a poor joke.
             self.autopilot.accept();
         }
+        if self.ui.button(cx, ids!(auto_fade_now)).clicked(actions) {
+            self.autopilot.force_fade_now();
+        }
+        if self.ui.button(cx, ids!(auto_skip)).clicked(actions) {
+            // Deferred to the next pump, which already builds the AutoObs
+            // this needs -- see auto_skip_requested's own comment.
+            self.auto_skip_requested = true;
+        }
+        if self.ui.button(cx, ids!(auto_add_random)).clicked(actions) {
+            self.add_random_track(cx);
+        }
         if self.ui.button(cx, ids!(auto_curve)).clicked(actions) {
             let at = Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0);
             self.set_curve = Curve::ALL[(at + 1) % Curve::ALL.len()];
@@ -28082,6 +28390,11 @@ p2 {}
             fade_secs_knob: self.xfade_secs,
             leader_hint: self.decks.sync_leader(),
         };
+        if std::mem::take(&mut self.auto_skip_requested) {
+            for cmd in self.autopilot.skip_next(&obs) {
+                self.run_auto_cmd(cx, cmd);
+            }
+        }
         for cmd in self.autopilot.tick(&obs) {
             self.run_auto_cmd(cx, cmd);
         }
@@ -28826,9 +29139,19 @@ p2 {}
                     }
                     index
                 }
-                TrackListHit::Queue(index) => {
+                TrackListHit::Queue(index, modifiers) => {
                     if let Some(item) = self.track_item_at(index) {
-                        let cmds = self.decks.enqueue(item);
+                        // Shift: play this one next, ahead of whatever is
+                        // already waiting. Control: drop the rest of the
+                        // queue and start over with just this track. Plain:
+                        // the queue's ordinary tail add.
+                        let cmds = if modifiers.control {
+                            self.decks.enqueue_replacing(item)
+                        } else if modifiers.shift {
+                            self.decks.enqueue_next(item)
+                        } else {
+                            self.decks.enqueue(item)
+                        };
                         self.run_deck_cmds(cx, cmds);
                         self.queue_rows_dirty = true;
                     }
@@ -28898,7 +29221,7 @@ p2 {}
                 TrackListHit::PreviewClose => self.stop_preview(cx),
                 TrackListHit::PreviewLoad(deck) => self.load_preview_to_deck(cx, deck),
                 TrackListHit::PreviewQueue => self.queue_preview(cx),
-                TrackListHit::Pick(..) | TrackListHit::Queue(_) => {}
+                TrackListHit::Pick(..) | TrackListHit::Queue(..) => {}
             }
         }
     }
@@ -28958,24 +29281,66 @@ p2 {}
     fn track_item_at(&mut self, index: usize) -> Option<TrackItem> {
         let entry = self.music_rows.get(index)?.clone();
         match entry.key {
-            TrackKey::Asset(asset) => {
-                let tile = self.music_model.tile(&asset)?;
-                let (revision, media) = (tile.revision?, tile.media.clone()?);
-                Some(TrackItem {
-                    asset,
-                    revision,
-                    title: tile.title.clone(),
-                    media_blob: media.blob,
-                    media_len: media.len,
-                    media: media.media,
-                    side: self
-                        .track_side_channels
-                        .get(&revision)
-                        .cloned()
-                        .unwrap_or_default(),
-                })
-            }
+            TrackKey::Asset(asset) => self.track_item_for_asset(asset),
             TrackKey::Local(path) => self.local_track_item(&path),
+        }
+    }
+
+    /// The same resolution `track_item_at`'s `TrackKey::Asset` arm does,
+    /// entered from a bare id instead of a picked row -- what a saved
+    /// queue restores through, since the catalog is the authority on a
+    /// store asset's current revision and a saved id could be stale.
+    fn track_item_for_asset(&mut self, asset: AssetId) -> Option<TrackItem> {
+        let tile = self.music_model.tile(&asset)?;
+        let (revision, media) = (tile.revision?, tile.media.clone()?);
+        Some(TrackItem {
+            asset,
+            revision,
+            title: tile.title.clone(),
+            media_blob: media.blob,
+            media_len: media.len,
+            media: media.media,
+            side: self
+                .track_side_channels
+                .get(&revision)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The auto-DJ's "add random": one track from the current library
+    /// list that is not already queued. A one-shot pick needs no
+    /// persistent shuffle state of its own -- seeded straight off the
+    /// wall clock, the same `xorshift64star` the queue's own shuffle
+    /// draw uses, reused rather than a second RNG invented beside it.
+    /// A local file is not checked against the queue (its would-be id
+    /// is a path hash `enqueue`'s own dedupe would still catch, so at
+    /// worst this pick is refused there, not doubled).
+    fn add_random_track(&mut self, cx: &mut Cx) {
+        let queued: std::collections::HashSet<AssetId> =
+            self.decks.queue().iter().map(|item| item.asset).collect();
+        let candidates: Vec<usize> = self
+            .music_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| match row.key {
+                TrackKey::Asset(asset) => !queued.contains(&asset),
+                TrackKey::Local(_) => true,
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.subsec_nanos() as u64)
+            .unwrap_or(1)
+            .max(1);
+        let pick = candidates[(crate::decks::xorshift64star(seed) as usize) % candidates.len()];
+        if let Some(item) = self.track_item_at(pick) {
+            let cmds = self.decks.enqueue(item);
+            self.run_deck_cmds(cx, cmds);
         }
     }
 }
@@ -29164,6 +29529,11 @@ impl MatchEvent for App {
             self.loop_tx = Some(tx);
             self.loop_results = Some(results);
         }
+        // Not called directly: a store-asset line needs the catalog to
+        // already know the tile it names, and at handle_startup itself
+        // the store connection has not necessarily produced one yet. The
+        // timer below gives it a head start.
+        self.queue_load_timer = cx.start_timeout(QUEUE_LOAD_DELAY_SECS);
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
@@ -32011,6 +32381,9 @@ impl AppMain for App {
             if self.knob_readouts[index].timer.is_event(event).is_some() {
                 self.restore_knob_legend(cx, index);
             }
+        }
+        if self.queue_load_timer.is_event(event).is_some() {
+            self.load_queue(cx);
         }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {

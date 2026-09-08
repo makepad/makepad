@@ -97,6 +97,13 @@ pub struct Tile {
     pub source: Option<TileMedia>,
     pub thumb: Option<TileThumb>,
     pub state: TileState,
+    /// The catalog's own artist/album — the DJ tab's fallback for a track
+    /// whose bytes are not on this machine yet, so its row is not blank
+    /// until the preprocessing lane happens to fetch it. Blank for a tile
+    /// this session generated rather than found on a page (nothing to
+    /// carry yet) and for every non-music lane (nothing reads it there).
+    pub artist: String,
+    pub album: String,
 }
 
 /// LEGACY ONLY: whether a tile's THUMBNAIL may be a packed animation strip,
@@ -193,6 +200,11 @@ pub struct HitRow {
     /// Server-side last-update stamp: the strip sorts newest-first on it,
     /// so tonight's generations lead from the left.
     pub updated_ms: u64,
+    /// The catalog's own artist/album, for a lane that reads them (the
+    /// DJ tab's rows) -- blank for a hit whose server never sent them,
+    /// same as every other optional string this struct carries.
+    pub artist: String,
+    pub album: String,
 }
 
 /// Which shelf a catalog row belongs on, classified the way the Asset UI's
@@ -438,6 +450,15 @@ impl<C: Clone> BrowseModel<C> {
         &self.tiles
     }
 
+    /// When this asset last moved in the strip's own ordering: the
+    /// server's `updated_ms` for a hit that arrived on a page, or a
+    /// locally-assigned monotonic stamp for one this session generated
+    /// and is still waiting on the server to confirm. `0` for an asset
+    /// this model has never placed.
+    pub fn updated_ms(&self, asset: AssetId) -> u64 {
+        self.stamps.get(&asset).copied().unwrap_or(0)
+    }
+
     /// How many tile resolves this surface may run at once. Returns the
     /// commands the widening frees, so raising the width does not have to
     /// wait for the next page to land.
@@ -614,6 +635,8 @@ impl<C: Clone> BrowseModel<C> {
             source: None,
             thumb: None,
             state: TileState::Listed,
+            artist: String::new(),
+            album: String::new(),
         });
         if count_total {
             self.total = self.total.saturating_add(1);
@@ -795,6 +818,8 @@ impl<C: Clone> BrowseModel<C> {
                     known.alias = hit.alias;
                     known.live = hit.live;
                     known.kind = kind;
+                    known.artist = hit.artist;
+                    known.album = hit.album;
                     self.tiles.push(known);
                 }
                 _ => {
@@ -809,6 +834,8 @@ impl<C: Clone> BrowseModel<C> {
                         source: None,
                         thumb: None,
                         state: TileState::Listed,
+                        artist: hit.artist,
+                        album: hit.album,
                     });
                     self.resolve_queue.push_back(hit.asset);
                 }
@@ -1187,6 +1214,8 @@ mod tests {
             live: true,
             kind: None,
             updated_ms: seed as u64,
+            artist: String::new(),
+            album: String::new(),
         }
     }
 
@@ -1235,6 +1264,15 @@ mod tests {
             .manifest_arrived(g1, hit(2).asset, rev(9), Some(media(1)), None, None)
             .is_empty());
         assert_eq!(m.tiles()[0].state, TileState::Resolving);
+    }
+
+    #[test]
+    fn updated_ms_answers_the_hits_own_stamp_and_zero_for_a_stranger() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g1 = search_gen(&m.refresh());
+        m.page_arrived(g1, 0, true, vec![hit(7)], 1, None);
+        assert_eq!(m.updated_ms(hit(7).asset), 7);
+        assert_eq!(m.updated_ms(hit(9).asset), 0, "never placed reads as no stamp");
     }
 
     #[test]

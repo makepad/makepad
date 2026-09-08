@@ -198,7 +198,7 @@ pub fn crossfader_gains(pos: f32, curve: FadeCurve) -> (f32, f32) {
 }
 
 /// xorshift64*: tiny, deterministic, and plenty for picking queue rows.
-fn xorshift64star(mut x: u64) -> u64 {
+pub(crate) fn xorshift64star(mut x: u64) -> u64 {
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
@@ -2074,9 +2074,12 @@ pub struct DeckEngine {
     /// startup; tests seed a constant, which is what keeps the draw
     /// assertable.
     shuffle_rng: u64,
-    /// The asset the last hand-back pushed, spared from the very next
-    /// shuffle draw so a two-track queue alternates instead of repeating.
-    last_requeued: Option<AssetId>,
+    /// Assets a shuffle draw or a hand-back sent to a deck recently, oldest
+    /// first, capped at `SHUFFLE_RECENCY_WINDOW`. Either way the record
+    /// was just playing, and picking it again immediately is exactly what
+    /// a shuffle exists to avoid -- a two-track queue still alternates,
+    /// and a six-track one does not repeat inside two laps of it.
+    recent_picks: Vec<AssetId>,
     /// The tracks the operator's retire button cleared, newest first,
     /// bounded by EJECT_HISTORY. This is the MEMORY and it lives as long as
     /// the app does; nothing expires it on a timer and nothing writes it to
@@ -2132,7 +2135,7 @@ impl Default for DeckEngine {
             repeat: false,
             shuffle: false,
             shuffle_rng: 1,
-            last_requeued: None,
+            recent_picks: Vec::new(),
             ejected: Vec::new(),
             last_eject_ms: [None; 2],
             frozen: [false; 2],
@@ -6063,14 +6066,39 @@ impl DeckEngine {
         Vec::new()
     }
 
+    /// Put a track at the FRONT of the queue: the next free deck gets this
+    /// one before anything already waiting. A duplicate is moved rather
+    /// than doubled, so "play this next" always means exactly one row, at
+    /// the front, whether or not it was already queued somewhere else.
+    pub fn enqueue_next(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        self.queue.retain(|queued| queued.asset != item.asset);
+        self.queue.insert(0, item);
+        if self.auto_load_queue {
+            return self.pump_queue();
+        }
+        Vec::new()
+    }
+
+    /// Clear whatever was queued and put just this one track in its place.
+    /// The operator's own "start over" gesture, not a merge with what was
+    /// there -- a top-up would leave old picks the operator meant to drop.
+    pub fn enqueue_replacing(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        self.queue.clear();
+        self.queue.push(item);
+        if self.auto_load_queue {
+            return self.pump_queue();
+        }
+        Vec::new()
+    }
+
     /// A finished track back onto the tail. Never pumps (the hand-back runs
     /// its single deliberate pump afterwards) and keeps the dedupe: a track
     /// the operator already re-queued is not doubled.
     pub fn requeue(&mut self, item: TrackItem) {
-        // The spare names the just-finished asset whether or not the push
-        // happens: a track the operator already re-queued mid-play must
-        // still be spared from the very next shuffle draw.
-        self.last_requeued = Some(item.asset);
+        // Remembered whether or not the push happens: a track the operator
+        // already re-queued mid-play must still be spared from the very
+        // next shuffle draw.
+        self.remember_recent_pick(item.asset);
         if self.queue.iter().any(|queued| queued.asset == item.asset) {
             return;
         }
@@ -6081,16 +6109,25 @@ impl DeckEngine {
         self.shuffle_rng = seed.max(1);
     }
 
+    /// How many recent picks the shuffle spares from an immediate repeat.
+    const SHUFFLE_RECENCY_WINDOW: usize = 6;
+
+    fn remember_recent_pick(&mut self, asset: AssetId) {
+        self.recent_picks.push(asset);
+        if self.recent_picks.len() > Self::SHUFFLE_RECENCY_WINDOW {
+            self.recent_picks.remove(0);
+        }
+    }
+
     /// Which queue index the next pump takes: the head, or a shuffle draw
-    /// that spares the track the last hand-back pushed (unless it is all
-    /// there is).
+    /// that spares whatever is still inside the recency window (unless
+    /// sparing all of it would leave nothing to draw from).
     fn pick_index(&mut self) -> usize {
         if !self.shuffle || self.queue.len() < 2 {
             return 0;
         }
-        let spare = self.last_requeued;
         let candidates: Vec<usize> = (0..self.queue.len())
-            .filter(|&index| spare != Some(self.queue[index].asset))
+            .filter(|&index| !self.recent_picks.contains(&self.queue[index].asset))
             .collect();
         let pool = if candidates.is_empty() {
             (0..self.queue.len()).collect()
@@ -6148,8 +6185,8 @@ impl DeckEngine {
             return Vec::new();
         };
         let index = self.pick_index();
-        self.last_requeued = None;
         let item = self.queue.remove(index);
+        self.remember_recent_pick(item.asset);
         let target = match deck {
             DeckId::A => DeckTarget::A,
             DeckId::B => DeckTarget::B,
@@ -10105,6 +10142,57 @@ mod tests {
     }
 
     #[test]
+    fn play_next_moves_a_track_to_the_front_rather_than_doubling_it() {
+        let mut engine = DeckEngine::new();
+        // Both decks busy, so the queue actually holds what it is given.
+        let (deck_a, gen_a) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck_a, gen_a, 100.0);
+        engine.play_pause(DeckId::A);
+        let (deck_b, gen_b) = load_gen(&engine.click(item(2), DeckTarget::B));
+        engine.track_ready(deck_b, gen_b, 100.0);
+        engine.play_pause(DeckId::B);
+
+        engine.enqueue(item(3));
+        engine.enqueue(item(4));
+        assert_eq!(engine.queue().len(), 2, "both decks busy: nothing pumps yet");
+
+        engine.enqueue_next(item(5));
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            vec![item(5).asset, item(3).asset, item(4).asset],
+            "the new track leads, the rest keep their order"
+        );
+
+        // Already-queued and asked for again: it MOVES to the front, the
+        // queue does not grow and the row is not doubled.
+        engine.enqueue_next(item(4));
+        assert_eq!(engine.queue().len(), 3, "moved, not duplicated");
+        assert_eq!(engine.queue()[0].asset, item(4).asset);
+    }
+
+    #[test]
+    fn replacing_the_queue_drops_everything_that_was_there() {
+        let mut engine = DeckEngine::new();
+        let (deck_a, gen_a) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck_a, gen_a, 100.0);
+        engine.play_pause(DeckId::A);
+        let (deck_b, gen_b) = load_gen(&engine.click(item(2), DeckTarget::B));
+        engine.track_ready(deck_b, gen_b, 100.0);
+        engine.play_pause(DeckId::B);
+
+        engine.enqueue(item(3));
+        engine.enqueue(item(4));
+        assert_eq!(engine.queue().len(), 2);
+
+        engine.enqueue_replacing(item(5));
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            vec![item(5).asset],
+            "a fresh start, not a merge with what was queued"
+        );
+    }
+
+    #[test]
     fn a_queued_row_can_be_carried_to_another_spot_in_the_order() {
         let mut engine = DeckEngine::new();
         // Both decks busy, so the queue holds everything it is given.
@@ -11519,6 +11607,63 @@ mod tests {
             other => panic!("expected a load, got {other:?}"),
         };
         assert_eq!(loaded, "track 4", "the deduped requeue is spared the draw");
+    }
+
+    /// library-c10: a real recency WINDOW, not just the single most recent
+    /// pick. Deterministic, not seed-dependent: put exactly six of the
+    /// queue's seven tracks in the recency window, leaving exactly one
+    /// legal candidate, and check every possible RNG state lands on it --
+    /// a test that merely samples a few random draws could pass by luck
+    /// even with a broken (too-narrow) window, as an earlier version of
+    /// this test did.
+    #[test]
+    fn shuffle_excludes_every_track_still_inside_the_recency_window() {
+        let mut engine = DeckEngine::new();
+        engine.shuffle = true;
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 10.0, true);
+        engine.auto_load_queue = false;
+        for n in 2..=8 {
+            engine.enqueue(item(n));
+        }
+        assert_eq!(engine.queue().len(), 7);
+        // Six of the seven queued tracks were "just played" -- exactly the
+        // window's width. Only track 8 is a legal draw.
+        for n in 2..=7 {
+            engine.remember_recent_pick(item(n).asset);
+        }
+        for seed in 1..200u64 {
+            engine.seed_shuffle(seed);
+            let index = engine.pick_index();
+            assert_eq!(
+                engine.queue()[index].asset,
+                item(8).asset,
+                "seed {seed}: only track 8 is outside the recency window"
+            );
+        }
+    }
+
+    /// The fallback: spared this hard, a queue this small has nothing
+    /// left to draw from, and the picker must fall back to the whole
+    /// pool rather than deadlock or panic.
+    #[test]
+    fn shuffle_falls_back_to_the_whole_pool_once_recency_would_empty_it() {
+        let mut engine = DeckEngine::new();
+        engine.shuffle = true;
+        engine.seed_shuffle(5);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 10.0, true);
+        engine.auto_load_queue = false;
+        engine.enqueue(item(2));
+        engine.enqueue(item(3));
+        // Both queued tracks are inside the window -- sparing both would
+        // leave nothing to draw.
+        engine.remember_recent_pick(item(2).asset);
+        engine.remember_recent_pick(item(3).asset);
+        let index = engine.pick_index();
+        assert!(index < engine.queue().len(), "a valid index, not a deadlock");
     }
 
     #[test]

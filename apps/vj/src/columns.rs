@@ -49,9 +49,10 @@ pub enum Column {
     Stem,
     Krk,
     Tags,
+    Added,
 }
 
-pub const ALL: [Column; 12] = [
+pub const ALL: [Column; 13] = [
     Column::Title,
     Column::Artist,
     Column::Album,
@@ -64,6 +65,7 @@ pub const ALL: [Column; 12] = [
     Column::Stem,
     Column::Krk,
     Column::Tags,
+    Column::Added,
 ];
 
 /// How wide a column wants to be. Mirrors the layout engine's `Size`:
@@ -95,6 +97,7 @@ impl Column {
             Column::Stem => "stem",
             Column::Krk => "krk",
             Column::Tags => "tags",
+            Column::Added => "added",
         }
     }
 
@@ -117,6 +120,7 @@ impl Column {
             Column::Stem => "STEM",
             Column::Krk => "KRK",
             Column::Tags => "TAGS",
+            Column::Added => "ADDED",
         }
     }
 
@@ -139,6 +143,7 @@ impl Column {
             Column::Stem => "S",
             Column::Krk => "K",
             Column::Tags => "TAG",
+            Column::Added => "ADD",
         }
     }
 
@@ -164,6 +169,7 @@ impl Column {
             Column::Stem => ColumnWidth::Fixed(36.0),
             Column::Krk => ColumnWidth::Fixed(30.0),
             Column::Tags => ColumnWidth::Fill { min: None, max: Some(190.0) },
+            Column::Added => ColumnWidth::Fixed(100.0),
         }
     }
 
@@ -194,6 +200,7 @@ impl Column {
             Column::Stem => 9,
             Column::Krk => 10,
             Column::Tags => 11,
+            Column::Added => 12,
         }
     }
 }
@@ -207,7 +214,7 @@ impl Column {
 /// The first nine are exactly what the listing draws now, in the order it
 /// draws them; the four that were added with this dialog sit at the end,
 /// hidden, so an operator who never opens the dialog sees no change at all.
-const EXPLORER_ORDER: [Column; 12] = [
+const EXPLORER_ORDER: [Column; 13] = [
     Column::Title,
     Column::Artist,
     Column::Album,
@@ -220,6 +227,7 @@ const EXPLORER_ORDER: [Column; 12] = [
     Column::Genre,
     Column::Year,
     Column::Bitrate,
+    Column::Added,
 ];
 
 const EXPLORER_SHOWN: [Column; 8] = [
@@ -238,7 +246,7 @@ const EXPLORER_SHOWN: [Column; 8] = [
 /// Only three columns fit honestly, and the operator asked for tempo and key
 /// to be two of them: the question being answered while looking at the set
 /// list is "does the next one mix", and that is what answers it.
-const QUEUE_ORDER: [Column; 12] = [
+const QUEUE_ORDER: [Column; 13] = [
     Column::Title,
     Column::Bpm,
     Column::Key,
@@ -251,6 +259,7 @@ const QUEUE_ORDER: [Column; 12] = [
     Column::Stem,
     Column::Krk,
     Column::Tags,
+    Column::Added,
 ];
 
 const QUEUE_SHOWN: [Column; 3] = [Column::Title, Column::Bpm, Column::Key];
@@ -267,7 +276,7 @@ pub struct ColumnLayout {
     /// Indexed by [`Column::index`], not parallel to `order`: reordering must
     /// not disturb what is shown, and keeping visibility in its own fixed slot
     /// is what makes that impossible to get wrong.
-    shown: [bool; 12],
+    shown: [bool; 13],
 }
 
 impl ColumnLayout {
@@ -280,7 +289,7 @@ impl ColumnLayout {
     }
 
     fn build(order: &[Column], shown: &[Column]) -> ColumnLayout {
-        let mut out = ColumnLayout { order: ColumnLayout::seal(order.to_vec()), shown: [false; 12] };
+        let mut out = ColumnLayout { order: ColumnLayout::seal(order.to_vec()), shown: [false; 13] };
         for column in shown {
             out.shown[column.index()] = true;
         }
@@ -384,7 +393,7 @@ impl ColumnLayout {
     /// to a bad file than a listing showing none.
     pub fn from_text(text: &str) -> ColumnLayout {
         let mut order: Vec<Column> = Vec::with_capacity(ALL.len());
-        let mut shown = [false; 12];
+        let mut shown = [false; 13];
         for token in text.split(',') {
             let token = token.trim();
             let (hidden, slug) = match token.strip_prefix('-') {
@@ -459,7 +468,7 @@ mod tests {
         }
         assert_eq!(
             ColumnLayout::queue_default().to_text(),
-            "title,bpm,key,-time,-artist,-album,-genre,-year,-bitrate,-stem,-krk,-tags",
+            "title,bpm,key,-time,-artist,-album,-genre,-year,-bitrate,-stem,-krk,-tags,-added",
         );
     }
 
@@ -495,10 +504,10 @@ mod tests {
         );
         assert_eq!(
             slugs(&layout.order()[8..]),
-            vec!["album", "genre", "year", "bitrate"],
+            vec!["album", "genre", "year", "bitrate", "added"],
             "the columns this build added land at the end",
         );
-        for column in [Column::Album, Column::Genre, Column::Year, Column::Bitrate] {
+        for column in [Column::Album, Column::Genre, Column::Year, Column::Bitrate, Column::Added] {
             assert!(!layout.is_visible(column), "a new column does not appear unasked");
         }
         assert_eq!(slugs(&layout.visible()).len(), 8);
@@ -576,7 +585,7 @@ mod tests {
             slugs(layout.order()),
             vec![
                 "title", "album", "artist", "bpm", "key", "time", "stem", "krk", "tags", "genre",
-                "year", "bitrate",
+                "year", "bitrate", "added",
             ],
             "artist and album swapped, nothing else moved",
         );

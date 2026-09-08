@@ -647,6 +647,8 @@ mod tests {
             } else {
                 crate::catalog::TileState::Listed
             },
+            artist: String::new(),
+            album: String::new(),
         }
     }
 
