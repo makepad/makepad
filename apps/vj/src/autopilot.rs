@@ -397,6 +397,49 @@ impl AutoPilot {
         }
     }
 
+    /// The operator's own "go now": an armed transition stops waiting for
+    /// its planned point and fires -- with its own prep pass first, same
+    /// as ever -- on the very next tick, wherever the outgoing record
+    /// actually is. `accepted` too, so a suggest-only setup does not
+    /// still sit on "ready — go?" after the operator just said go.
+    /// Nothing to force when there is no plan yet.
+    pub fn force_fade_now(&mut self) {
+        if let State::Planned(plan) = &mut self.state {
+            plan.fire_at_src = 0.0;
+            self.accepted = true;
+        }
+    }
+
+    /// The operator's own "not that one": abandon whatever is planned (or
+    /// nothing, if none is) and hand the OUT deck back for its next queued
+    /// track early, the same command the deck running out already sends.
+    /// A fade already in flight is left alone -- it is already the
+    /// transition mid-flight, and cutting audio out from under a running
+    /// blend is a different, more invasive thing than skipping ahead of
+    /// one that has not started.
+    pub fn skip_next(&mut self, obs: &AutoObs) -> Vec<AutoCmd> {
+        if !self.on {
+            return Vec::new();
+        }
+        let out = match &self.state {
+            State::Planned(plan) => plan.out,
+            State::Fading(_) => return Vec::new(),
+            State::Idle => {
+                let loaded_playing =
+                    |d: DeckId| obs.deck(d).load == AutoLoad::Loaded && obs.deck(d).playing;
+                match (loaded_playing(DeckId::A), loaded_playing(DeckId::B)) {
+                    (true, false) => DeckId::A,
+                    (false, true) => DeckId::B,
+                    // Neither or both playing: no single record to name.
+                    _ => return Vec::new(),
+                }
+            }
+        };
+        self.state = State::Idle;
+        self.start_pending = true;
+        vec![AutoCmd::HandBack { retire: out, requeue: true }]
+    }
+
     /// Whether a transition is sitting waiting to be told to go.
     pub fn awaiting(&self) -> bool {
         self.suggest_only
@@ -1284,6 +1327,70 @@ mod tests {
             assert!(w.tick(&mut pilot).is_empty(), "one transition per load");
         }
         assert_eq!(pilot.status(), "played, riding out");
+    }
+
+    #[test]
+    fn force_fade_now_fires_a_planned_transition_immediately() {
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        // Deck A is nowhere near its outro (280) or even its own prep
+        // point: left alone this would run for hundreds of ticks first.
+        w.obs.decks[0].position_secs = 30.0;
+        // Get the plan built (Idle -> Planned) without yet reaching prep.
+        w.tick(&mut pilot);
+        pilot.force_fade_now();
+        let (cmds, ticks) = w.run_until_cmds(&mut pilot, 5);
+        assert!(
+            cmds.iter().any(|c| matches!(c, AutoCmd::BeginFade { to: DeckId::B, .. })),
+            "expected a fade among {cmds:?}"
+        );
+        assert!(ticks < 5, "fired within a couple of ticks of being forced, not hundreds");
+    }
+
+    #[test]
+    fn force_fade_now_does_nothing_with_no_plan_to_force() {
+        let mut pilot = AutoPilot::new();
+        pilot.set_on(true);
+        assert!(matches!(pilot.state, State::Idle));
+        // Nothing armed yet. Must not panic, and must not conjure a plan
+        // (and therefore a fade) out of nothing.
+        pilot.force_fade_now();
+        assert!(matches!(pilot.state, State::Idle), "still nothing to force");
+    }
+
+    #[test]
+    fn skip_next_hands_back_the_planned_out_deck_without_a_fade() {
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        w.obs.decks[0].position_secs = 30.0;
+        w.tick(&mut pilot); // Idle -> Planned, well before prep or fire.
+        let cmds = pilot.skip_next(&w.obs);
+        assert_eq!(
+            cmds,
+            vec![AutoCmd::HandBack { retire: DeckId::A, requeue: true }],
+            "skips straight to a hand-back, no fade in between"
+        );
+        // The plan is gone: ticking again does not also fire a fade for
+        // the transition that was just skipped.
+        for _ in 0..10 {
+            let cmds = w.tick(&mut pilot);
+            assert!(
+                !cmds.iter().any(|c| matches!(c, AutoCmd::BeginFade { .. })),
+                "the skipped plan must not still fire: {cmds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skip_next_leaves_a_fade_already_running_alone() {
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        w.obs.decks[0].position_secs = 279.5;
+        w.run_until_cmds(&mut pilot, 40); // prep
+        let (cmds, _) = w.run_until_cmds(&mut pilot, 40); // fire
+        assert!(cmds.iter().any(|c| matches!(c, AutoCmd::BeginFade { .. })));
+        // A fade is now actually in flight: skip must not cut it.
+        assert!(pilot.skip_next(&w.obs).is_empty(), "a running fade is not interrupted");
     }
 
     #[test]

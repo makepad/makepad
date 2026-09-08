@@ -7778,6 +7778,11 @@ pub struct App {
     /// Same for the set list; see [`App::music_rows_dirty`].
     #[rust]
     queue_rows_dirty: bool,
+    /// SKIP pressed: consumed and cleared on the next `pump_autopilot`,
+    /// which is the one place that already has a fresh `AutoObs` built to
+    /// hand `AutoPilot::skip_next` -- building a second one just for the
+    /// click would duplicate what that function already does every pump.
+    auto_skip_requested: bool,
     /// Browsing local audio files instead of the store catalog.
     #[rust]
     music_local: bool,
@@ -27855,6 +27860,17 @@ p2 {}
             // suggestion by cancelling it would be a poor joke.
             self.autopilot.accept();
         }
+        if self.ui.button(cx, ids!(auto_fade_now)).clicked(actions) {
+            self.autopilot.force_fade_now();
+        }
+        if self.ui.button(cx, ids!(auto_skip)).clicked(actions) {
+            // Deferred to the next pump, which already builds the AutoObs
+            // this needs -- see auto_skip_requested's own comment.
+            self.auto_skip_requested = true;
+        }
+        if self.ui.button(cx, ids!(auto_add_random)).clicked(actions) {
+            self.add_random_track(cx);
+        }
         if self.ui.button(cx, ids!(auto_curve)).clicked(actions) {
             let at = Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0);
             self.set_curve = Curve::ALL[(at + 1) % Curve::ALL.len()];
@@ -28325,6 +28341,11 @@ p2 {}
             fade_secs_knob: self.xfade_secs,
             leader_hint: self.decks.sync_leader(),
         };
+        if std::mem::take(&mut self.auto_skip_requested) {
+            for cmd in self.autopilot.skip_next(&obs) {
+                self.run_auto_cmd(cx, cmd);
+            }
+        }
         for cmd in self.autopilot.tick(&obs) {
             self.run_auto_cmd(cx, cmd);
         }
@@ -29236,6 +29257,42 @@ p2 {}
                 .cloned()
                 .unwrap_or_default(),
         })
+    }
+
+    /// The auto-DJ's "add random": one track from the current library
+    /// list that is not already queued. A one-shot pick needs no
+    /// persistent shuffle state of its own -- seeded straight off the
+    /// wall clock, the same `xorshift64star` the queue's own shuffle
+    /// draw uses, reused rather than a second RNG invented beside it.
+    /// A local file is not checked against the queue (its would-be id
+    /// is a path hash `enqueue`'s own dedupe would still catch, so at
+    /// worst this pick is refused there, not doubled).
+    fn add_random_track(&mut self, cx: &mut Cx) {
+        let queued: std::collections::HashSet<AssetId> =
+            self.decks.queue().iter().map(|item| item.asset).collect();
+        let candidates: Vec<usize> = self
+            .music_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| match row.key {
+                TrackKey::Asset(asset) => !queued.contains(&asset),
+                TrackKey::Local(_) => true,
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.subsec_nanos() as u64)
+            .unwrap_or(1)
+            .max(1);
+        let pick = candidates[(crate::decks::xorshift64star(seed) as usize) % candidates.len()];
+        if let Some(item) = self.track_item_at(pick) {
+            let cmds = self.decks.enqueue(item);
+            self.run_deck_cmds(cx, cmds);
+        }
     }
 }
 

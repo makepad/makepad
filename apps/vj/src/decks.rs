@@ -198,7 +198,7 @@ pub fn crossfader_gains(pos: f32, curve: FadeCurve) -> (f32, f32) {
 }
 
 /// xorshift64*: tiny, deterministic, and plenty for picking queue rows.
-fn xorshift64star(mut x: u64) -> u64 {
+pub(crate) fn xorshift64star(mut x: u64) -> u64 {
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;

@@ -4012,6 +4012,18 @@ script_mod! {
                         auto_go := MusicButton{width: 42 height: 22 text: "GO"}
                         auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
                     }
+                    // Three verbs that act on the queue and the pending
+                    // transition directly, rather than configuring how
+                    // future ones get planned.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        auto_fade_now := MusicButton{width: 100 height: 22 text: "FADE NOW"}
+                        auto_skip := MusicButton{width: 78 height: 22 text: "SKIP"}
+                        auto_add_random := MusicButton{width: 100 height: 22 text: "+ RANDOM"}
+                    }
                     View{
                         width: Fill
                         height: Fit
