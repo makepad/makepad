@@ -115,30 +115,108 @@ impl Worker {
 #[derive(Clone, Copy)]
 enum Provider {
     Codex,
+    CodexYolo,
     Claude,
+    ClaudeYolo,
+    CodexResumeYolo,
+    ClaudeResumeYolo,
 }
 impl Provider {
+    const ALL: [Self; 6] = [
+        Self::Codex,
+        Self::CodexYolo,
+        Self::Claude,
+        Self::ClaudeYolo,
+        Self::CodexResumeYolo,
+        Self::ClaudeResumeYolo,
+    ];
+
     fn command(self) -> &'static str {
         match self {
-            Self::Codex => "codex",
-            Self::Claude => "claude",
+            Self::Codex | Self::CodexYolo | Self::CodexResumeYolo => "codex",
+            Self::Claude | Self::ClaudeYolo | Self::ClaudeResumeYolo => "claude",
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::CodexYolo | Self::CodexResumeYolo => "Codex --yolo",
+            Self::Claude => "Claude",
+            Self::ClaudeYolo | Self::ClaudeResumeYolo => "Claude --dangerously-skip-permissions",
+        }
+    }
+
+    fn is_resume(self) -> bool {
+        matches!(self, Self::CodexResumeYolo | Self::ClaudeResumeYolo)
+    }
+
+    fn args(self, resume: Option<&str>) -> Result<Vec<OsString>, String> {
+        Ok(match self {
+            Self::Codex | Self::Claude => Vec::new(),
+            Self::CodexYolo => vec!["--yolo".into()],
+            Self::ClaudeYolo => vec!["--dangerously-skip-permissions".into()],
+            Self::CodexResumeYolo => vec![
+                "resume".into(),
+                "--yolo".into(),
+                resume_token(resume.unwrap_or_default())?.into(),
+            ],
+            Self::ClaudeResumeYolo => vec![
+                "--dangerously-skip-permissions".into(),
+                "--resume".into(),
+                resume_token(resume.unwrap_or_default())?.into(),
+            ],
+        })
+    }
 }
+
+fn resume_token(input: &str) -> Result<&str, String> {
+    let token = input.trim();
+    if token.len() != 36
+        || !token.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err("Paste the session UUID only (not the resume command).".into());
+    }
+    Ok(token)
+}
+
 enum Choice {
     Quit,
     Attach(Session),
-    New(Provider),
+    New(Provider, Option<String>),
 }
 struct Confirmation {
     session: Session,
     yes: bool,
+}
+struct ResumePrompt {
+    provider: Provider,
+    token: String,
+    overflowed: bool,
+    error: String,
+}
+impl ResumePrompt {
+    fn new(provider: Provider) -> Self {
+        Self {
+            provider,
+            token: String::new(),
+            overflowed: false,
+            error: String::new(),
+        }
+    }
 }
 struct Menu {
     sessions: Vec<Session>,
     selected: usize,
     top: usize,
     confirmation: Option<Confirmation>,
+    resume: Option<ResumePrompt>,
     pending_stop: Option<Session>,
     busy: bool,
     stopping: bool,
@@ -152,6 +230,7 @@ impl Default for Menu {
             selected: 0,
             top: 0,
             confirmation: None,
+            resume: None,
             pending_stop: None,
             busy: false,
             stopping: false,
@@ -191,8 +270,8 @@ pub fn run(state: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
                 SessionLocation::open(&state, &session.id, false)
                     .and_then(|location| client::attach(&location, false))
             }
-            Choice::New(provider) => (|| {
-                let (program, args) = provider_command(provider)?;
+            Choice::New(provider, resume) => (|| {
+                let (program, args) = provider_command(provider, resume.as_deref())?;
                 let id = format!(
                     "{}-{}",
                     provider.command(),
@@ -221,7 +300,11 @@ pub fn run(state: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
     }
 }
 
-fn provider_command(provider: Provider) -> Result<(OsString, Vec<OsString>), String> {
+fn provider_command(
+    provider: Provider,
+    resume: Option<&str>,
+) -> Result<(OsString, Vec<OsString>), String> {
+    let provider_args = provider.args(resume)?;
     let name = provider.command();
     let paths: Vec<_> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
@@ -259,12 +342,14 @@ fn provider_command(provider: Provider) -> Result<(OsString, Vec<OsString>), Str
             }
             #[cfg(windows)]
             if path.extension().is_some_and(|ext| ext != "exe") {
+                let mut args = vec!["/d".into(), "/c".into(), name.into()];
+                args.extend(provider_args);
                 return Ok((
                     std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()),
-                    vec!["/d".into(), "/c".into(), name.into()],
+                    args,
                 ));
             }
-            return Ok((path.into_os_string(), Vec::new()));
+            return Ok((path.into_os_string(), provider_args));
         }
     }
     Err(format!(
@@ -308,7 +393,7 @@ impl Menu {
                                     creation
                                         .map(|n| sessions.len() + n)
                                         .unwrap_or(self.selected)
-                                        .min(sessions.len() + 1)
+                                        .min(sessions.len() + Provider::ALL.len() - 1)
                                 });
                             self.sessions = sessions;
                             if self.message == "Loading running agents…" {
@@ -358,7 +443,7 @@ impl Menu {
                 }
                 keys.push(&input);
             }
-            while let Some(key) = keys.next() {
+            while let Some(key) = keys.next(self.resume.is_some()) {
                 if size.0 < 44 || size.1 < 12 {
                     if matches!(key, Key::Quit) {
                         return Ok(Choice::Quit);
@@ -366,6 +451,48 @@ impl Menu {
                     continue;
                 }
                 if self.stopping {
+                    continue;
+                }
+                if let Some(prompt) = &mut self.resume {
+                    match key {
+                        Key::Text(ch) => {
+                            if prompt.token.len() < 128 {
+                                prompt.token.push(ch);
+                            } else {
+                                prompt.overflowed = true;
+                            }
+                            prompt.error.clear();
+                        }
+                        Key::Delete => {
+                            prompt.token.pop();
+                            prompt.error.clear();
+                            if prompt.token.is_empty() {
+                                prompt.overflowed = false;
+                            }
+                        }
+                        Key::Clear => *prompt = ResumePrompt::new(prompt.provider),
+                        Key::Enter => {
+                            if prompt.overflowed {
+                                prompt.error = "Token too long. Ctrl+U clears the field.".into();
+                            } else {
+                                match resume_token(&prompt.token) {
+                                    Ok(token) => {
+                                        let token = token.to_owned();
+                                        let provider = prompt.provider;
+                                        self.resume = None;
+                                        return Ok(Choice::New(provider, Some(token)));
+                                    }
+                                    Err(error) => prompt.error = error,
+                                }
+                            }
+                        }
+                        Key::Quit => {
+                            self.resume = None;
+                            keys.clear();
+                            break;
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 if let Some(confirm) = &mut self.confirmation {
@@ -392,19 +519,27 @@ impl Menu {
                 }
                 match key {
                     Key::Up => self.selected = self.selected.saturating_sub(1),
-                    Key::Down => self.selected = (self.selected + 1).min(self.sessions.len() + 1),
+                    Key::Down => {
+                        self.selected =
+                            (self.selected + 1).min(self.sessions.len() + Provider::ALL.len() - 1)
+                    }
                     Key::Enter => {
                         if let Some(session) = self.sessions.get(self.selected) {
                             return Ok(Choice::Attach(session.clone()));
                         }
-                        return Ok(Choice::New(if self.selected == self.sessions.len() {
-                            Provider::Codex
-                        } else {
-                            Provider::Claude
-                        }));
+                        if let Some(provider) =
+                            Provider::ALL.get(self.selected - self.sessions.len())
+                        {
+                            if provider.is_resume() {
+                                self.resume = Some(ResumePrompt::new(*provider));
+                                keys.clear();
+                                break;
+                            }
+                            return Ok(Choice::New(*provider, None));
+                        }
                     }
-                    Key::Codex => return Ok(Choice::New(Provider::Codex)),
-                    Key::Claude => return Ok(Choice::New(Provider::Claude)),
+                    Key::Codex => return Ok(Choice::New(Provider::Codex, None)),
+                    Key::Claude => return Ok(Choice::New(Provider::Claude, None)),
                     Key::Delete => {
                         if let Some(session) = self.sessions.get(self.selected) {
                             self.confirmation = Some(Confirmation {
@@ -463,7 +598,7 @@ impl Menu {
         if self.selected >= self.top + visible {
             self.top = self.selected + 1 - visible;
         }
-        for (row, index) in (self.top..self.sessions.len() + 2)
+        for (row, index) in (self.top..self.sessions.len() + Provider::ALL.len())
             .take(visible)
             .enumerate()
         {
@@ -480,14 +615,12 @@ impl Menu {
                     session.cwd
                 )
             } else {
-                format!(
-                    "{marker}  + New {}",
-                    if index == self.sessions.len() {
-                        "Codex"
-                    } else {
-                        "Claude"
-                    }
-                )
+                let provider = Provider::ALL[index - self.sessions.len()];
+                if provider.is_resume() {
+                    format!("{marker}  Resume {} (paste resume token)", provider.label())
+                } else {
+                    format!("{marker}  + New {}", provider.label())
+                }
             };
             line(
                 &mut out,
@@ -513,7 +646,7 @@ impl Menu {
             rows,
             cols,
             "\x1b[2m",
-            "↑↓ move · Enter attach · Del stop · C Codex · A Claude · R reload · Q quit",
+            "↑↓ move · Enter select · Del stop · C Codex · A Claude · R reload · Q quit",
         );
         if let Some(confirm) = &self.confirmation {
             let y = rows / 2;
@@ -551,6 +684,40 @@ impl Menu {
                 cols,
                 "\x1b[2m",
                 "↑↓ choose · Enter confirm · Escape cancel",
+            );
+        }
+        if let Some(prompt) = &self.resume {
+            let y = rows / 2;
+            line(
+                &mut out,
+                y - 1,
+                cols,
+                "\x1b[1m",
+                &format!("Resume {}", prompt.provider.label()),
+            );
+            line(
+                &mut out,
+                y,
+                cols,
+                "",
+                "Paste the session UUID of the conversation to resume.",
+            );
+            let visible = cols.saturating_sub(5);
+            let start = prompt.token.len().saturating_sub(visible);
+            line(
+                &mut out,
+                y + 1,
+                cols,
+                "\x1b[7m",
+                &format!("> {}_", &prompt.token[start..]),
+            );
+            line(&mut out, y + 2, cols, "", &prompt.error);
+            line(
+                &mut out,
+                y + 3,
+                cols,
+                "\x1b[2m",
+                "Enter resume · Escape cancel · Ctrl+U clear",
             );
         }
         out.push_str("\x1b[0m\x1b[?2026l");
@@ -600,6 +767,8 @@ enum Key {
     Quit,
     Yes,
     No,
+    Text(char),
+    Clear,
     Ignore,
 }
 #[derive(Default)]
@@ -618,7 +787,7 @@ impl Keys {
         self.bytes.clear();
         self.escape = None;
     }
-    fn next(&mut self) -> Option<Key> {
+    fn next(&mut self, text_input: bool) -> Option<Key> {
         let byte = *self.bytes.first()?;
         let (count, key) = if byte == 27 {
             let started = *self.escape.get_or_insert_with(Instant::now);
@@ -652,7 +821,12 @@ impl Keys {
                         _ => Key::Ignore,
                     };
                     (end + 1, key)
-                } else if started.elapsed() < Duration::from_millis(35) {
+                } else if b"\x1b[200~".starts_with(&self.bytes)
+                    || b"\x1b[201~".starts_with(&self.bytes)
+                    || started.elapsed() < Duration::from_millis(35)
+                {
+                    // Paste delimiters may arrive across reads, especially
+                    // over SSH. Do not turn a delayed delimiter into text.
                     return None;
                 } else {
                     (self.bytes.len(), Key::Ignore)
@@ -664,6 +838,9 @@ impl Keys {
             (
                 1,
                 match byte {
+                    b' '..=b'~' if text_input => Key::Text(byte as char),
+                    b'\r' | b'\n' | b'\t' if text_input && self.paste => Key::Text(' '),
+                    21 if text_input => Key::Clear,
                     b'\r' | b'\n' => Key::Enter,
                     b'\t' => Key::Tab,
                     8 | 127 => Key::Delete,
@@ -679,6 +856,10 @@ impl Keys {
         };
         self.bytes.drain(..count);
         self.escape = None;
-        Some(if self.paste { Key::Ignore } else { key })
+        Some(if self.paste && !matches!(key, Key::Text(_)) {
+            Key::Ignore
+        } else {
+            key
+        })
     }
 }
