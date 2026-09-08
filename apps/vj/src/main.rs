@@ -258,6 +258,7 @@ use makepad_show_control::{
 use makepad_show_control::LightSample;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -8135,6 +8136,11 @@ pub struct App {
     pending_search: Option<(Surface, SearchBox, String)>,
     #[rust]
     search_timer: Timer,
+    /// A short head start for the catalog before `load_queue` asks it to
+    /// resolve a saved store-asset line -- at `handle_startup` itself
+    /// the store connection has not necessarily produced a single tile
+    /// yet, and a line that cannot resolve is dropped, not retried.
+    queue_load_timer: Timer,
     #[rust]
     video_pump: NextFrame,
     /// Finished decodes the operator is WAITING for (the clicked cue, a
@@ -8325,6 +8331,11 @@ const EVENT_REFRESH_COOLDOWN_S: f64 = 3.0;
 /// Idle time after the last keystroke before the pad filter re-queries the
 /// server. Short enough to feel live, long enough not to search per key.
 const FILTER_DEBOUNCE_S: f64 = 0.3;
+/// How long the saved queue waits for the catalog before asking it to
+/// resolve a store-asset line. Long enough that an ordinary store
+/// connection has had its first sync; a line that still cannot resolve
+/// after this is dropped, not retried further.
+const QUEUE_LOAD_DELAY_SECS: f64 = 2.5;
 
 /// Which box of a search row a debounced keystroke belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20076,6 +20087,63 @@ p2 {}
         service::session_config_from_env().cache_parent.join("preprocess.txt")
     }
 
+    fn queue_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("queue.txt")
+    }
+
+    /// The queue's own file, one line per track in play order -- library-c11.
+    /// A list, not a setting, so it rides beside the marks and the MIDI map
+    /// rather than in with preprocess.txt's single values. `local_by_asset`
+    /// (populated whenever a local file passed through the explorer this
+    /// session) decides which line a queued track gets: a local file's own
+    /// path survives a restart on its own, a store asset's does not need
+    /// to, because the catalog is the authority on it.
+    fn save_queue(&self) {
+        let path = Self::queue_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut body = String::new();
+        for item in self.decks.queue() {
+            match self.local_by_asset.get(&item.asset) {
+                Some(local_path) => {
+                    body.push_str("local ");
+                    body.push_str(&local_path.to_string_lossy());
+                }
+                None => {
+                    body.push_str("asset ");
+                    body.push_str(&item.asset.to_string());
+                }
+            }
+            body.push('\n');
+        }
+        let _ = crate::durable::write_file(&path, body);
+    }
+
+    /// Read the queue back. Called once at startup, before the catalog
+    /// necessarily has anything loaded -- a store-asset line that cannot
+    /// resolve yet is silently dropped rather than retried, the same
+    /// "refuse a position that parses but cannot mean one" rule the marks
+    /// reader already follows. A local-file line does not depend on the
+    /// catalog at all and always resolves if the file is still there.
+    fn load_queue(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::queue_path()) else { return };
+        for line in body.lines() {
+            let Some((kind, value)) = line.split_once(' ') else { continue };
+            let resolved = match kind {
+                "local" => self.local_track_item(Path::new(value)),
+                "asset" => {
+                    AssetId::from_str(value).ok().and_then(|asset| self.track_item_for_asset(asset))
+                }
+                _ => None,
+            };
+            if let Some(item) = resolved {
+                let cmds = self.decks.enqueue(item);
+                self.run_deck_cmds(cx, cmds);
+            }
+        }
+    }
+
     /// The columns dialog's twelve rows: show tick, name, and the pair that
     /// moves it. One row per column, in the edited list's current order.
     const PREP_COL_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
@@ -25454,6 +25522,9 @@ p2 {}
             // Just the number: the header now also carries the set-policy
             // controls, and the count reads on its own.
             self.set_label(cx, 0xffff, &label, &format!("{count}"));
+            // Whichever of the queue's dozen mutation sites caused this,
+            // this is the one place they all funnel through -- library-c11.
+            self.save_queue();
         }
     }
 
@@ -29140,25 +29211,31 @@ p2 {}
     fn track_item_at(&mut self, index: usize) -> Option<TrackItem> {
         let entry = self.music_rows.get(index)?.clone();
         match entry.key {
-            TrackKey::Asset(asset) => {
-                let tile = self.music_model.tile(&asset)?;
-                let (revision, media) = (tile.revision?, tile.media.clone()?);
-                Some(TrackItem {
-                    asset,
-                    revision,
-                    title: tile.title.clone(),
-                    media_blob: media.blob,
-                    media_len: media.len,
-                    media: media.media,
-                    side: self
-                        .track_side_channels
-                        .get(&revision)
-                        .cloned()
-                        .unwrap_or_default(),
-                })
-            }
+            TrackKey::Asset(asset) => self.track_item_for_asset(asset),
             TrackKey::Local(path) => self.local_track_item(&path),
         }
+    }
+
+    /// The same resolution `track_item_at`'s `TrackKey::Asset` arm does,
+    /// entered from a bare id instead of a picked row -- what a saved
+    /// queue restores through, since the catalog is the authority on a
+    /// store asset's current revision and a saved id could be stale.
+    fn track_item_for_asset(&mut self, asset: AssetId) -> Option<TrackItem> {
+        let tile = self.music_model.tile(&asset)?;
+        let (revision, media) = (tile.revision?, tile.media.clone()?);
+        Some(TrackItem {
+            asset,
+            revision,
+            title: tile.title.clone(),
+            media_blob: media.blob,
+            media_len: media.len,
+            media: media.media,
+            side: self
+                .track_side_channels
+                .get(&revision)
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 }
 
@@ -29346,6 +29423,11 @@ impl MatchEvent for App {
             self.loop_tx = Some(tx);
             self.loop_results = Some(results);
         }
+        // Not called directly: a store-asset line needs the catalog to
+        // already know the tile it names, and at handle_startup itself
+        // the store connection has not necessarily produced one yet. The
+        // timer below gives it a head start.
+        self.queue_load_timer = cx.start_timeout(QUEUE_LOAD_DELAY_SECS);
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
@@ -32193,6 +32275,9 @@ impl AppMain for App {
             if self.knob_readouts[index].timer.is_event(event).is_some() {
                 self.restore_knob_legend(cx, index);
             }
+        }
+        if self.queue_load_timer.is_event(event).is_some() {
+            self.load_queue(cx);
         }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {
