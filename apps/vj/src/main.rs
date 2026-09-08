@@ -13830,6 +13830,15 @@ p2 {}
     }
 
     fn pump_apc40(&mut self, cx: &mut Cx) {
+        // A port set declared through the control bridge is adopted by the
+        // SAME call the operating system's own port event runs, so a run
+        // with no controller plugged in proves the port matching, the
+        // dialect pick and the LED writer rather than standing in for them.
+        // Inert -- one relaxed load -- until the bridge arms it.
+        if let Some(descs) = makepad_widgets::makepad_platform::midi_inject::take_declared_ports() {
+            log!("midi: adopting {} declared port(s) from the control bridge", descs.len());
+            self.handle_midi_ports(cx, &MidiPortsEvent { descs });
+        }
         let mut actions = Vec::new();
         let mut pad_touched = false;
         for _ in 0..256 {

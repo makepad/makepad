@@ -31,6 +31,7 @@ pub mod frame_trace;
 
 pub mod audio;
 pub mod midi;
+pub mod midi_inject;
 pub mod script;
 pub mod thread;
 pub mod storage;
