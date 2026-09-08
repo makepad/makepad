@@ -86,6 +86,12 @@ pub struct Declaration {
     pub base: String,
     pub rung: String,
     pub covered: bool,
+    /// Whether a story could show this at all. A `Draw*` shader struct and a
+    /// bare enum are declared under `mod.widgets` like everything else and
+    /// can never be rendered on a page of their own; counting them as
+    /// uncovered put several hundred pages into a denominator that no amount
+    /// of work could ever close.
+    pub storyable: bool,
 }
 
 const RUNGS: &[&str] = &["GradientX", "GradientY", "Flatter", "Flat", "Icon", "Base"];
@@ -137,6 +143,16 @@ pub struct StoryCoverage {
 impl StoryCoverage {
     fn build(&mut self, cx: &mut Cx) {
         let mut rows: Vec<Declaration> = Vec::new();
+        // The registry knows exactly which Rust types can be built as a
+        // widget, which is the only honest test for "could a story show
+        // this". Asking it beats keeping a list of exceptions in step.
+        let widget_types: std::collections::BTreeSet<String> = cx
+            .components
+            .get::<WidgetRegistry>()
+            .map
+            .values()
+            .map(|(info, _)| id_name(info.name))
+            .collect();
         cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
             let top: Vec<(String, ScriptValue)> = vm.map_mut_with(widgets, |_vm, map| {
@@ -213,29 +229,39 @@ impl StoryCoverage {
                 let family = family_of(short);
                 let covered =
                     registry::all().any(|s| s.component == family || s.component == short);
+                let storyable = widget_types.contains(&kind);
                 rows.push(Declaration {
                     name: name.clone(),
                     kind,
                     base,
                     rung: rung_of(short).to_string(),
                     covered,
+                    storyable,
                 });
             }
         });
         rows.sort_by(|a, b| a.name.cmp(&b.name));
-        let shown = rows.iter().filter(|r| r.covered).count();
-        let total = rows.len();
-        let families: std::collections::BTreeSet<String> = rows
+        let storyable_rows: Vec<&Declaration> = rows.iter().filter(|r| r.storyable).collect();
+        let shown = storyable_rows.iter().filter(|r| r.covered).count();
+        let total = storyable_rows.len();
+        let other = rows.len() - total;
+        let families: std::collections::BTreeSet<String> = storyable_rows
             .iter()
             .map(|r| family_of(r.name.rsplit('.').next().unwrap_or(&r.name)))
             .collect();
         let summary = format!(
-            "{} of {} declarations have a story, in {} families",
+            "{} of {} declarations a story could show have one, in {} families \u{2014} and {} more no story could show: shaders, enums and the property types the DSL names",
             shown,
             total,
-            families.len()
+            families.len(),
+            other
         );
-        log!("storybook: coverage {} of {} declarations shown", shown, total);
+        log!(
+            "storybook: coverage {} of {} storyable declarations shown ({} not storyable)",
+            shown,
+            total,
+            other
+        );
         self.view.label(cx, ids!(summary)).set_text(cx, &summary);
         self.rows = rows;
         self.built = true;
@@ -264,8 +290,14 @@ impl Widget for StoryCoverage {
                     item.label(cx, ids!(kind)).set_text(cx, &row.kind);
                     item.label(cx, ids!(base)).set_text(cx, &row.base);
                     item.label(cx, ids!(rung)).set_text(cx, &row.rung);
-                    item.label(cx, ids!(covered))
-                        .set_text(cx, if row.covered { "yes" } else { "no" });
+                    item.label(cx, ids!(covered)).set_text(
+                        cx,
+                        match (row.storyable, row.covered) {
+                            (false, _) => "-",
+                            (true, true) => "yes",
+                            (true, false) => "no",
+                        },
+                    );
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
