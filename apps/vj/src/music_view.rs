@@ -1164,6 +1164,7 @@ script_mod! {
         row_col9 := TrackText{width: 0}
         row_col10 := TrackText{width: 0}
         row_col11 := TrackText{width: 0}
+        row_col12 := TrackText{width: 0}
         }
         row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
         row_time := TrackText{width: 52 draw_text.color: #x9fabb7}
@@ -3613,6 +3614,7 @@ script_mod! {
                                 th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
                                 th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
                                 th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
+                                th_cell12 := View{width: 0 height: Fit th_head12 := MusicColHead{width: Fill text: ""}}
                                 }
                                 // Stands in for the row's headphone + queue
                                 // chips, so a head sits over its own column
@@ -4527,6 +4529,17 @@ script_mod! {
                         prep_col_label11 := MusicLabel{width: Fill text: ""}
                         prep_col_up11 := MusicButton{width: 26 height: 20 text: "UP"}
                         prep_col_down11 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show12 := CheckBox{width: 26 text: ""}
+                        prep_col_label12 := MusicLabel{width: Fill text: ""}
+                        prep_col_up12 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down12 := MusicButton{width: 26 height: 20 text: "DN"}
                     }
                     View{
                         width: Fill
@@ -7306,6 +7319,11 @@ pub struct TrackRowEntry {
     pub duration: String,
     pub license: String,
     pub tags: String,
+    /// `YYYY-MM-DD`, blank for a track this machine has no timestamp for.
+    /// A calendar-day string sorts chronologically as plain text, so the
+    /// ADDED column needs no separate machine-sortable field the way KEY
+    /// does.
+    pub added: String,
     /// The store holds this track's four separated stems.
     pub stem: bool,
     /// The store holds this track's word-aligned transcript.
@@ -7333,6 +7351,7 @@ impl TrackRowEntry {
             duration: String::new(),
             license: String::new(),
             tags: String::new(),
+            added: String::new(),
             stem: false,
             krk: false,
             badge: String::new(),
@@ -7919,8 +7938,8 @@ pub struct PhonesLine {
 
 /// The most columns a row or a header can carry. The templates declare this
 /// many generic cells; a layout is never longer, because it is a permutation
-/// of the twelve that exist.
-pub const MAX_COLUMNS: usize = 12;
+/// of the thirteen that exist.
+pub const MAX_COLUMNS: usize = 13;
 
 /// The cell ids in the row template, in declaration order. A column's place
 /// in the operator's layout picks the cell it draws into, which is what makes
@@ -7938,6 +7957,7 @@ pub const ROW_CELLS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(row_col9),
     ids!(row_col10),
     ids!(row_col11),
+    ids!(row_col12),
 ];
 
 /// The header's boxes and the heads inside them, same order as [`ROW_CELLS`].
@@ -7954,6 +7974,7 @@ pub const HEAD_CELLS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(th_cell9),
     ids!(th_cell10),
     ids!(th_cell11),
+    ids!(th_cell12),
 ];
 
 pub const HEAD_BUTTONS: [&[LiveId]; MAX_COLUMNS] = [
@@ -7969,6 +7990,7 @@ pub const HEAD_BUTTONS: [&[LiveId]; MAX_COLUMNS] = [
     ids!(th_head9),
     ids!(th_head10),
     ids!(th_head11),
+    ids!(th_head12),
 ];
 
 /// What one column reads for one row. The tick columns are a mark rather
@@ -7987,6 +8009,7 @@ pub fn column_text(column: Column, entry: &TrackRowEntry) -> String {
         Column::Stem => if entry.stem { "✓" } else { "" }.to_string(),
         Column::Krk => if entry.krk { "✓" } else { "" }.to_string(),
         Column::Tags => entry.tags.clone(),
+        Column::Added => entry.added.clone(),
     }
 }
 
@@ -8423,6 +8446,31 @@ pub fn format_duration(secs: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+/// `YYYY-MM-DD` for a millisecond Unix timestamp, blank for `0` or earlier
+/// (the sentinel for "this machine has no timestamp for this track").
+///
+/// No calendar crate in this workspace, so this is the whole of one:
+/// days-since-epoch to a civil year/month/day, Howard Hinnant's
+/// `civil_from_days` (public-domain algorithm, not tied to any particular
+/// implementation), good over any date this column will ever show.
+pub fn format_added_date(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}")
+}
+
 /// A deck's tempo readout: the grid's BPM scaled by the playback rate.
 pub fn format_bpm(grid: Option<TrackGrid>, rate: f64) -> String {
     match grid.filter(|grid| grid.has_grid()) {
@@ -8513,6 +8561,7 @@ mod tests {
             key_fit: None,
             duration: "3:16".into(),
             tags: "Tags".into(),
+            added: "2026-09-08".into(),
             stem: true,
             krk: false,
             badge: String::new(),
@@ -8537,12 +8586,32 @@ mod tests {
             (Column::Key, "8A"),
             (Column::Time, "3:16"),
             (Column::Tags, "Tags"),
+            (Column::Added, "2026-09-08"),
         ] {
             assert_eq!(column_text(column, &row), expect, "{column:?}");
         }
         // The two mark columns are a tick or nothing, never a word.
         assert_eq!(column_text(Column::Stem, &row), "✓");
         assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    #[test]
+    fn format_added_date_reads_a_millisecond_stamp_as_a_calendar_day() {
+        // Known-good dates, computed independently (`date -u -d ... +%s`),
+        // including a leap day and a leap CENTURY (2000 is divisible by
+        // 400, so it is one) to exercise the era correction.
+        assert_eq!(format_added_date(1_788_825_600_000), "2026-09-08");
+        assert_eq!(format_added_date(86_400_000), "1970-01-02");
+        assert_eq!(format_added_date(1_835_395_200_000), "2028-02-29");
+        assert_eq!(format_added_date(951_782_400_000), "2000-02-29");
+        // A time within the day still floors to that day.
+        assert_eq!(format_added_date(1_788_825_600_000 + 12 * 3_600_000), "2026-09-08");
+    }
+
+    #[test]
+    fn format_added_date_is_blank_for_the_zero_and_negative_sentinel() {
+        assert_eq!(format_added_date(0), "", "no timestamp reads as no timestamp, not epoch");
+        assert_eq!(format_added_date(-86_400_000), "");
     }
 
     #[test]

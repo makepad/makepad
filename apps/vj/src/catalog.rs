@@ -438,6 +438,15 @@ impl<C: Clone> BrowseModel<C> {
         &self.tiles
     }
 
+    /// When this asset last moved in the strip's own ordering: the
+    /// server's `updated_ms` for a hit that arrived on a page, or a
+    /// locally-assigned monotonic stamp for one this session generated
+    /// and is still waiting on the server to confirm. `0` for an asset
+    /// this model has never placed.
+    pub fn updated_ms(&self, asset: AssetId) -> u64 {
+        self.stamps.get(&asset).copied().unwrap_or(0)
+    }
+
     /// How many tile resolves this surface may run at once. Returns the
     /// commands the widening frees, so raising the width does not have to
     /// wait for the next page to land.
@@ -1235,6 +1244,15 @@ mod tests {
             .manifest_arrived(g1, hit(2).asset, rev(9), Some(media(1)), None, None)
             .is_empty());
         assert_eq!(m.tiles()[0].state, TileState::Resolving);
+    }
+
+    #[test]
+    fn updated_ms_answers_the_hits_own_stamp_and_zero_for_a_stranger() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g1 = search_gen(&m.refresh());
+        m.page_arrived(g1, 0, true, vec![hit(7)], 1, None);
+        assert_eq!(m.updated_ms(hit(7).asset), 7);
+        assert_eq!(m.updated_ms(hit(9).asset), 0, "never placed reads as no stamp");
     }
 
     #[test]

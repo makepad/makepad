@@ -20152,7 +20152,7 @@ p2 {}
     /// The columns dialog's twelve rows: show tick, name, and the pair that
     /// moves it. One row per column, in the edited list's current order.
     const PREP_COL_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
-        &'static [LiveId]); 12] = [
+        &'static [LiveId]); 13] = [
         (ids!(prep_col_show0), ids!(prep_col_label0), ids!(prep_col_up0), ids!(prep_col_down0)),
         (ids!(prep_col_show1), ids!(prep_col_label1), ids!(prep_col_up1), ids!(prep_col_down1)),
         (ids!(prep_col_show2), ids!(prep_col_label2), ids!(prep_col_up2), ids!(prep_col_down2)),
@@ -20174,6 +20174,12 @@ p2 {}
             ids!(prep_col_label11),
             ids!(prep_col_up11),
             ids!(prep_col_down11),
+        ),
+        (
+            ids!(prep_col_show12),
+            ids!(prep_col_label12),
+            ids!(prep_col_up12),
+            ids!(prep_col_down12),
         ),
     ];
 
@@ -25490,6 +25496,7 @@ p2 {}
                 let (bpm, musical_key, key_order, key_fit, duration) =
                     self.row_analysis_cells(&key);
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                let added = self.row_added(&key);
                 let side = self
                     .music_model_tile(asset)
                     .and_then(|tile| tile.revision)
@@ -25509,6 +25516,7 @@ p2 {}
                     key_fit,
                     duration,
                     tags: String::new(),
+                    added,
                     stem: side.is_some_and(|side| side.stems.is_some()),
                     krk: side.is_some_and(|side| side.lyrics.is_some()),
                     badge: format!("{}", index + 1),
@@ -25666,6 +25674,24 @@ p2 {}
         )
     }
 
+    /// When this row's track was added, `YYYY-MM-DD`: a local file's own
+    /// filesystem timestamp, or the catalog's `updated_ms` for a store
+    /// track. Blank when this machine has neither — a store tile whose
+    /// hit has not resolved yet, or a local file whose metadata call
+    /// failed.
+    fn row_added(&self, key: &TrackKey) -> String {
+        let ms = match key {
+            TrackKey::Local(path) => std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(0),
+            TrackKey::Asset(asset) => self.music_model.updated_ms(*asset) as i64,
+        };
+        crate::music_view::format_added_date(ms)
+    }
+
     /// The two analysed columns as the cells want them: blank when nothing
     /// has judged this track, rather than a zero that reads as a fact.
     /// Say how this deck's key sits with what the room is hearing -- and,
@@ -25761,6 +25787,7 @@ p2 {}
                     let (bpm, musical_key, key_order, key_fit, duration) =
                     self.row_analysis_cells(&key);
                     let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                    let added = self.row_added(&key);
                     // The file's own title tag beats its filename — the
                     // filename is a naming convention, the tag is what the
                     // record says it is.
@@ -25786,6 +25813,7 @@ p2 {}
                             .parent()
                             .map(|dir| dir.to_string_lossy().to_string())
                             .unwrap_or_default(),
+                        added,
                         // A local file's stems/transcript are keyed by a
                         // digest this machine only learns on decode; the
                         // marks stay blank rather than guess.
@@ -25837,6 +25865,7 @@ p2 {}
                     }
                 }
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                let added = self.row_added(&key);
                 TrackRowEntry {
                     key,
                     license: String::new(),
@@ -25852,6 +25881,7 @@ p2 {}
                     key_fit,
                     duration,
                     tags: alias.unwrap_or_default(),
+                    added,
                     stem,
                     krk,
                     badge,
@@ -25937,6 +25967,9 @@ p2 {}
             Some(Column::Stem) => rows.sort_by_key(|row| row.stem),
             Some(Column::Krk) => rows.sort_by_key(|row| row.krk),
             Some(Column::Tags) => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
+            // `YYYY-MM-DD` sorts chronologically as plain text — no
+            // separate machine-sortable field needed the way KEY has one.
+            Some(Column::Added) => rows.sort_by(|a, b| text(&a.added, &b.added)),
         }
         if self.music_sort_desc {
             rows.reverse();
