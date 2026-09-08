@@ -70,7 +70,7 @@ script_mod! {
         }
 
         StoryHeading{text: "Groups"}
-        StoryNote{text: "A group is one tab stop: the arrows walk it, Return chooses, Delete asks a removable chip to go. A Single group puts the others back when one is chosen."}
+        StoryNote{text: "A group is one tab stop: Tab reaches it, the arrows walk it and show where they are standing, Return chooses, Delete asks a removable chip to go. The arrows step past a chip that is switched off, because the ring would otherwise promise a Return that does nothing. A Single group puts the others back when one is chosen."}
         StoryRow{
             single := ChipGroup{
                 width: Fit
@@ -78,6 +78,7 @@ script_mod! {
                 ChipFlat{text: "Day" selectable: true selected: true appearance: Outline}
                 ChipFlat{text: "Week" selectable: true appearance: Outline}
                 ChipFlat{text: "Month" selectable: true appearance: Outline}
+                ChipFlat{text: "Year" selectable: true appearance: Outline disabled: true}
             }
         }
         StoryRow{

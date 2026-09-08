@@ -913,12 +913,29 @@ impl ChipGroup {
     }
 
     fn move_focus(&mut self, cx: &mut Cx, delta: isize) {
-        let count = self.chips().len();
-        if count == 0 {
+        let chips = self.chips();
+        let len = chips.len() as isize;
+        if len == 0 {
             return;
         }
-        let len = count as isize;
-        self.focused = (((self.focused as isize + delta) % len + len) % len) as usize;
+        // Step PAST what cannot be chosen, the way menu.rs already does.
+        // Landing on a disabled chip is a dead stop: the ring says the keys
+        // are there and Return then does nothing.
+        let usable = |i: isize| -> bool {
+            chips
+                .get(i as usize)
+                .and_then(|c| c.borrow::<Chip>())
+                .map(|c| c.interactive && !c.disabled)
+                .unwrap_or(false)
+        };
+        let mut at = self.focused as isize;
+        for _ in 0..len {
+            at = (at + delta).rem_euclid(len);
+            if usable(at) {
+                break;
+            }
+        }
+        self.focused = at as usize;
         self.view.redraw(cx);
     }
 
@@ -954,7 +971,8 @@ impl ChipGroup {
         let Some(mut inner) = chip.borrow_mut::<Chip>() else {
             return false;
         };
-        if !inner.selectable {
+        // The mouse refuses a disabled chip; the keyboard was toggling it.
+        if !inner.selectable || inner.disabled || !inner.interactive {
             return false;
         }
         let on = !inner.selected;
