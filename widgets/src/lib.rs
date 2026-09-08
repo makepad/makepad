@@ -67,6 +67,7 @@ pub mod desktop_button;
 pub mod gauss_view;
 pub mod keyboard_view;
 pub mod nav_control;
+pub mod nav_list;
 pub mod tweaker;
 pub mod reflect;
 pub mod ai_slot;
@@ -228,6 +229,7 @@ pub use crate::{
     menu_bar::*,
     modal::*,
     nav_control::*,
+    nav_list::*,
     page_flip::*,
     pagination::*,
     popup_menu::*,
@@ -453,6 +455,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::progress::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
+    crate::nav_list::script_mod(vm);
     crate::marquee::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
@@ -725,6 +728,28 @@ mod chip_registration_tests {
         assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
         assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
         assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod nav_list_registration_tests {
+    /// The nav list registers after the radio button its rows must be
+    /// shaped like, and carries exactly one preset plus the two flows.
+    #[test]
+    fn test_nav_list_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let nav = include_str!("nav_list.rs");
+        assert!(lib.contains("pub mod nav_list;"));
+        assert!(lib.contains("nav_list::*"));
+        let at = lib.find("crate::nav_list::script_mod(vm);").expect("nav_list registered");
+        for base in ["crate::view::script_mod(vm);", "crate::radio_button::script_mod(vm);"] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before nav_list");
+        }
+        assert!(nav.contains("mod.widgets.NavListBase = #(NavList::register_widget(vm))"));
+        assert_eq!(nav.matches("set_type_default() do mod.widgets.NavListBase").count(), 1);
+        // A rail and a bar are presets over the one list, not two widgets.
+        assert!(nav.contains("mod.widgets.NavRail = mod.widgets.NavList{"));
+        assert!(nav.contains("mod.widgets.NavBar = mod.widgets.NavList{"));
     }
 }
 
