@@ -8243,6 +8243,9 @@ pub struct App {
     /// walk eats what the operator was writing.
     #[rust]
     search_recall: Vec<(Surface, Option<usize>, String)>,
+    /// When the room was last sampled, for the night's log.
+    #[rust]
+    room_watch: Option<std::time::Instant>,
     /// A record's menu while it is open: which list it came from, the row
     /// it names, and the verbs it offered.
     #[rust]
@@ -15905,6 +15908,22 @@ p2 {}
             let cmds = self.decks.track_ended(deck);
             self.run_deck_cmds(cx, cmds);
         }
+        // What the ROOM heard, which is the honest witness for the night's
+        // log: a record ends when it stops sounding, however it stopped.
+        // Real elapsed rather than the timer's nominal step, because this
+        // pump's interval coalesces; clamped so a stalled UI thread cannot
+        // settle out a record that only paused.
+        let now = std::time::Instant::now();
+        let elapsed = self
+            .room_watch
+            .replace(now)
+            .map(|was| now.duration_since(was).as_secs_f64())
+            .unwrap_or(0.0)
+            .min(1.0);
+        for gone in self.decks.poll_room(elapsed) {
+            log!("set list: {} left the room after {:.0}s", gone.item.title, gone.heard_secs);
+            self.note_played(&gone.item);
+        }
         self.pump_analysis(cx);
         self.pump_stems(cx);
         self.pump_loop_score(cx);
@@ -19981,8 +20000,28 @@ p2 {}
     }
 
     /// Which deck the room can hear, by the crossfader.
-    fn tab_audible(&self) -> usize {
-        if self.decks.crossfader < 0.5 { 0 } else { 1 }
+    /// Which deck the room is actually hearing, for the tab that follows it.
+    ///
+    /// It used to read the crossfader alone, so a deck that was stopped,
+    /// muted or faded to nothing still "won" the panel by sitting on the
+    /// loud side of a fader nobody had moved. The strip gain is the same
+    /// product leader election trusts: loaded, unmuted, its own fader, its
+    /// side of the crossfader, and playing.
+    ///
+    /// `None` when the room can hear neither deck, or both equally -- the
+    /// tab then holds rather than picking one.
+    fn tab_audible(&self) -> Option<usize> {
+        let gains = [DeckId::A, DeckId::B].map(|deck| match self.decks.deck_audible(deck) {
+            true => self.decks.deck_strip_gain(deck),
+            false => 0.0,
+        });
+        if gains[0] <= 0.0 && gains[1] <= 0.0 {
+            return None;
+        }
+        if (gains[0] - gains[1]).abs() <= 1e-3 {
+            return None;
+        }
+        Some(if gains[0] > gains[1] { 0 } else { 1 })
     }
 
     /// The tab strip's own presses: the tabs, then the four modes.
@@ -29105,9 +29144,11 @@ p2 {}
                 let item = self.decks.deck(retire).item().cloned();
                 let cmds = self.decks.eject(retire);
                 self.run_deck_cmds(cx, cmds);
-                if let Some(item) = item.as_ref() {
-                    self.note_played(item);
-                }
+                // NOT logged here any more. The eject makes the deck silent,
+                // and the room sampler settles it out -- or retires it at
+                // once when the next record airs over it. A record the
+                // autopilot retired but the room never heard is no longer a
+                // play, and one a hand mixed out at 3am now is.
                 if requeue && self.decks.repeat {
                     if let Some(item) = item {
                         self.decks.requeue(item);

@@ -22,8 +22,11 @@ pub enum TabFollow {
     /// The load target: the tab and the target are one control, so pressing
     /// a tab also aims the library at that deck.
     Target,
-    /// Whichever deck the room can hear. Follows the crossfader, which means
-    /// it moves DURING a mix — the most automatic and the least safe.
+    /// Whichever deck the room can hear — the crossfader, the channel
+    /// faders, the mutes and the transport together, not the crossfader
+    /// alone. It moves DURING a mix: the most automatic and the least safe.
+    /// When the room hears both decks equally, or neither, it holds where
+    /// it is rather than picking one.
     Audible,
     /// The load target, until a tab is pressed; then it holds there until
     /// the target next moves.
@@ -104,7 +107,7 @@ impl DeckTabs {
         &mut self,
         follow: TabFollow,
         target: Option<usize>,
-        audible: usize,
+        audible: Option<usize>,
     ) -> bool {
         self.follow = follow;
         self.held = false;
@@ -113,7 +116,11 @@ impl DeckTabs {
             TabFollow::Target | TabFollow::Pinned => {
                 target.map(|deck| self.show(deck)).unwrap_or(false)
             }
-            TabFollow::Audible => self.show(audible),
+            // None is "the room can hear no one deck" -- both, or neither.
+            // The tab HOLDS: a panel that jumped while nothing was playing
+            // would be answering a question nobody asked, and not moving
+            // without a reason is the whole point of this mode.
+            TabFollow::Audible => audible.map(|deck| self.show(deck)).unwrap_or(false),
         }
     }
 
@@ -134,11 +141,10 @@ impl DeckTabs {
     }
 
     /// The mix moved and a different deck is audible.
-    pub fn audible_moved(&mut self, audible: usize) -> bool {
-        if self.follow == TabFollow::Audible {
-            self.show(audible)
-        } else {
-            false
+    pub fn audible_moved(&mut self, audible: Option<usize>) -> bool {
+        match (self.follow, audible) {
+            (TabFollow::Audible, Some(deck)) => self.show(deck),
+            _ => false,
         }
     }
 }
@@ -155,26 +161,26 @@ mod tests {
         let mut tabs = DeckTabs::new(2);
         assert_eq!(tabs.follow(), TabFollow::Manual, "the safe mode is the default");
         assert!(!tabs.target_moved(Some(B)), "the target does not move it");
-        assert!(!tabs.audible_moved(B), "nor does the mix");
+        assert!(!tabs.audible_moved(Some(B)), "nor does the mix");
         assert_eq!(tabs.shown(), A);
         assert_eq!(tabs.press(B), Press { shown: B, aim_target: false });
         assert_eq!(tabs.shown(), B);
         // And it stays there through anything the console does on its own.
         assert!(!tabs.target_moved(Some(A)));
-        assert!(!tabs.audible_moved(A));
+        assert!(!tabs.audible_moved(Some(A)));
         assert_eq!(tabs.shown(), B);
     }
 
     #[test]
     fn the_target_mode_makes_the_tab_and_the_target_one_control() {
         let mut tabs = DeckTabs::new(2);
-        tabs.set_follow(TabFollow::Target, Some(A), A);
+        tabs.set_follow(TabFollow::Target, Some(A), Some(A));
         assert!(tabs.target_moved(Some(B)));
         assert_eq!(tabs.shown(), B, "aiming at a deck shows it");
         // Pressing a tab aims the library rather than springing back.
         assert_eq!(tabs.press(A), Press { shown: A, aim_target: true });
         // The mix is not one of its sources.
-        assert!(!tabs.audible_moved(B));
+        assert!(!tabs.audible_moved(Some(B)));
         assert_eq!(tabs.shown(), A);
         // A target that names no deck (the mix, or nothing) moves nothing.
         assert!(!tabs.target_moved(None));
@@ -182,15 +188,29 @@ mod tests {
     }
 
     #[test]
+    fn the_audible_mode_holds_its_tab_when_the_room_can_hear_neither_deck() {
+        let mut tabs = DeckTabs::new(2);
+        tabs.set_follow(TabFollow::Audible, Some(A), Some(B));
+        assert_eq!(tabs.shown(), B);
+        // Nothing playing, or both equally loud: there is no answer, and a
+        // panel that jumped anyway would be answering a question nobody
+        // asked, right where the operator's hands are.
+        assert!(!tabs.audible_moved(None));
+        assert_eq!(tabs.shown(), B, "it holds where it was");
+        assert!(!tabs.set_follow(TabFollow::Audible, Some(A), None));
+        assert_eq!(tabs.shown(), B, "and picking the mode again does not guess either");
+    }
+
+    #[test]
     fn the_audible_mode_follows_the_mix_and_a_press_does_not_hold() {
         let mut tabs = DeckTabs::new(2);
-        tabs.set_follow(TabFollow::Audible, Some(A), A);
-        assert!(tabs.audible_moved(B));
+        tabs.set_follow(TabFollow::Audible, Some(A), Some(A));
+        assert!(tabs.audible_moved(Some(B)));
         assert_eq!(tabs.shown(), B);
         // A press shows the other deck, but the next crossfade takes it
         // back — which is exactly why the pin exists.
         assert_eq!(tabs.press(A), Press { shown: A, aim_target: false });
-        assert!(tabs.audible_moved(B));
+        assert!(tabs.audible_moved(Some(B)));
         assert_eq!(tabs.shown(), B);
         assert!(!tabs.target_moved(Some(A)), "the target is not its source");
     }
@@ -198,7 +218,7 @@ mod tests {
     #[test]
     fn a_pin_holds_the_tab_until_the_target_next_moves() {
         let mut tabs = DeckTabs::new(2);
-        tabs.set_follow(TabFollow::Pinned, Some(A), A);
+        tabs.set_follow(TabFollow::Pinned, Some(A), Some(A));
         assert!(tabs.target_moved(Some(B)));
         assert_eq!(tabs.shown(), B, "unpinned, it follows the target");
 
@@ -219,21 +239,21 @@ mod tests {
         let mut tabs = DeckTabs::new(2);
         tabs.press(A);
         // Target and Pinned snap to the target; Audible snaps to the mix.
-        assert!(tabs.set_follow(TabFollow::Target, Some(B), A));
+        assert!(tabs.set_follow(TabFollow::Target, Some(B), Some(A)));
         assert_eq!(tabs.shown(), B);
-        assert!(tabs.set_follow(TabFollow::Audible, Some(B), A));
+        assert!(tabs.set_follow(TabFollow::Audible, Some(B), Some(A)));
         assert_eq!(tabs.shown(), A);
-        assert!(tabs.set_follow(TabFollow::Pinned, Some(B), A));
+        assert!(tabs.set_follow(TabFollow::Pinned, Some(B), Some(A)));
         assert_eq!(tabs.shown(), B);
         // Manual takes what is already there rather than jumping.
-        assert!(!tabs.set_follow(TabFollow::Manual, Some(A), A));
+        assert!(!tabs.set_follow(TabFollow::Manual, Some(A), Some(A)));
         assert_eq!(tabs.shown(), B);
 
         // Choosing a mode also releases a pin, so the icons never disagree
         // with what the panel is doing.
-        tabs.set_follow(TabFollow::Pinned, Some(B), A);
+        tabs.set_follow(TabFollow::Pinned, Some(B), Some(A));
         tabs.press(A);
-        tabs.set_follow(TabFollow::Pinned, Some(B), A);
+        tabs.set_follow(TabFollow::Pinned, Some(B), Some(A));
         assert_eq!(tabs.shown(), B, "the pin did not survive being re-chosen");
     }
 
@@ -241,7 +261,7 @@ mod tests {
     fn it_counts_decks_rather_than_lettering_them() {
         // Four decks, which is where this is going.
         let mut tabs = DeckTabs::new(4);
-        tabs.set_follow(TabFollow::Target, Some(0), 0);
+        tabs.set_follow(TabFollow::Target, Some(0), Some(0));
         for deck in 0..4 {
             assert!(tabs.target_moved(Some(deck)) || tabs.shown() == deck);
             assert_eq!(tabs.shown(), deck);

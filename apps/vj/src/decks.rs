@@ -172,6 +172,51 @@ fn shoulder(x: f32, from: f32, to: f32) -> f32 {
 /// wrong reason.
 pub const AUDIBLE_FLOOR: f32 = 0.01;
 
+/// How long a record has to sound before the night counts it as played.
+///
+/// A cue burst, a scrub past the floor and a fader knocked open by an elbow
+/// are all under this; a fast cut-mix set is not. It is set-charting taste
+/// rather than engineering, and it is one line to move.
+pub const AIRING_MIN_SECS: f64 = 30.0;
+
+/// How long the silence has to hold before a record is called finished.
+///
+/// A cut, a stab, and a fader thrown across and back are all inside this
+/// window, and none of them ends a record.
+pub const AIRING_SETTLE_SECS: f64 = 5.0;
+
+/// A record the room is currently hearing.
+///
+/// The item is CLONED when the record becomes audible: by the time it goes
+/// quiet the deck may be holding whatever displaced it, and the log has to
+/// name the one that left.
+#[derive(Clone, Debug)]
+struct Airing {
+    item: TrackItem,
+    /// The load this airing belongs to. A different generation on the same
+    /// deck is a different record, however similar it looks.
+    gen: DeckGen,
+    heard_secs: f64,
+    /// How long it has been under the floor. `None` while it is sounding.
+    silent_secs: Option<f64>,
+}
+
+/// A record the room has finished hearing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retired {
+    pub deck: DeckId,
+    pub item: TrackItem,
+    pub heard_secs: f64,
+}
+
+/// Emit a finished airing, if the room heard enough of it to count.
+fn retire(gone: &mut Vec<Retired>, deck: DeckId, airing: Airing) {
+    if airing.heard_secs < AIRING_MIN_SECS {
+        return;
+    }
+    gone.push(Retired { deck, item: airing.item, heard_secs: airing.heard_secs });
+}
+
 /// Per-deck gains for a crossfader position in [0,1] (0 = full A, 1 = full B).
 pub fn crossfader_gains(pos: f32, curve: FadeCurve) -> (f32, f32) {
     let x = pos.clamp(0.0, 1.0);
@@ -2065,6 +2110,9 @@ pub struct DeckEngine {
     queue: Vec<TrackItem>,
     /// Fill an idle deck from the queue as soon as one frees up.
     pub auto_load_queue: bool,
+    /// What each deck is currently airing, for the night's log. Private:
+    /// nothing outside asks what is airing, only what has just finished.
+    airing: [Option<Airing>; 2],
     /// Recycle finished tracks to the queue tail (read by the autopilot's
     /// hand-back; the engine itself never requeues on its own).
     pub repeat: bool,
@@ -2132,6 +2180,7 @@ impl Default for DeckEngine {
             snap_beats: [SNAP_DEFAULT_BEATS; 2],
             queue: Vec::new(),
             auto_load_queue: true,
+            airing: [None, None],
             repeat: false,
             shuffle: false,
             shuffle_rng: 1,
@@ -4008,6 +4057,69 @@ impl DeckEngine {
     /// Whether the room is hearing this deck at all.
     pub fn deck_audible(&self, deck: DeckId) -> bool {
         self.deck(deck).playing && self.deck_strip_gain(deck) > AUDIBLE_FLOOR
+    }
+
+    /// What the room heard, sampled.
+    ///
+    /// The night's log used to be written by the autopilot alone, from its
+    /// own hand-back -- so a set mixed by hand left no record at all, and a
+    /// record the autopilot retired was logged whether or not anybody ever
+    /// heard it. The room is the honest witness: a record is playing when it
+    /// is audible, and it is finished when it stops being audible and stays
+    /// that way.
+    ///
+    /// This one edge SUBSUMES every other way a record can end. A track
+    /// running out sets `playing` false; so does a stop, an eject, a mute, a
+    /// fader thrown across, a load over a playing deck. All of them are the
+    /// same event here, which is why the log gains no second writer to
+    /// de-duplicate against.
+    ///
+    /// The item and the load generation are captured when a record BECOMES
+    /// audible, never read back at the end: by the time a record leaves, the
+    /// deck may already be holding whatever displaced it, and the log must
+    /// name the record that left.
+    ///
+    /// Takes real elapsed time rather than counting ticks, because the
+    /// caller's timer coalesces.
+    pub fn poll_room(&mut self, elapsed_secs: f64) -> Vec<Retired> {
+        let mut gone = Vec::new();
+        // In deck order, so two records leaving on one tick are logged the
+        // same way every time.
+        for deck in [DeckId::A, DeckId::B] {
+            let audible = self.deck_audible(deck);
+            let gen = self.deck(deck).load_gen;
+            let slot = deck.index();
+            match (&mut self.airing[slot], audible) {
+                (Some(airing), true) if airing.gen == gen => {
+                    airing.heard_secs += elapsed_secs;
+                    // Back above the floor before the settle ran out: one
+                    // record, not two. A cut and a stab are inside this.
+                    airing.silent_secs = None;
+                }
+                (_, true) => {
+                    // Either nothing was airing, or what was airing is not
+                    // what is airing now -- a record loaded over a playing
+                    // deck. The one that left is retired before the one that
+                    // arrived can be mistaken for it.
+                    if let Some(was) = self.airing[slot].take() {
+                        retire(&mut gone, deck, was);
+                    }
+                    let Some(item) = self.deck(deck).item().cloned() else { continue };
+                    self.airing[slot] =
+                        Some(Airing { item, gen, heard_secs: elapsed_secs, silent_secs: None });
+                }
+                (Some(airing), false) => {
+                    let silent = airing.silent_secs.unwrap_or(0.0) + elapsed_secs;
+                    airing.silent_secs = Some(silent);
+                    if silent >= AIRING_SETTLE_SECS {
+                        let was = self.airing[slot].take().expect("just matched");
+                        retire(&mut gone, deck, was);
+                    }
+                }
+                (None, false) => {}
+            }
+        }
+        gone
     }
 
     /// Whichever deck is audibly leading, with no pin standing.
@@ -10194,6 +10306,153 @@ mod tests {
     /// The startup case, which every other queue test dodges by busying
     /// both decks first: a set list is read back with NOTHING loaded, which
     /// is precisely when an enqueue pumps.
+    /// Bring a record up on a deck and make the room hear it.
+    fn air(engine: &mut DeckEngine, deck: DeckId, seed: u8) {
+        let target = match deck {
+            DeckId::A => DeckTarget::A,
+            DeckId::B => DeckTarget::B,
+        };
+        let (id, gen) = load_gen(&engine.click(item(seed), target));
+        engine.track_ready(id, gen, 200.0);
+        if !engine.deck(deck).playing {
+            engine.play_pause(deck);
+        }
+        // Centre the crossfader so both decks are over the floor.
+        engine.set_crossfader(0.5);
+    }
+
+    /// Sound for long enough to be counted.
+    fn heard(engine: &mut DeckEngine, secs: f64) -> Vec<Retired> {
+        let mut gone = Vec::new();
+        let mut left = secs;
+        while left > 0.0 {
+            let step = left.min(1.0);
+            gone.extend(engine.poll_room(step));
+            left -= step;
+        }
+        gone
+    }
+
+    #[test]
+    fn a_record_the_room_heard_is_named_when_it_stops_sounding() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        assert!(heard(&mut engine, AIRING_MIN_SECS + 1.0).is_empty(), "still playing");
+
+        engine.play_pause(DeckId::A);
+        // Nothing yet: the silence has to hold.
+        assert!(heard(&mut engine, AIRING_SETTLE_SECS - 1.0).is_empty(), "settling");
+        let gone = heard(&mut engine, 2.0);
+        assert_eq!(gone.len(), 1, "one record, named once");
+        assert_eq!(gone[0].item.asset, item(1).asset);
+        assert_eq!(gone[0].deck, DeckId::A);
+        assert!(gone[0].heard_secs >= AIRING_MIN_SECS);
+    }
+
+    #[test]
+    fn a_record_the_room_barely_heard_is_not_a_play() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        heard(&mut engine, AIRING_MIN_SECS - 5.0);
+        engine.play_pause(DeckId::A);
+        assert!(
+            heard(&mut engine, AIRING_SETTLE_SECS + 1.0).is_empty(),
+            "a cue burst is not a play",
+        );
+    }
+
+    #[test]
+    fn a_cut_across_the_fader_does_not_end_a_record() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        heard(&mut engine, AIRING_MIN_SECS + 1.0);
+
+        // Thrown across and back, well inside the settle.
+        engine.set_crossfader(1.0);
+        assert!(heard(&mut engine, AIRING_SETTLE_SECS - 2.0).is_empty(), "still the same record");
+        engine.set_crossfader(0.5);
+        assert!(heard(&mut engine, 10.0).is_empty(), "and it never ended");
+
+        // Now let it go for real.
+        engine.set_crossfader(1.0);
+        let gone = heard(&mut engine, AIRING_SETTLE_SECS + 1.0);
+        assert_eq!(gone.len(), 1, "one record for the whole passage, not three");
+    }
+
+    #[test]
+    fn a_muted_deck_is_out_of_the_room_and_the_mute_ends_the_record() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        heard(&mut engine, AIRING_MIN_SECS + 1.0);
+        engine.toggle_mute(DeckId::A);
+        let gone = heard(&mut engine, AIRING_SETTLE_SECS + 1.0);
+        assert_eq!(gone.len(), 1, "silence is silence, whichever control made it");
+    }
+
+    /// The failure this whole design is shaped to avoid.
+    #[test]
+    fn a_load_over_names_the_record_that_just_left_not_the_one_arriving() {
+        let mut engine = DeckEngine::new();
+        // The policy that lets a record be replaced while it sounds, which
+        // is the only way this case exists at all.
+        engine.over_playing = OverPlaying::Keep;
+        air(&mut engine, DeckId::A, 1);
+        heard(&mut engine, AIRING_MIN_SECS + 1.0);
+
+        // A second record straight over the top of it, with no silence in
+        // between at all -- so the only thing telling them apart is the
+        // load generation.
+        air(&mut engine, DeckId::A, 2);
+        let gone = heard(&mut engine, 1.0);
+        assert_eq!(gone.len(), 1, "the one that left is named as it leaves");
+        assert_eq!(
+            gone[0].item.asset,
+            item(1).asset,
+            "the log named the record that ARRIVED, which is the one thing it must never do",
+        );
+    }
+
+    #[test]
+    fn the_room_names_a_record_once_however_many_ways_it_fell_silent() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        heard(&mut engine, AIRING_MIN_SECS + 1.0);
+        // Stopped, muted and faded away all at once.
+        engine.play_pause(DeckId::A);
+        engine.toggle_mute(DeckId::A);
+        engine.set_crossfader(1.0);
+        let gone = heard(&mut engine, AIRING_SETTLE_SECS + 5.0);
+        assert_eq!(gone.len(), 1);
+        assert!(heard(&mut engine, 60.0).is_empty(), "and never again");
+    }
+
+    #[test]
+    fn a_record_the_room_never_heard_is_never_named() {
+        let mut engine = DeckEngine::new();
+        // Loaded and playing, but faded fully away from the start.
+        let (id, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(id, gen, 200.0);
+        engine.play_pause(DeckId::A);
+        engine.set_crossfader(1.0);
+        assert!(heard(&mut engine, 300.0).is_empty(), "nobody heard it");
+    }
+
+    #[test]
+    fn each_deck_keeps_its_own_record_and_both_can_leave_at_once() {
+        let mut engine = DeckEngine::new();
+        air(&mut engine, DeckId::A, 1);
+        air(&mut engine, DeckId::B, 2);
+        heard(&mut engine, AIRING_MIN_SECS + 1.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        let gone = heard(&mut engine, AIRING_SETTLE_SECS + 1.0);
+        assert_eq!(gone.len(), 2);
+        assert_eq!(gone[0].deck, DeckId::A, "deck order, so one tick reads the same way twice");
+        assert_eq!(gone[1].deck, DeckId::B);
+        assert_eq!(gone[0].item.asset, item(1).asset);
+        assert_eq!(gone[1].item.asset, item(2).asset);
+    }
+
     #[test]
     fn a_restored_set_list_comes_back_whole_rather_than_two_records_short() {
         let mut engine = DeckEngine::new();
