@@ -72,6 +72,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "navigation/breadcrumb/overview",
     category: "Navigation",
     component: "Breadcrumb",
+    also: &[],
     name: "Overview",
     dsl: "BreadcrumbOverview",
     added: "2026-09-08",

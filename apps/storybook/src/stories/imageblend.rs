@@ -39,6 +39,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "media/imageblend/overview",
     category: "Media",
     component: "ImageBlend",
+    also: &[],
     name: "Overview",
     dsl: "ImageBlendOverview",
     added: "2026-02-16",

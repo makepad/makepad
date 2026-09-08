@@ -67,6 +67,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "overview/coverage/coverage",
     category: "Overview",
     component: "Coverage",
+    also: &[],
     name: "Coverage",
     dsl: "Coverage",
     added: "2025-06-01",
@@ -227,8 +228,11 @@ impl StoryCoverage {
                     .unwrap_or_default();
                 let short = name.rsplit('.').next().unwrap_or(name);
                 let family = family_of(short);
-                let covered =
-                    registry::all().any(|s| s.component == family || s.component == short);
+                let covered = registry::all().any(|s| {
+                    s.component == family
+                        || s.component == short
+                        || s.also.iter().any(|a| *a == short || *a == family)
+                });
                 let storyable = widget_types.contains(&kind);
                 rows.push(Declaration {
                     name: name.clone(),

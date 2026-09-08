@@ -111,6 +111,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "actions/button/variants",
     category: "Actions",
     component: "Button",
+    also: &[],
     name: "Variants",
     dsl: "ButtonVariants",
     added: "2026-09-05",

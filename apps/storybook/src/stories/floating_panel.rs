@@ -71,6 +71,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "overlay/floating-panel/overview",
     category: "Overlay",
     component: "FloatingPanel",
+    also: &[],
     name: "Overview",
     dsl: "FloatingPanelOverview",
     added: "2026-09-08",

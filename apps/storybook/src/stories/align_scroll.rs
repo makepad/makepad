@@ -142,6 +142,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "containers/alignscroll/overview",
     category: "Containers",
     component: "AlignScroll",
+    also: &[],
     name: "Overview",
     dsl: "AlignScrollOverview",
     added: "2026-04-16",

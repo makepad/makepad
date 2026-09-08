@@ -17,6 +17,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "media/rotatedimage/overview",
     category: "Media",
     component: "RotatedImage",
+    also: &[],
     name: "Overview",
     dsl: "RotatedImageOverview",
     added: "2026-02-16",

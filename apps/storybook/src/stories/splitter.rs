@@ -135,6 +135,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "containers/splitter/overview",
     category: "Containers",
     component: "Splitter",
+    also: &[],
     name: "Overview",
     dsl: "SplitterOverview",
     added: "2026-09-08",

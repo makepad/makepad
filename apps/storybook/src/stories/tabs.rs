@@ -188,6 +188,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "navigation/tabs/overview",
     category: "Navigation",
     component: "Tabs",
+    also: &[],
     name: "Overview",
     dsl: "TabsOverview",
     added: "2026-09-07",

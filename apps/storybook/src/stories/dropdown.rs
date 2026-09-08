@@ -69,6 +69,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/dropdown/overview",
     category: "Inputs",
     component: "DropDown",
+    also: &["ComboBox"],
     name: "Overview",
     dsl: "DropDownOverview",
     added: "2026-08-23",

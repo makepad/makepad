@@ -94,6 +94,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "overlay/popover/overview",
     category: "Overlay",
     component: "Popover",
+    also: &["ConfirmPopover"],
     name: "Overview",
     dsl: "PopoverOverview",
     added: "2026-09-05",

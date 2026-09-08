@@ -683,6 +683,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "text/html/overview",
     category: "Text",
     component: "Html",
+    also: &["HtmlLink"],
     name: "Overview",
     dsl: "HtmlOverview",
     added: "2026-08-10",

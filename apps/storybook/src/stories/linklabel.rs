@@ -69,6 +69,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "actions/linklabel/overview",
     category: "Actions",
     component: "LinkLabel",
+    also: &[],
     name: "Overview",
     dsl: "LinkLabelOverview",
     added: "2026-02-23",

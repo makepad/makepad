@@ -20,6 +20,16 @@ pub struct Story {
     pub category: &'static str,
     /// The navigator's second-level folder, normally the widget's DSL name.
     pub component: &'static str,
+    /// Other declarations this page shows besides its own `component`.
+    ///
+    /// A page routinely renders more than the one widget it is filed under:
+    /// the segmented control lives on the button-group page and the chip
+    /// group on the chip page. Only the coverage count reads this, and
+    /// without it those widgets report as undocumented while standing on
+    /// their own catalogue page. It has to be written down rather than
+    /// found: a story template's children do not exist until the page is
+    /// built, so there is nothing to walk until something builds it.
+    pub also: &'static [&'static str],
     /// The row in the navigator.
     pub name: &'static str,
     /// The template's name under `mod.stories`.
@@ -170,6 +180,7 @@ mod tests {
             key: "a/b/c",
             category: "A",
             component: "B",
+            also: &[],
             name: "C",
             dsl: "X",
             added: "2026-09-05",

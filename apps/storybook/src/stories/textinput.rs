@@ -165,6 +165,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/textinput/overview",
     category: "Inputs",
     component: "TextInput",
+    also: &[],
     name: "Overview",
     dsl: "TextInputOverview",
     added: "2026-04-06",

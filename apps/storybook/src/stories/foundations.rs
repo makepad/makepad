@@ -291,6 +291,7 @@ const fn story(key: &'static str, component: &'static str, name: &'static str, d
         key,
         category: "Foundations",
         component,
+        also: &[],
         name,
         dsl,
         added: "2026-09-05",

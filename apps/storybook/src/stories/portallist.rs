@@ -82,6 +82,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "data display/portallist/overview",
     category: "Data display",
     component: "PortalList",
+    also: &[],
     name: "Overview",
     dsl: "PortalListOverview",
     added: "2026-03-08",

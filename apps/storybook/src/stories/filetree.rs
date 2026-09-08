@@ -362,6 +362,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "data display/filetree/overview",
     category: "Data display",
     component: "FileTree",
+    also: &["FileTreeNode"],
     name: "Overview",
     dsl: "FileTreeOverview",
     added: "2026-02-16",

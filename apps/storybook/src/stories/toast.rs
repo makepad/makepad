@@ -143,6 +143,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "feedback/toast/overview",
     category: "Feedback",
     component: "Toast",
+    also: &["Toaster"],
     name: "Overview",
     dsl: "ToastOverview",
     added: "2026-09-05",

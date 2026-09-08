@@ -102,6 +102,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/field-well/overview",
     category: "Inputs",
     component: "FieldWell",
+    also: &[],
     name: "Overview",
     dsl: "FieldWellOverview",
     added: "2026-09-08",

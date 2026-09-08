@@ -112,6 +112,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "navigation/menu/overview",
     category: "Navigation",
     component: "Menu",
+    also: &["MenuLayer"],
     name: "Overview",
     dsl: "MenuOverview",
     added: "2026-09-05",
