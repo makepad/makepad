@@ -315,10 +315,7 @@ script_mod! {
                 margin: 0
                 padding: Inset{left: 5 right: 4 top: 3 bottom: 2}
                 draw_bg +: {
-                    // Not zero: at radius zero sdf.box gives the fill no
-                    // coverage and the border stroke paints the whole cell
-                    // editor in the accent colour. Must clear half the border.
-                    border_radius: uniform(1.5)
+                    border_radius: uniform(0.0)
                     border_size: uniform(2.0)
                     color_dither: uniform(0.0)
                     gradient_border_horizontal: uniform(0.0)
