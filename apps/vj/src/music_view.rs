@@ -2659,66 +2659,60 @@ script_mod! {
                             }
                         }
                     }
-                    // The deck's own transport, at the foot of its column. Two
-                    // explicit wrapping rows keep every primary control large
-                    // without letting either line escape the fixed deck panel.
+                    // The deck's own transport, at the foot of its column. One
+                    // row, sized to hold every primary control without
+                    // escaping the fixed deck panel -- see MusicTransportButton
+                    // and MusicTransportIconButton's own overrides below for
+                    // the sizing this row specifically needs.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Down
-                        spacing: 5
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 0.0, y: 0.5}
-                            deck_a_play := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
-                            }
-                            deck_a_cue := MusicTransportButton{width: 52 text: "CUE"}
-                            // One beat either way -- the nudge a hand makes
-                            // when the drop lands a hair off -- and held, they
-                            // BEND the record rather than stepping it. A beat
-                            // is a measured one where the analysis found beats
-                            // and a second where it did not, so they always
-                            // step something.
-                            //
-                            // They point at the TRACK, not at the playhead: <
-                            // sends the track a beat FORWARD past the head, >
-                            // a beat back, which is the same convention as a
-                            // hand on the platter. NOT mirrored on deck B: the
-                            // sense is the same whichever deck it is.
-                            deck_a_beat_fwd := MusicTransportButton{width: 36 text: "<"}
-                            deck_a_beat_back := MusicTransportButton{width: 36 text: ">"}
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        spacing: 3
+                        wrap_spacing: 3
+                        align: Align{x: 0.0, y: 0.5}
+                        deck_a_play := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 0.0, y: 0.5}
-                            deck_a_loop := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                            }
-                            deck_a_loop_halve := MusicTransportButton{width: 36 text: "<"}
-                            deck_a_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
-                                draw_bg +: {arrow: 0.0}
-                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
-                            }
-                            deck_a_loop_double := MusicTransportButton{width: 36 text: ">"}
-                            // The loop pair, in glyphs that read as the marks
-                            // they set: `[` in, `]` out. The loop icon left of the
-                            // stepper is RELOOP/EXIT; the sparkle past them opens the
-                            // scanner, which is also where marks go to be forgotten.
-                            deck_a_loop_in := MusicTransportButton{width: 36 text: "["}
-                            deck_a_loop_out := MusicTransportButton{width: 36 text: "]"}
-                            deck_a_loop_scan := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
-                            }
+                        deck_a_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        // One beat either way -- the nudge a hand makes
+                        // when the drop lands a hair off -- and held, they
+                        // BEND the record rather than stepping it. A beat
+                        // is a measured one where the analysis found beats
+                        // and a second where it did not, so they always
+                        // step something.
+                        //
+                        // They point at the TRACK, not at the playhead: <
+                        // sends the track a beat FORWARD past the head, >
+                        // a beat back, which is the same convention as a
+                        // hand on the platter. NOT mirrored on deck B: the
+                        // sense is the same whichever deck it is.
+                        deck_a_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        deck_a_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        deck_a_loop := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                        }
+                        deck_a_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        deck_a_loop_len := VjBeatsDrop{
+                            width: 30 height: 34 loop_rows: true
+                            draw_bg +: {arrow: 0.0}
+                            draw_text +: {text_style: theme.font_bold{font_size: 10}}
+                        }
+                        deck_a_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        // The loop pair, in glyphs that read as the marks
+                        // they set: `[` in, `]` out. The loop icon left of the
+                        // stepper is RELOOP/EXIT; the sparkle past them opens the
+                        // scanner, which is also where marks go to be forgotten.
+                        deck_a_loop_in := MusicTransportButton{width: 22 text: "["}
+                        deck_a_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        deck_a_loop_scan := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
                         }
                     }
                 }
@@ -3227,52 +3221,44 @@ script_mod! {
                             }
                         }
                     }
-                    // Deck B mirrors both transport rows across the waveforms.
+                    // Deck B mirrors the transport row across the waveforms.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Down
-                        spacing: 5
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 1.0, y: 0.5}
-                            // NOT mirrored, exactly as the loop marks are not:
-                            // the chevrons read the same on both decks.
-                            deck_b_beat_fwd := MusicTransportButton{width: 36 text: "<"}
-                            deck_b_beat_back := MusicTransportButton{width: 36 text: ">"}
-                            deck_b_cue := MusicTransportButton{width: 52 text: "CUE"}
-                            deck_b_play := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
-                            }
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        spacing: 3
+                        wrap_spacing: 3
+                        align: Align{x: 1.0, y: 0.5}
+                        // NOT mirrored, exactly as the loop marks are not:
+                        // the chevrons read the same on both decks.
+                        deck_b_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        deck_b_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        deck_b_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        deck_b_play := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
-                            spacing: 5
-                            wrap_spacing: 5
-                            align: Align{x: 1.0, y: 0.5}
-                            // The sparkle stays outermost. IN then OUT keeps the
-                            // gesture's temporal order on either deck.
-                            deck_b_loop_scan := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
-                            }
-                            deck_b_loop_in := MusicTransportButton{width: 36 text: "["}
-                            deck_b_loop_out := MusicTransportButton{width: 36 text: "]"}
-                            deck_b_loop_halve := MusicTransportButton{width: 36 text: "<"}
-                            deck_b_loop_len := VjBeatsDrop{
-                                width: 42 height: 38 loop_rows: true
-                                draw_bg +: {arrow: 0.0}
-                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
-                            }
-                            deck_b_loop_double := MusicTransportButton{width: 36 text: ">"}
-                            deck_b_loop := MusicTransportIconButton{
-                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                            }
+                        // The sparkle stays outermost. IN then OUT keeps the
+                        // gesture's temporal order on either deck.
+                        deck_b_loop_scan := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        }
+                        deck_b_loop_in := MusicTransportButton{width: 22 text: "["}
+                        deck_b_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        deck_b_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        deck_b_loop_len := VjBeatsDrop{
+                            width: 30 height: 34 loop_rows: true
+                            draw_bg +: {arrow: 0.0}
+                            draw_text +: {text_style: theme.font_bold{font_size: 10}}
+                        }
+                        deck_b_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        deck_b_loop := MusicTransportIconButton{
+                            width: 26
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
                     }
                 }
