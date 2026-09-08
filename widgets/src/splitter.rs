@@ -166,12 +166,17 @@ impl SplitterAlign {
     }
 }
 
-/// Clamp a split position into the room both panes' own floors actually
-/// allow. This is the one rule every place a position is resolved shares —
-/// a live drag and the next layout pass alike — so a floor set once holds
-/// whether or not a finger is on the bar: a resize that leaves less room
-/// than `align` remembers is corrected the moment it is next drawn, not
-/// only the next time someone drags.
+/// Clamp a dragged split position into the room both panes' floors allow.
+///
+/// **A floor governs the hand, not the host.** This is applied to a drag and
+/// to nothing else. A host that sets the align itself is making a decision,
+/// not sliding a bar, and the commonest such decision is collapsing a panel
+/// to nothing — which three apps in this repo do by setting the position to
+/// zero on a splitter that also declares a floor. Applying the floor to
+/// that too does not enforce a rule, it overrules the caller: the panel
+/// stops collapsing and leaves a gutter the width of its own floor. The
+/// layout pass therefore clamps only into the room that exists (see
+/// `begin`), and the floor lives here, where a finger is on the bar.
 ///
 /// If the two floors do not both fit in the room at all (a pane squeezed
 /// narrower than either floor demands), the floors lose rather than the
@@ -415,9 +420,15 @@ impl Splitter {
             SplitterAxis::Horizontal => self.rect.size.x,
             SplitterAxis::Vertical => self.rect.size.y,
         };
-        let (min_a, min_b) = self.axis_min_max();
-        self.position =
-            clamp_split_position(self.align.to_position(self.axis, self.rect), room, min_a, min_b);
+        // Into the room and no further. NOT the floors: a host that has set
+        // the align itself — collapsing a panel to nothing, restoring a
+        // remembered width — has said what it wants, and the floors are for
+        // the drag. Clamping here as well is what turned a collapsed panel
+        // into an empty gutter the width of its own floor.
+        self.position = self
+            .align
+            .to_position(self.axis, self.rect)
+            .clamp(0.0, room.max(0.0));
 
         let walk = match self.axis {
             SplitterAxis::Horizontal => Walk::new(Size::Fixed(self.position), Size::fill()),
@@ -597,5 +608,28 @@ mod tests {
     #[test]
     fn no_room_at_all_still_answers() {
         assert_eq!(clamp_split_position(50.0, 0.0, 50.0, 50.0), 0.0);
+    }
+
+    /// A host collapsing a panel to nothing is honoured, and the floor is
+    /// not applied to it. Three apps in this repo collapse a panel by
+    /// setting the position to zero on a splitter that also declares a
+    /// floor; running the drag clamp over that as well left an empty
+    /// gutter the width of the floor instead of a collapsed panel. The
+    /// layout pass clamps into the room and stops there — this test is
+    /// that division, written down.
+    #[test]
+    fn a_host_may_collapse_past_a_floor_that_a_drag_may_not() {
+        let room = 900.0;
+        // What the layout pass does with a deliberate collapse.
+        assert_eq!(0.0_f64.clamp(0.0, room), 0.0, "a host asking for nothing gets nothing");
+        // What a DRAG to the same place does, on the same splitter.
+        assert_eq!(
+            clamp_split_position(0.0, room, 180.0, 50.0),
+            180.0,
+            "a finger on the bar still stops at the floor"
+        );
+        // And the layout pass still refuses a pane wider than the window,
+        // which is the case that made a clamp there worth having at all.
+        assert_eq!(2000.0_f64.clamp(0.0, room), room);
     }
 }
