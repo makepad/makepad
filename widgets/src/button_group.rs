@@ -745,6 +745,14 @@ impl Widget for SegmentedControl {
             draw.draw_abs(cx, pos, &option);
             draw.color = rest;
         }
+        // The comment below the key handler has said "the row is one tab
+        // stop" since it was written, and nothing ever registered one: the
+        // arrows worked, but only for someone who had already put the mouse
+        // on the row. A control a person cannot reach by keyboard has no
+        // keyboard.
+        if !self.disabled {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        }
         DrawStep::done()
     }
 

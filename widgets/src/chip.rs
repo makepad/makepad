@@ -840,6 +840,8 @@ impl ChipRef {
 /// Tab nine times to get past nine filters.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChipGroup {
+    #[rust]
+    area: Area,
     #[deref]
     view: View,
     /// How many chips may be chosen at once.
@@ -965,7 +967,19 @@ impl ChipGroup {
 
 impl Widget for ChipGroup {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.draw_walk(cx, scope, walk)
+        let step = self.view.draw_walk(cx, scope, walk);
+        // The view hands out a fresh area every redraw and migrates nothing,
+        // so a key focus pointed at it stops matching the moment anything
+        // repaints — which is why the arrows had never once answered. The
+        // group keeps its own handle and moves the focus along with it.
+        self.area = cx.update_area_refs(self.area, self.view.area());
+        // The doc above this type has always said the row is one tab stop.
+        // Nothing registered one, so Tab walked straight past the group and
+        // the arrows only answered someone who had already clicked into it.
+        if !self.disabled(cx.cx.cx) {
+            cx.add_nav_stop(self.area, NavRole::TextInput, Inset::default());
+        }
+        step
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -975,7 +989,7 @@ impl Widget for ChipGroup {
         // before a chip ever saw it. Keys are read straight off the event
         // instead, and only while the row holds the key focus.
         if let Event::KeyDown(ke) = event {
-            if cx.has_key_focus(self.view.area()) {
+            if cx.has_key_focus(self.area) {
                 match ke.key_code {
                     KeyCode::ArrowRight | KeyCode::ArrowDown => self.move_focus(cx, 1),
                     KeyCode::ArrowLeft | KeyCode::ArrowUp => self.move_focus(cx, -1),
@@ -1000,6 +1014,16 @@ impl Widget for ChipGroup {
             }
         }
         self.view.handle_event(cx, event, scope);
+
+        // Taken on any press inside the row, not only on one that changed an
+        // answer. A chip that is already on does not toggle, so it reports
+        // nothing, so the focus would stay on whatever the hand had touched
+        // last and the arrows would answer nobody.
+        if let Event::MouseDown(e) = event {
+            if !self.area.is_empty() && self.area.rect(cx).contains(e.abs) {
+                cx.set_key_focus(self.area);
+            }
+        }
 
         if let Event::Actions(actions) = event {
             let mut changed = false;
@@ -1027,7 +1051,7 @@ impl Widget for ChipGroup {
                 if let Some(index) = self.pressed_index(actions) {
                     self.focused = index;
                 }
-                cx.set_key_focus(self.view.area());
+                cx.set_key_focus(self.area);
                 cx.widget_action(uid, ChipGroupAction::Changed);
             }
             // The clear link is found by name rather than by type: a host
