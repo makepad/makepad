@@ -13903,7 +13903,21 @@ p2 {}
             surface: ApcSurface::Sfx,
             video_playing: false,
         };
+        // Traced under the same switch the ordinary frames are, because
+        // this is the one frame nothing can watch: it goes out as the app
+        // is leaving, so the surface it lands on is gone by the time
+        // anybody could look, and the control bridge's own record of what
+        // was sent dies with the process.
+        let trace = std::env::var_os("VJ_TRACE_LED").is_some();
         for message in self.apc_leds.update(frame) {
+            if trace {
+                log!(
+                    "led out: ch{} note {} vel {}",
+                    message[0] & 0x0f,
+                    message[1],
+                    message[2]
+                );
+            }
             for port in &self.apc_output_ports {
                 self.midi_output.send(Some(*port), MidiData { data: message });
             }
