@@ -13940,11 +13940,22 @@ p2 {}
             if !self.apc_input_ports.contains(&port) {
                 continue;
             }
-            if let Some(action) = self.apc.decode(data.data) {
+            let claimed = self.apc.decode(data.data);
+            if let Some(action) = claimed {
                 pad_touched |= matches!(action, ApcAction::Pad { .. });
                 actions.push(action);
             }
-            if !is_vj_reserved_midi(data.data) {
+            // The surface plays the lighting desk as well, and the desk was
+            // here first: it has the same faders, the same two knob rows
+            // and the same scene buttons. Anything the surface decoder just
+            // claimed is not also the desk's -- and because the decoder is
+            // surface-aware, that means the mixer strip is the DJ's on the
+            // music page and the desk's everywhere else, with one table
+            // deciding rather than two lists drifting apart. The reserved
+            // set stays as the floor beneath it: the clip grid and the
+            // crossfader were never the desk's, whatever the decoder makes
+            // of a particular note on a particular model.
+            if claimed.is_none() && !is_vj_reserved_midi(data.data) {
                 if let Some(desk) = self.lighting.as_ref() {
                     let _ = desk.handle_midi(data.data);
                 }

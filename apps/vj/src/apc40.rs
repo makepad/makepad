@@ -95,7 +95,10 @@ impl Apc40State {
         if is_note {
             let note = data[1];
             let channel = data[0] & 0x0f;
-            if self.model == ApcModel::Apc40Mk2 {
+            // The scene row and the clip-stop row belong to the loop
+            // launcher, which only exists on the music surface. Off it they
+            // are not ours at all -- see `MIXER STRIP` below.
+            if self.model == ApcModel::Apc40Mk2 && self.surface == ApcSurface::Music {
                 if channel == 0 && (NOTE_SCENE_FIRST..=NOTE_SCENE_LAST).contains(&note) {
                     return Some(ApcAction::Scene {
                         surface: self.surface,
@@ -187,22 +190,33 @@ impl Apc40State {
         if status == 0xb {
             let value = data[2] as f32 / 127.0;
             let channel = (data[0] & 0x0f) as usize;
+            // MIXER STRIP. One surface, two jobs: this console's lighting
+            // desk plays the same faders, the same two knob rows and the
+            // same scene buttons, and it was here first. They are the DJ
+            // mixer's only while the surface is on the music page; on the
+            // video and pad pages they are the desk's, exactly as they were
+            // before the decks claimed them. The master and the crossfader
+            // are not in the argument -- they mean something on every page
+            // and the desk has never wanted them.
+            let strip = self.surface == ApcSurface::Music;
             return match data[1] {
                 CC_MASTER => Some(ApcAction::Master(value)),
                 CC_CROSSFADER => Some(ApcAction::Crossfader(value)),
-                CC_CHANNEL_FADER if channel < KNOB_ROW => {
+                CC_CHANNEL_FADER if strip && channel < KNOB_ROW => {
                     Some(ApcAction::ChannelFader { channel, value })
                 }
-                cc if (CC_TRACK_KNOB_FIRST..CC_TRACK_KNOB_FIRST + KNOB_ROW as u8)
-                    .contains(&cc) =>
+                cc if strip
+                    && (CC_TRACK_KNOB_FIRST..CC_TRACK_KNOB_FIRST + KNOB_ROW as u8)
+                        .contains(&cc) =>
                 {
                     Some(ApcAction::TrackKnob {
                         index: (cc - CC_TRACK_KNOB_FIRST) as usize,
                         value,
                     })
                 }
-                cc if (CC_DEVICE_KNOB_FIRST..CC_DEVICE_KNOB_FIRST + KNOB_ROW as u8)
-                    .contains(&cc) =>
+                cc if strip
+                    && (CC_DEVICE_KNOB_FIRST..CC_DEVICE_KNOB_FIRST + KNOB_ROW as u8)
+                        .contains(&cc) =>
                 {
                     Some(ApcAction::DeviceKnob {
                         index: (cc - CC_DEVICE_KNOB_FIRST) as usize,
@@ -959,7 +973,7 @@ mod tests {
 
     #[test]
     fn channel_faders_and_both_knob_rows_decode() {
-        let mut state = Apc40State::default();
+        let mut state = Apc40State { surface: ApcSurface::Music, ..Apc40State::default() };
         // Channel faders carry their strip in the MIDI channel nibble.
         assert_eq!(
             state.decode([0xb0, CC_CHANNEL_FADER, 127]),
@@ -991,6 +1005,44 @@ mod tests {
         );
         // An unmapped controller stays unmapped.
         assert_eq!(state.decode([0xb0, 0x22, 100]), None);
+    }
+
+    /// One surface, two jobs. The lighting desk plays the same faders, the
+    /// same knob rows and the same scene buttons, and it was here first --
+    /// so off the music page the DJ mixer does not answer them, and the
+    /// message goes where it went before the decks existed.
+    #[test]
+    fn the_mixer_strip_is_the_djs_only_on_the_music_page() {
+        for surface in [ApcSurface::Video, ApcSurface::Sfx] {
+            let mut state = Apc40State { surface, ..Apc40State::default() };
+            assert_eq!(state.decode([0xb0, CC_CHANNEL_FADER, 127]), None, "{surface:?} fader");
+            assert_eq!(state.decode([0xb0, CC_TRACK_KNOB_FIRST, 64]), None, "{surface:?} top knob");
+            assert_eq!(state.decode([0xb0, CC_DEVICE_KNOB_FIRST, 64]), None, "{surface:?} knob");
+            assert_eq!(state.decode([0x90, NOTE_SCENE_FIRST, 127]), None, "{surface:?} scene");
+            assert_eq!(state.decode([0x80, NOTE_SCENE_FIRST, 0]), None, "{surface:?} scene up");
+            assert_eq!(state.decode([0x93, NOTE_CLIP_STOP, 127]), None, "{surface:?} clip stop");
+            // What the surface owns everywhere it goes on owning.
+            assert_eq!(state.decode([0xb0, CC_MASTER, 127]), Some(ApcAction::Master(1.0)));
+            assert_eq!(
+                state.decode([0xb0, CC_CROSSFADER, 0]),
+                Some(ApcAction::Crossfader(0.0)),
+            );
+            assert!(
+                matches!(state.decode([0x90, 7, 127]), Some(ApcAction::Pad { .. })),
+                "{surface:?}: the clip grid is the surface's on every page",
+            );
+        }
+
+        // And on the music page they are the mixer's again.
+        let mut state = Apc40State { surface: ApcSurface::Music, ..Apc40State::default() };
+        assert_eq!(
+            state.decode([0xb0, CC_CHANNEL_FADER, 127]),
+            Some(ApcAction::ChannelFader { channel: 0, value: 1.0 }),
+        );
+        assert!(matches!(
+            state.decode([0x90, NOTE_SCENE_FIRST, 127]),
+            Some(ApcAction::Scene { .. }),
+        ));
     }
 
     #[test]
