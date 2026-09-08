@@ -200,6 +200,12 @@ impl NavList {
     /// still here, and otherwise the list falls back to the first, because a
     /// nav with nothing lit does not say where you are.
     pub fn set_destinations(&mut self, cx: &mut Cx, destinations: Vec<Destination>) {
+        // Handing over the same list again is what a host does on every
+        // refresh; rebuilding the rows for it would throw away their state
+        // and cost a redraw a pass.
+        if self.destinations == destinations {
+            return;
+        }
         let keep = self
             .selected
             .filter(|id| destinations.iter().any(|d| d.id == *id))
