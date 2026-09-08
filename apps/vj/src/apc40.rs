@@ -747,6 +747,25 @@ pub fn is_apc40_port(name: &str) -> bool {
     apc_model_for_port(name).is_some()
 }
 
+/// Whether a port name is the operating system's own loopback, which
+/// carries back whatever is written to it.
+///
+/// Sending the house clock into one of these means the app immediately
+/// reads its own clock back, and anything else listening on the other end
+/// hears every tick twice. The test is deliberately narrow: only the
+/// generic name the operating system gives its own facility, matched
+/// through the same normalise-then-substring form port matching already
+/// uses. Third-party loopback drivers name themselves whatever they like
+/// and are the operator's own business.
+pub fn is_loopback_port(name: &str) -> bool {
+    let compact: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    compact.contains("midithrough") || compact.contains("throughport")
+}
+
 /// Which ports of a set belong to ONE surface, by index into the set.
 ///
 /// A machine can have both surfaces plugged in, and their protocols are not
@@ -1105,6 +1124,21 @@ mod tests {
         let choice = choose_surface([("Some Synth", true), ("APC40 mkII", true)]).unwrap();
         assert!(choice.ignored.is_empty());
         assert_eq!(choice.inputs, vec![1]);
+    }
+
+    /// The clock fans out to every output when it is on, and one of them
+    /// hands back whatever it is given.
+    #[test]
+    fn the_systems_own_loopback_is_recognised_by_its_generic_name() {
+        assert!(is_loopback_port("Midi Through"));
+        assert!(is_loopback_port("Midi Through:Midi Through Port-0 14:0"));
+        assert!(is_loopback_port("MIDITHROUGH"));
+        assert!(is_loopback_port("Through Port-0"));
+        // Anything else is a real device until proven otherwise -- a name
+        // test that guesses wide silences ports the operator wanted.
+        assert!(!is_loopback_port("APC40 mkII"));
+        assert!(!is_loopback_port("Breakthrough Synth"), "a word is not the facility");
+        assert!(!is_loopback_port("Passthrough Box"));
     }
 
     #[test]

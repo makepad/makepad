@@ -12548,9 +12548,14 @@ p2 {}
                 sender.close_and_wait();
             }
             // Back to the APC's own ports, which is what the LED writer
-            // needs and all it needs.
+            // needs and all it needs. The record of what the clock owns
+            // goes back with them: nothing reads it while the sender is
+            // gone, but a field whose doc comment says "every output the
+            // clock is being sent to" and which names a set nobody owns is
+            // a bug already written, waiting for its first reader.
             let ports = self.apc_output_ports.clone();
             cx.use_midi_outputs(&ports);
+            self.clock_out_ports = ports;
             return;
         }
         let mut ports = self.apc_output_ports.clone();
@@ -30434,10 +30439,14 @@ impl MatchEvent for App {
             choice.inputs.iter().map(|index| ports.descs[*index].name.clone()).collect();
         let model = (!choice.inputs.is_empty() || !choice.outputs.is_empty())
             .then_some(choice.model);
+        // Every output EXCEPT the system's own loopback, which hands back
+        // whatever is written to it: fanning the house clock into that
+        // means reading our own clock straight back, and anything else on
+        // the far end hearing every tick twice.
         self.all_output_ports = ports
             .descs
             .iter()
-            .filter(|desc| desc.port_type.is_output())
+            .filter(|desc| desc.port_type.is_output() && !apc40::is_loopback_port(&desc.name))
             .map(|desc| desc.port_id)
             .collect();
         // The clock, when it is on, goes to every output; the LEDs only
