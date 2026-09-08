@@ -38,6 +38,7 @@ pub mod radiobutton;
 pub mod view;
 pub mod breadcrumb;
 pub mod layout;
+pub mod pagination;
 pub mod marquee;
 pub mod grid;
 pub mod align_scroll;
@@ -76,6 +77,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);
     breadcrumb::script_mod(vm);
     layout::script_mod(vm);
+    pagination::script_mod(vm);
     marquee::script_mod(vm);
     grid::script_mod(vm);
     align_scroll::script_mod(vm);
@@ -136,6 +138,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         view::STORIES,
         breadcrumb::STORIES,
         layout::STORIES,
+        pagination::STORIES,
         marquee::STORIES,
         grid::STORIES,
         align_scroll::STORIES,
