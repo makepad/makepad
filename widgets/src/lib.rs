@@ -144,6 +144,7 @@ pub mod stack_navigation;
 
 pub mod callout_tooltip;
 pub mod file_tree;
+pub mod floating_panel;
 pub mod modal;
 pub mod page_flip;
 pub mod pagination;
@@ -227,6 +228,7 @@ pub use crate::{
     label::*,
     link_label::*,
     menu_bar::*,
+    floating_panel::*,
     modal::*,
     nav_control::*,
     nav_list::*,
@@ -456,6 +458,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
+    crate::floating_panel::script_mod(vm);
     crate::marquee::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
