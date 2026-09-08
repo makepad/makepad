@@ -269,6 +269,43 @@ impl MidiEvent {
 }
 
 impl MidiData {
+    /// How many of the three bytes are actually part of the message.
+    ///
+    /// A `MidiData` is always three bytes wide, but the wire is not: the
+    /// status byte names the length, and everything after it is somebody
+    /// else's business. A clock tick is ONE byte; sending three puts two
+    /// zeroes on the wire after it, and because a system-realtime byte does
+    /// not clear running status, a receiver reads them as another message
+    /// under whatever status came last -- a note-off for note 0, twenty-four
+    /// times a beat, on a port that is also carrying lamp writes.
+    ///
+    /// A first byte below 0x80 is not a status at all (it is running status,
+    /// or a caller that built a message by hand); nothing here can tell how
+    /// long that is, so all three go, exactly as they always did.
+    pub fn wire_len(&self) -> usize {
+        match self.data[0] {
+            // Program change and channel pressure carry ONE data byte.
+            0xc0..=0xdf => 2,
+            // Note, aftertouch, control change and pitch bend carry two.
+            0x80..=0xbf | 0xe0..=0xef => 3,
+            // System common: one data byte for quarter-frame and song
+            // select, two for song position, none for the rest.
+            0xf1 | 0xf3 => 2,
+            0xf2 => 3,
+            // System realtime and everything else in 0xf4..=0xff: the
+            // status IS the message. 0xf0 cannot be a whole system-exclusive
+            // message in three bytes, so it is left alone.
+            0xf0 => 3,
+            0xf4..=0xff => 1,
+            _ => 3,
+        }
+    }
+
+    /// The bytes to put on the wire.
+    pub fn wire(&self) -> &[u8] {
+        &self.data[..self.wire_len()]
+    }
+
     pub fn status(&self) -> u8 {
         self.data[0] >> 4
     }
@@ -362,6 +399,38 @@ mod tests {
                 other => panic!("expected pitch bend, got {:?}", other),
             }
         }
+    }
+
+    /// The length the status byte names. Getting this wrong is not a
+    /// cosmetic fault: two zero bytes after a clock tick are read under
+    /// whatever status came last, so a port carrying both a clock and lamp
+    /// writes gets a stream of note-offs it never asked for.
+    #[test]
+    fn the_status_byte_says_how_much_of_the_message_is_real() {
+        let len = |bytes: [u8; 3]| MidiData { data: bytes }.wire_len();
+        // Three-byte messages, one per status.
+        assert_eq!(len([0x80, 60, 0]), 3, "note off");
+        assert_eq!(len([0x9f, 60, 100]), 3, "note on, channel 15");
+        assert_eq!(len([0xa0, 60, 100]), 3, "polyphonic aftertouch");
+        assert_eq!(len([0xb0, 7, 100]), 3, "control change");
+        assert_eq!(len([0xe0, 0, 64]), 3, "pitch bend");
+        assert_eq!(len([0xf2, 0, 1]), 3, "song position");
+        // Two-byte messages.
+        assert_eq!(len([0xc0, 5, 0]), 2, "program change");
+        assert_eq!(len([0xd0, 64, 0]), 2, "channel pressure");
+        assert_eq!(len([0xf1, 0x21, 0]), 2, "quarter frame");
+        assert_eq!(len([0xf3, 2, 0]), 2, "song select");
+        // One-byte messages: the whole reason this exists.
+        for status in [0xf6u8, 0xf7, 0xf8, 0xfa, 0xfb, 0xfc, 0xfe, 0xff] {
+            assert_eq!(len([status, 0, 0]), 1, "status {status:#04x} is one byte");
+        }
+        assert_eq!(MidiData { data: [0xf8, 0, 0] }.wire(), &[0xf8]);
+        assert_eq!(MidiData { data: [0x90, 60, 100] }.wire(), &[0x90, 60, 100]);
+        // Not a status byte at all: nothing can be assumed, so nothing is.
+        assert_eq!(len([0x40, 0x50, 0x60]), 3, "running status stays whole");
+        // Three bytes cannot hold a whole system-exclusive message, so it is
+        // passed through rather than truncated to its opening byte.
+        assert_eq!(len([0xf0, 0x7e, 0x00]), 3, "sysex is not ours to cut");
     }
 
     /// Channel pressure carries one 7-bit value, so the third byte is not part

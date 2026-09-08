@@ -403,10 +403,22 @@ impl AlsaMidiAccess {
                     // send to port
                     let mut event: snd_seq_event_t = std::mem::zeroed();
                     snd_midi_event_reset_encode(client.midi_send.0);
-                    let r =
-                        snd_midi_event_encode(client.midi_send.0, d.data.as_ptr(), 3, &mut event);
-                    if r != 1 {
-                        panic!("Unexpected result");
+                    // The encoder is told how long the message IS, and it
+                    // answers with how much of it it consumed. Handing it
+                    // three bytes for a one-byte clock tick put two zeroes
+                    // on the wire; demanding it consume exactly one byte
+                    // meant a three-byte note took the panic branch, which
+                    // is every lamp write this backend has ever tried.
+                    let len = d.wire_len();
+                    let r = snd_midi_event_encode(
+                        client.midi_send.0,
+                        d.data.as_ptr(),
+                        len as _,
+                        &mut event,
+                    );
+                    if r < 0 || r as usize != len {
+                        crate::log!("midi out: encoder took {r} of {len} bytes, message dropped");
+                        continue;
                     }
                     event.source.port = port.port_id as _;
                     event.dest.client = SND_SEQ_ADDRESS_SUBSCRIBERS as _;

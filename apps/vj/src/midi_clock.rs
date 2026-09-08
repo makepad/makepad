@@ -387,8 +387,11 @@ fn send(
     ports: &[makepad_widgets::MidiPortId],
     byte: u8,
 ) {
-    // A system-realtime message is one byte; the two that follow are
-    // ignored by every sender path because the status names the length.
+    // A system-realtime message is one byte. The two that follow are
+    // padding, and this comment used to claim every sender path ignored
+    // them because the status names the length -- which was simply not
+    // true of any of the three backends: each one wrote all three bytes.
+    // `MidiData::wire_len` is where the status is read now, below here.
     for port in ports {
         output.send(Some(*port), makepad_widgets::MidiData { data: [byte, 0, 0] });
     }

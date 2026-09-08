@@ -24,7 +24,12 @@ impl OsMidiInput {
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let mut words = [0u32; 64];
-        words[0] = (0x20000000)
+        // The universal-packet message type has to match the status: type 1
+        // is system real-time and common, type 2 is a channel voice message.
+        // Hard-coding 2 made a clock tick a malformed voice packet, which is
+        // dropped rather than sounded -- so the house clock never left here.
+        let message_type: u32 = if d.data[0] >= 0xf0 { 0x1 } else { 0x2 };
+        words[0] = (message_type << 28)
             | ((d.data[0] as u32) << 16)
             | ((d.data[1] as u32) << 8)
             | d.data[2] as u32;
