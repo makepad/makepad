@@ -22,7 +22,7 @@ use crate::h3_text::{
     h3_text_encode_progress, h3_text_encoder_evict, H3TextEncoderPrepared, H3VisionImage,
     H3VisionSpan,
 };
-use crate::h3_transformer::{h3_dit_forward, H3DitPrepared};
+use crate::h3_transformer::{h3_dit_forward, H3AdaLnCache, H3DitPrepared};
 use crate::h3_vae::{
     h3_vae_decode_ctrl, h3_vae_denormalize_latents, h3_vae_frames_to_u8, H3VaeCtrl,
     H3VaeDecoderPrepared, H3_VAE_PATCH,
@@ -102,7 +102,8 @@ impl H3RunControl<'_> {
 /// ~42s of a 46s repeat job was the TE phase for embeds that are
 /// byte-identical to the previous job's.
 ///
-/// This cache keeps the ENCODED conditioning (host `Vec<f32>`, a few MB):
+/// This cache keeps encoded conditioning and a bounded exact AdaLN schedule
+/// on the host (small embeddings plus at most 512 MiB of projection tables):
 /// - text embeds, keyed by models dir + the full token presentation +
 ///   canvas size + the keyframe canvas pixels (fl2va embeds see the image);
 /// - fl2va keyframe condition LATENTS (pre-noise, seed-independent — the
@@ -124,6 +125,7 @@ pub struct H3CondCache {
     /// first+last request encodes two anchors, and swapping only the prompt
     /// must still hit both.
     keyframe_latents: Vec<(H3KeyframeKey, Vec<f32>)>,
+    adaln: Option<(PathBuf, std::sync::Arc<H3AdaLnCache>)>,
 }
 
 /// How many keyframe latent blocks the cache keeps (2 keyframes x a
@@ -958,7 +960,37 @@ pub fn h3_generate_with_control(
     ctrl.phase("dit-load", 0, 0);
     let start = std::time::Instant::now();
     let dit_weights = load_dit_weights(models_dir, &params.model_set)?;
-    let dit_prepared = H3DitPrepared::prepare(&dit_weights)?;
+    let mut dit_prepared = H3DitPrepared::prepare(&dit_weights)?;
+    let schedule_values: Vec<Vec<f32>> = (0..num_forwards).map(|step| {
+        h3_build_row_timesteps_cond(&layout, video_sched.timesteps[step],
+            audio_sched.timesteps[step], video_sched.timesteps[step].max(H3_KEYFRAME_NOISE_AUG)).values
+    }).collect();
+    // Bound the single-entry host cache to 512 MiB. Long base-model schedules
+    // and already-pruned AdaLN curves retain the original projection path.
+    let table_bytes = schedule_values.iter().map(|v| v.len().max(2)).sum::<usize>()
+        .saturating_mul(50 * 96768 * std::mem::size_of::<f32>());
+    if std::env::var("H3_ADALN_PRECOMPUTE").as_deref() != Ok("0")
+        && dit_weights.adaln_curve().is_none() && table_bytes <= 512 * 1024 * 1024
+    {
+        let source = params.model_set.as_ref().and_then(|set| set.dit.as_ref())
+            .map(|file| file.path.clone()).unwrap_or_else(|| models_dir.join("transformer"));
+        let cached = ctrl.cond_cache.as_deref().and_then(|cache| cache.adaln.as_ref())
+            .filter(|(path, cache)| path == &source && cache.matches(&dit_weights, &schedule_values, params.precision))
+            .map(|(_, cache)| std::sync::Arc::clone(cache));
+        let reused = cached.is_some();
+        let cache = match cached {
+            Some(cache) => cache,
+            None => std::sync::Arc::new(H3AdaLnCache::prepare(
+                &dit_weights, &dit_prepared, &schedule_values, params.precision, || ctrl.check(),
+            )?),
+        };
+        if let Some(cond) = ctrl.cond_cache.as_deref_mut() {
+            cond.adaln = Some((source, std::sync::Arc::clone(&cache)));
+        }
+        dit_prepared.adaln_cache = Some(cache);
+        progress(&format!("adaln: {} exact schedule tables ({:.1} MiB)",
+            if reused { "reused" } else { "precomputed" }, table_bytes as f64 / 1048576.0));
+    }
     timings.dit_load_s = start.elapsed().as_secs_f64();
 
     // The DiT consumes (and emits) video rows conditioning-first; the euler

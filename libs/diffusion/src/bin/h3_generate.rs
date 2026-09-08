@@ -11,6 +11,9 @@
 //!               [--dump <oracle dir>]     token ids + seed-parity noise
 //!               [--width 640 --height 352 --frames 124 --steps 50 --seed 42]
 //!               [--own-noise]             ignore dump noise, use seeded RNG
+//!               [--dit-bf16 <transformer dir>] [--repeats 3]
+//!               [--last-prompt "text"]    change prompt on the final repeat
+//!               [--seed-stride 1]         vary the seed between repeats
 //!               [--no-audio]              skip the audio VAE decode
 //!
 //! The dump's forward-0 input rows are the reference's initial noise (t=0 is
@@ -23,7 +26,7 @@
 use makepad_diffusion::backend::GemmPrecision;
 use makepad_diffusion::h3::H3_VIDEO_PATCH_DIM;
 use makepad_diffusion::h3::H3KeyframeAnchor;
-use makepad_diffusion::h3_pipeline::{h3_generate, H3GenerateParams, H3KeyframeInput};
+use makepad_diffusion::h3_pipeline::{h3_generate_with_control, H3CondCache, H3GenerateParams, H3KeyframeInput, H3RunControl};
 use makepad_diffusion::h3_tokenizer::H3Tokenizer;
 use makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::PngDecoder;
@@ -337,7 +340,13 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
             dit_namespace: None,
         })
     };
-    let dit_file = component("dit-gguf", "dit-nvfp4");
+    let dit_file = if let Some(path) = opts.get("dit-bf16") {
+        Some(makepad_diffusion::h3_pipeline::H3ComponentFile {
+            path: PathBuf::from(path),
+            format: makepad_diffusion::h3_pipeline::H3WeightFormat::Bf16Shards,
+            dit_namespace: Some(format!("h3dit::bench::{}", path)),
+        })
+    } else { component("dit-gguf", "dit-nvfp4") };
     let te_file = component("te-gguf", "te-nvfp4");
     let video_vae_path = opts.get("video-vae").map(std::path::PathBuf::from);
     let audio_vae_dir = opts.get("audio-vae").map(std::path::PathBuf::from);
@@ -356,7 +365,7 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         None
     };
 
-    let params = H3GenerateParams {
+    let mut params = H3GenerateParams {
         width,
         height,
         num_frames: frames,
@@ -376,68 +385,87 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         staged_residency: opts.contains_key("staged"),
     };
 
-    let output = h3_generate(&models, &params, |line| {
-        println!("{line}");
-        let _ = std::io::stdout().flush();
-    })
-    .map_err(|err| err.to_string())?;
-
-    // Frames + stats.
-    let frames_path = out_dir.join("frames_u8.npy");
-    write_npy_u8(
-        &frames_path,
-        &[output.num_frames, output.height, output.width, 3],
-        &output.frames_rgb8,
-    )?;
-    if let Some(planar) = &output.audio_planar {
-        let wav_path = out_dir.join("audio.wav");
-        write_wav_stereo(&wav_path, planar, output.audio_sample_rate)?;
-        println!("audio -> {}", wav_path.display());
+    let repeats = opt_usize(opts, "repeats", 1).max(1);
+    let seed_stride = opt_usize(opts, "seed-stride", 0) as u64;
+    if seed_stride != 0 && (params.video_noise_rows.is_some() || params.audio_noise_rows.is_some()) {
+        return Err("--seed-stride requires generated noise; use --own-noise with --dump".into());
     }
-    let t = &output.timings;
-    let warm = t.warm_forward_s().unwrap_or(0.0);
-    let forwards_list = t
-        .forwards_s
-        .iter()
-        .map(|s| format!("{s:.3}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let denoise_total: f64 = t.forwards_s.iter().sum();
-    let stats = format!(
-        "{{\n \"canvas\": [{}, {}, {}],\n \"steps\": {},\n \"seed\": {},\n \"noise\": \"{}\",\n \
-         \"te_load_s\": {:.2},\n \"te_encode_s\": {:.2},\n \"dit_load_s\": {:.2},\n \
-         \"denoise_total_s\": {:.2},\n \"warm_s_per_forward\": {:.3},\n \
-         \"vae_load_s\": {:.2},\n \"vae_decode_s\": {:.2},\n \"audio_decode_s\": {:.2},\n \"total_s\": {:.1},\n \
-         \"forwards_s\": [{}]\n}}\n",
-        output.width,
-        output.height,
-        output.num_frames,
-        steps,
-        seed,
-        noise_source,
-        t.te_load_s,
-        t.te_encode_s,
-        t.dit_load_s,
-        denoise_total,
-        warm,
-        t.vae_load_s,
-        t.vae_decode_s,
-        t.audio_decode_s,
-        t.total_s,
-        forwards_list,
-    );
-    std::fs::write(out_dir.join("h3_ours_stats.json"), &stats).map_err(|err| err.to_string())?;
-    println!(
-        "totals: te {:.1}+{:.1}s dit_load {:.1}s denoise {:.1}s (warm {:.3} s/fwd) vae {:.1}+{:.1}s total {:.1}s",
-        t.te_load_s,
-        t.te_encode_s,
-        t.dit_load_s,
-        denoise_total,
-        warm,
-        t.vae_load_s,
-        t.vae_decode_s,
-        t.total_s,
-    );
-    println!("frames -> {}", frames_path.display());
+    let mut cond_cache = H3CondCache::default();
+    for repeat in 0..repeats {
+        params.seed = seed.wrapping_add((repeat as u64).wrapping_mul(seed_stride));
+        if repeat > 0 && repeat + 1 == repeats {
+            if let Some(prompt) = opts.get("last-prompt") {
+                let tokenizer = H3Tokenizer::load(&models.join("tokenizer")).map_err(|e| e.to_string())?;
+                params.token_ids = tokenizer.encode(prompt);
+                println!("changed prompt: {} tokens", params.token_ids.len());
+            }
+        }
+        let out_dir = if repeats > 1 { out_dir.join(format!("run-{repeat}")) } else { out_dir.clone() };
+        std::fs::create_dir_all(&out_dir).map_err(|err| err.to_string())?;
+        println!("repeat {}/{} seed {}", repeat + 1, repeats, params.seed);
+        let output = h3_generate_with_control(&models, &params, |line| {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }, &mut H3RunControl { cond_cache: Some(&mut cond_cache), ..Default::default() })
+        .map_err(|err| err.to_string())?;
+
+        // Frames + stats.
+        let frames_path = out_dir.join("frames_u8.npy");
+        write_npy_u8(
+            &frames_path,
+            &[output.num_frames, output.height, output.width, 3],
+            &output.frames_rgb8,
+        )?;
+        if let Some(planar) = &output.audio_planar {
+            let wav_path = out_dir.join("audio.wav");
+            write_wav_stereo(&wav_path, planar, output.audio_sample_rate)?;
+            println!("audio -> {}", wav_path.display());
+        }
+        let t = &output.timings;
+        let warm = t.warm_forward_s().unwrap_or(0.0);
+        let forwards_list = t
+            .forwards_s
+            .iter()
+            .map(|s| format!("{s:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let denoise_total: f64 = t.forwards_s.iter().sum();
+        let stats = format!(
+            "{{\n \"canvas\": [{}, {}, {}],\n \"steps\": {},\n \"seed\": {},\n \"noise\": \"{}\",\n \
+             \"te_load_s\": {:.2},\n \"te_encode_s\": {:.2},\n \"dit_load_s\": {:.2},\n \
+             \"denoise_total_s\": {:.2},\n \"warm_s_per_forward\": {:.3},\n \
+             \"vae_load_s\": {:.2},\n \"vae_decode_s\": {:.2},\n \"audio_decode_s\": {:.2},\n \"total_s\": {:.1},\n \
+             \"forwards_s\": [{}]\n}}\n",
+            output.width,
+            output.height,
+            output.num_frames,
+            steps,
+            params.seed,
+            noise_source,
+            t.te_load_s,
+            t.te_encode_s,
+            t.dit_load_s,
+            denoise_total,
+            warm,
+            t.vae_load_s,
+            t.vae_decode_s,
+            t.audio_decode_s,
+            t.total_s,
+            forwards_list,
+        );
+        std::fs::write(out_dir.join("h3_ours_stats.json"), &stats).map_err(|err| err.to_string())?;
+        println!(
+            "totals: te {:.1}+{:.1}s dit_load {:.1}s denoise {:.1}s (warm {:.3} s/fwd) vae {:.1}+{:.1}s total {:.1}s",
+            t.te_load_s,
+            t.te_encode_s,
+            t.dit_load_s,
+            denoise_total,
+            warm,
+            t.vae_load_s,
+            t.vae_decode_s,
+            t.total_s,
+        );
+        println!("frames -> {}", frames_path.display());
+    }
     Ok(())
 }
