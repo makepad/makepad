@@ -7835,8 +7835,10 @@ pub enum TrackListHit {
     /// target loads it. Carries the modifiers so a set-building release
     /// still loads nothing.
     Load(usize, KeyModifiers),
-    /// The row's `+` button: queue it.
-    Queue(usize),
+    /// The row's `+` button: queue it. Carries the modifiers so Shift
+    /// (play next) and Control (replace the queue) reach the host --
+    /// same treatment as the row body's own `Pick`/`Load`.
+    Queue(usize, KeyModifiers),
     /// The queue row's minus button: take it back off the set list.
     Unqueue(usize),
     /// The row's headphones button: pre-listen it on the phones bus.
@@ -8358,8 +8360,8 @@ pub fn track_list_hits(
         // press is one load, whatever the list reports.
         let hit = if item.button(cx, ids!(row_hp)).clicked(actions) {
             TrackListHit::Preview(row_id)
-        } else if item.button(cx, ids!(row_queue)).clicked(actions) {
-            TrackListHit::Queue(row_id)
+        } else if let Some(modifiers) = item.button(cx, ids!(row_queue)).clicked_modifiers(actions) {
+            TrackListHit::Queue(row_id, modifiers)
         } else if item.button(cx, ids!(row_unqueue)).clicked(actions) {
             TrackListHit::Unqueue(row_id)
         } else if item.button(cx, ids!(hp_play)).clicked(actions)

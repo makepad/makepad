@@ -6063,6 +6063,31 @@ impl DeckEngine {
         Vec::new()
     }
 
+    /// Put a track at the FRONT of the queue: the next free deck gets this
+    /// one before anything already waiting. A duplicate is moved rather
+    /// than doubled, so "play this next" always means exactly one row, at
+    /// the front, whether or not it was already queued somewhere else.
+    pub fn enqueue_next(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        self.queue.retain(|queued| queued.asset != item.asset);
+        self.queue.insert(0, item);
+        if self.auto_load_queue {
+            return self.pump_queue();
+        }
+        Vec::new()
+    }
+
+    /// Clear whatever was queued and put just this one track in its place.
+    /// The operator's own "start over" gesture, not a merge with what was
+    /// there -- a top-up would leave old picks the operator meant to drop.
+    pub fn enqueue_replacing(&mut self, item: TrackItem) -> Vec<DeckCmd> {
+        self.queue.clear();
+        self.queue.push(item);
+        if self.auto_load_queue {
+            return self.pump_queue();
+        }
+        Vec::new()
+    }
+
     /// A finished track back onto the tail. Never pumps (the hand-back runs
     /// its single deliberate pump afterwards) and keeps the dedupe: a track
     /// the operator already re-queued is not doubled.
@@ -10102,6 +10127,57 @@ mod tests {
         assert!(engine.queue().is_empty());
         engine.clear_queue();
         assert!(engine.pump_queue().is_empty());
+    }
+
+    #[test]
+    fn play_next_moves_a_track_to_the_front_rather_than_doubling_it() {
+        let mut engine = DeckEngine::new();
+        // Both decks busy, so the queue actually holds what it is given.
+        let (deck_a, gen_a) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck_a, gen_a, 100.0);
+        engine.play_pause(DeckId::A);
+        let (deck_b, gen_b) = load_gen(&engine.click(item(2), DeckTarget::B));
+        engine.track_ready(deck_b, gen_b, 100.0);
+        engine.play_pause(DeckId::B);
+
+        engine.enqueue(item(3));
+        engine.enqueue(item(4));
+        assert_eq!(engine.queue().len(), 2, "both decks busy: nothing pumps yet");
+
+        engine.enqueue_next(item(5));
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            vec![item(5).asset, item(3).asset, item(4).asset],
+            "the new track leads, the rest keep their order"
+        );
+
+        // Already-queued and asked for again: it MOVES to the front, the
+        // queue does not grow and the row is not doubled.
+        engine.enqueue_next(item(4));
+        assert_eq!(engine.queue().len(), 3, "moved, not duplicated");
+        assert_eq!(engine.queue()[0].asset, item(4).asset);
+    }
+
+    #[test]
+    fn replacing_the_queue_drops_everything_that_was_there() {
+        let mut engine = DeckEngine::new();
+        let (deck_a, gen_a) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck_a, gen_a, 100.0);
+        engine.play_pause(DeckId::A);
+        let (deck_b, gen_b) = load_gen(&engine.click(item(2), DeckTarget::B));
+        engine.track_ready(deck_b, gen_b, 100.0);
+        engine.play_pause(DeckId::B);
+
+        engine.enqueue(item(3));
+        engine.enqueue(item(4));
+        assert_eq!(engine.queue().len(), 2);
+
+        engine.enqueue_replacing(item(5));
+        assert_eq!(
+            engine.queue().iter().map(|i| i.asset).collect::<Vec<_>>(),
+            vec![item(5).asset],
+            "a fresh start, not a merge with what was queued"
+        );
     }
 
     #[test]

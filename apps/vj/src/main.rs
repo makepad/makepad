@@ -28998,9 +28998,19 @@ p2 {}
                     }
                     index
                 }
-                TrackListHit::Queue(index) => {
+                TrackListHit::Queue(index, modifiers) => {
                     if let Some(item) = self.track_item_at(index) {
-                        let cmds = self.decks.enqueue(item);
+                        // Shift: play this one next, ahead of whatever is
+                        // already waiting. Control: drop the rest of the
+                        // queue and start over with just this track. Plain:
+                        // the queue's ordinary tail add.
+                        let cmds = if modifiers.control {
+                            self.decks.enqueue_replacing(item)
+                        } else if modifiers.shift {
+                            self.decks.enqueue_next(item)
+                        } else {
+                            self.decks.enqueue(item)
+                        };
                         self.run_deck_cmds(cx, cmds);
                         self.queue_rows_dirty = true;
                     }
@@ -29070,7 +29080,7 @@ p2 {}
                 TrackListHit::PreviewClose => self.stop_preview(cx),
                 TrackListHit::PreviewLoad(deck) => self.load_preview_to_deck(cx, deck),
                 TrackListHit::PreviewQueue => self.queue_preview(cx),
-                TrackListHit::Pick(..) | TrackListHit::Queue(_) => {}
+                TrackListHit::Pick(..) | TrackListHit::Queue(..) => {}
             }
         }
     }
