@@ -627,7 +627,11 @@ impl Backend {
         // Validate presentation quoting before any hosted process is created.
         cmd_quote(&program)?;
         cmd_quote(&records)?;
-        Ok(Self { program, records, mcp_tokens })
+        Ok(Self {
+            program,
+            records,
+            mcp_tokens,
+        })
     }
     fn file(&self, id: &str, suffix: &str) -> PathBuf {
         self.records.join(format!("{id}{suffix}"))
@@ -775,6 +779,7 @@ impl Backend {
             return Ok(Self {
                 records: self.records.clone(),
                 program: PathBuf::from(record.program),
+                mcp_tokens: self.mcp_tokens.clone(),
             });
         }
         if !creating {
@@ -801,6 +806,7 @@ impl Backend {
         Ok(Self {
             records: self.records.clone(),
             program: self.program.clone(),
+            mcp_tokens: self.mcp_tokens.clone(),
         })
     }
     fn info(&self, value: &Value) -> Result<Option<SessionInfo>, String> {
@@ -832,17 +838,38 @@ impl Backend {
         if !cwd.is_absolute() {
             return Err("Invalid PTY working directory".into());
         }
+        let state_dir = value
+            .get("state_dir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.records.clone());
         let provider = self
             .launch_record(id)?
             .map(|l| l.provider)
             .unwrap_or(AgentProvider::Unknown);
         Ok(Some(SessionInfo {
             session_id: id.into(),
+            state_dir: state_dir.clone(),
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id)
+                .into(),
+            activity: value
+                .get("activity")
+                .and_then(Value::as_str)
+                .unwrap_or("running")
+                .into(),
+            started_at_ms: value
+                .get("started_at_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             supervisor_pid: pid,
             attach_command: format!(
                 "\"{} attach --state-dir {} --session {}\"",
                 cmd_quote(&self.program)?,
-                cmd_quote(&self.records)?,
+                cmd_quote(&state_dir)?,
                 id
             ),
             backend: "makepad-screen",
@@ -1475,34 +1502,48 @@ impl Backend {
             return Err("Terminal view selection exceeds its limit".into());
         }
         for (tab, id) in &views {
-            validate_id(id)?;
+            view_target(id, &self.records)?;
             if !tabs.insert(*tab) {
                 return Err("Duplicate terminal view selection".into());
             }
         }
         Ok(views)
     }
-    fn inventory(&self, stop: &AtomicBool) -> Result<SessionOutcome, String> {
-        let (status, output) = self.run_command(&mut self.control("list", None), stop)?;
-        if !status.success() {
-            return Err("PTY inventory is unavailable".into());
-        }
-        let value =
-            json::parse_depth(output.as_bytes(), 16).map_err(|_| "Invalid PTY inventory JSON")?;
-        let rows = value
-            .as_arr()
-            .or_else(|| value.get("sessions").and_then(Value::as_arr))
-            .ok_or("Invalid PTY inventory response")?;
-        if rows.len() > 256 {
-            return Err("PTY inventory exceeds its bound".into());
-        }
+    fn inventory(&self, repo: &Path, stop: &AtomicBool) -> Result<SessionOutcome, String> {
         let mut sessions = Vec::new();
-        for row in rows {
-            if let Some(info) = self.info(row)? {
-                sessions.push(info);
+        for studio in [true, false] {
+            let mut command = Command::new(&self.program);
+            command.arg("list");
+            if studio {
+                command.arg("--state-dir").arg(&self.records);
+            } else {
+                command.arg("--cwd").arg(repo);
+            }
+            let (status, output) = self.run_command(&mut command, stop)?;
+            if !status.success() {
+                return Err(format!("Cannot list running agents: {}", output.trim()));
+            }
+            let value = json::parse(output.as_bytes()).map_err(|e| e.to_string())?;
+            let rows = value
+                .as_arr()
+                .or_else(|| value.get("sessions").and_then(Value::as_arr))
+                .ok_or("Invalid agent inventory")?;
+            if rows.len() > 1024 {
+                return Err("Agent inventory exceeds its bound".into());
+            }
+            for row in rows {
+                if let Some(info) = self.info(row)? {
+                    if !sessions
+                        .iter()
+                        .any(|old: &SessionInfo| old.key() == info.key())
+                    {
+                        sessions.push(info);
+                    }
+                }
             }
         }
         Ok(SessionOutcome::Inventory {
+            state_dir: self.records.clone(),
             sessions,
             views: self.views()?,
         })
@@ -1514,10 +1555,17 @@ impl Backend {
         stop: &AtomicBool,
     ) -> Result<SessionOutcome, String> {
         let session = if let Some(id) = &selected {
-            self.pin(id, false, stop)?
-                .existing(id, stop)?
-                .ok_or("Selected PTY is no longer running")
-                .map(Some)?
+            let (records, id) = view_target(id, &self.records)?;
+            let backend = Self {
+                records,
+                program: self.program.clone(),
+                mcp_tokens: self.mcp_tokens.clone(),
+            };
+            Some(
+                backend
+                    .live(&id, stop)?
+                    .ok_or("Selected agent is no longer running")?,
+            )
         } else {
             None
         };
@@ -1537,6 +1585,15 @@ impl Backend {
     }
 }
 
+pub(super) fn delete_lane_session(state: PathBuf, tab: u64, id: &str) -> Result<(), String> {
+    let backend = Backend::open(state)?;
+    let stop = AtomicBool::new(false);
+    backend.stop_session(id, &stop)?;
+    backend.select_view(tab, None, &stop)?;
+    backend.mcp_tokens.revoke(id)?;
+    Ok(())
+}
+
 pub(super) fn run(
     state: PathBuf,
     commands: Receiver<Request>,
@@ -1553,7 +1610,17 @@ pub(super) fn run(
         let result = match &backend {
             Err(error) => Err(error.clone()),
             Ok(backend) => match request.operation {
-                Operation::List => backend.inventory(&stop),
+                Operation::List(repo) => backend.inventory(&repo, &stop),
+                Operation::NewView(tab, spec) => backend
+                    .pin(&spec.session_id, true, &stop)
+                    .and_then(|session| session.prepare(spec, AgentProvider::Shell, &stop))
+                    .and_then(|outcome| {
+                        if let SessionOutcome::Ready(info) = outcome {
+                            backend.select_view(tab, Some(info.key()), &stop)
+                        } else {
+                            Err("New terminal did not become ready".into())
+                        }
+                    }),
                 Operation::SelectView(tab, selected) => backend.select_view(tab, selected, &stop),
                 operation => backend
                     .pin(
@@ -1586,7 +1653,9 @@ pub(super) fn run(
                         Operation::Recover(command, cwd) => {
                             backend.recover(&request.session_id, &command, &cwd, &stop)
                         }
-                        Operation::List | Operation::SelectView(_, _) => unreachable!(),
+                        Operation::List(_)
+                        | Operation::NewView(_, _)
+                        | Operation::SelectView(_, _) => unreachable!(),
                     }),
             },
         };

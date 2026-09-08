@@ -131,6 +131,20 @@ impl Palette {
         }
     }
 
+    /// Colours the disk map paints with, matching this palette.
+    pub fn map_palette(&self) -> makepad_diskmap::MapPalette {
+        makepad_diskmap::MapPalette::from_hexes(
+            &self.accent,
+            &self.bg,
+            &self.bg_dark,
+            &self.fg,
+            &self.fg_bright,
+            &self.fg_dim,
+            &self.muted,
+            self.kinds.clone(),
+        )
+    }
+
     /// The fill for one treemap kind class, by its index in [`Palette::kinds`].
     /// Out-of-range classes read as "other" rather than panicking: a map that
     /// paints an unknown file grey is right, one that crashes is not.

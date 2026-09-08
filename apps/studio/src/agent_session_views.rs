@@ -2,12 +2,13 @@
 impl App {
     fn refresh_terminal_inventory(&mut self) -> Result<(), String> {
         if self.agent_sessions.inventory_request.is_none() {
+            let repo = self.project_dir();
             let request = self
                 .agent_sessions
                 .worker
                 .as_mut()
                 .ok_or("Terminal host unavailable")?
-                .list()?;
+                .list(repo)?;
             self.agent_sessions.inventory_request = Some(request);
         }
         Ok(())
@@ -34,7 +35,9 @@ impl App {
                 .bindings
                 .get(&tab)
                 .is_some_and(|binding| {
-                    binding.open
+                    !self.agent_sessions.mirrors.get(&tab).is_some_and(|info| {
+                        self.agent_sessions.inventory_state_dir.as_ref() != Some(&info.state_dir)
+                    }) && binding.open
                         && self
                             .agent_sessions
                             .mirrors
@@ -56,28 +59,48 @@ impl App {
     }
 
     fn refresh_terminal_view_labels(&mut self, cx: &mut Cx) {
-        let labels = self
+        let mut labels = std::collections::BTreeMap::new();
+        let flows: Vec<_> = self
             .iterations
             .snapshot
             .engine
             .flows
-            .keys()
-            .filter_map(|flow| {
-                self.agent_sessions
-                    .mirrors
-                    .get(&self.flow_terminal_id(flow))
-                    .map(|info| {
-                        (
-                            flow.clone(),
-                            format!(
-                                "Viewing {}",
-                                self.session_owner_flow(&info.session_id)
-                                    .unwrap_or_else(|| info.session_id.clone())
-                            ),
-                        )
-                    })
-            })
+            .values()
+            .map(|flow| (flow.id.clone(), flow.title.clone()))
             .collect();
+        for (flow, old_title) in flows {
+            let tab = self.flow_terminal_id(&flow);
+            let info = self.agent_sessions.mirrors.get(&tab).or_else(|| {
+                self.agent_sessions
+                    .bindings
+                    .get(&tab)
+                    .and_then(|b| b.info.as_ref())
+            });
+            if let Some(info) = info {
+                let title = info.title.clone();
+                labels.insert(flow.clone(), title.clone());
+                if title == old_title {
+                    self.agent_sessions.reported_titles.remove(&flow);
+                }
+                if title != old_title
+                    && self.agent_sessions.reported_titles.get(&flow) != Some(&title)
+                {
+                    if self
+                        .submit_iteration(
+                            cx,
+                            IterationRequest::TerminalNamed {
+                                flow: flow.clone(),
+                                title: title.clone(),
+                            },
+                            "terminal_name",
+                        )
+                        .is_ok()
+                    {
+                        self.agent_sessions.reported_titles.insert(flow, title);
+                    }
+                }
+            }
+        }
         if let Some(mut view) = self
             .ui
             .widget(cx, ids!(flow_scene))
@@ -87,15 +110,18 @@ impl App {
         }
     }
 
+    fn info_owner_flow(&self, info: &makepad_studio::agent_session::SessionInfo) -> Option<String> {
+        if self.agent_sessions.inventory_state_dir.as_ref() != Some(&info.state_dir) {
+            return None;
+        }
+        self.session_owner_flow(&info.session_id)
+    }
+
     fn terminal_owner_for_tab(&self, tab: u64) -> Option<String> {
-        let binding = self.agent_sessions.bindings.get(&tab)?;
-        let session = self
-            .agent_sessions
-            .mirrors
-            .get(&tab)
-            .map(|info| info.session_id.as_str())
-            .unwrap_or(&binding.session_id);
-        self.session_owner_flow(session)
+        if let Some(info) = self.agent_sessions.mirrors.get(&tab) {
+            return self.info_owner_flow(info);
+        }
+        self.session_owner_flow(&self.agent_sessions.bindings.get(&tab)?.session_id)
     }
 
     fn terminal_input_flow(&self, flow: &str) -> Result<String, String> {
@@ -104,7 +130,7 @@ impl App {
             .mirrors
             .get(&self.flow_terminal_id(flow))
         {
-            Some(info) => self.session_owner_flow(&info.session_id).ok_or_else(|| {
+            Some(info) => self.info_owner_flow(info).ok_or_else(|| {
                 "This shared terminal has no Studio flow owner for image feedback".into()
             }),
             None => Ok(flow.to_owned()),
@@ -112,63 +138,38 @@ impl App {
     }
 
     fn open_terminal_connections(&mut self, cx: &mut Cx, tab: u64) {
-        self.agent_sessions.picker_tab = Some(tab);
-        self.show_utility(
-            cx,
-            id!(terminal_connections_tab),
-            id!(TerminalConnectionsTab),
-            "Connect terminal",
-        );
+        let flow = self
+            .iterations
+            .snapshot
+            .engine
+            .flows
+            .keys()
+            .find(|flow| self.flow_terminal_id(flow) == tab)
+            .cloned();
         self.update_terminal_connections(cx);
+        if let Some(flow) = flow {
+            if let Some(mut view) = self
+                .ui
+                .widget(cx, ids!(flow_scene))
+                .borrow_mut::<StudioIterationView>()
+            {
+                view.open_agent_menu(cx, flow);
+            }
+        }
         if let Err(error) = self.refresh_terminal_inventory() {
-            self.ui
-                .label(cx, ids!(terminal_connection_note))
-                .set_text(cx, &error);
+            self.flow_note(cx, &error);
         }
     }
 
     fn update_terminal_connections(&mut self, cx: &mut Cx) {
-        let Some(tab) = self.agent_sessions.picker_tab else {
-            return;
-        };
-        let own = self
-            .agent_sessions
-            .bindings
-            .get(&tab)
-            .map(|binding| binding.session_id.as_str());
-        let selected = self
-            .agent_sessions
-            .mirrors
-            .get(&tab)
-            .map(|info| info.session_id.as_str());
-        let mut labels = vec!["This lane’s own terminal".to_string()];
-        let mut ids = vec![None];
-        let mut index = 0;
-        for info in &self.agent_sessions.inventory {
-            if Some(info.session_id.as_str()) == own {
-                continue;
-            }
-            if Some(info.session_id.as_str()) == selected {
-                index = ids.len();
-            }
-            let owner = self
-                .session_owner_flow(&info.session_id)
-                .unwrap_or_else(|| info.session_id.clone());
-            labels.push(format!(
-                "{} · {} · {} connected · {}",
-                owner,
-                info.provider.as_str(),
-                info.clients,
-                info.cwd.display()
-            ));
-            ids.push(Some(info.session_id.clone()));
+        let choices = makepad_studio::agent_session::terminal_menu(&self.agent_sessions.inventory);
+        if let Some(mut view) = self
+            .ui
+            .widget(cx, ids!(flow_scene))
+            .borrow_mut::<StudioIterationView>()
+        {
+            view.set_agent_menu(cx, choices);
         }
-        self.agent_sessions.picker_ids = ids;
-        let picker = self.ui.drop_down(cx, ids!(terminal_connection_picker));
-        picker.set_labels(cx, labels);
-        picker.set_selected_item(cx, index);
-        self.ui.label(cx, ids!(terminal_connection_note)).set_text(cx,
-            "Connect another view to a running Studio PTY. Other views stay connected. Agent updates go to the session’s original lane; the latest resize sets its size.");
     }
 
     fn select_terminal_view(&mut self, tab: u64, session: Option<String>) -> Result<(), String> {
@@ -196,12 +197,23 @@ impl App {
         {
             return Err("Wait for this terminal’s current process operation to finish".into());
         }
-        let request = self
+        let binding = self
+            .agent_sessions
+            .bindings
+            .get(&tab)
+            .ok_or("Lane terminal is unavailable")?;
+        let cwd = binding.cwd.clone();
+        let command = binding.initial_command.clone();
+        let worker = self
             .agent_sessions
             .worker
             .as_mut()
-            .ok_or("Terminal host unavailable")?
-            .select_view(tab, session)?;
+            .ok_or("Terminal host unavailable")?;
+        let request = if session.is_some() {
+            worker.select_view(tab, session)?
+        } else {
+            worker.new_view(tab, cwd, command)?
+        };
         self.agent_sessions.view_requests.insert(request, tab);
         Ok(())
     }
@@ -212,6 +224,19 @@ impl App {
         tab: u64,
         info: makepad_studio::agent_session::SessionInfo,
     ) {
+        if self.agent_sessions.inventory_state_dir.as_ref() == Some(&info.state_dir)
+            && self
+                .agent_sessions
+                .bindings
+                .get(&tab)
+                .is_some_and(|binding| binding.session_id == info.session_id)
+        {
+            self.agent_sessions.mirrors.remove(&tab);
+            self.attach_agent_terminal_view(cx, tab, info);
+            self.refresh_agent_terminal_status(cx, tab);
+            self.refresh_terminal_view_labels(cx);
+            return;
+        }
         let body = self.ui.dock(cx, ids!(dock)).item(LiveId(tab));
         let terminal = body.widget(cx, ids!(term));
         self.agent_sessions.mirrors.insert(tab, info.clone());
@@ -245,7 +270,7 @@ impl App {
                 .agent_sessions
                 .inventory
                 .iter()
-                .find(|info| info.session_id == session)
+                .find(|info| info.key() == session || info.session_id == session)
                 .cloned()
             {
                 self.attach_shared_terminal_view(cx, tab, info);
@@ -267,19 +292,37 @@ impl App {
         if self.agent_sessions.inventory_request == Some(reply.request_id) {
             self.agent_sessions.inventory_request = None;
             match &reply.result {
-                Ok(SessionOutcome::Inventory { sessions, views }) => {
+                Ok(SessionOutcome::Inventory {
+                    state_dir,
+                    sessions,
+                    views,
+                }) => {
+                    self.agent_sessions.inventory_state_dir = Some(state_dir.clone());
                     self.agent_sessions.inventory = sessions.clone();
+                    for info in sessions {
+                        for mirror in self.agent_sessions.mirrors.values_mut() {
+                            if mirror.key() == info.key() {
+                                *mirror = info.clone();
+                            }
+                        }
+                        for binding in self.agent_sessions.bindings.values_mut() {
+                            if let Some(current) = &mut binding.info {
+                                if current.key() == info.key() {
+                                    *current = info.clone();
+                                }
+                            }
+                        }
+                    }
                     if !self.agent_sessions.views_loaded {
                         self.agent_sessions.views_loaded = true;
                         self.agent_sessions.saved_views = views.iter().cloned().collect();
                     }
                     self.restore_terminal_views(cx);
                     self.update_terminal_connections(cx);
+                    self.refresh_terminal_view_labels(cx);
                 }
                 Err(error) => {
-                    self.ui
-                        .label(cx, ids!(terminal_connection_note))
-                        .set_text(cx, error);
+                    self.flow_note(cx, error);
                     log!("studio terminal inventory: {error}");
                 }
                 _ => {}
@@ -316,12 +359,9 @@ impl App {
                 self.refresh_agent_terminal_status(cx, tab);
                 self.refresh_ai_context(cx);
                 self.refresh_terminal_view_labels(cx);
-                self.close_utility(cx);
             }
             Err(error) => {
-                self.ui
-                    .label(cx, ids!(terminal_connection_note))
-                    .set_text(cx, error);
+                self.flow_note(cx, error);
                 self.ui.label(cx, ids!(status_state)).set_text(cx, error);
             }
             _ => {}
@@ -330,43 +370,26 @@ impl App {
     }
 
     fn handle_terminal_connection_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self
-            .ui
-            .button(cx, ids!(terminal_connection_cancel))
-            .clicked(actions)
-        {
-            self.close_utility(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(terminal_connection_refresh))
-            .clicked(actions)
-        {
-            if let Err(error) = self.refresh_terminal_inventory() {
-                self.ui
-                    .label(cx, ids!(terminal_connection_note))
-                    .set_text(cx, &error);
-            }
-        }
-        if self
-            .ui
-            .button(cx, ids!(terminal_connection_apply))
-            .clicked(actions)
-        {
-            if let Some(tab) = self.agent_sessions.picker_tab {
-                let index = self
-                    .ui
-                    .drop_down(cx, ids!(terminal_connection_picker))
-                    .selected_item();
-                if let Some(session) = self.agent_sessions.picker_ids.get(index).cloned() {
-                    if let Err(error) = self.select_terminal_view(tab, session) {
-                        self.ui
-                            .label(cx, ids!(terminal_connection_note))
-                            .set_text(cx, &error);
+        for action in actions {
+            let Some(wa) = action.as_widget_action() else {
+                continue;
+            };
+            if let MpTermAction::TitleChanged(title) = wa.cast::<MpTermAction>() {
+                if let Some(tab) = self.tab_of_terminal(cx, wa.widget_uid) {
+                    if let Some(info) = self.agent_sessions.mirrors.get_mut(&tab.0) {
+                        info.title = title.clone();
+                    } else if let Some(info) = self
+                        .agent_sessions
+                        .bindings
+                        .get_mut(&tab.0)
+                        .and_then(|b| b.info.as_mut())
+                    {
+                        info.title = title;
                     }
                 }
             }
         }
+        self.refresh_terminal_view_labels(cx);
         let tabs: Vec<_> = self.agent_sessions.bindings.keys().copied().collect();
         for tab in tabs {
             if self

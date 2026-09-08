@@ -428,6 +428,45 @@ impl<'a> CxDraw<'a> {
         })
     }
 
+    /// Bind immutable worker instances without copying them into a draw vector.
+    /// Re-recording the same resource changes uniforms but does not upload it.
+    pub fn add_retained_instances(
+        &mut self,
+        draw_vars: &DrawVars,
+        resource: &makepad_platform::retained_instances::RetainedInstances,
+    ) -> Area {
+        self.add_retained_instances_count(draw_vars, resource, resource.count())
+    }
+
+    /// Preserve a retained draw slot while its LOD is inactive (count zero).
+    /// Reactivation never copies or reallocates the publication's GPU prefix.
+    pub fn add_retained_instances_count(
+        &mut self,
+        draw_vars: &DrawVars,
+        resource: &makepad_platform::retained_instances::RetainedInstances,
+        count: usize,
+    ) -> Area {
+        assert!(count <= resource.count());
+        let draw_list_id = self.get_current_draw_list_id().unwrap();
+        let Some(item) = self.new_draw_call(draw_vars) else {
+            return Area::Empty;
+        };
+        let call = item.kind.draw_call_mut().unwrap();
+        assert_eq!(call.total_instance_slots, resource.slots());
+        call.instance_dirty = item.retained_instance_id != resource.id();
+        item.retained_upload_range = resource.upload_since(item.retained_instance_id);
+        item.retained_instances = Some(resource.clone());
+        item.retained_instance_count = count;
+        InstanceArea {
+            draw_list_id,
+            draw_item_id: item.draw_item_id,
+            instance_count: count,
+            instance_offset: 0,
+            redraw_id: item.redraw_id,
+        }
+        .into()
+    }
+
     pub fn end_many_instances(&mut self, many_instances: ManyInstances) -> Area {
         let mut ia = many_instances.instance_area;
         let draw_list = &mut self.draw_lists[ia.draw_list_id];

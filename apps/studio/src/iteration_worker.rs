@@ -1,7 +1,7 @@
 //! Durable flow host. Commands, Git, Cargo, process ownership and feedback
 //! ingestion live on one worker; the UI only sends bounded requests/snapshots.
 use crate::iteration::{self, Command as FlowCommand, Effect, Engine, Observation, Transition};
-use crate::iteration_git::{self as git, OwnedWorktree};
+use crate::iteration_git::{self as git, RepoCheckout};
 use makepad_strict_json::{self as json, Value};
 use makepad_widgets::makepad_platform::thread::{
     SignalToUI, TaskHandle, ThreadOptions, ThreadSpawner,
@@ -55,6 +55,10 @@ impl Default for Snapshot {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
+    TerminalNamed {
+        flow: String,
+        title: String,
+    },
     TerminalBusy {
         flow: String,
         busy: bool,
@@ -125,12 +129,6 @@ pub enum Request {
     },
     GitInspect {
         flow: String,
-    },
-    /// Remove an archived lane's owned checkout. Dirty work is refused
-    /// unless `force`; the branch and its checkpoints always stay.
-    ReleaseWorkspace {
-        flow: String,
-        force: bool,
     },
     GitPreview {
         flow: String,
@@ -208,7 +206,17 @@ impl IterationWorker {
                         name: Some("studio-iterations".into()),
                         ..Default::default()
                     },
-                    move || host(directory, rx, tx, snap_tx, stopping, embedding_commands, code_spawner),
+                    move || {
+                        host(
+                            directory,
+                            rx,
+                            tx,
+                            snap_tx,
+                            stopping,
+                            embedding_commands,
+                            code_spawner,
+                        )
+                    },
                 )
                 .map_err(|e| e.to_string())?;
             Ok(Self {
@@ -433,8 +441,12 @@ impl Host {
         );
         self.lifecycle_report(flow, state, "stopping", None);
         self.poll_lifecycle();
-        let complete =
-            !self.lifecycle_pending.contains_key(flow) && self.flow(flow)?.lifecycle == state;
+        let complete = !self.lifecycle_pending.contains_key(flow)
+            && self
+                .engine
+                .flows
+                .get(flow)
+                .is_none_or(|lane| lane.lifecycle == state);
         Ok(json::obj(vec![
             ("flow", s(flow)),
             ("state", s(state.as_str())),
@@ -550,6 +562,15 @@ impl Host {
                 self.lifecycle_pending.insert(flow, pending);
                 continue;
             }
+            if self.reports.contains_key(&format!("delete:{flow}")) {
+                if let Err(error) = self.finish_lane_delete(&flow) {
+                    self.note = format!("Delete lane: {error}");
+                    if self.engine.flows.contains_key(&flow) {
+                        self.lifecycle_pending.insert(flow, pending);
+                    }
+                }
+                continue;
+            }
             let state = pending.state;
             match self.observe(Observation::LifecycleChanged {
                 flow: flow.clone(),
@@ -557,24 +578,7 @@ impl Host {
             }) {
                 Ok(_) => {
                     self.lifecycle_report(&flow, state, "complete", None);
-                    self.note = format!(
-                        "{flow}: {}; history and local workspace preserved",
-                        state.as_str()
-                    );
-                    if state == iteration::FlowLifecycle::Archived {
-                        // Processes and the lease are gone; free the checkout
-                        // unless it holds uncheckpointed work.
-                        match self.release_workspace(&flow, false) {
-                            Ok(None) => {
-                                self.note = format!(
-                                    "{flow}: archived; local workspace removed, branch and checkpoints kept"
-                                );
-                            }
-                            Ok(Some(reason)) | Err(reason) => {
-                                self.note = format!("{flow}: archived; local workspace retained: {reason}");
-                            }
-                        }
-                    }
+                    self.note = format!("{flow}: {}; history preserved", state.as_str());
                     self.changed = true;
                     if let Err(error) = self.persist() {
                         self.note = format!(
@@ -700,7 +704,7 @@ impl Host {
 
 fn effect_flow(effect: &Effect) -> &str {
     match effect {
-        Effect::CreateWorkspace { flow, .. }
+        Effect::Delete { flow }
         | Effect::RequestCheckpoint { flow, .. }
         | Effect::Build { flow, .. }
         | Effect::Launch { flow, .. }
@@ -1029,6 +1033,44 @@ impl Host {
                 }
             }
         }
+        self.attachments.retain(|a| {
+            self.engine.flows.contains_key(
+                self.engine
+                    .history_owner(&a.flow, &format!("attachment/{}", a.id)),
+            )
+        });
+        self.terminal_heights
+            .retain(|id, _| self.engine.flows.contains_key(id));
+        self.lane_widths
+            .retain(|id, _| self.engine.flows.contains_key(id));
+        self.cleanup_deleted_lanes()?;
+        for flow in self.engine.flows.keys() {
+            if self.engine.events(flow).any(|event| {
+                event.flow == *flow
+                    && event
+                        .operation
+                        .get("command")
+                        .and_then(|c| c.get("tool"))
+                        .and_then(Value::as_str)
+                        == Some("flow_delete")
+            }) {
+                self.effects
+                    .push_back(Effect::Delete { flow: flow.clone() });
+            }
+        }
+        for (key, value) in &self.reports {
+            if key.starts_with("delete:") {
+                if let Some(flow) = value.get("flow").and_then(Value::as_str) {
+                    if self.engine.flows.contains_key(flow)
+                        && !self.effects.iter().any(
+                            |effect| matches!(effect, Effect::Delete { flow: id } if id == flow),
+                        )
+                    {
+                        self.effects.push_back(Effect::Delete { flow: flow.into() });
+                    }
+                }
+            }
+        }
         let ids: Vec<_> = self.engine.flows.keys().cloned().collect();
         for flow in ids {
             self.observe(Observation::Interrupted{flow,reason:"Studio restarted; prior process ownership must be reconciled before another build".into()})?;
@@ -1117,46 +1159,63 @@ impl Host {
             .get(id)
             .ok_or_else(|| "Unknown flow".into())
     }
-    fn owned(&self, id: &str) -> Result<OwnedWorktree, String> {
-        let flow = self.flow(id)?;
-        let path = flow
-            .worktree
-            .as_ref()
-            .ok_or("Local workspace unavailable")?;
-        let state = git::inspect(path)?;
-        let branch = state.branch.ok_or("Local workspace is detached")?;
-        if !git::is_private_branch(&branch) {
-            return Err("Flow source must stay on a private local branch".into());
+    fn name_terminal(&self, flow: &str, title: &str) -> Result<(), String> {
+        use makepad_widgets::makepad_micro_serde::DeRon;
+        let origin = self.engine.terminal_origin(flow)?;
+        let session = cli_screen_session_id(origin)?;
+        let tab = makepad_widgets::LiveId::from_str(&format!("studio-flow-terminal:{origin}")).0;
+        let records = self
+            .directory
+            .parent()
+            .ok_or("Missing Studio state")?
+            .join("agent_sessions");
+        let path = records.join("terminal-views.ron");
+        let selected = if path.exists() {
+            Vec::<(u64, String)>::deserialize_ron(&bounded_read(&path, 256 * 1024)?)
+                .map_err(|_| "Invalid terminal view links")?
+                .into_iter()
+                .find(|(id, _)| *id == tab)
+                .map(|(_, key)| key)
+        } else {
+            None
+        };
+        let (state, session) =
+            crate::agent_session::view_target(selected.as_deref().unwrap_or(&session), &records)?;
+        let program = std::env::current_exe()
+            .map_err(err)?
+            .with_file_name(if cfg!(windows) {
+                "makepad-screen.exe"
+            } else {
+                "makepad-screen"
+            });
+        let output = Command::new(program)
+            .arg("name")
+            .arg("--state-dir")
+            .arg(state)
+            .arg("--session")
+            .arg(session)
+            .arg("--")
+            .arg(title)
+            .output()
+            .map_err(err)?;
+        if !output.status.success() {
+            return Err(format!(
+                "Cannot name terminal: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
-        Ok(OwnedWorktree {
+        Ok(())
+    }
+    fn owned(&self, id: &str) -> Result<RepoCheckout, String> {
+        let flow = self.flow(id)?;
+        let path = &flow.config.repo;
+        let state = git::inspect(path)?;
+        let branch = state.branch.ok_or("Repository HEAD is detached")?;
+        Ok(RepoCheckout {
             path: path.clone(),
             branch,
             common_dir: state.common_dir,
         })
-    }
-    /// Remove an archived lane's owned checkout through `makepad_git`,
-    /// keeping its branch, checkpoint refs and resume identity. Returns
-    /// `Ok(Some(reason))` when dirty work kept the checkout in place.
-    fn release_workspace(&mut self, flow: &str, force: bool) -> Result<Option<String>, String> {
-        let state = self.flow(flow)?;
-        if state.lifecycle != iteration::FlowLifecycle::Archived {
-            return Err("Only archived lanes release their local workspace".into());
-        }
-        if state.worktree.is_none() {
-            return Ok(None);
-        }
-        if self.apps.contains_key(flow) || self.builds.contains_key(flow) {
-            return Err("Owned processes are still running".into());
-        }
-        let owned = self.owned(flow)?;
-        match git::remove_flow_worktree(&owned, force) {
-            Ok(()) => {
-                self.observe(Observation::WorkspaceReleased { flow: flow.into() })?;
-                Ok(None)
-            }
-            Err(reason) if !force && reason.contains("uncommitted change") => Ok(Some(reason)),
-            Err(error) => Err(error),
-        }
     }
     fn request(&mut self, request: Request) -> Result<Value, String> {
         if let Some(error) = &self.storage_error {
@@ -1169,7 +1228,6 @@ impl Host {
             Request::FeedbackReport { flow, .. } => Some(flow.as_str()),
             Request::GitApply { flow, .. }
             | Request::SyncApply { flow, .. }
-            | Request::ReleaseWorkspace { flow, .. }
             | Request::Fetch { flow } => Some(flow.as_str()),
             Request::Flow(
                 FlowCommand::Todos { flow, .. }
@@ -1182,6 +1240,12 @@ impl Host {
             return Err("Lane shutdown is in progress; code and Git commands are paused until its owned processes exit".into());
         }
         match request {
+            Request::TerminalNamed { flow, title } => {
+                if self.flow(&flow)?.title == title {
+                    return Ok(Value::Bool(true));
+                }
+                self.observe(Observation::TerminalNamed { flow, title })
+            }
             Request::CodeTool { flow, tool, args } => {
                 let control = cli_control_dir(&self.directory, &flow)?;
                 let id = cli_request_id();
@@ -1278,7 +1342,13 @@ impl Host {
                     self.require_active_lane(flow)?;
                 }
                 let previous = self.engine.clone();
-                let transition = self.engine.apply(command, now())?;
+                // Validate before contacting the terminal, then persist the confirmed name.
+                let mut next = previous.clone();
+                let transition = next.apply(command.clone(), now())?;
+                if let FlowCommand::Rename { flow, title } = &command {
+                    self.name_terminal(flow, title.trim())?;
+                }
+                self.engine = next;
                 let value = self.transition(previous, transition)?;
                 Ok(value)
             }
@@ -1289,28 +1359,16 @@ impl Host {
                     s("closing; build waits for observed process exit"),
                 )]))
             }
-            Request::ReleaseWorkspace { flow, force } => {
-                let flow_state = self.flow(&flow)?;
-                if flow_state.lifecycle != iteration::FlowLifecycle::Archived {
-                    return Err("Archive the lane before releasing its local workspace".into());
-                }
-                if self.lifecycle_pending.contains_key(&flow) {
-                    return Err("Lane shutdown is still in progress".into());
-                }
-                let retained = self.release_workspace(&flow, force)?;
-                Ok(json::obj(vec![
-                    ("flow", s(&flow)),
-                    ("released", Value::Bool(retained.is_none())),
-                    ("retained", retained.map(s).unwrap_or(Value::Null)),
-                ]))
-            }
             Request::GitInspect { flow } => {
                 let owned = self.owned(&flow)?;
                 let state = git::inspect(&owned.path)?;
                 Ok(json::obj(vec![
                     ("branch", s(&owned.branch)),
                     ("head", s(&state.head)),
-                    ("private", Value::Bool(true)),
+                    (
+                        "private",
+                        Value::Bool(git::is_private_branch(&owned.branch)),
+                    ),
                     ("push_allowed", Value::Bool(false)),
                     (
                         "changed_paths",
@@ -1360,12 +1418,13 @@ impl Host {
                 if !validated {
                     return Err("Validate the exact promotion result tree before committing this feature/milestone".into());
                 }
-                let target_worktree = git::ensure_promotion_worktree(
-                    &owned.path,
-                    &self.directory.join("integration").join(&target),
-                    &target,
-                )?;
-                let commit = git::apply_promotion(&preview, &target_worktree, &title)?;
+                if owned.branch != target {
+                    return Err(
+                        "Check out the promotion target in the open repository before applying it"
+                            .into(),
+                    );
+                }
+                let commit = git::apply_promotion(&preview, &owned, &title)?;
                 Ok(json::obj(vec![
                     ("commit", s(commit.commit)),
                     ("branch", s(target)),
@@ -1396,20 +1455,14 @@ impl Host {
                 if preview.source_oid != source_oid || preview.target_oid != target_oid {
                     return Err("Sync preview is stale".into());
                 }
-                let target_worktree = if target == owned.branch {
-                    owned
-                } else {
-                    git::ensure_promotion_worktree(
-                        &owned.path,
-                        &self.directory.join("integration").join(&target),
-                        &target,
-                    )?
-                };
-                let result = git::apply_sync(
-                    &preview,
-                    &target_worktree,
-                    "Sync public changes for Studio iteration",
-                )?;
+                if owned.branch != target {
+                    return Err(
+                        "Check out the sync target in the open repository before applying it"
+                            .into(),
+                    );
+                }
+                let result =
+                    git::apply_sync(&preview, &owned, "Sync public changes for Studio iteration")?;
                 Ok(json::obj(vec![("result", s(format!("{result:?}")))]))
             }
             Request::Fetch { flow } => {
@@ -1447,7 +1500,11 @@ impl Host {
                 let diff = git::unified_diff(
                     &owned.path,
                     &from,
-                    if to.is_empty() { None } else { Some(to.as_str()) },
+                    if to.is_empty() {
+                        None
+                    } else {
+                        Some(to.as_str())
+                    },
                 )?;
                 Ok(json::obj(vec![
                     ("from", s(from)),
@@ -1465,37 +1522,27 @@ impl Host {
         }
     }
     fn effect(&mut self, effect: Effect) {
-        if self.require_active_lane(effect_flow(&effect)).is_err() {
+        if !matches!(effect, Effect::Delete { .. })
+            && self.require_active_lane(effect_flow(&effect)).is_err()
+        {
             return;
         }
         let result: Result<(), String> = (|| {
             match effect {
-                Effect::CreateWorkspace { flow, config } => {
-                    let branch = if self.engine.flows.len() == 1 {
-                        "local".into()
-                    } else {
-                        format!("local-{flow}")
-                    };
-                    let guard =
-                        std::env::current_exe()
-                            .map_err(err)?
-                            .with_file_name(if cfg!(windows) {
-                                "studio-git-guard.exe"
-                            } else {
-                                "studio-git-guard"
-                            });
-                    let destination = self.directory.join("worktrees").join(&flow);
-                    match git::ensure_flow_worktree(&config.repo, &destination, &branch, &guard) {
-                        Ok(owned) => {
-                            cli_control_dir(&self.directory, &flow)?;
-                            self.observe(Observation::WorkspaceReady {
-                                flow,
-                                path: owned.path,
-                            })?;
+                Effect::Delete { flow } => {
+                    if let Err(error) = self.delete_lane(&flow) {
+                        let report =
+                            self.reports
+                                .entry(format!("delete:{flow}"))
+                                .or_insert_with(|| {
+                                    json::obj(vec![("kind", s("lane_delete")), ("flow", s(&flow))])
+                                });
+                        if let Value::Obj(fields) = report {
+                            fields.retain(|(key, _)| key != "error");
+                            fields.push(("error".into(), s(&error)));
                         }
-                        Err(error) => {
-                            self.observe(Observation::WorkspaceFailed { flow, error })?;
-                        }
+                        self.persist()?;
+                        return Err(error);
                     }
                 }
                 Effect::RequestCheckpoint { flow, job_id, .. } => {
@@ -1914,4 +1961,388 @@ fn sync_json(p: &git::SyncPreview) -> Value {
         ("fast_forward", Value::Bool(p.fast_forward)),
         ("diff", s(&p.diff_stat)),
     ])
+}
+
+impl Host {
+    fn delete_lane(&mut self, flow: &str) -> Result<(), String> {
+        let lane = self.flow(flow)?;
+        let owns_terminal = lane.successor.is_none();
+        let origin = self.engine.terminal_origin(flow)?.to_owned();
+        // Persist intent before stopping anything. A restart retries this intent.
+        self.reports.insert(
+            format!("delete:{flow}"),
+            json::obj(vec![
+                ("kind", s("lane_delete")),
+                ("flow", s(flow)),
+                ("phase", s("stopping")),
+            ]),
+        );
+        self.persist()?;
+        if owns_terminal {
+            let tab = makepad_widgets::makepad_platform::live_id::LiveId::from_str(&format!(
+                "studio-flow-terminal:{origin}"
+            ))
+            .0;
+            crate::agent_session::delete_lane_session(
+                self.directory
+                    .parent()
+                    .ok_or("Missing Studio state directory")?
+                    .to_owned(),
+                tab,
+            )?;
+        }
+        let state = if owns_terminal {
+            iteration::FlowLifecycle::Stopped
+        } else {
+            iteration::FlowLifecycle::Archived
+        };
+        let result = self.set_lifecycle(flow, state)?;
+        if self.engine.flows.contains_key(flow)
+            && result.get("complete").and_then(Value::as_bool) == Some(true)
+        {
+            self.finish_lane_delete(flow)?;
+        }
+        Ok(())
+    }
+
+    fn finish_lane_delete(&mut self, flow: &str) -> Result<(), String> {
+        let lane = self.flow(flow)?.clone();
+        if self.apps.contains_key(flow)
+            || self.builds.contains_key(flow)
+            || lane.runs.iter().any(|run| !run.closed)
+        {
+            return Err("Lane processes have not exited".into());
+        }
+        let survivors: Vec<_> = self
+            .engine
+            .flows
+            .values()
+            .filter(|lane| lane.id != flow)
+            .collect();
+        let shared_run = |id: &str| {
+            survivors
+                .iter()
+                .any(|lane| lane.runs.iter().any(|run| run.id == id))
+        };
+        let shared_artifact = |id: &str| {
+            survivors
+                .iter()
+                .any(|lane| lane.artifacts.iter().any(|artifact| artifact.id == id))
+        };
+        let mut paths = BTreeSet::new();
+        for run in &lane.runs {
+            if !shared_run(&run.id) {
+                paths.insert(self.directory.join("runs").join(&run.id));
+            }
+        }
+        for capture in &lane.captures {
+            if !survivors
+                .iter()
+                .any(|lane| lane.captures.iter().any(|kept| kept.path == capture.path))
+            {
+                paths.insert(capture.path.clone());
+            }
+        }
+        for artifact in &lane.artifacts {
+            if !shared_artifact(&artifact.id) {
+                if let Some(parent) = artifact.path.parent() {
+                    paths.insert(parent.to_owned());
+                }
+            }
+        }
+        if !survivors.iter().any(|lane| {
+            lane.artifacts.iter().any(|artifact| {
+                artifact
+                    .path
+                    .starts_with(self.directory.join("artifacts").join(flow))
+            })
+        }) {
+            paths.insert(self.directory.join("artifacts").join(flow));
+            paths.insert(self.directory.join("builds").join(flow));
+        }
+        if !survivors
+            .iter()
+            .any(|lane| self.engine.terminal_origin(&lane.id).ok() == Some(flow))
+        {
+            paths.insert(self.directory.join("control").join(flow));
+        }
+        for attachment in &self.attachments {
+            if self
+                .engine
+                .history_owner(&attachment.flow, &format!("attachment/{}", attachment.id))
+                == flow
+            {
+                paths.insert(attachment.path.clone());
+            }
+        }
+        // Paths come only from retained state, and removal is confined to this state root.
+        for path in &paths {
+            self.validate_delete_path(path)?;
+        }
+        let key = format!("delete:{flow}");
+        self.reports.insert(
+            key.clone(),
+            json::obj(vec![
+                ("kind", s("lane_delete")),
+                ("flow", s(flow)),
+                ("phase", s("cleanup")),
+                (
+                    "paths",
+                    Value::Arr(paths.iter().map(|path| s(path.to_string_lossy())).collect()),
+                ),
+            ]),
+        );
+        self.persist()?;
+        let removed_attachments: BTreeSet<_> = self
+            .attachments
+            .iter()
+            .filter(|a| {
+                self.engine
+                    .history_owner(&a.flow, &format!("attachment/{}", a.id))
+                    == flow
+            })
+            .map(|a| a.id.clone())
+            .collect();
+        let removed_tiles: BTreeSet<_> = self
+            .recordings
+            .tiles
+            .values()
+            .filter(|tile| self.recording_owner(tile) == flow)
+            .map(|tile| tile.id.clone())
+            .collect();
+        self.observe(Observation::FlowDeleted { flow: flow.into() })?;
+        self.attachments
+            .retain(|a| !removed_attachments.contains(&a.id));
+        self.recordings
+            .tiles
+            .retain(|id, _| !removed_tiles.contains(id));
+        self.recordings.loaded.clear();
+        self.recordings.attempted.clear();
+        self.previews.clear();
+        self.preview_failed.clear();
+        self.terminal_heights.remove(flow);
+        self.lane_widths.remove(flow);
+        self.terminal_busy.remove(flow);
+        self.fingerprints.remove(flow);
+        self.reports.retain(|k, report| {
+            k == &key || report.get("flow").and_then(Value::as_str) != Some(flow)
+        });
+        for run in &lane.runs {
+            self.design_snapshots.remove(&run.id);
+            self.seen_feedback
+                .retain(|key| !key.starts_with(&format!("{}:", run.id)));
+        }
+        if self
+            .full_preview_selection
+            .as_ref()
+            .is_some_and(|(id, _)| id == flow)
+        {
+            self.full_preview = None;
+            self.full_preview_selection = None;
+            self.full_preview_stamp = None;
+            self.full_preview_error = None;
+        }
+        self.persist()?;
+        self.cleanup_deleted_lanes()?;
+        self.changed = true;
+        self.note = "Lane deleted".into();
+        Ok(())
+    }
+
+    fn validate_delete_path(&self, path: &Path) -> Result<(), String> {
+        let relative = path
+            .strip_prefix(&self.directory)
+            .map_err(|_| "Lane cleanup path is outside its state directory")?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err("Invalid lane cleanup path".into());
+        }
+        let mut parent = self.directory.clone();
+        for component in relative.components() {
+            parent.push(component);
+            if parent != path
+                && fs::symlink_metadata(&parent).is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err("Lane cleanup refuses a symlinked parent directory".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup_deleted_lanes(&mut self) -> Result<(), String> {
+        let pending: Vec<_> = self
+            .reports
+            .iter()
+            .filter(|(key, value)| {
+                key.starts_with("delete:")
+                    && value
+                        .get("flow")
+                        .and_then(Value::as_str)
+                        .is_some_and(|flow| !self.engine.flows.contains_key(flow))
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        for (key, report) in pending {
+            for path in report.get("paths").and_then(Value::as_arr).unwrap_or(&[]) {
+                let path = PathBuf::from(path.as_str().ok_or("Invalid lane cleanup path")?);
+                self.validate_delete_path(&path)?;
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                        fs::remove_dir_all(&path).map_err(err)?
+                    }
+                    Ok(_) => fs::remove_file(&path).map_err(err)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(err(error)),
+                }
+            }
+            // Purge deleted history from the auxiliary archive too.
+            let events = self
+                .engine
+                .retained_events()
+                .map(|event| event.json().to_json() + "\n")
+                .collect::<String>();
+            atomic_write(&self.directory.join("events.jsonl"), events.as_bytes())?;
+            self.cli_archive_cursor = 0;
+            self.reports.remove(&key);
+            self.persist()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod delete_lane_tests {
+    use super::*;
+    fn host() -> (Host, String) {
+        let directory = std::env::temp_dir().join(format!(
+            "studio-delete-{}-{}",
+            std::process::id(),
+            cli_request_id()
+        ));
+        let directory = directory.join("iterations");
+        fs::create_dir_all(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
+        let mut engine = Engine::default();
+        engine
+            .apply(
+                FlowCommand::Create {
+                    title: "Delete proof".into(),
+                    config: iteration::default_lane_config(directory.clone(), "claude"),
+                },
+                1,
+            )
+            .unwrap();
+        let mut host = Host::for_tests(engine);
+        host.directory = directory;
+        (host, "flow-1".into())
+    }
+    #[test]
+    fn delete_lane_removes_files_and_round_trips_state() {
+        let (mut host, flow) = host();
+        for kind in ["builds", "artifacts", "control"] {
+            let path = host.directory.join(kind).join(&flow);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("history.txt"), "private lane history").unwrap();
+        }
+        let keep = host.directory.join("keep.txt");
+        fs::write(&keep, "keep").unwrap();
+        host.request(Request::Flow(FlowCommand::Delete { flow: flow.clone() }))
+            .unwrap();
+        while let Some(effect) = host.effects.pop_front() {
+            host.effect(effect);
+        }
+        assert!(!host.engine.flows.contains_key(&flow), "{}", host.note);
+        for kind in ["builds", "artifacts", "control"] {
+            assert!(!host.directory.join(kind).join(&flow).exists());
+        }
+        assert!(keep.exists());
+        let mut restarted = Host::for_tests(Engine::default());
+        restarted.directory = host.directory.clone();
+        restarted.restore().unwrap();
+        assert!(!restarted.engine.flows.contains_key(&flow));
+        assert!(!fs::read_to_string(host.directory.join("events.jsonl"))
+            .unwrap()
+            .contains("Delete proof"));
+        fs::remove_dir_all(&host.directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_lane_waits_for_owned_process_group_exit() {
+        use std::os::unix::process::CommandExt;
+        let (mut host, flow) = host();
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let directory = host.directory.join("runs").join("run-proof");
+        fs::create_dir_all(&directory).unwrap();
+        let log = directory.join("app.log");
+        fs::write(&log, "").unwrap();
+        host.engine
+            .flows
+            .get_mut(&flow)
+            .unwrap()
+            .runs
+            .push(iteration::Run {
+                id: "run-proof".into(),
+                artifact_id: "artifact-proof".into(),
+                mode: iteration::LaunchMode::Standalone,
+                role: iteration::RunRole::Human,
+                pid: Some(pid),
+                closed: false,
+                observation_lost: false,
+                human_requested: false,
+                exit_code: None,
+            });
+        host.apps.insert(
+            flow.clone(),
+            AppRun {
+                child,
+                role: iteration::RunRole::Human,
+                run: "run-proof".into(),
+                artifact: "artifact-proof".into(),
+                directory: directory.clone(),
+                log,
+                closing: None,
+                port: None,
+                grab_directory: None,
+                user_closed: false,
+                log_offset: 0,
+                log_partial: String::new(),
+                close_request: None,
+                close_stage: 0,
+                exit: None,
+                mode: iteration::LaunchMode::Standalone,
+                pop_out: false,
+                embedding_client: None,
+                embedding_port: None,
+            },
+        );
+        host.delete_lane(&flow).unwrap();
+        assert!(host.engine.flows.contains_key(&flow));
+        assert!(directory.exists());
+        // Exercise the existing timeout path without waiting for a UI remote port.
+        host.apps.get_mut(&flow).unwrap().closing = Some(Instant::now() - Duration::from_secs(20));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.engine.flows.contains_key(&flow) && Instant::now() < deadline {
+            host.poll_apps();
+            host.poll_lifecycle();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Always reap the test's exact process if an assertion would fail.
+        if let Some(mut run) = host.apps.remove(&flow) {
+            let _ = run.child.kill();
+            let _ = run.child.wait();
+        }
+        assert!(!host.engine.flows.contains_key(&flow), "{}", host.note);
+        assert!(!owned_lane_group_alive(pid, false).unwrap());
+        assert!(!directory.exists());
+        fs::remove_dir_all(host.directory).unwrap();
+    }
 }

@@ -1110,6 +1110,29 @@ impl ShaderFnCompiler {
     ) {
         let builtins = &vm.bx.code.builtins.pod;
 
+        if name == id!(instance_index) {
+            if output.mode != ShaderMode::Vertex || !args.is_empty() {
+                script_err_not_impl!(
+                    self.trap,
+                    "instance_index() requires vertex stage and no arguments"
+                );
+            }
+            for (_, s) in args {
+                self.stack.free_string(s);
+            }
+            let mut out = self.stack.new_string();
+            out.push_str(match output.backend {
+                ShaderBackend::Metal => "_iov.iid",
+                ShaderBackend::Hlsl => "_mp_iov.iid",
+                ShaderBackend::Glsl => "uint(gl_InstanceID)",
+                ShaderBackend::Wgsl => "_mp_instance_index",
+                ShaderBackend::Rust => "rcx.instance_index",
+            });
+            self.stack
+                .push(self.trap.pass(), ShaderType::Pod(builtins.pod_u32), out);
+            return;
+        }
+
         // Special case: discard() - emits backend-specific discard statement
         if name == id!(discard) {
             for (_, s) in args {
@@ -1527,7 +1550,10 @@ impl ShaderFnCompiler {
             id!(sample_compare) => {
                 let mut s = self.stack.new_string();
                 if tex_type != TextureType::TextureDepth || args.len() != 2 {
-                    script_err_invalid_args!(self.trap, "texture_depth.sample_compare requires (uv, reference_depth)");
+                    script_err_invalid_args!(
+                        self.trap,
+                        "texture_depth.sample_compare requires (uv, reference_depth)"
+                    );
                     s.push_str("0.0");
                 } else {
                     let sampler = output.get_or_create_sampler(ShaderSampler {
@@ -1537,17 +1563,44 @@ impl ShaderFnCompiler {
                     let uv = &args[0];
                     let depth = &args[1];
                     match output.backend {
-                        ShaderBackend::Metal => { write!(s, "{}.sample_compare(_s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
-                        ShaderBackend::Hlsl => { write!(s, "{}.SampleCmpLevelZero(_s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
-                        ShaderBackend::Wgsl => { write!(s, "textureSampleCompareLevel({}, _s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
+                        ShaderBackend::Metal => {
+                            write!(
+                                s,
+                                "{}.sample_compare(_s{}, {}, {})",
+                                texture_expr, sampler, uv, depth
+                            )
+                            .ok();
+                        }
+                        ShaderBackend::Hlsl => {
+                            write!(
+                                s,
+                                "{}.SampleCmpLevelZero(_s{}, {}, {})",
+                                texture_expr, sampler, uv, depth
+                            )
+                            .ok();
+                        }
+                        ShaderBackend::Wgsl => {
+                            write!(
+                                s,
+                                "textureSampleCompareLevel({}, _s{}, {}, {})",
+                                texture_expr, sampler, uv, depth
+                            )
+                            .ok();
+                        }
                         ShaderBackend::Glsl => {
                             output.bind_texture_sampler(&texture_expr, sampler);
                             write!(s, "texture({}, vec3({}, {}))", texture_expr, uv, depth).ok();
                         }
-                        ShaderBackend::Rust => { write!(s, "{}.sample_compare({}, {})", texture_expr, uv, depth).ok(); }
+                        ShaderBackend::Rust => {
+                            write!(s, "{}.sample_compare({}, {})", texture_expr, uv, depth).ok();
+                        }
                     }
                 }
-                self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_f32), s);
+                self.stack.push(
+                    self.trap.pass(),
+                    ShaderType::Pod(vm.bx.code.builtins.pod.pod_f32),
+                    s,
+                );
             }
             id!(size) => {
                 // size() returns vec2f with the texture dimensions
@@ -1591,8 +1644,13 @@ impl ShaderFnCompiler {
                     s,
                 );
             }
-            id!(sample) | id!(sample_as_bgra) | id!(sample_lod) | id!(sample_nearest)
-            | id!(sample_repeat) | id!(sample_as_bgra_repeat) => {
+            id!(sample)
+            | id!(sample_as_bgra)
+            | id!(sample_as_bgra_nearest)
+            | id!(sample_lod)
+            | id!(sample_nearest)
+            | id!(sample_repeat)
+            | id!(sample_as_bgra_repeat) => {
                 // sample(coord) samples the texture at normalized coordinates.
                 // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
                 // applies a BGRA->RGBA swizzle in the sampler helper.
@@ -1601,6 +1659,7 @@ impl ShaderFnCompiler {
                 // (GL renders them through a Y-inverted projection), so a
                 // render texture samples exactly like any other.
                 let method_name = if method_id == id!(sample_as_bgra)
+                    || method_id == id!(sample_as_bgra_nearest)
                     || method_id == id!(sample_as_bgra_repeat)
                 {
                     "sample_as_bgra"
@@ -1630,7 +1689,11 @@ impl ShaderFnCompiler {
                         "texture.{} requires {} arg{}",
                         method_name,
                         if method_id == id!(sample_lod) { 2 } else { 1 },
-                        if method_id == id!(sample_lod) { "s" } else { "" }
+                        if method_id == id!(sample_lod) {
+                            "s"
+                        } else {
+                            ""
+                        }
                     );
                     let empty = self.stack.new_string();
                     self.stack.push(
@@ -1643,7 +1706,9 @@ impl ShaderFnCompiler {
                     let lod = args.get(1);
                     let mut s = self.stack.new_string();
 
-                    let sampler = if method_id == id!(sample_nearest) {
+                    let sampler = if method_id == id!(sample_nearest)
+                        || method_id == id!(sample_as_bgra_nearest)
+                    {
                         ShaderSampler {
                             filter: SamplerFilter::Nearest,
                             ..ShaderSampler::default()
@@ -1780,6 +1845,7 @@ impl ShaderFnCompiler {
                                         )
                                         .ok();
                                     } else if method_id == id!(sample_as_bgra)
+                                        || method_id == id!(sample_as_bgra_nearest)
                                         || method_id == id!(sample_as_bgra_repeat)
                                     {
                                         write!(s, "samplecube_bgra({}, {})", texture_expr, coord)
@@ -1812,6 +1878,7 @@ impl ShaderFnCompiler {
                                         )
                                         .ok();
                                     } else if method_id == id!(sample_as_bgra)
+                                        || method_id == id!(sample_as_bgra_nearest)
                                         || method_id == id!(sample_as_bgra_repeat)
                                     {
                                         write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
@@ -1829,7 +1896,9 @@ impl ShaderFnCompiler {
                             // texel fetch (every data pass depends on it) and only
                             // the *_repeat forms wrap, so each maps to its own
                             // runtime method rather than collapsing to `sample`.
-                            if method_id == id!(sample_nearest) {
+                            if method_id == id!(sample_nearest)
+                                || method_id == id!(sample_as_bgra_nearest)
+                            {
                                 write!(s, "{}.sample_nearest({})", texture_expr, coord).ok();
                             } else if method_id == id!(sample_repeat)
                                 || method_id == id!(sample_as_bgra_repeat)
@@ -1925,6 +1994,7 @@ impl ShaderFnCompiler {
                         &[
                             id!(sample),
                             id!(sample_as_bgra),
+                            id!(sample_as_bgra_nearest),
                             id!(sample_repeat),
                             id!(sample_as_bgra_repeat),
                             id!(sample_lod),

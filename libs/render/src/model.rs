@@ -1583,7 +1583,16 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
     let emissive_strength=value(strength,"emissiveStrength",1.0);
     let emissive=std::array::from_fn(|i|material.get("emissiveFactor").and_then(|e|e.idx(i)).and_then(Val::f64).unwrap_or(0.0)as f32*emissive_strength);
     let alpha=material.get("pbrMetallicRoughness").and_then(|p|p.get("baseColorFactor")).and_then(|f|f.idx(3)).and_then(Val::f64).unwrap_or(1.0)as f32;
+    let fur = material.get("extras").and_then(|e| e.get("makepadFur")).and_then(|f| {
+        let seed = f.get("seed")?.usize()?;
+        let fur = makepad_gltf::GlbFurMaterial {
+            length: f.get("length")?.f64()?, density: f.get("density")?.f64()?,
+            scale: f.get("scale")?.f64()?, seed: u32::try_from(seed).ok()?,
+        };
+        fur.valid().then_some(fur)
+    });
     Some(crate::material_surface::MaterialSurface {
+        fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
         emissive_png:image("emissiveTexture"),emissive,

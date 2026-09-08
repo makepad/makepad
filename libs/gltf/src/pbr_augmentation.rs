@@ -11,6 +11,8 @@ pub struct GlbPbrTexture {
 }
 #[derive(Clone, Debug)]
 pub struct GlbPbrMaterial {
+    /// Short fur rendered from repeated surface shells; no strand geometry.
+    pub fur: Option<GlbFurMaterial>,
     pub base_color: [f64; 4],
     pub metallic: f64,
     pub roughness: f64,
@@ -26,6 +28,24 @@ pub struct GlbPbrMaterial {
     pub normal_texture: Option<GlbPbrTexture>,
     pub occlusion_texture: Option<GlbPbrTexture>,
     pub emissive_texture: Option<GlbPbrTexture>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlbFurMaterial {
+    pub length: f64,
+    pub density: f64,
+    /// Procedural strand cells per model metre.
+    pub scale: f64,
+    pub seed: u32,
+}
+
+impl GlbFurMaterial {
+    pub fn valid(self) -> bool {
+        self.length.is_finite() && (0.001..=0.05).contains(&self.length)
+            && self.density.is_finite() && (0.05..=1.0).contains(&self.density)
+            && self.scale.is_finite() && (20.0..=1000.0).contains(&self.scale)
+            && self.seed <= 65535
+    }
 }
 #[derive(Clone, Debug)]
 pub struct GlbPbrPrimitive {
@@ -120,6 +140,9 @@ pub fn augment_glb_pbr(
     ]));
     let mut emissive_extension = false;
     for m in materials {
+        if m.fur.is_some_and(|fur| !fur.valid()) {
+            return Err(validation("invalid fur material"));
+        }
         if m.base_color
             .iter()
             .chain(&m.emissive)
@@ -186,6 +209,14 @@ pub fn augment_glb_pbr(
         }
         root.insert("pbrMetallicRoughness".into(), JsonValue::Object(pbr));
         let mut extras = HashMap::from([("makepadSurface".into(), JsonValue::Bool(true))]);
+        if let Some(fur) = m.fur {
+            extras.insert("makepadFur".into(), object([
+                ("length", JsonValue::F64(fur.length)),
+                ("density", JsonValue::F64(fur.density)),
+                ("scale", JsonValue::F64(fur.scale)),
+                ("seed", number(fur.seed as usize)),
+            ]));
+        }
         if !mip_maps.is_empty() { extras.insert("makepadMips".into(), JsonValue::Object(mip_maps)); }
         root.insert("extras".into(), JsonValue::Object(extras));
         if m.emissive_strength != 1. {

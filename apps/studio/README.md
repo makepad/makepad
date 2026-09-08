@@ -1,10 +1,11 @@
 # Studio
 
 An environment for watching and directing AI work through live terminals,
-code editors, system designs and observed process activity.
+code editors, agent lanes and the Architecture map of the code.
 
-Use the two mode icons in the toolbar: **Structured** for project files and
-docked panes, or **Canvas** for the giant workspace. The active icon is highlighted.
+Use the three mode icons in the toolbar: **Structured** for project files and
+docked panes, **Tasks** for the agent lanes with their terminals, or
+**Architecture** for the code map. The active icon is highlighted.
 Structured starts with a **Project** file tree on the left and the work Dock on
 the right. Expand folders and click files to open their shared editor; the tree
 keeps its expansion/selection when switching modes. Refresh and Reveal active
@@ -19,43 +20,22 @@ itself can be repositioned. Dock arrangements persist between launches and appea
 Older saves with detached default panes recover their valid visible layout.
 Moving a tab retains its terminal process, code buffer and unsaved edits.
 
-Both modes render the same live terminal and editor widgets, so switching preserves
-their sessions, output and unsaved edits. The canvas supports 0.001%–800% zoom,
-an interactive minimap, relationship lines and compact cards at overview scale.
-Nodes use Flow's card, shadow and grid renderer with tighter 4-point corners, colored type
-icons and curved relationship lines. The navigator keeps a fixed-size map of
-the whole workspace; its shaded window rectangle moves and resizes as you pan
-and zoom. Map bounds change only when workspace contents or their layout change.
+All modes render the same live terminal and editor widgets, so switching preserves
+their sessions, output and unsaved edits. **Tasks** shows the iteration lanes:
+each lane has its own terminal on the persistent screen host, so an agent keeps
+running across Studio restarts; the caption tools start Fable or Codex lanes,
+open archived lanes, fit all lanes and drive the local → work → dev flow. The
+mode is saved between launches.
 
-Choose **Auto layout** to place new cards near their parents without shuffling
-existing cards. System children use separate design, terminal, code and run
-columns. Drag the lower-right grip to resize terminals, editors and other cards
-in either layout. Auto moves overlapping cards down without changing their lane;
-shrinking a card keeps the remaining arrangement stable. Choose **Free layout**
-to drag card headers. Auto and Free keep independent positions and sizes. Delegates of an agent/terminal stack
-vertically beside it; owned code/design and run/app cards use adjacent columns. The mode, camera, arrangements, open
-file paths and design cards are saved between launches.
-
-Drag the background, Space-drag or middle-drag to pan. Scrolling over the canvas,
-node frames or navigator zooms; live terminal/editor content scrolls normally.
-Ctrl/Command-scroll zooms there too. The −/+ buttons also zoom;
-**Fit** frames the workspace. Click or drag the
-minimap to navigate. Double-click a card header to focus it; a design with a
-linked source path opens that file. Terminals and code editors keep their live content down to 12% zoom; below
-that they become compact summaries. Zoom into terminals and editors to interact
-with their actual content.
-
-The compact top toolbar provides terminal, code, activity, disk and settings
-actions with tooltips. The code icon reveals a collapsible source-path row;
-Enter opens an absolute or project-relative path. Save and Discard become
-available when the active editor needs them. Settings, disk, activity diagnostics
-and usage details open in a separate utility panel, outside both workspace
-presentations. Close the panel with ×, Escape or a click outside it; the canvas
-camera and active work item are retained. Older saved utility tabs are removed
+The compact top toolbar holds the three modes, the disk and workspace
+inventory, and Settings. Save with Cmd/Ctrl+S in an editor, or Cmd/Ctrl+Shift+S
+for every unsaved document; closing Studio lists what is still unsaved. Settings,
+disk, activity diagnostics and usage details open in a separate utility panel,
+outside the workspace presentations. Close the panel with ×, Escape or a click
+outside it; the active work item is retained. Older saved utility tabs are removed
 from the workspace on restore.
 
-Close a canvas item with its header ×, or its Structured tab close button.
-Closing a terminal ends its live shell.
+Close an item with its Structured tab close button. Closing a terminal ends its live shell.
 
 **Open code** accepts an absolute path through F10. Up to 32 UTF-8 files of at most 2 MiB
 each can stay open. Clean editors apply observed disk changes incrementally;
@@ -66,12 +46,11 @@ open when a close would lose those edits; use Save or Discard edits first.
 
 On macOS and Linux, a bounded worker samples Studio's descendant processes and
 Git source metadata every two seconds. New observed source changes can open
-live code cards without moving the camera or taking focus. Discovery watches
-up to 512 source paths; changes already present at startup form the baseline.
-Only processes beneath live Studio terminals become workspace cards; quota
-pollers, inventory helpers and their children stay out of the graph.
-Process cards link through observed parent PIDs to their live terminals, where
-command output remains available. The Activity view reports observation limits.
+live code editors without taking focus. Discovery watches up to 512 source
+paths; changes already present at startup form the baseline. The Activity view
+lists the observed processes beneath live Studio terminals, the source changes
+and the observation limits; quota pollers, inventory helpers and their
+children stay out of it.
 
 Build from the repository workspace:
 
@@ -106,7 +85,10 @@ observation does not establish that deleting a workspace is safe.
 
 The bottom status bar shows **Fable** session (`S`) and weekly (`W`) usage,
 and **Astra** weekly usage, beside disk space. Percentages show capacity used.
-The second line shows Fable's session reset time and both weekly reset dates.
+Each provider has a separate compact island on one line: usage, reset time/date
+(for example, `Sep 10`) and signed-in account email. The bottom bar stays one
+row tall; its provider strip scrolls horizontally on small screens, while
+Refresh and disk space stay visible. Hover or click for full account details.
 Refresh requests a fresh reading; automatic polling runs every 2 minutes,
 with 10-minute backoff after errors.
 Click either provider for reset times, freshness and the signed-in account email
@@ -131,10 +113,10 @@ Account identity is queried afresh even when quota data is stale, and changing
 accounts prevents carrying the previous account's quota sample forward.
 
 F10 opens the standard Makepad assistant using the existing AI settings. Its
-33 Studio tools operate the same terminal, code, canvas, appearance, usage and disk
-state as the UI, including adding system design cards with source links. The
+Studio tools operate the same terminal, code, mode, appearance, usage and disk
+state as the UI, including adding system design tabs with source links. The
 `dock_tab`, `refresh_project_tree` and `reveal_project_file` tools operate this
-same project browser and Dock; `resize_card` resizes Canvas frames. The tool console accepts `/help` and `/studio.status {}`. Terminal commands execute
+same project browser and Dock. The tool console accepts `/help` and `/studio.status {}`. Terminal commands execute
 in the live shell; closing a terminal or discarding code edits is a destructive
 tool action.
 
@@ -142,8 +124,7 @@ Activity coverage is observational: brief processes can fall between samples,
 and an exited process has an unknown result. App/test processes currently show
 status and terminal output; embedded app windows and structured test results
 are future work. Provider-internal activity and edit authorship are not inferred.
-Design cards are supplied by the user or assistant; automatic Rust architecture
-discovery and pinch gestures are not implemented.
+Design tabs are supplied by the user or assistant.
 
 Validation:
 
@@ -151,8 +132,8 @@ Validation:
 cargo test --release -p makepad-studio
 ```
 
-Tests cover typed actions, stable Auto/Free arrangements and restoration,
-canvas input transforms, document revisions/conflicts and bounded saves,
+Tests cover typed actions, the persisted workspace mode, zoomable input
+transforms, document revisions/conflicts and bounded saves,
 process/source observations, provider quota parsing and CLI shutdown, disk
 discovery and style registration. Runtime
 acceptance additionally checks live interaction, mode switches, navigation,

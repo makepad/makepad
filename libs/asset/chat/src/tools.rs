@@ -560,6 +560,17 @@ pub fn game_definitions() -> Vec<ToolDef> {
         .collect()
 }
 
+/// Advertised only by a game client with a configured escalation target.
+pub fn delegation_definition() -> ToolDef {
+    ToolDef {
+        name: "agent.delegate",
+        api_name: "agent_delegate",
+        description: "Delegate a complex task such as modeling, rigging or difficult scripting to the cloud agent chosen in Settings. It can use the game tools and receives this conversation, current world context and accepted reference images. Include the objective, selected reference labels, constraints and expected result. Ordinary game chatter, level layout and generating image choices stay with you.",
+        args_doc: r#"{"task":"Build the chosen design as a rigged model, using the accepted reference image..."}"#,
+        parameters: schema_object(vec![("task", schema_string_len("Complete task and acceptance criteria; name the selected reference", 1, 8192))], &["task"], Some(false)),
+    }
+}
+
 /// The game-session tool extension: read-only SQL over the live asset
 /// catalog (executed by the broker, next to its own catalog file) and the
 /// world tools (executed by the connected GAME CLIENT via the parked-turn
@@ -715,6 +726,13 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                 &["id"],
                 Some(false),
             ),
+        },
+        ToolDef {
+            name: "world.render",
+            api_name: "world_render",
+            description: "See the actual bound world as an image. map is an orthographic top-down view fitting all loaded terrain and geometry, north (-Z) up. player captures the current player's rendered view. perspective uses eye and target in world metres. Read-only: never moves the player or their camera. Returns image pixels, framing bounds, revision and readiness facts. Inspect map after creating/rebuilding a level, then player or chosen perspectives for scenery, and correct layout defects before finishing. Large maps may need closer perspective views for detail. Only the currently loaded game/sub-world can be rendered.",
+            args_doc: r#"{"view":"map"} or {"view":"perspective","eye":[20,8,20],"target":[0,1,0]}"#,
+            parameters: schema_object(vec![("view", json::obj(vec![("type", json::s("string")), ("enum", Value::Arr(["map", "player", "perspective"].iter().map(|v| json::s(*v)).collect()))])), ("eye", schema_pos()), ("target", schema_pos())], &[], Some(false)),
         },
         ToolDef {
             name: "world.list",
@@ -1147,12 +1165,14 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "operation_cancel" => Some("operation.cancel"),
         "operation_retry" => Some("operation.retry"),
         "llm_consult" => Some("llm.consult"),
+        "agent_delegate" => Some("agent.delegate"),
         "query_assets" => Some("assets.query"),
         "assets_schema" => Some("assets.schema"),
         "world_place" => Some("world.place"),
         "world_remove" => Some("world.remove"),
         "world_move" => Some("world.move"),
         "world_list" => Some("world.list"),
+        "world_render" => Some("world.render"),
         "world_get_source" => Some("world.get_source"),
         "world_api" => Some("world.api"),
         "world_get_plan" => Some("world.get_plan"),
@@ -1547,6 +1567,7 @@ pub enum ContentToolCall {
     OperationRetry { operation: OperationId },
     /// Local session delegates a text-only generation to OpenAI or Grok.
     LlmConsult { task: ConsultTask, prompt: String, provider: Option<ProviderKind> },
+    AgentDelegate { task: String },
     /// One read-only SELECT over the live catalog (sandbox sessions only;
     /// the executor's SQL engine enforces read-only at the AST level).
     AssetsQuery { sql: String },
@@ -1566,6 +1587,8 @@ pub enum ContentToolCall {
     WorldMove { id: u64, pos: Option<[f64; 3]>, yaw_deg: Option<f64>, scale: Option<f64> },
     /// List current placements.
     WorldList,
+    /// Render the bound live world for visual review without moving the player.
+    WorldRender { view: String, eye: Option<[f64; 3]>, target: Option<[f64; 3]> },
     /// Read the running game's splash source (sandbox sessions only).
     WorldGetSource,
     /// Read-only live engine vocabulary lookup; never evaluates source.
@@ -1756,6 +1779,7 @@ impl ContentToolCall {
             ContentToolCall::OperationCancel { .. } => "operation.cancel",
             ContentToolCall::OperationRetry { .. } => "operation.retry",
             ContentToolCall::LlmConsult { .. } => "llm.consult",
+            ContentToolCall::AgentDelegate { .. } => "agent.delegate",
             ContentToolCall::AssetsQuery { .. } => "assets.query",
             ContentToolCall::AssetsSchema => "assets.schema",
             ContentToolCall::ModelBuild { .. } => "model.build",
@@ -1765,6 +1789,7 @@ impl ContentToolCall {
             ContentToolCall::WorldRemove { .. } => "world.remove",
             ContentToolCall::WorldMove { .. } => "world.move",
             ContentToolCall::WorldList => "world.list",
+            ContentToolCall::WorldRender { .. } => "world.render",
             ContentToolCall::WorldGetSource => "world.get_source",
             ContentToolCall::WorldApi { .. } => "world.api",
             ContentToolCall::WorldGetPlan => "world.get_plan",
@@ -2016,6 +2041,12 @@ impl ContentToolCall {
                 check_known(args, &["operation"], "operation.retry argument")?;
                 Ok(ContentToolCall::OperationRetry { operation: need_op(args)? })
             }
+            "agent.delegate" => {
+                check_known(args, &["task"], "agent.delegate argument")?;
+                let task = need_str(args, "task", 8192)?;
+                if task.trim().is_empty() { return Err("task must not be empty".into()); }
+                Ok(ContentToolCall::AgentDelegate { task })
+            }
             "llm.consult" => {
                 check_known(args, &["task", "prompt", "provider"], "llm.consult argument")?;
                 let task = ConsultTask::from_slug(need_str(args, "task", 16)?.as_str())
@@ -2132,6 +2163,19 @@ impl ContentToolCall {
                     return Err("world.move needs at least one of pos/yaw_deg/scale".to_string());
                 }
                 Ok(ContentToolCall::WorldMove { id, pos, yaw_deg, scale })
+            }
+            "world.render" => {
+                check_known(args, &["view", "eye", "target"], "world.render argument")?;
+                let view = optional_str(args, "view")?.unwrap_or("map");
+                if !matches!(view, "map" | "player" | "perspective") { return Err("view must be map, player or perspective".into()); }
+                let eye = args.get("eye").map(|v| need_pos(&json::obj(vec![("pos", v.clone())]))).transpose()?;
+                let target = args.get("target").map(|v| need_pos(&json::obj(vec![("pos", v.clone())]))).transpose()?;
+                if (view == "perspective") != (eye.is_some() && target.is_some()) || (view != "perspective" && (eye.is_some() || target.is_some())) {
+                    return Err("perspective requires eye and target; map/player fit the camera automatically".into());
+                }
+                if eye.iter().chain(target.iter()).flatten().any(|v| !v.is_finite() || v.abs() > 100_000.) { return Err("camera coordinates must be finite world metres within 100000".into()); }
+                if let (Some(a), Some(b)) = (eye, target) { if (0..3).map(|i|(a[i]-b[i]).powi(2)).sum::<f64>() < 0.01 { return Err("eye and target must differ".into()); } }
+                Ok(ContentToolCall::WorldRender { view: view.into(), eye, target })
             }
             "world.list" => {
                 check_known(args, &[], "world.list argument")?;
@@ -3195,6 +3239,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
+        ContentToolCall::AgentDelegate { task } => json::obj(vec![("task", json::s(task.clone()))]),
         ContentToolCall::AssetsQuery { sql } => json::obj(vec![("sql", json::s(sql.clone()))]),
         ContentToolCall::AssetsSchema => Value::Obj(Vec::new()),
         ContentToolCall::ModelBuild { title, source } => json::obj(vec![
@@ -3256,6 +3301,12 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             json::obj(pairs)
         }
         ContentToolCall::WorldList => Value::Obj(Vec::new()),
+        ContentToolCall::WorldRender { view, eye, target } => {
+            let mut fields = vec![("view", json::s(view))];
+            if let Some(v) = eye { fields.push(("eye", Value::Arr(v.iter().map(|n| Value::F64(*n)).collect()))); }
+            if let Some(v) = target { fields.push(("target", Value::Arr(v.iter().map(|n| Value::F64(*n)).collect()))); }
+            json::obj(fields)
+        }
         ContentToolCall::WorldGetSource => Value::Obj(Vec::new()),
         ContentToolCall::WorldApi { query, limit, cursor } => json::obj(vec![
             ("query", json::s(query.clone())), ("limit", Value::Int(*limit as i64)),

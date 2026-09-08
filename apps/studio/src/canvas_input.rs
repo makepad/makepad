@@ -1,5 +1,5 @@
 //! Canvas input follows the established flow-ui face-host coordinate contract.
-use crate::canvas::CanvasCamera as Camera;
+use crate::presentation::Camera;
 use makepad_widgets::makepad_platform::event::TweakRayEvent;
 use makepad_widgets::*;
 use std::cell::RefCell;

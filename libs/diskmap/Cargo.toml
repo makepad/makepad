@@ -1,0 +1,10 @@
+[package]
+name = "makepad-diskmap"
+version = "0.1.0"
+edition = "2021"
+description = "Disk-space treemap widget extracted from the files app"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }

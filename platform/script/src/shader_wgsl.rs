@@ -484,6 +484,7 @@ fn build_draw_shader_wgsl(
     }
 
     writeln!(out, "var<private> VIEW_ID: i32;").ok();
+    writeln!(out, "var<private> _mp_instance_index: u32;").ok();
     writeln!(out, "var<private> vtx_pos: vec4f;").ok();
 
     for io in &output.io {
@@ -612,8 +613,13 @@ fn build_draw_shader_wgsl(
         writeln!(
             out,
             "@group(0) @binding({}) var {}: {};",
-            next_binding, sampler_name,
-            if output.samplers[sampler_index].compare { "sampler_comparison" } else { "sampler" }
+            next_binding,
+            sampler_name,
+            if output.samplers[sampler_index].compare {
+                "sampler_comparison"
+            } else {
+                "sampler"
+            }
         )
         .ok();
         next_binding += 1;
@@ -633,6 +639,7 @@ fn build_draw_shader_wgsl(
     .ok();
 
     writeln!(out, "struct VertexMainIn {{").ok();
+    writeln!(out, "    @builtin(instance_index) instance_index: u32,").ok();
     if xr_multiview {
         writeln!(out, "    @builtin(view_index) view_index: i32,").ok();
     }
@@ -820,6 +827,7 @@ fn build_draw_shader_wgsl(
 
     writeln!(out, "@vertex").ok();
     writeln!(out, "fn vertex_main(in: VertexMainIn) -> VertexMainOut {{").ok();
+    writeln!(out, "    _mp_instance_index = in.instance_index;").ok();
     if xr_multiview {
         writeln!(out, "    VIEW_ID = in.view_index;").ok();
     } else {

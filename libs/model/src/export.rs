@@ -425,6 +425,7 @@ fn export_surface(
                 Ok(Some(GlbPbrTexture { png, mip_pngs }))
             };
             let out = GlbPbrMaterial {
+                fur: source.fur,
                 base_color: source.base_color,
                 metallic: source.metallic,
                 roughness: source.roughness,

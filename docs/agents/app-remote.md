@@ -41,7 +41,7 @@ and raw grabs are PNG. Errors carry an `err` field.
 |---|---|
 | `/`, `/help` | Current protocol help |
 | `/s?w=ID` | App/PID and window geometry; omit `w` to list windows |
-| `/g?w=ID&scale=0.5` | Save a frame and return its absolute `png` path |
+| `/g?w=ID&scale=0.5`, `/gseq?n=8&every_ms=50&scale=0.5` | Capture the next presented frame, or N frames on request cadence (1–64, ≥8 ms, ≤60 s span); Metal/raw readbacks downsample before worker PNG encoding; return absolute `png` path(s) and per-frame `capture_ms`/`encode_ms` (`gseq.frames`); input `wait=1` remains a next-frame barrier |
 | `/g?raw=1` | Return PNG bytes instead of a path |
 | `/gq?scale=0.5` | Grab windows, then quit; returns `png` paths and `quit:1` |
 | `/snap?q=TEXT&w=ID&all=1` | Widget ids/types/text and window-local rectangles |
@@ -50,6 +50,7 @@ and raw grabs are PNG. Errors carry an `err` field.
 | `/click?x=X&y=Y` | Click alias |
 | `/k?k=press&c=KeyA` | Key input; down/up are also supported |
 | `/t?t=TEXT`, `/k?t=TEXT` | Text/IME input |
+| `/drop?path=ABSOLUTE_PATH&x=X&y=Y` | One file through native drag, drop, and drag-end events |
 | `/log?n=50&since=N` | App log tail; `n` in the reply is the latest sequence |
 | `/close?w=ID` | Close one window normally |
 | `/quit` | Graceful shutdown without a final grab |
@@ -68,6 +69,19 @@ Keyboard modifiers are `shift=1`, `ctrl=1`, `alt=1`, and `cmd=1`.
 POST with a flat JSON body is supported. The input parser also accepts long
 names such as `window`, `kind`, `button`, `text`, and `code`. Use
 `curl --get --data-urlencode` for arbitrary text in query strings.
+
+File drops require an absolute path (at most 4096 bytes) and finite,
+nonnegative `x`/`y` inside the window. Optional parameters are `w`/`window`
+and `wait=1`; duplicate or unknown parameters are rejected. The remote
+thread sends only the path; the app owns validation and loading. The reply
+reports `drop_handled` and `drag_response`, which confirm event handling,
+not that an asynchronous file import has completed. For example:
+
+```sh
+curl --get --data-urlencode 'path=/absolute/path/reference car.png' \
+  --data-urlencode 'x=300' --data-urlencode 'y=400' --data-urlencode 'wait=1' \
+  'http://127.0.0.1:53412/drop'
+```
 
 ## Drive an owned instance
 

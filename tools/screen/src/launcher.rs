@@ -20,6 +20,7 @@ mod terminal_io;
 #[derive(Clone)]
 struct Session {
     id: String,
+    title: String,
     instance: String,
     provider: String,
     cwd: String,
@@ -52,6 +53,12 @@ impl Session {
                 .into_owned()
         };
         Some(Self {
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&id)
+                .into(),
             id,
             instance,
             provider,
@@ -240,25 +247,40 @@ impl Default for Menu {
     }
 }
 
-pub fn run(state: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
-    let cwd = cwd
-        .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?)
-        .canonicalize()
-        .map_err(|e| format!("Agent working directory: {e}"))?;
+/// Same resolution as tools/agents: explicit scope, inherited scope, workspace
+/// verification sessions when present, then the user's default sessions.
+pub fn resolve_state_dir(state: Option<PathBuf>, workspace: &Path) -> Result<PathBuf, String> {
     let state = state
-        .or_else(|| std::env::var_os("MAKEPAD_SCREEN_STATE_DIR").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("MAKEPAD_SCREEN_STATE_DIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            let path = workspace
+                .join("local/agent_state/studio/iteration-verification/state/agent_sessions");
+            path.is_dir().then_some(path)
+        })
         .or_else(|| {
             std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
                 .map(|home| PathBuf::from(home).join(".makepad/studio/agent_sessions"))
         })
         .ok_or("Provide --state-dir for the screen launcher")?;
-    let state = if state.is_absolute() {
+    Ok(if state.is_absolute() {
         state
     } else {
         std::env::current_dir()
             .map_err(|e| e.to_string())?
             .join(state)
-    };
+    })
+}
+
+pub fn run(state: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
+    let cwd = cwd
+        .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?)
+        .canonicalize()
+        .map_err(|e| format!("Agent working directory: {e}"))?;
+    let state = resolve_state_dir(state, &cwd)?;
     let worker = Worker::new(state.clone())?;
     let mut menu = Menu::default();
     loop {
@@ -607,7 +629,7 @@ impl Menu {
             let text = if let Some(session) = self.sessions.get(index) {
                 format!(
                     "{marker}  {} {} {:>3}    {:>3}×{:<3}  {}",
-                    column(&session.id, 22),
+                    column(&session.title, 22),
                     column(&session.provider, 10),
                     session.clients,
                     session.cols,

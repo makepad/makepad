@@ -38,10 +38,16 @@ This uses the existing PBR path and does not require image generation.
 
 ## Surface fibers
 
+For a short fur coat or fine fuzz, prefer `surface_material.fur` from
+[Surface authoring](SURFACE_API.md). It keeps the base mesh and uses bounded
+shader shells. Use the geometry operation below when individual modeled
+strands are intentional; its output contributes to GLB size, topology checks,
+skinning and triangle cost.
+
 `fiber_shell {object,source,count,length,width,seed,material}` creates a new
-mesh of tapered closed fibers sampled by source triangle area. Counts1–4096,
+mesh of tapered closed fibers sampled by source triangle area. Counts1–32768,
 length0.0001–1m, width0.00001–0.1m and at most half the length, u32 seed;
-source input at most16384 triangles. Geometry, normals, root UV/color sampling
+source input uses the document triangle/work budgets. Geometry, normals, root UV/color sampling
 and inherited skin weights are deterministic. Fibers use source mesh coordinates;
 copy its object transform to the new object when required. `length:0.012`,
 `width:0.0006`, `count:1400` is a starting yarn-ball surface. This creates

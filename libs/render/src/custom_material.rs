@@ -171,6 +171,7 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
     if vm.bx.heap.type_default_for_id(DrawSceneSkinned::script_type_id_static()).is_none() {
         crate::local_shadows::sampling::script_mod(vm);
         crate::clustered::script_mod(vm);
+        crate::fast_gi::script_mod(vm);
         crate::shaders::script_mod(vm);
         crate::local_shadows::script_mod(vm);
     }

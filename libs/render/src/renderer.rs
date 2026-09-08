@@ -115,6 +115,8 @@ pub struct ScreenInstance {
 /// Per-frame render counters, handed back for the host's profiler.
 #[derive(Default, Clone, Copy)]
 pub struct RenderStats {
+    /// Extra triangles actually submitted for material fur this frame.
+    pub fur_triangles: usize,
     pub gi: crate::fast_gi::GiStats,
     /// Device-local clustered light assignment/upload cost and overflow.
     pub clustered: crate::clustered::ClusterStats,
@@ -514,6 +516,7 @@ pub struct Renderer {
 /// One GPU-skinned character instance for [`Renderer::draw_scene_full`].
 /// The per-frame payload is the joint `palette`; the rig's rest mesh is
 /// resident on the GPU ([`Renderer::upload_skin_rig`]).
+#[derive(Clone)]
 pub struct SkinnedDraw {
     /// Stable per-character id — the rotational-shadow keyframe cache key.
     pub key: u64,
@@ -892,6 +895,8 @@ impl ModelDraw<'_> {
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.
     fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) {
+        self.base().fur = Default::default();
+        self.base().fur_layer.x = 0.0;
         if let ModelDraw::Pbr(d) = self {
             d.metallic = m.metallic;
             d.roughness = m.roughness;
@@ -901,6 +906,7 @@ impl ModelDraw<'_> {
             d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
+                d.skinned.fur = crate::material_surface::fur_params(definition.fur);
                 d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
                 d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
@@ -919,6 +925,20 @@ impl ModelDraw<'_> {
                 }
             }
         }
+    }
+
+    fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize) -> usize {
+        let draw = self.base();
+        if !draw.draw_vars.can_instance() { return 0; }
+        let triangles = draw.draw_vars.geometry_id.map_or(0, |id| cx.cx.geometries[id].indices.len() / 3);
+        let shells = crate::material_surface::fur_shell_count(draw.fur.x, &draw.transform, distance, triangles, fur_budget);
+        for layer in 0..=shells {
+            draw.fur_layer.x = layer as f32 / shells.max(1) as f32;
+            let area = cx.add_instance(&draw.draw_vars);
+            draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, area);
+        }
+        draw.fur_layer.x = 0.0;
+        shells * triangles
     }
 }
 
@@ -1163,6 +1183,7 @@ impl UploadedSkinRig {
 /// A stock prop resident on the GPU: geometry uploaded once, plus the pack
 /// atlas it samples. Thousands of models share a few dozen atlases, which is
 /// what keeps a whole pack's worth of props cheap to draw.
+#[derive(Clone)]
 struct LoadedModel {
     lods:Vec<(f32,LoadedModel)>,
     morph:Option<crate::asset_morph::UploadedMorph>,
@@ -1357,7 +1378,7 @@ struct AnimPartRuntime {
 /// be tested without a device.
 #[derive(Clone)]
 struct ModelClipPlayback{name:Option<String>,time:f32,looping:bool,weight:f32}
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ModelStates {
     clips:std::collections::BTreeMap<ModelTarget,ModelClipPlayback>,
     map: std::collections::BTreeMap<(ModelTarget, String), AnimPartRuntime>,
@@ -3134,6 +3155,57 @@ impl Renderer {
             self.rebuild_csm_static_casters();
         }
         Ok(())
+    }
+
+    /// Independent camera/lighting caches for an on-demand scene review.
+    /// Meshes, textures and immutable metadata share resident handles; the
+    /// live renderer's GI, camera and simulation state remain untouched.
+    pub fn fork_scene_for_review(&self) -> Self {
+        let mut review = Self::default();
+        review.static_models = self.static_models.clone();
+        review.model_casts_shadow = self.model_casts_shadow.clone();
+        review.model_anim_state = self.model_anim_state.clone();
+        review.ao_textures = self.ao_textures.clone();
+        review.model_pack = self.model_pack.clone();
+        review.skin_rig_geometries = self.skin_rig_geometries.clone();
+        review.skin_material_draws = self.skin_material_draws.clone();
+        review.skin_lods = self.skin_lods.clone();
+        review.skin_morphs = self.skin_morphs.clone();
+        review.skin_prepared_sdf = self.skin_prepared_sdf.clone();
+        review.set_models(self.placed_models.clone());
+        review.set_world_attachments(self.world_attachments.clone());
+        review.host_lights = self.host_lights.clone();
+        review.host_asset_lights = self.host_asset_lights.clone();
+        review.sky_time = self.sky_time;
+        review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
+        review.set_clustered_lighting(true);
+        review.set_gi_mode(crate::GiMode::Off);
+        review
+    }
+
+    /// Custom draw handles stay UI-owned; lend them only while encoding a
+    /// review pass, then restore them before encoding the player's pass.
+    pub fn swap_review_materials(&mut self, other: &mut Self) {
+        std::mem::swap(&mut self.custom_draws, &mut other.custom_draws);
+    }
+
+    pub fn review_models_ready(&self) -> bool {
+        self.placed_models.iter().chain(&self.world_attachments).all(|instance|self.model_is_loaded(&instance.model))
+    }
+
+    /// Visible resident model bounds, including rotation and instance scale.
+    pub fn placed_scene_bounds(&self) -> Option<(Vec3f, Vec3f)> {
+        let mut min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for instance in self.placed_models.iter().chain(&self.world_attachments) {
+            let Some((a,b)) = self.model_bounds(&instance.model) else { continue; };
+            for x in [a.x,b.x] { for y in [a.y,b.y] { for z in [a.z,b.z] {
+                let p = instance.transform.transform_vec4(vec4(x,y,z,1.));
+                min.x=min.x.min(p.x);min.y=min.y.min(p.y);min.z=min.z.min(p.z);
+                max.x=max.x.max(p.x);max.y=max.y.max(p.y);max.z=max.z.max(p.z);
+            }}}
+        }
+        min.x.is_finite().then_some((min,max))
     }
 
     /// Install only a successfully frontend-compiled material. Failure keeps
@@ -6377,6 +6449,7 @@ impl Renderer {
             };
             let root = &self.static_models[at].1;
             let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
+            let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
             let lod_index=root.lods.partition_point(|(threshold,_)|*threshold<=distance);
             let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
             // Lane filter. Both passes walk the same instance list — indices
@@ -6422,7 +6495,10 @@ impl Renderer {
                 // Generic node clips can leave the authored rest bounds.
                 // Their small, bounded part sets remain visible until posed
                 // bounds are available; a rest-only cull would hide motion.
-                if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min, root.max, &inst.transform) {
+                // Fur can extend beyond the authored base geometry. The
+                // validated recipe is bounded to 5 cm in model space.
+                let fur_margin = vec3f(0.05, 0.05, 0.05);
+                if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min-fur_margin, root.max+fur_margin, &inst.transform) {
                     match lane {
                         WorldModelLane::Placed => stats.model_culled += 1,
                         WorldModelLane::Attachment => stats.world_attachment_culled += 1,
@@ -6544,10 +6620,7 @@ impl Renderer {
                 draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                 draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                 draw.set_material(cx.cx, material);
-                if draw.base().draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draw.base().draw_vars);
-                    draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
-                }
+                stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
             }
             // Rigid parts (doors, lifts). Each is one extra draw on the
             // PARENT's material — same shader, same textures, usually the
@@ -6613,10 +6686,7 @@ impl Renderer {
                     draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                     draw.set_material(cx.cx, material);
-                    if draw.base().draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&draw.base().draw_vars);
-                        draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
-                    }
+                    stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
                 }
                 match lane {
                     WorldModelLane::Placed => stats.model_triangles += part_tris,
@@ -7255,7 +7325,8 @@ impl Renderer {
             // costs its pose math and nothing else. Bounds come from the
             // joint spheres (posed_bounds), conservative for any pose.
             if let (Some(frustum), Some((min, max))) = (frustum, item.bounds) {
-                if !frustum.intersects_obb(min, max, &item.transform) {
+                let fur_margin = vec3f(0.05, 0.05, 0.05);
+                if !frustum.intersects_obb(min-fur_margin, max+fur_margin, &item.transform) {
                     stats.skinned_culled += 1;
                     continue;
                 }
@@ -7294,6 +7365,7 @@ impl Renderer {
             batch.skinned.ground_y = self.char_ground.get(i).copied().unwrap_or(0.0);
             batch.skinned.joint_base = base;
             let distance=crate::asset_lod::instance_distance(&item.transform,eye);
+            let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
             let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=distance);n.checked_sub(1).map(|i|&levels[i].1)});
             batch.skinned.draw_vars.geometry_id =
                 Some(lod.map_or_else(||self.skin_rig_geometries[at].1.geometry_id(),|lod|lod.geometry.geometry_id()));
@@ -7337,6 +7409,7 @@ impl Renderer {
             if let Some(parts)=materials.filter(|parts|!parts.is_empty()) {
                 for part in parts {
                     let definition=&part.surface.definition;
+                    batch.skinned.fur = crate::material_surface::fur_params(definition.fur);
                     batch.skinned.surface_on=1.0;batch.skinned.metallic=part.metallic;batch.skinned.roughness=part.roughness;
                     batch.skinned.material_alpha=definition.base_alpha;batch.skinned.alpha_mode=definition.alpha_mode as f32;batch.skinned.alpha_cutoff=definition.alpha_cutoff;
                     batch.skinned.normal_scale=definition.normal_scale;batch.skinned.occlusion_strength=definition.occlusion_strength;
@@ -7349,9 +7422,20 @@ impl Renderer {
                             if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==name){batch.skinned.draw_vars.set_texture(slot,texture);}
                         }
                     }
-                    if batch.skinned.draw_vars.can_instance(){let area=cx.add_instance(&batch.skinned.draw_vars);batch.skinned.draw_vars.area=cx.update_area_refs(batch.skinned.draw_vars.area,area);}
+                    if batch.skinned.draw_vars.can_instance() {
+                        let triangles = cx.cx.geometries[part.geometry.geometry_id()].indices.len() / 3;
+                        let shells = crate::material_surface::fur_shell_count(batch.skinned.fur.x, &item.transform, distance, triangles, &mut fur_budget);
+                        for layer in 0..=shells {
+                            batch.skinned.fur_layer.x = layer as f32 / shells.max(1) as f32;
+                            let area = cx.add_instance(&batch.skinned.draw_vars);
+                            batch.skinned.draw_vars.area = cx.update_area_refs(batch.skinned.draw_vars.area, area);
+                        }
+                        stats.fur_triangles += shells * triangles;
+                        batch.skinned.fur_layer.x = 0.0;
+                    }
                 }
             } else {
+                batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
                 batch.skinned.surface_on=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);

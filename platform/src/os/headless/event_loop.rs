@@ -179,6 +179,7 @@ impl Cx {
         send_protocol: bool,
         time_now: f64,
     ) -> bool {
+        self.run_live_edit_if_needed("headless");
         if self.os.no_draw {
             self.call_draw_event(time_now);
             self.os.no_draw_initialized = true;

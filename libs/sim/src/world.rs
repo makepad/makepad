@@ -214,6 +214,9 @@ pub struct GameWorld {
     /// Input state, written by the ActionMap / tape, read by script.
     pub held: HashSet<LiveId>,
     pub pressed: HashSet<LiveId>,
+    /// Contextual input ownership. Device/wire input remains untouched so
+    /// hosts can recognize the same interaction; authored queries hide claims.
+    pub claimed_actions: HashMap<crate::player::PlayerId, HashSet<LiveId>>,
     /// Gamepad state, merged with the keyboard at read time (never into
     /// `held`, so a pad release can't cancel a held key). Stick is analog.
     pub pad: PadState,
@@ -398,7 +401,31 @@ impl GameWorld {
 
     /// Keyboard OR gamepad. The pad's stick maps onto the four directions at
     /// half deflection so `held("left")` works the same on both.
+    pub fn claim_action_until_release(&mut self, player: crate::player::PlayerId, action: LiveId) {
+        self.claimed_actions.entry(player).or_default().insert(action);
+    }
+
+    /// Call after input delivery, before context interactions and authored code.
+    /// A completed repair keeps ownership until release, including when its
+    /// target vanishes or becomes driveable during that same held press.
+    pub fn refresh_action_claims(&mut self) {
+        let mut claims = std::mem::take(&mut self.claimed_actions);
+        claims.retain(|player, actions| {
+            actions.retain(|action| self.raw_action_held_for(*player, *action));
+            !actions.is_empty()
+        });
+        self.claimed_actions = claims;
+    }
+
+    fn action_claimed(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
+        self.claimed_actions.get(&player).is_some_and(|actions| actions.contains(&action))
+    }
+
     pub fn action_held(&self, action: LiveId) -> bool {
+        !self.action_claimed(crate::player::PlayerId::LOCAL, action) && self.raw_action_held(action)
+    }
+
+    fn raw_action_held(&self, action: LiveId) -> bool {
         if self.held.contains(&action) {
             return true;
         }
@@ -419,6 +446,7 @@ impl GameWorld {
     }
 
     pub fn action_pressed(&self, action: LiveId) -> bool {
+        if self.action_claimed(crate::player::PlayerId::LOCAL, action) { return false; }
         if self.pressed.contains(&action) {
             return true;
         }
@@ -457,8 +485,12 @@ impl GameWorld {
     /// fields directly (identical to [`Self::action_held`]); everyone else
     /// reads their replicated input.
     pub fn action_held_for(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
+        !self.action_claimed(player, action) && self.raw_action_held_for(player, action)
+    }
+
+    fn raw_action_held_for(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
         if player.is_local_slot() {
-            return self.action_held(action);
+            return self.raw_action_held(action);
         }
         self.players
             .get(player)
@@ -466,6 +498,7 @@ impl GameWorld {
     }
 
     pub fn action_pressed_for(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
+        if self.action_claimed(player, action) { return false; }
         if player.is_local_slot() {
             return self.action_pressed(action);
         }
@@ -564,6 +597,7 @@ impl GameWorld {
         self.dynamics = crate::dynamics::RigidDynamics::new();
         // Nav re-derives from the rebuilt world on first query.
         self.nav = crate::nav::NavMap::default();
+        self.claimed_actions.clear();
         // Players are connections, not world content: an edit must not kick
         // the room. Their bodies are gone though, so the references go with
         // them — script re-spawns and re-assigns during the same eval.

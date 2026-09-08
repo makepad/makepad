@@ -26,6 +26,7 @@ type VertexFn = unsafe extern "C" fn(
     geom_len: u32,
     inst_ptr: *const f32,
     inst_len: u32,
+    instance_index: u32,
     uniform_ptrs: *const *const f32,
     uniform_lens: *const u32,
     uniform_count: u32,
@@ -276,6 +277,28 @@ struct PassRaster {
 }
 
 impl HeadlessRenderTargets {
+    /// Portable readback preserves the attachment's premultiplied channels.
+    pub(crate) fn read_color_raw_bgra8(
+        &self,
+        id: crate::texture::TextureId,
+    ) -> Option<std::sync::Arc<[u8]>> {
+        let fb = self.color_target(id.0)?;
+        let mut bytes = std::sync::Arc::<[u8]>::new_uninit_slice(fb.width * fb.height * 4);
+        for (pixel, output) in fb
+            .color
+            .iter()
+            .zip(std::sync::Arc::get_mut(&mut bytes)?.chunks_exact_mut(4))
+        {
+            for (out, channel) in output
+                .iter_mut()
+                .zip([pixel[2], pixel[1], pixel[0], pixel[3]])
+            {
+                out.write((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+        Some(unsafe { bytes.assume_init() })
+    }
+
     fn color_target(&self, texture_index: usize) -> Option<&Framebuffer> {
         let fb = self.framebuffers.get(&texture_index)?;
         if fb.width == 0 || fb.height == 0 || fb.color.is_empty() {
@@ -508,7 +531,10 @@ fn headless_vec_texture_info(
             },
             *width,
             *height,
-            width.saturating_mul(*height).saturating_mul(6).min(data.len()),
+            width
+                .saturating_mul(*height)
+                .saturating_mul(6)
+                .min(data.len()),
             data,
             updated,
             bgra_u32_to_rgba,
@@ -857,8 +883,7 @@ impl Cx {
                         );
                     }
                     let dpi_uniforms_gen = self.next_uniform_gen();
-                    self.passes[*draw_pass_id]
-                        .set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+                    self.passes[*draw_pass_id].set_dpi_factor(dpi_factor, dpi_uniforms_gen);
                     let time_uniforms_gen = self.next_uniform_gen();
                     self.passes[*draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
@@ -913,6 +938,13 @@ impl Cx {
                     );
                 }
                 CxDrawPassParent::Xr => {}
+            }
+            if !self.textures.1.readbacks.slots.is_empty() {
+                // Capture after this producer, before a later pass can write
+                // the same target. The raster store is temporarily borrowed.
+                std::mem::swap(&mut self.os.render_targets, &mut render_targets);
+                self.headless_capture_texture_readbacks(Some(*draw_pass_id));
+                std::mem::swap(&mut self.os.render_targets, &mut render_targets);
             }
         }
 
@@ -998,8 +1030,7 @@ impl Cx {
             by_age.sort_unstable();
             let mut bytes = render_targets.bytes();
             for (used, texture_index) in by_age {
-                if bytes <= budget
-                    || used.saturating_add(RENDER_TARGET_EVICT_GUARD_FRAMES) >= frame
+                if bytes <= budget || used.saturating_add(RENDER_TARGET_EVICT_GUARD_FRAMES) >= frame
                 {
                     break;
                 }
@@ -1092,6 +1123,10 @@ impl Cx {
         let viewport_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
         let (width, height) = {
             let cxtexture = &mut self.textures[texture_id];
+            if cxtexture.alloc.is_some() && !render_targets.framebuffers.contains_key(&texture_id.0)
+            {
+                cxtexture.reset_allocation();
+            }
             cxtexture.alloc_render(viewport_width, viewport_height);
             match cxtexture
                 .alloc
@@ -1115,11 +1150,7 @@ impl Cx {
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[draw_pass_id].set_ortho_matrix(
-                pass_rect.pos,
-                pass_rect.size,
-                uniforms_gen,
-            );
+            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size, uniforms_gen);
         }
         let dpi_uniforms_gen = self.next_uniform_gen();
         self.passes[draw_pass_id].set_dpi_factor(dpi_factor, dpi_uniforms_gen);
@@ -1184,6 +1215,8 @@ impl Cx {
 
         render_targets.framebuffers.insert(texture_id.0, fb);
         render_targets.touch(texture_id.0);
+        self.textures[texture_id].producer_serial =
+            self.frame_submission_serial().saturating_add(1);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1428,6 +1461,22 @@ impl Cx {
             }
 
             let uniform_count = total_buffers as u32;
+            // Generated custom-block unpack uses read_unaligned, so publications
+            // may be borrowed directly without a camera-frame metadata copy.
+            for (slot, input) in sh.mapping.uniform_buffers.iter().enumerate() {
+                let index = input.buffer_index;
+                if index < MAX_UNIFORM_BUFS {
+                    if let Some(buffer) = draw_call
+                        .uniform_buffer_slots
+                        .get(slot)
+                        .and_then(|v| v.as_ref())
+                    {
+                        let data = &self.uniform_buffers[buffer.uniform_buffer_id()].data;
+                        ptrs[index] = data.as_ptr().cast();
+                        lens[index] = (data.len() / 4) as u32;
+                    }
+                }
+            }
             let uniform_ptrs = ptrs.as_ptr();
             let uniform_lens = lens.as_ptr();
 
@@ -1439,8 +1488,12 @@ impl Cx {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
                     let __tex_t0 = std::time::Instant::now();
-                    let __info =
-                        headless_texture_info(texture_id.0, cxtexture, texture_cache, render_targets);
+                    let __info = headless_texture_info(
+                        texture_id.0,
+                        cxtexture,
+                        texture_cache,
+                        render_targets,
+                    );
                     if let Some(p) = profile.as_deref_mut() {
                         p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
                     }
@@ -1483,6 +1536,9 @@ impl Cx {
                 Some(id) => id,
                 None => continue,
             };
+            if self.geometries.skip_stale(geometry_id) {
+                continue;
+            }
             if !crate::geometry::geometry_layout_matches_shader(
                 &mut self.geometries[geometry_id],
                 &sh.mapping.geometries,
@@ -1499,8 +1555,13 @@ impl Cx {
                 sh.mapping.geometry_stride_bytes()
             };
 
-            let instances_data = match &draw_item.instances {
-                Some(data) => data.as_slice(),
+            let instances_data = match draw_item
+                .retained_instances
+                .as_ref()
+                .map(|v| v.data())
+                .or(draw_item.instances.as_deref())
+            {
+                Some(data) => data,
                 None => continue,
             };
 
@@ -1508,8 +1569,17 @@ impl Cx {
             if total_instance_slots == 0 {
                 continue;
             }
-            let instance_count = instances_data.len() / total_instance_slots;
+            let instance_count = if draw_item.retained_instances.is_some() {
+                draw_item.retained_instance_count
+            } else {
+                instances_data.len() / total_instance_slots
+            };
             if instance_count == 0 {
+                let item = &mut self.draw_lists[draw_list_id].draw_items[draw_item_id];
+                item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+                if let Some(call) = item.kind.draw_call_mut() {
+                    call.instance_dirty = false;
+                }
                 continue;
             }
             if sh.mapping.flags.debug_draw {
@@ -1528,7 +1598,10 @@ impl Cx {
 
             let vertex_count = if geom.vertices.is_f32() {
                 if geom_slots > 0 {
-                    geom.vertices.as_f32().map(|v| v.len() / geom_slots).unwrap_or(0)
+                    geom.vertices
+                        .as_f32()
+                        .map(|v| v.len() / geom_slots)
+                        .unwrap_or(0)
                 } else {
                     0
                 }
@@ -1571,10 +1644,9 @@ impl Cx {
                         let end = (start + geom_stride).min(bytes.len());
                         if start < bytes.len() {
                             decoded_geom.fill(0.0);
-                            sh.mapping.geometries.decode_vertex_f32(
-                                &bytes[start..end],
-                                &mut decoded_geom,
-                            );
+                            sh.mapping
+                                .geometries
+                                .decode_vertex_f32(&bytes[start..end], &mut decoded_geom);
                         }
                         &decoded_geom
                     };
@@ -1589,6 +1661,7 @@ impl Cx {
                             geom_slice.len() as u32,
                             inst_slice.as_ptr(),
                             inst_slice.len() as u32,
+                            inst_idx as u32,
                             uniform_ptrs,
                             uniform_lens,
                             uniform_count,
@@ -1768,6 +1841,13 @@ impl Cx {
             }
             if let Some(p) = profile.as_deref_mut() {
                 p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
+            }
+            // Software consumption is synchronous. Recording alone never
+            // advances the resident publication identity.
+            let item = &mut self.draw_lists[draw_list_id].draw_items[draw_item_id];
+            item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+            if let Some(call) = item.kind.draw_call_mut() {
+                call.instance_dirty = false;
             }
         }
     }

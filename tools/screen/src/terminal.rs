@@ -134,6 +134,13 @@ impl HostedTerminal {
     pub fn rows(&self) -> usize {
         self.terminal.rows()
     }
+    pub fn set_title(&mut self, title: &str) {
+        self.terminal.title = title
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(4096)
+            .collect();
+    }
     pub fn title(&self) -> &str {
         &self.terminal.title
     }

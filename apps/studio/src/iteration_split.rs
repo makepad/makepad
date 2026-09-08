@@ -84,7 +84,6 @@ impl Host {
             return Err("Finish the lane's build/test/launch work and close its app before splitting history".into());
         }
         let owned = self.owned(flow)?;
-        git::verify_flow_worktree(&owned)?;
         let history = self.split_history(flow)?;
         let previous = self.engine.clone();
         let transition = self.engine.observe(
@@ -129,7 +128,7 @@ impl Host {
             ("predecessor", s(flow)),
             ("item", s(item)),
             ("terminal_origin", s(self.engine.terminal_origin(&next)?)),
-            ("worktree", s(owned.path.to_string_lossy())),
+            ("cwd", s(owned.path.to_string_lossy())),
             ("v", Value::Int(current.todos_revision as i64)),
             ("r", Value::Int(current.requirements_revision as i64)),
         ]))

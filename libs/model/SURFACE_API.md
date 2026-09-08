@@ -2,7 +2,7 @@
 
 These are entries in `model.apply.operations`. Each operation has `op` and the
 fields below. Unknown and duplicate fields fail. Material IDs are u32 JSON
-integers; vertex IDs and seeds are canonical decimal strings. Colors and factors
+integers; vertex IDs and pattern seeds are canonical decimal strings. Colors and factors
 are finite linear numbers in 0..1. Layer PNG/raw RGB bytes use sRGB for base color
 and emissive, linear normalized bytes for data and normal channels. UV0 follows
 the image row direction: row zero corresponds to V=0.
@@ -11,13 +11,27 @@ Channels: `base_color`, `metallic_roughness`, `normal`, `occlusion`, `emissive`.
 Metallic/roughness packs roughness in G and metallic in B. Normal RGB is a
 normalized tangent-space vector encoded from -1..1 to 0..1. Occlusion uses R.
 
-- `surface_material {material,base_color?,metallic?,roughness?,normal_scale?,occlusion_strength?,emissive?,emissive_strength?,alpha?,alpha_cutoff?,double_sided?}`
+- `surface_material {material,base_color?,metallic?,roughness?,normal_scale?,occlusion_strength?,emissive?,emissive_strength?,alpha?,alpha_cutoff?,double_sided?,fur?}`
   sets factors while preserving an existing layer stack; on first use it seeds
   a `legacy` base-color layer from the material's existing PNG. Unspecified factors use
   defaults: base RGBA1, metal0, rough1, normal scale1, AO strength1, emissive RGB0,
   strength1, opaque, cutoff0.5, double-sided false. `alpha` is `opaque|mask|blend`.
   Normal scale is 0..16; emissive strength is 0..100000. Material must already
   exist (the ordinary `material` operation creates one).
+  This replaces factors rather than patching them: inspect the current material
+  and repeat its other factors when changing just roughness or emission.
+  `fur:{length:0.015,density:0.65,scale:180,seed:0}` adds short procedural fur:
+  length 0.001–0.05 model metres, density 0.05–1, scale 20–1000 strand cells per
+  metre, integer seed 0–65535. These are also the defaults for omitted fields
+  inside `fur`. Omitted/null `fur` disables it; repeat it when changing factors.
+  Fur reuses the mesh and skin weights in at most six shader shells, with
+  distance reduction, a 12,000 extra-triangle ceiling per model instance and
+  a 96,000 ceiling per view. It adds no editable strands or collider geometry.
+  Prefer it for a coat of short fur/fuzz, especially on Quest. Layered rendering
+  still costs vertex work and overdraw; keep the base mesh economical. Long
+  hair, individually modeled strands and strand physics need other geometry.
+  The recipe persists in model source and GLB makepadFur material extras;
+  generic GLB viewers show the base PBR surface.
 - `surface_remove_material {material}` removes the rich sidecar and restores the
   legacy material's factors/image. This explicitly removes its retained layers.
 - `surface_layer {material,channel,layer,width,height,color?,rgba_hex?,mask_hex?,opacity?,blend?,visible?}`

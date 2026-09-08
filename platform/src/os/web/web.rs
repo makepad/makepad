@@ -33,6 +33,87 @@ use {
 };
 
 impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        if !self.textures.1.readbacks.slots.is_empty() {
+            // Let JS report device loss even for tickets awaiting a producer
+            // whose render commands have not reached the bridge yet.
+            let registrations: Vec<_> = self.textures.1.readbacks.slots.iter()
+                .filter(|slot| slot.result.ticket.0 > self.os.readback_registered_until)
+                .map(|slot| slot.result.ticket).collect();
+            for ticket in registrations {
+                self.os.readback_registered_until = self.os.readback_registered_until.max(ticket.0);
+                self.os.from_wasm(FromWasmRequestRenderTextureCapture {
+                    texture_id: 0, register_only: true, ticket_lo: ticket.0 as u32,
+                    ticket_hi: (ticket.0 >> 32) as u32, width: 0, height: 0,
+                });
+            }
+            self.web_capture_texture_readbacks(None);
+        }
+    }
+
+    pub(crate) fn web_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        if self.os.readback_device_lost {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost); return;
+        }
+        let work = self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        for work in work {
+            if work.width * work.height * 4 > work.reserved_bytes {
+                work.completion.finish(Err(ReadbackError::Backpressure)); continue;
+            }
+            let ticket = work.ticket;
+            let request = FromWasmRequestRenderTextureCapture {
+                register_only: false,
+                texture_id: work.texture_id.0, ticket_lo: ticket.0 as u32, ticket_hi: (ticket.0 >> 32) as u32,
+                width: work.width, height: work.height,
+            };
+            self.os.texture_readbacks.push(WebTextureReadback {
+                bytes: Arc::<[u8]>::new_uninit_slice(work.width * work.height * 4),
+                received: 0, work,
+            });
+            self.os.from_wasm(request);
+        }
+    }
+
+    fn web_texture_readback_chunk(&mut self, tw: ToWasmRenderTextureCapture) {
+        use crate::texture::{ReadbackError, ReadbackTicket};
+        let ticket = ReadbackTicket((tw.ticket_hi as u64) << 32 | tw.ticket_lo as u64);
+        if tw.error == "device lost" {
+            self.os.readback_device_lost = true;
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            for capture in self.os.texture_readbacks.drain(..) {
+                capture.work.completion.finish(Err(ReadbackError::DeviceLost));
+            }
+            self.call_event_handler(&Event::Signal);
+            return;
+        }
+        let Some(index) = self.os.texture_readbacks.iter().position(|capture| capture.work.ticket == ticket) else { return; };
+        let capture = &mut self.os.texture_readbacks[index];
+        let data = tw.data.into_vec_u8();
+        let error = if !tw.error.is_empty() {
+            Some(if tw.error == "allocation changed" { ReadbackError::AllocationChanged } else { ReadbackError::Failed })
+        } else if tw.width != capture.work.width || tw.height != capture.work.height || tw.offset != capture.received
+            || data.len() > 256 * 1024 || data.len() > capture.bytes.len().saturating_sub(capture.received) {
+            Some(ReadbackError::Failed)
+        } else { None };
+        if let Some(error) = error {
+            self.os.texture_readbacks.remove(index).work.completion.finish(Err(error));
+            self.call_event_handler(&Event::Signal);
+            return;
+        }
+        // JS bounds the total bridge traffic per animation frame, including
+        // this copy into the final allocation. Never build a second full Vec.
+        let target = Arc::get_mut(&mut capture.bytes).unwrap();
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), target.as_mut_ptr().add(capture.received).cast::<u8>(), data.len()); }
+        capture.received += data.len();
+        if tw.complete {
+            let capture = self.os.texture_readbacks.remove(index);
+            let result = if capture.received == capture.bytes.len() { Ok(unsafe { capture.bytes.assume_init() }) } else { Err(ReadbackError::Failed) };
+            capture.work.completion.finish(result);
+            self.call_event_handler(&Event::Signal);
+        }
+    }
+
     fn web_key_modifiers(modifiers: u32) -> KeyModifiers {
         KeyModifiers {
             shift: modifiers & 1 != 0,
@@ -88,14 +169,8 @@ impl Cx {
     /// Queue a WebGL2 PBO/fence readback. The bridge polls the fence on later
     /// animation frames and returns raw RGBA8 bytes without blocking this call.
     pub fn request_render_texture_capture(&mut self, texture: &crate::texture::Texture) -> bool {
-        let tid = texture.texture_id();
-        let Some(alloc) = self.textures[tid].alloc.as_ref() else { return false };
-        if alloc.width == 0 || alloc.height == 0 {
-            return false;
-        }
-        self.os.from_wasm(FromWasmRequestRenderTextureCapture {
-            texture_id: tid.0,
-        });
+        let Ok(ticket) = texture.read_back(self, Default::default()) else { return false; };
+        self.textures.1.readbacks.slots.iter_mut().find(|slot| slot.result.ticket == ticket).unwrap().legacy = true;
         true
     }
 
@@ -103,7 +178,12 @@ impl Cx {
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        std::mem::take(&mut self.os.render_texture_captures)
+        self.take_texture_readback_results(true).into_iter().map(|(texture_id, result)| {
+            match result.data {
+                Ok(bytes) => (texture_id, result.width, result.height, bytes.to_vec()),
+                Err(_) => (texture_id, 0, 0, Vec::new()),
+            }
+        }).collect()
     }
 
     fn normalize_web_pathname(pathname: &str) -> String {
@@ -364,6 +444,10 @@ impl Cx {
                 }
                 live_id!(ToWasmRenderTextureCapture) => {
                     let tw = ToWasmRenderTextureCapture::read_to_wasm(&mut to_wasm);
+                    if tw.ticket_lo != 0 || tw.ticket_hi != 0 {
+                        self.web_texture_readback_chunk(tw);
+                        continue;
+                    }
                     if tw.error.is_empty() {
                         if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
                             self.os.render_texture_captures.push((
@@ -1428,6 +1512,7 @@ impl CxOsApi for Cx {
             FromWasmXrStopPresenting::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
+            FromWasmRetainedArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
             FromWasmFreeWebGLResources::to_js_code(),
@@ -1529,6 +1614,12 @@ extern "C" {
 }
 
 // storage buffers for graphics API related platform
+struct WebTextureReadback {
+    work: crate::texture::ReadbackWork,
+    bytes: Arc<[std::mem::MaybeUninit<u8>]>,
+    received: usize,
+}
+
 pub struct CxOs {
     pub(crate) window_geom: WindowGeom,
     pub(crate) native_window_geom: WindowGeom,
@@ -1550,6 +1641,9 @@ pub struct CxOs {
     pub(crate) media: CxWebMedia,
     pub(crate) render_texture_captures:
         Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+    texture_readbacks: Vec<WebTextureReadback>,
+    readback_device_lost: bool,
+    readback_registered_until: u64,
     /// The one-line notice that a second window maps to nothing has been
     /// given (`CxOsOp::CreateWindow`).
     pub(crate) second_window_reported: bool,
@@ -1574,6 +1668,9 @@ impl Default for CxOs {
 
             media: CxWebMedia::default(),
             render_texture_captures: Vec::new(),
+            texture_readbacks: Vec::new(),
+            readback_device_lost: false,
+            readback_registered_until: 0,
             second_window_reported: false,
         }
     }

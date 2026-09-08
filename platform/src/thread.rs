@@ -566,6 +566,13 @@ pub fn worker_count(reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
     worker_count_from(available_parallelism(), reserve_for_ui, cap)
 }
 
+/// Heavy lane = `cores − 2`, light lane = 2, each at least 1.
+pub fn machine_lane_counts(cores: usize) -> (usize, usize) {
+    let light = 2;
+    let heavy = cores.saturating_sub(2).max(1);
+    (heavy, light)
+}
+
 fn worker_count_from(parallelism: NonZeroUsize, reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
     let available = parallelism.get().saturating_sub(reserve_for_ui).max(1);
     NonZeroUsize::new(available.min(cap.max(1))).unwrap()
@@ -718,19 +725,28 @@ pub struct PoolOptions {
 }
 
 impl PoolOptions {
-    /// The runtime sizing law. Desktop: hardware concurrency minus one for the
-    /// UI thread, clamped to `3..=8`. Web: the same minus one, capped at 6
-    /// (Web Workers are expensive to start but cheap to keep) and at least 3.
-    /// Two workers are reserved for light jobs on both.
+    /// The runtime sizing law. Desktop: heavy = cores − 2 (minimum 1), light = 2,
+    /// no upper clamp other than `MAX_POOL_WORKERS`. Web: hardware concurrency
+    /// minus one, capped at 6 (Web Workers are expensive to start but cheap to
+    /// keep) and at least 3. Two workers are reserved for light jobs on both.
     pub fn runtime(parallelism: NonZeroUsize) -> Self {
         let hardware = parallelism.get();
-        #[cfg(target_arch = "wasm32")]
-        let total = hardware.saturating_sub(1).clamp(3, 6);
-        #[cfg(not(target_arch = "wasm32"))]
-        let total = hardware.saturating_sub(1).clamp(3, 8);
+        let (total, light_reserve) = {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let total = hardware.saturating_sub(1).clamp(3, 6);
+                (total, 2.min(total.saturating_sub(1)))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (heavy, light) = machine_lane_counts(hardware);
+                let total = (heavy + light).min(MAX_POOL_WORKERS);
+                (total, light.min(total.saturating_sub(1)).max(1))
+            }
+        };
         Self {
-            workers: NonZeroUsize::new(total).unwrap(),
-            light_reserve: 2,
+            workers: NonZeroUsize::new(total.max(1)).unwrap(),
+            light_reserve,
             light_capacity: NonZeroUsize::new(512).unwrap(),
             heavy_capacity: NonZeroUsize::new(128).unwrap(),
             name: "makepad-pool".into(),
@@ -2221,12 +2237,22 @@ mod tests {
     #[test]
     fn runtime_sizing_reserves_the_ui_thread_and_two_light_workers() {
         let tiny = PoolOptions::runtime(NonZeroUsize::new(1).unwrap());
-        assert_eq!(tiny.workers.get(), 3);
         assert_eq!(tiny.light_reserve, 2);
         let mid = PoolOptions::runtime(NonZeroUsize::new(6).unwrap());
-        assert_eq!(mid.workers.get(), 5);
         let big = PoolOptions::runtime(NonZeroUsize::new(32).unwrap());
-        assert_eq!(big.workers.get(), if cfg!(target_arch = "wasm32") { 6 } else { 8 });
+        let desktop_16 = PoolOptions::runtime(NonZeroUsize::new(16).unwrap());
+        if cfg!(target_arch = "wasm32") {
+            assert_eq!(tiny.workers.get(), 3);
+            assert_eq!(mid.workers.get(), 5);
+            assert_eq!(big.workers.get(), 6);
+        } else {
+            assert_eq!(tiny.workers.get(), 3);
+            assert_eq!(mid.workers.get(), 6);
+            assert_eq!(big.workers.get(), 32);
+            assert_eq!(desktop_16.workers.get(), 16);
+            assert_eq!(desktop_16.light_reserve, 2);
+            assert_eq!(machine_lane_counts(16), (14, 2));
+        }
     }
 
     #[test]

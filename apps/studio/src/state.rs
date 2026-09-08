@@ -80,12 +80,17 @@ pub struct Settings {
     /// Manual dark preference for an explicit family, or for a platform that
     /// cannot report its native appearance.
     pub dark: bool,
+    /// Display cells per four source indentation cells in Architecture.
+    pub architecture_indent_cells: Option<u32>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
 const DOCK_FILE: &str = "dock.ron";
 
 impl Settings {
+    pub fn code_indent_cells(&self) -> u32 {
+        self.architecture_indent_cells.unwrap_or(2).clamp(1, 8)
+    }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
             .ok()
@@ -267,9 +272,11 @@ mod tests {
     fn settings_roundtrip_and_missing_file_is_default() {
         let dir = temp_dir("settings");
         assert_eq!(Settings::load(&dir), Settings::default());
+        assert_eq!(Settings::deserialize_ron("(dark: false)").unwrap().code_indent_cells(), 2);
         let s = Settings {
             style: Some("windows-2000".into()),
             dark: true,
+            architecture_indent_cells: Some(2),
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);

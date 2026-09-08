@@ -27,8 +27,10 @@ use makepad_widgets::makepad_platform::thread::TaskPool;
 use crate::{
     model::{self, FileEntry},
     ops::{OpKind, OpRequest, Undo},
-    sizecache::Cached,
+};
+use makepad_diskmap::{
     treemap::{self, Node, ScanProgress, ScanRules, ScanStep},
+    Cached,
 };
 
 /// A capability the active filesystem deliberately does not provide.
@@ -311,7 +313,7 @@ impl Vfs for RealVfs {
     fn load_scan_cache(&self, root: &Path) -> Result<Option<Cached>, VfsError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Ok(crate::sizecache::load(root))
+            Ok(makepad_diskmap::sizecache::load(root))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -323,7 +325,7 @@ impl Vfs for RealVfs {
     fn store_scan_cache(&self, root: &Path, bytes: &[u8]) -> Result<(), VfsError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::sizecache::store(root, bytes);
+            makepad_diskmap::sizecache::store(root, bytes);
             Ok(())
         }
         #[cfg(target_arch = "wasm32")]
@@ -336,7 +338,7 @@ impl Vfs for RealVfs {
     fn forget_scan_cache(&self, root: &Path) -> Result<(), VfsError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::sizecache::forget(root);
+            makepad_diskmap::sizecache::forget(root);
             Ok(())
         }
         #[cfg(target_arch = "wasm32")]
@@ -399,11 +401,64 @@ static VFS: OnceLock<Arc<dyn Vfs>> = OnceLock::new();
 /// filesystems underneath itself would be showing two different worlds.
 pub fn install(vfs: Arc<dyn Vfs>) {
     let _ = VFS.set(vfs);
+    bind_diskmap_backend();
+}
+
+fn bind_diskmap_backend() {
+    makepad_diskmap::install_backend(Arc::new(FilesScanBackend));
+}
+
+/// The files app's VFS, so the demo home still maps.
+struct FilesScanBackend;
+
+impl makepad_diskmap::ScanBackend for FilesScanBackend {
+    fn now_secs(&self) -> u64 {
+        now_secs()
+    }
+
+    fn is_instant(&self) -> bool {
+        vfs().is_instant()
+    }
+
+    fn is_demo(&self) -> bool {
+        is_demo()
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        vfs().exists(path)
+    }
+
+    fn display_name(&self, path: &Path) -> String {
+        model::display_name(path)
+    }
+
+    fn load_scan_cache(&self, root: &Path) -> Option<Cached> {
+        vfs().load_scan_cache(root).ok().flatten()
+    }
+
+    fn store_scan_cache(&self, root: &Path, bytes: &[u8]) {
+        let _ = vfs().store_scan_cache(root, bytes);
+    }
+
+    fn forget_scan_cache(&self, root: &Path) {
+        let _ = vfs().forget_scan_cache(root);
+    }
+
+    fn scan_stream(
+        &self,
+        root: &Path,
+        cancel: &AtomicBool,
+        sink: &(dyn Fn(ScanStep) + Sync),
+        pool: &TaskPool,
+    ) -> bool {
+        vfs().scan_stream(root, cancel, sink, pool)
+    }
 }
 
 /// The filesystem this process is browsing.
 pub fn vfs() -> &'static Arc<dyn Vfs> {
     VFS.get_or_init(|| {
+        bind_diskmap_backend();
         #[cfg(all(target_arch = "wasm32", feature = "demo"))]
         {
             Arc::new(crate::demo::DemoVfs::new())

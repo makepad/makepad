@@ -1,0 +1,711 @@
+[arch]
+version = 0
+scope = "platform/"
+title = "Makepad platform"
+prompt = "arch/0"
+generator = "codex/astra"
+
+[source]
+files = [
+    { path = "platform/build.rs", hash = "2eadbae135ef00432c2e22f35fb591c1fb1c9f54" },
+    { path = "platform/network/src/backend/android.rs", hash = "0f60cc02252e3e64d38fceaf5bb2c8ef788d2f4c" },
+    { path = "platform/network/src/backend/apple/http.rs", hash = "149856d0f749889ec34a07bc33f463dab30d8c28" },
+    { path = "platform/network/src/backend/apple/socket_stream.rs", hash = "cc9bc65a24944abc7683e89cb71233c18f71cacb" },
+    { path = "platform/network/src/backend/apple/web_socket.rs", hash = "df9fcb109c825e3f8595e9fa422e87df8c801310" },
+    { path = "platform/network/src/backend/apple.rs", hash = "5e914e1b9fae4cdc0f1bea5ae0a544cc7422a9fe" },
+    { path = "platform/network/src/backend/linux/http.rs", hash = "6c5aebe89c40207cd25b17db4048225d271458c9" },
+    { path = "platform/network/src/backend/linux/socket_stream.rs", hash = "cd34bd030a8ca4555f791415fe3d5bb9ff34e7f5" },
+    { path = "platform/network/src/backend/linux/web_socket.rs", hash = "8e37605af6229225a9509e25a198e2f789c29c8e" },
+    { path = "platform/network/src/backend/linux.rs", hash = "9ee0a312abac1ab9862fd4b2cc634500ddf70b56" },
+    { path = "platform/network/src/backend/web.rs", hash = "f9ecf00266471928dd9b1f9fcc3936406211ef6b" },
+    { path = "platform/network/src/backend/windows/http.rs", hash = "6db28d3f3c7a84d71e85acf77ce83ca6b79274b0" },
+    { path = "platform/network/src/backend/windows/socket_stream.rs", hash = "4423f27be780897fcda97ab16be08cc11493ce67" },
+    { path = "platform/network/src/backend/windows/web_socket.rs", hash = "27caaebeaeb04ff88ad869df2c36038312368c3d" },
+    { path = "platform/network/src/backend/windows.rs", hash = "f5eda9de5b958455400b6047ca32c1625a6265e8" },
+    { path = "platform/network/src/backend.rs", hash = "57ebedbe11281f48c4a6163ce820d4a89089063c" },
+    { path = "platform/network/src/blocking_http.rs", hash = "5dcb80f53b7351eb91e7b8035c1db07490b963c5" },
+    { path = "platform/network/src/digest.rs", hash = "8f4fd9eb50fc99113b4cb4bde5f723f9328e7c29" },
+    { path = "platform/network/src/http_server.rs", hash = "925662c5f828ec26c8ac0367bdb93336d739984b" },
+    { path = "platform/network/src/lib.rs", hash = "fadce4c509237554e7f163e8b28fef7c2683b882" },
+    { path = "platform/network/src/plain_web_socket.rs", hash = "74348eab19fa443cccbe51abc2d7a22487594883" },
+    { path = "platform/network/src/runtime.rs", hash = "26340c8e2a5d2a19ad183fff9c21a58acd663ba9" },
+    { path = "platform/network/src/socket_stream.rs", hash = "f62a2c6c1eb9b8c926c2d64e167c0771cd49eb09" },
+    { path = "platform/network/src/types.rs", hash = "03805d4a453b5464d7a3e893239b54350591636a" },
+    { path = "platform/network/src/ui_signal.rs", hash = "0f470115f1554aa4fc740255b37c0af92fdb1a44" },
+    { path = "platform/network/src/utils.rs", hash = "a8703cd1673bdd1edb2917721b8a5f4a6df805f7" },
+    { path = "platform/network/src/web_socket_parser.rs", hash = "ac0366882e8ee22e66331db5f88d5bc028ebbbda" },
+    { path = "platform/network/tests/blocking_http.rs", hash = "0bc15240c992774486f2f8ed027b9a52fae68fc1" },
+    { path = "platform/network/tests/network_integration.rs", hash = "e40aee0156cdf8dbe079e51fc52c0f28123e78e8" },
+    { path = "platform/script/build.rs", hash = "f328e4d9d04c31d0d70d16d21a07d1613be9d577" },
+    { path = "platform/script/derive/src/derive_scriptable.rs", hash = "bbf5f617604927375e4409c1cede5a93361a9af0" },
+    { path = "platform/script/derive/src/error.rs", hash = "ca82409d9334685cbecbabd065bd478992d964d8" },
+    { path = "platform/script/derive/src/lib.rs", hash = "4734669d2e2b8ebbcaae218f965b97b540fe812d" },
+    { path = "platform/script/derive/src/script.rs", hash = "917b4a838cab7de609616c69054095e35db7c0ee" },
+    { path = "platform/script/derive/src/swizzle.rs", hash = "4b16ecd0e36b7b6bc4336a8072bd09edea182d6c" },
+    { path = "platform/script/src/apply.rs", hash = "a39e18425e92399300447b83e9730010d891109f" },
+    { path = "platform/script/src/array.rs", hash = "0cb08277c1b5a58c9c48cf7e9652e4635e1628a1" },
+    { path = "platform/script/src/array_heap.rs", hash = "398df49c4d4f502821fa28fa69a71cc426f6eeb9" },
+    { path = "platform/script/src/clock.rs", hash = "3a4cee6f35423dd0932f3c55501bfba6d615cf48" },
+    { path = "platform/script/src/colorhex.rs", hash = "7746774f032c1de8369f050c70b3b1c8839276a2" },
+    { path = "platform/script/src/docs.rs", hash = "b8937cbfab7324a7ea407b774fe6491f930a6511" },
+    { path = "platform/script/src/function.rs", hash = "323e20655a2015a9ea0c0678116a2bf4a4643c01" },
+    { path = "platform/script/src/gc.rs", hash = "8acfb59ff650db4a18412d869beed68f5ab35d79" },
+    { path = "platform/script/src/gen_index.rs", hash = "5e4aebc09f01e668c62616998b0c3ae1b61fbce4" },
+    { path = "platform/script/src/handle.rs", hash = "d9fc91723acfecdf4a0f923f59d86cc38513b701" },
+    { path = "platform/script/src/heap.rs", hash = "2c843c29909bd7346a4825e870da0d7075eccd90" },
+    { path = "platform/script/src/json.rs", hash = "af865e98be507655a6e01e336f44b4c079608316" },
+    { path = "platform/script/src/lib.rs", hash = "96290f0862c5f68eaa0dd7c11f5b2c856ba4bdae" },
+    { path = "platform/script/src/math_aot/mod.rs", hash = "1c9ab801d33aaf3bc41ff0884336c6124ad45749" },
+    { path = "platform/script/src/math_aot/stitch_backend.rs", hash = "c238e2996c1126c74e04a1dca4edbb354cb6ea75" },
+    { path = "platform/script/src/math_aot/vir.rs", hash = "bc34c4b62ffe05d8bf5c085c49d863f4196e810a" },
+    { path = "platform/script/src/mod_gc.rs", hash = "ed8fe51677a509bc4c1da9d706b16d85cba78f24" },
+    { path = "platform/script/src/mod_html.rs", hash = "4e0c5553c3f269c382aacb088f03155dbc1a3866" },
+    { path = "platform/script/src/mod_math.rs", hash = "9222e8535e705e1254a2bc56e6a1f39c44bd939a" },
+    { path = "platform/script/src/mod_pod.rs", hash = "8b1f3b2a5e97f7b1263c9864059f6fde068c142a" },
+    { path = "platform/script/src/mod_regex.rs", hash = "a3246a09a11b4b33aa2370a58be1fdf22c2ca624" },
+    { path = "platform/script/src/mod_shader.rs", hash = "e2b6e3920d2ecdc66bf5fa5bd13e3962a9dd8c86" },
+    { path = "platform/script/src/mod_std.rs", hash = "2c6060fb620681e9c3277a9c47db7dbeffb61d26" },
+    { path = "platform/script/src/native.rs", hash = "ec2e6a3cee29ea341348df933f1a20c38af32e79" },
+    { path = "platform/script/src/numeric.rs", hash = "a1e9fa50cfd140e552352187ac014cfb989cc106" },
+    { path = "platform/script/src/object.rs", hash = "44e004b0e847795944d8a75c8b8d8da52455f4eb" },
+    { path = "platform/script/src/object_heap.rs", hash = "eb1753341d6a192b9c6b9ae99b2260b9ec121fa4" },
+    { path = "platform/script/src/opcode.rs", hash = "cef82ef8dee5005472d1b59c69c84e44ac4f8e71" },
+    { path = "platform/script/src/opcodes.rs", hash = "13c4687a57b3430f866cdaf3972d4c8b462b3c01" },
+    { path = "platform/script/src/opcodes_assign.rs", hash = "06e1af19734c3c4aeca71d385d3e1a426c4b4b69" },
+    { path = "platform/script/src/opcodes_calls.rs", hash = "48559d20edd8e3a4a70b7aee1bb0ba2a5d0797e5" },
+    { path = "platform/script/src/opcodes_control.rs", hash = "41bd0925a7e13f45a4e0995faeb457612a2a5095" },
+    { path = "platform/script/src/opcodes_loops.rs", hash = "fb4a9d239aafef7b82a2b32ef25736367c3679e5" },
+    { path = "platform/script/src/opcodes_ops.rs", hash = "c682de746199be90c50859733b35d2e2b2af8e43" },
+    { path = "platform/script/src/opcodes_slots.rs", hash = "a5eea68ff7e67c73125e6be4a35c8edeb646d7ff" },
+    { path = "platform/script/src/opcodes_vars.rs", hash = "ca901d0447db5926f4fecfc80e10e797c3f032de" },
+    { path = "platform/script/src/parser.rs", hash = "da49ed202335f84c7284a80ab8cd3cd40b43795a" },
+    { path = "platform/script/src/pod.rs", hash = "bec7f9c3acdf90e71a6e3fd517a9007fc2543891" },
+    { path = "platform/script/src/pod_heap.rs", hash = "aef4df072a488a00a3ede685395f9579c428ae0c" },
+    { path = "platform/script/src/prims.rs", hash = "3d631ae95746a07df6054b26406aa27be3303782" },
+    { path = "platform/script/src/regex.rs", hash = "bfc27a64a3ac59246f60c0ec0f98cd7f3a08e9f5" },
+    { path = "platform/script/src/regex_heap.rs", hash = "18022f2aaf4dabb235c93b0e8ad7f189c37ff9f0" },
+    { path = "platform/script/src/scratch.rs", hash = "f875c73b35461c43e7d9c4a95bfb5c2f29d07b73" },
+    { path = "platform/script/src/shader.rs", hash = "d019bdb80c296e7d69e0205985b561d6a54425f6" },
+    { path = "platform/script/src/shader_backend.rs", hash = "1ded4fc1b0e907e9c58928982a56770c29dc4672" },
+    { path = "platform/script/src/shader_builtins.rs", hash = "b54b81e5f5a86af1b57ad681a7a406bdb0dec00d" },
+    { path = "platform/script/src/shader_calls.rs", hash = "c427e9be0adb31b3a27410e0759cc59c4beb748c" },
+    { path = "platform/script/src/shader_control.rs", hash = "66d25b9fb3f1f5c8b13048fdf740c934311b6db9" },
+    { path = "platform/script/src/shader_glsl.rs", hash = "3b4a79265b3426d6f1540028035c051c70d192e3" },
+    { path = "platform/script/src/shader_hlsl.rs", hash = "a191c0bb782944ffbdc6c5662d9101e8a7ed27dd" },
+    { path = "platform/script/src/shader_metal.rs", hash = "67c6a06ff240eac35efde0f30cd10c01e67b0912" },
+    { path = "platform/script/src/shader_ops.rs", hash = "496d7e533e2160defe4afa9cf5522742e56b2a61" },
+    { path = "platform/script/src/shader_output.rs", hash = "a195ac952aa5ed662fde69e51482f8db9d8e4a45" },
+    { path = "platform/script/src/shader_tables.rs", hash = "3f460a4f0d65e1e55ed5d132b1c84711943dd0ed" },
+    { path = "platform/script/src/shader_vars.rs", hash = "c870b69c305655e2ee35cdedae1e356d9b99d1c4" },
+    { path = "platform/script/src/shader_wgsl.rs", hash = "568c1c7ea621ea10df159083400b7410cf216de4" },
+    { path = "platform/script/src/string.rs", hash = "f3368e0dbfc19e3ed990ce634df7404b492de21e" },
+    { path = "platform/script/src/string_heap.rs", hash = "cdd4fb319ea56ee25fa5fe776e71997036600153" },
+    { path = "platform/script/src/suggest.rs", hash = "ff33b1faa4ef8395cdc8604528e5533586b110e0" },
+    { path = "platform/script/src/test.rs", hash = "8b137891791fe96927ad78e64b0aad7bded08bdc" },
+    { path = "platform/script/src/thread.rs", hash = "afe9479b84d14689163ca06e2b21827591de0860" },
+    { path = "platform/script/src/tokenizer.rs", hash = "d786b33b3cf49e84945959470b9bf973ca24198c" },
+    { path = "platform/script/src/traits.rs", hash = "b8745499fabdd01299bef16e1de9b9bdbda01ccf" },
+    { path = "platform/script/src/trap.rs", hash = "d7d6af99359fb69f17c802612750d2f092a177c9" },
+    { path = "platform/script/src/value.rs", hash = "a3d617bfe3a81d4d9e22484a2fde320f9a6e2e3e" },
+    { path = "platform/script/src/value_map.rs", hash = "55b303b2a124203dd29de5b59ee04f8e9c02c215" },
+    { path = "platform/script/src/vec_prims.rs", hash = "1dfef8401364068ecb0328695aa5a73d9a98f639" },
+    { path = "platform/script/src/vm.rs", hash = "40df5e44aec01573f0ada8409cab1850a6d2ab83" },
+    { path = "platform/script/std/src/data.rs", hash = "9fe6a977d23f3acc631756f36901747b6e62ed53" },
+    { path = "platform/script/std/src/fs.rs", hash = "4246864dc22a43439ee9b4711a6acda29ded4b1d" },
+    { path = "platform/script/std/src/lib.rs", hash = "96e1d496fcf4c2a2a95d475dd53a9aab6b777e99" },
+    { path = "platform/script/std/src/net.rs", hash = "502dd493464588c8a7ee81ef3220ad61f03526ed" },
+    { path = "platform/script/std/src/run.rs", hash = "c7cdbe744c3ff01dbd0ae5c3f22083453acfc5a7" },
+    { path = "platform/script/std/src/task.rs", hash = "bed88bd48296d6fa63b7cb2166df010527013a82" },
+    { path = "platform/script/std/src/vm.rs", hash = "3ddf30db59cf271dbb3f826f8d2fbd4c5382e1a0" },
+    { path = "platform/script/std/tests/headless.rs", hash = "6e8d73e804b571c675754b0769dac7c7af4ae685" },
+    { path = "platform/script/test/src/app.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "platform/script/test/src/bin/doc_experiment_probe.rs", hash = "6939faca372cde688dd85c827da95b0491445857" },
+    { path = "platform/script/test/src/bin/mathaot_bench.rs", hash = "bfdd64973635b268e3cb6b45f48b6d87afc6f78a" },
+    { path = "platform/script/test/src/bin/splash_bench.rs", hash = "38da5de8422a52ccb4aae59fc9084e4bf21bd6f2" },
+    { path = "platform/script/test/src/lib.rs", hash = "8b137891791fe96927ad78e64b0aad7bded08bdc" },
+    { path = "platform/script/test/src/main.rs", hash = "a6d83ce01f8c92d1dfb2493dc05ed19f5d4b45fa" },
+    { path = "platform/script/tests/allocation_limit.rs", hash = "8751419b58f388cb7ed98a8e1dec3f2861a4c1df" },
+    { path = "platform/script/tests/auto_close_eof.rs", hash = "d7e13fb7269303d419167397e31e696041338923" },
+    { path = "platform/script/tests/extra_arg_typecheck.rs", hash = "2c66227f6e95d8ab8a7bb2cf3fff83a7623db778" },
+    { path = "platform/script/tests/fn_ref_callback.rs", hash = "4e380243d8721734cd87f87d122e34b2511e8c88" },
+    { path = "platform/script/tests/json_negative_numbers.rs", hash = "397efa4ef64666fc242768112a344c7c3e022993" },
+    { path = "platform/script/tests/math_aot.rs", hash = "595da89e50e9a5d0858a170cc3de72c684e40dc7" },
+    { path = "platform/script/tests/math_aot_fuzz.rs", hash = "1293f6c1ac66f42d1c315b3edb49c7e83cfcbb7e" },
+    { path = "platform/script/tests/newline_call.rs", hash = "1e70fa06907d4ef7bef059fa11a1fa3ad2a337ff" },
+    { path = "platform/script/tests/on_render_emission.rs", hash = "c58af5aebe0b8445b6c088b6a82e439b59d4041e" },
+    { path = "platform/script/tests/parse_error_capture.rs", hash = "9bb37ecd7c197d98a57f569d0d95a26c5da8dc36" },
+    { path = "platform/script/tests/reload_defaults.rs", hash = "0cf5476df858762de49d26ef5bcd1807db8d1af4" },
+    { path = "platform/script/tests/short_circuit_args.rs", hash = "2a0e526f7e9e8f8dde525b7b7609a3debf369c34" },
+    { path = "platform/src/action.rs", hash = "159a9d530b939af0f573aa01aff954313b6b6e6c" },
+    { path = "platform/src/app_icon.rs", hash = "ad3fa075ae9297f507d6620d2a6f02668cc42649" },
+    { path = "platform/src/app_main.rs", hash = "3823df312365d4bef040fa4b44697ea148ee3f94" },
+    { path = "platform/src/arc_string_mut.rs", hash = "52825eb55c972a203e3fa938cdf85fe52f81bc39" },
+    { path = "platform/src/archive_cache.rs", hash = "b425f8f5b6e418db8b7401a66f43a997aa08968c" },
+    { path = "platform/src/area.rs", hash = "3e836906f8842c92059c2bfc09208617e35a5b4d" },
+    { path = "platform/src/audio.rs", hash = "3db9110a1bbadf71cddb8d39559e46d4184bb005" },
+    { path = "platform/src/audio_output_tap.rs", hash = "f210b4ce6dd44fe9aaeeaa8e1d8c420bd18fbc86" },
+    { path = "platform/src/audio_stream.rs", hash = "e0d150a2a3ee054a74c8663190cfc531c6333a45" },
+    { path = "platform/src/component.rs", hash = "db9daec9757f56443e1516ce4d6eb65975b33aff" },
+    { path = "platform/src/component_list.rs", hash = "d5c4b2021e954a8fe674b50137911c8b7c9f29b7" },
+    { path = "platform/src/component_map.rs", hash = "692cc5b969d79dff3e373200c069a9d75ba60260" },
+    { path = "platform/src/cursor.rs", hash = "c41f6735e81ba7cc2c492c80fbafea1dfdc4c749" },
+    { path = "platform/src/cx.rs", hash = "e9a154b94a8698768b2012551916f1b97d18dd3d" },
+    { path = "platform/src/cx_api.rs", hash = "6524ed865118d5fd9c44edb42435a971a3eb4331" },
+    { path = "platform/src/debug.rs", hash = "c196850b53558241b25ce154c2b7f6ce4a91bd52" },
+    { path = "platform/src/display_context.rs", hash = "f3dcb71daf13f21743e5bdac2bbdc7a87709633f" },
+    { path = "platform/src/draw_list.rs", hash = "ec3dae3ef92366d863b75986d016941aded65f60" },
+    { path = "platform/src/draw_matrix.rs", hash = "c49718a0bdb4e65475d232816f18ee91d953a1f8" },
+    { path = "platform/src/draw_pass.rs", hash = "0887832160376cbb1b6888b6524528e2d4a49cca" },
+    { path = "platform/src/draw_shader.rs", hash = "83decd97bc27dd968284b2ee713667a3ca84a30f" },
+    { path = "platform/src/draw_vars.rs", hash = "90b25b9ab79bf7837074947e9f7169c77e2f0bfb" },
+    { path = "platform/src/event/drag_drop.rs", hash = "819df2e68b724bf1921b05569aae57e057c59b97" },
+    { path = "platform/src/event/event.rs", hash = "84d2fa2210a6d23d452f2f32932cae50c529c9e7" },
+    { path = "platform/src/event/finger.rs", hash = "c4c4099e7c27061fd23218fbf03f06011593894c" },
+    { path = "platform/src/event/game_input.rs", hash = "017c6a7fb21ab3d840cf8a672e5a8016be73a13e" },
+    { path = "platform/src/event/keyboard.rs", hash = "806e4661cc9aaabde44b4872a8d5f3fd3da0441d" },
+    { path = "platform/src/event/location.rs", hash = "6cf569e1571fcd37f65eed397e2f4a6149a65e38" },
+    { path = "platform/src/event/mod.rs", hash = "550c6195d44ec6d2201153686a4f6f225b9e2834" },
+    { path = "platform/src/event/network.rs", hash = "2f6210edd3207c55a77d697e43516e9dfa8a77d2" },
+    { path = "platform/src/event/video_playback.rs", hash = "7fe86eed0fe624c5a5b378ea93fdb846095700ba" },
+    { path = "platform/src/event/window.rs", hash = "47c107e2482c4f9c79a29dd12f58ad044aecb508" },
+    { path = "platform/src/event/xr.rs", hash = "1e72279337c2fbae620f41bd7601c5a71094476f" },
+    { path = "platform/src/file_dialogs.rs", hash = "7999192a5344b195cc5de81e8eb83537b7884ff9" },
+    { path = "platform/src/font_policy.rs", hash = "cb1946861a66fea0ec83b3ee8cf7d004174fee87" },
+    { path = "platform/src/frame_trace.rs", hash = "a0059b0fbd52551fc8c9f146650e60fd678724fb" },
+    { path = "platform/src/game_input.rs", hash = "cff4d8e5987b695ff1b79be19e6fede0c86ca361" },
+    { path = "platform/src/geometry.rs", hash = "b237919405c55e83131c82346c448cc10b9cc7bc" },
+    { path = "platform/src/gl_render_bridge.rs", hash = "f7e04f0de478b764e5e7f2a37da034f46afed091" },
+    { path = "platform/src/gpu_info.rs", hash = "61f3282eff74dd7937a82596670f1a8e17497eec" },
+    { path = "platform/src/gpu_texture.rs", hash = "51f43be5e1218e2bc30233e222ffdf81e66e7af1" },
+    { path = "platform/src/home.rs", hash = "98a3fa31bcecf377e9da901d584a809575501691" },
+    { path = "platform/src/id_pool.rs", hash = "94b5fe5d413a59b5cab0b03f458f8963122584ea" },
+    { path = "platform/src/ime.rs", hash = "daebffeb5bd38517d2c0b5d2028082ff8c27f6f5" },
+    { path = "platform/src/lib.rs", hash = "e3b4963b9367f4928e7c0694008df96fefd95116" },
+    { path = "platform/src/live_reload.rs", hash = "200f4f6b62ea9f9d3b58ef0647653983e10ef191" },
+    { path = "platform/src/log.rs", hash = "a13a9cd333c4873cea7aaabacf3a858dd497b60c" },
+    { path = "platform/src/macos_menu.rs", hash = "ae95db5ff27a8932a7db32ead1354bbec502e5bc" },
+    { path = "platform/src/media_api.rs", hash = "5955bf011b5ee7363b47a743677cba1a965e56f9" },
+    { path = "platform/src/media_host.rs", hash = "2536455d7a1c9980d2024b5148593c9c02923cff" },
+    { path = "platform/src/media_plugin.rs", hash = "6d8cb8998cb1636b0ea3780a90fdab8ef0fa39ed" },
+    { path = "platform/src/memory_watchdog.rs", hash = "66f93778e13be269ccbff22bc95dcb428d1ae0de" },
+    { path = "platform/src/midi.rs", hash = "bae46a9892c9e5768c5139c441cf89f2149bd7a9" },
+    { path = "platform/src/os/apple/apple_classes.rs", hash = "90c8cdce3eb8d015db4546ac3845a8af9995b026" },
+    { path = "platform/src/os/apple/apple_game_input.rs", hash = "e99de6244376c616253473dbedc636753f3e0097" },
+    { path = "platform/src/os/apple/apple_geo.rs", hash = "f0b9c7ddf7bc4e4a73ece9afd16ab4ae6041ff78" },
+    { path = "platform/src/os/apple/apple_media.rs", hash = "dc951274a70d9e3730a5ac6a2cd9fdb590b67126" },
+    { path = "platform/src/os/apple/apple_resources.rs", hash = "98f5e860b51884734b9a93559c6fbd9bd6f47861" },
+    { path = "platform/src/os/apple/apple_sys.rs", hash = "567c9654ed8e5f45f49b6a2fd6d43ff3592d785a" },
+    { path = "platform/src/os/apple/apple_util.rs", hash = "d804bede7b6b5d40c68de52838abd6540a972337" },
+    { path = "platform/src/os/apple/apple_video_playback.rs", hash = "4320783d70ed5f0aaed8fdd970eb723f20062c3a" },
+    { path = "platform/src/os/apple/apple_video_player.rs", hash = "9d85ad666b92485204989376c2475a1be4701d10" },
+    { path = "platform/src/os/apple/apple_webview.rs", hash = "da39a57968a2a1e79b0e0410323878b2c5a85b50" },
+    { path = "platform/src/os/apple/apple_yuv_metal.rs", hash = "5ee3fadf3cbc9f61f099fd2c6f92c0d0f8874540" },
+    { path = "platform/src/os/apple/audio_tap.rs", hash = "ff94871a5c74ce95a0571c0f221c721795233cbe" },
+    { path = "platform/src/os/apple/audio_unit.rs", hash = "b380a8be10c5d33d0a1d20aa05f9796ed6ea5cad" },
+    { path = "platform/src/os/apple/av_capture.rs", hash = "dfa3671a161f55c21a3af42e4808c2472de1c475" },
+    { path = "platform/src/os/apple/core_midi.rs", hash = "e883f3063081f2a23c22182ca60473d54ee6117c" },
+    { path = "platform/src/os/apple/ios/ios.rs", hash = "dafd4ceee6c2ae8f96f7b95b9d05030218da96b6" },
+    { path = "platform/src/os/apple/ios/ios_app.rs", hash = "3dcabebc23c79851cedf1e50d3e771395a305aa7" },
+    { path = "platform/src/os/apple/ios/ios_delegates.rs", hash = "30c6a1e6c3ff5058f092f95818f36620877f220f" },
+    { path = "platform/src/os/apple/ios/ios_event.rs", hash = "1b3e99ed10e022e37eca3699c3713cd496375006" },
+    { path = "platform/src/os/apple/ios/ios_file_dialog.rs", hash = "434205cbf3c76430f9861de8deb2e8fbe36d13b4" },
+    { path = "platform/src/os/apple/ios/ios_text_input.rs", hash = "8a73212ca62e35850d405cbeb08ab2899f8bf588" },
+    { path = "platform/src/os/apple/ios/mod.rs", hash = "dba498b9a3831bddc9cd6ed4310ddfe4a90f2d72" },
+    { path = "platform/src/os/apple/macos/macos.rs", hash = "e6037233be209d0bedc192bf36121b442149f1e7" },
+    { path = "platform/src/os/apple/macos/macos_app.rs", hash = "013c0f5884779f6146e3ecfa56099ee459364a10" },
+    { path = "platform/src/os/apple/macos/macos_delegates.rs", hash = "cd55cb054f452873d9db96ff79af95b02fccf38a" },
+    { path = "platform/src/os/apple/macos/macos_event.rs", hash = "cb3a975183d2ed4e9e1ed8936aaa1ed556b90c2a" },
+    { path = "platform/src/os/apple/macos/macos_stdin.rs", hash = "186ee56df834972d45f6a1f27e8d7ba30cdb0649" },
+    { path = "platform/src/os/apple/macos/macos_window.rs", hash = "c1c2c7981e37be51185d35880ce4973aec60b287" },
+    { path = "platform/src/os/apple/macos/mod.rs", hash = "84e3ad5f13e75680f80fafaee3810e40fd892341" },
+    { path = "platform/src/os/apple/metal.rs", hash = "4767a1fe3361c7bc271b5b24709dcb8aa4ebdb2f" },
+    { path = "platform/src/os/apple/mod.rs", hash = "6f1a959ff2c0f1822799e8e0c4ac2dd95651bd6c" },
+    { path = "platform/src/os/apple/tvos/mod.rs", hash = "65165394e57fe9ecb714decd6318f9423830791b" },
+    { path = "platform/src/os/apple/tvos/tvos.rs", hash = "d7e9110cfbb0f704e7ed096ff187ef50fd415be3" },
+    { path = "platform/src/os/apple/tvos/tvos_app.rs", hash = "c56e7baac59146069265d8bc10649769dd7b89f1" },
+    { path = "platform/src/os/apple/tvos/tvos_delegates.rs", hash = "3aecc79e584e7bd2fa01e7ad7674199028aa32cf" },
+    { path = "platform/src/os/apple/tvos/tvos_event.rs", hash = "f4bdbc3b19aa05e44dd773f6473cc5f01f88515b" },
+    { path = "platform/src/os/apple/video_file_decoder.rs", hash = "f58e259af27602e52742c1a9e313781201f0b082" },
+    { path = "platform/src/os/apple/video_file_encoder.rs", hash = "a79cd41fa755ad4f98068b36463d4ab370d1cef2" },
+    { path = "platform/src/os/cx_native.rs", hash = "9c300db233dcc4f5314293ddd14d4b6bf1532a80" },
+    { path = "platform/src/os/cx_shared.rs", hash = "d3b9f6322ef082a1059b9714acaf1b380bdc8e4c" },
+    { path = "platform/src/os/headless/event_loop.rs", hash = "7d6f5155acc0376612528b37de3558a1e58abdc0" },
+    { path = "platform/src/os/headless/jit.rs", hash = "9b87b1a83b3e918a69971b1e98392b7a68b3f49a" },
+    { path = "platform/src/os/headless/mod.rs", hash = "13c91dfd118d391fa9a2fb1f89f056aed0fd5bfe" },
+    { path = "platform/src/os/headless/raster.rs", hash = "aad3a97d55ff5d7243a555fca62c0495f0197b02" },
+    { path = "platform/src/os/headless/shader.rs", hash = "5df56bd5872f9b1fbbd0a3f10072378b72d8cc23" },
+    { path = "platform/src/os/headless/shader_runtime_preamble.rs", hash = "f8d354dce1fe98d0dc990303fbae49ea9ced6d96" },
+    { path = "platform/src/os/headless/virtual_gpu.rs", hash = "44ec0ad8f6b23e7e471428cdf1174c613cea1832" },
+    { path = "platform/src/os/linux/alsa_audio.rs", hash = "58919896d31df0e3d587705ef9af5e12e672275d" },
+    { path = "platform/src/os/linux/alsa_midi.rs", hash = "e174e108f90d7fd7e943e57d7bd069c8470e5d33" },
+    { path = "platform/src/os/linux/alsa_sys.rs", hash = "98d1dcb75e3d650a1e36c1e341059e69e5b70509" },
+    { path = "platform/src/os/linux/android/aaudio_sys.rs", hash = "79b9592d77751f858ae3b820778422132c8b2586" },
+    { path = "platform/src/os/linux/android/acamera_sys.rs", hash = "10def0dd9e29f093cb0f4def12187fa7500301a1" },
+    { path = "platform/src/os/linux/android/amidi_sys.rs", hash = "ea0f54ab533c063c1f0a291fbd7f4170114111ab" },
+    { path = "platform/src/os/linux/android/android.rs", hash = "ee2fd20db0fa7f9af34b1bddd369a19c66c3b9d6" },
+    { path = "platform/src/os/linux/android/android_audio.rs", hash = "3b1efdb4d57d47b7b4a940aab4caadb26e9e4438" },
+    { path = "platform/src/os/linux/android/android_camera.rs", hash = "e279a06691758c43c147941b22e50bb37fc7df06" },
+    { path = "platform/src/os/linux/android/android_camera_player.rs", hash = "765fff08f3d0d8d18b0754b4135e44efe5756aa8" },
+    { path = "platform/src/os/linux/android/android_file_dialog.rs", hash = "1e42638f4b5fc84811fa2998fb04da1dabd22623" },
+    { path = "platform/src/os/linux/android/android_jni.rs", hash = "81bd29e6aba3bb3b457994f7a19a173e627af683" },
+    { path = "platform/src/os/linux/android/android_keycodes.rs", hash = "311d0033f8ea687613946768e4962f04ead73c2c" },
+    { path = "platform/src/os/linux/android/android_media.rs", hash = "6383cfc233579c3cfb691bedc4eb7ff44fe55747" },
+    { path = "platform/src/os/linux/android/android_midi.rs", hash = "31ccb5a9e3f221b0dcb5e9b93fe25e731add702d" },
+    { path = "platform/src/os/linux/android/android_network.rs", hash = "b99bba772e8e855716fbed94929644c11ca80864" },
+    { path = "platform/src/os/linux/android/android_video_playback.rs", hash = "2ed73c2af263f612efebafc10046b0ffc34824e0" },
+    { path = "platform/src/os/linux/android/mod.rs", hash = "a4a335dfe177ebb533e981ae67ca629926de4b02" },
+    { path = "platform/src/os/linux/android/ndk_sys.rs", hash = "6597ce3a6805bc60f351eba90290c60c2f9378da" },
+    { path = "platform/src/os/linux/android/ndk_utils.rs", hash = "bae6cbd97f498ee33e5248c442365baf1849597c" },
+    { path = "platform/src/os/linux/direct/direct_event.rs", hash = "8b51dc491941ce4c847b17e3f25fe8eeb8a503e0" },
+    { path = "platform/src/os/linux/direct/drm_sys.rs", hash = "073788a7caba53121c2601f84d256ee43b466f3f" },
+    { path = "platform/src/os/linux/direct/egl_drm.rs", hash = "0521adf045b50a80e41e9b9bde4e790c1ece4a8a" },
+    { path = "platform/src/os/linux/direct/gbm_sys.rs", hash = "2b83c0065f14162d136b49848c8ebce1283a2174" },
+    { path = "platform/src/os/linux/direct/linux_direct.rs", hash = "65693e5729ed8e230a3aca583067584e5b8dc73e" },
+    { path = "platform/src/os/linux/direct/mod.rs", hash = "c55f6b0be7a3b2c39dc4425e25ccb1aa8a158297" },
+    { path = "platform/src/os/linux/direct/raw_input.rs", hash = "080410c574a91391e3b27a7f1d09022f25416ffb" },
+    { path = "platform/src/os/linux/dma_buf.rs", hash = "b901a04a30d0c379042490dbfb61c327dd3c5989" },
+    { path = "platform/src/os/linux/egl_sys.rs", hash = "ba82ebd045c56f60f35abba94a1ca3ab5a0ee750" },
+    { path = "platform/src/os/linux/file_dialog.rs", hash = "84f7b6c92d94535903479e5081e2f50aeaed8423" },
+    { path = "platform/src/os/linux/gl_sys.rs", hash = "a248411b6e18de034ef1315441539319efac87a4" },
+    { path = "platform/src/os/linux/gl_video_upload.rs", hash = "d443520f5843e9300859f7ae036e0beeaf4a5000" },
+    { path = "platform/src/os/linux/gst_gl_share.rs", hash = "6caf87da86a29898c6ed1a07792241ad6652d47f" },
+    { path = "platform/src/os/linux/gstreamer_sys.rs", hash = "fcb24b6092ca78e8bddf3420bbfaac821138b504" },
+    { path = "platform/src/os/linux/ipc.rs", hash = "1c59d066299d62c4f0e824ba9d3db497590742c1" },
+    { path = "platform/src/os/linux/libc_sys.rs", hash = "87d6ab3b3a71676af3532e0b3429aba3106cef35" },
+    { path = "platform/src/os/linux/linux_media.rs", hash = "6a130141818121944e5c44ba7c7cc089213389b4" },
+    { path = "platform/src/os/linux/linux_video_gpu.rs", hash = "ae4cf01814314c11d341f1cd165f5aad80f34544" },
+    { path = "platform/src/os/linux/linux_video_playback.rs", hash = "fafb12da8adb168925b5a574fe1f5ab993690982" },
+    { path = "platform/src/os/linux/linux_video_player.rs", hash = "e433a758024f3f2ae2212405ee6f061e25fc4719" },
+    { path = "platform/src/os/linux/mod.rs", hash = "e233fe143985a6630c6299b85050cc5ee7781222" },
+    { path = "platform/src/os/linux/module_loader.rs", hash = "394c786cdcec302fefadbd3c7bc7410c541a48c2" },
+    { path = "platform/src/os/linux/open_harmony/arkts_obj_ref.rs", hash = "39f5309aac993477dc8c5ddf592138c5082802f9" },
+    { path = "platform/src/os/linux/open_harmony/mod.rs", hash = "23afa10a031f15ffd0c499caee4d8352ce724056" },
+    { path = "platform/src/os/linux/open_harmony/oh_callbacks.rs", hash = "286d34d86c125c91d7d98ec75925a931c1cb6918" },
+    { path = "platform/src/os/linux/open_harmony/oh_media.rs", hash = "005ce91760b3438491eba0969b33b7652fcfd876" },
+    { path = "platform/src/os/linux/open_harmony/oh_sys.rs", hash = "df05485f16209da004ba30b87bcdfde9a258d641" },
+    { path = "platform/src/os/linux/open_harmony/oh_util.rs", hash = "dbcdcc2b232d2375359059f11b5b6ff80ef86751" },
+    { path = "platform/src/os/linux/open_harmony/open_harmony.rs", hash = "e9d4b4eddcaa7ec624ce10a2da9d976c91374b8a" },
+    { path = "platform/src/os/linux/open_harmony/raw_file.rs", hash = "eb5babd374fc85770262196aec3face426d05a7f" },
+    { path = "platform/src/os/linux/opengl.rs", hash = "c1632787e74a0d3e83bfc69fd5bf9ea210220b7a" },
+    { path = "platform/src/os/linux/opengl_cx.rs", hash = "5efecb1563d773c5fe3192d1067ebc699995f4db" },
+    { path = "platform/src/os/linux/openxr.rs", hash = "71e9871af3b9f84af60902da9c0dea1ac74548d2" },
+    { path = "platform/src/os/linux/openxr_anchor.rs", hash = "c80c2121b85a8a2099a04d04e7681e6d4e067cfe" },
+    { path = "platform/src/os/linux/openxr_depth.rs", hash = "c1d8769316bc328acb26825d99b910f417a53c07" },
+    { path = "platform/src/os/linux/openxr_input.rs", hash = "180eb64ec6842fa3941fb4568a25a4bd88b578a8" },
+    { path = "platform/src/os/linux/openxr_opengl.rs", hash = "01cfcead97ba6f5f152028d4916d9ffad13e9d13" },
+    { path = "platform/src/os/linux/openxr_sys.rs", hash = "14a7c00ba2116b518b84d580c49d12cdca253868" },
+    { path = "platform/src/os/linux/openxr_vulkan.rs", hash = "bef7620c5894aec50e5a0d7c16e338d72af49815" },
+    { path = "platform/src/os/linux/pulse_audio.rs", hash = "c98f225666524ff9d7c465c2c52741c8b046fb34" },
+    { path = "platform/src/os/linux/pulse_sys.rs", hash = "52b3f4b4987c7bcfc6880794e913904250a88736" },
+    { path = "platform/src/os/linux/select_timer.rs", hash = "378cc0f2e2fa635740467a6098cae9b6e87dc12b" },
+    { path = "platform/src/os/linux/socket_stream.rs", hash = "2e3a7fd84f708b91d81dc096c45327aa79bd467c" },
+    { path = "platform/src/os/linux/v4l2_camera.rs", hash = "1a4820874daf05c1f85e45b9a9692a4b2abd1db9" },
+    { path = "platform/src/os/linux/v4l2_camera_player.rs", hash = "d1f34ed71e7db2db28f3a9d51503ac10966b61fb" },
+    { path = "platform/src/os/linux/v4l2_sys.rs", hash = "ade548bd9a171e7ae7461ec6e88800d1753d0595" },
+    { path = "platform/src/os/linux/va_dmabuf_modifier.rs", hash = "9bd199e1f27d89af822402feaa4b4c2762c6a74f" },
+    { path = "platform/src/os/linux/vulkan.rs", hash = "c978a35627a405d89a241967a8bab901e5190962" },
+    { path = "platform/src/os/linux/vulkan_naga.rs", hash = "ea79ff2d7a5bec57d7e39d6e413723196afa43c6" },
+    { path = "platform/src/os/linux/wayland/linux_wayland.rs", hash = "1881f2e2ce669b660021372dad1de61dbc805892" },
+    { path = "platform/src/os/linux/wayland/mod.rs", hash = "a13070c14322c717e4612ad8d0a495c013643e4d" },
+    { path = "platform/src/os/linux/wayland/opengl_wayland.rs", hash = "b9c76fb76281e8e0c244aaebad61f56d2d2db60a" },
+    { path = "platform/src/os/linux/wayland/wayland_app.rs", hash = "b12e12aa3b5e1906f45712eb7b791ad69ed792c6" },
+    { path = "platform/src/os/linux/wayland/wayland_state.rs", hash = "8e63bfe3c7543dad87acb84b304174889449a497" },
+    { path = "platform/src/os/linux/wayland/wayland_type.rs", hash = "6e2cc832e79351142c3c768fd14af9c0e41407ad" },
+    { path = "platform/src/os/linux/wayland/xkb_sys.rs", hash = "9a29dace07e19732b93d0b97b0c0daf95769493b" },
+    { path = "platform/src/os/linux/windowing_backend.rs", hash = "5908cfad227aded4d8a17e8d46567c02b37e4416" },
+    { path = "platform/src/os/linux/x11/glx_sys.rs", hash = "b04b90107311a34fcfcb558e1272850439c48c16" },
+    { path = "platform/src/os/linux/x11/linux_x11.rs", hash = "102998ec9bbf310ac778b8788556d29a888c1bae" },
+    { path = "platform/src/os/linux/x11/linux_x11_stdin.rs", hash = "fc98d1c3dfb8401dc8393b32b79d7de2fcc18841" },
+    { path = "platform/src/os/linux/x11/mod.rs", hash = "73e8423774a3d847fcc403e243ca9f348c5de831" },
+    { path = "platform/src/os/linux/x11/opengl_x11.rs", hash = "9a99cad90cb49e21dd31e7cab9376852d48c326a" },
+    { path = "platform/src/os/linux/x11/x11_screen.rs", hash = "3b7a74555d792e345eaea40bff366fc2e7f6b3a1" },
+    { path = "platform/src/os/linux/x11/x11_sys.rs", hash = "1d0effd2918a42dfe2014b37488fa2fa531a98a7" },
+    { path = "platform/src/os/linux/x11/xlib_app.rs", hash = "c3308698e05a8de8da7f81de3a969fb246314827" },
+    { path = "platform/src/os/linux/x11/xlib_event.rs", hash = "6e69c660553596e214a46a3a3702f43d7b004da6" },
+    { path = "platform/src/os/linux/x11/xlib_window.rs", hash = "6bd8f80bd1db120b7ba1904a4e3656fc14d93341" },
+    { path = "platform/src/os/linux_test_stub.rs", hash = "0181c3317feb2161c7f3ec3db990d1d171fb487c" },
+    { path = "platform/src/os/mod.rs", hash = "450bb1d682836c7658c7ef7263fe28ed966be657" },
+    { path = "platform/src/os/shared_framebuf.rs", hash = "b6d01053b6aab059a3493843f1ec414a5c439a6d" },
+    { path = "platform/src/os/termination_signal.rs", hash = "fe279f17de88744321d5657fb362cb072ea39f64" },
+    { path = "platform/src/os/web/alloc.rs", hash = "6f76e86db39f0be00583e4428f3fa62986d852ea" },
+    { path = "platform/src/os/web/from_wasm.rs", hash = "ce15e0b675c3e2b143c72611e78677c19bd1fbe5" },
+    { path = "platform/src/os/web/mod.rs", hash = "119179e03b64ed679a5ab8a050d645789c8445f7" },
+    { path = "platform/src/os/web/to_wasm.rs", hash = "fc2d1e9025762000cdf8634bdbdb1a01bebbb91c" },
+    { path = "platform/src/os/web/web.rs", hash = "a7dd3f2a8209d944ba9d5b4aabf14e11ba1e238c" },
+    { path = "platform/src/os/web/web_audio.rs", hash = "cd7e4a38d91aabc17c12c2599be5dc3067b648c9" },
+    { path = "platform/src/os/web/web_gl.rs", hash = "f227f0d045afe451ceeded6e80c354115f607e5a" },
+    { path = "platform/src/os/web/web_media.rs", hash = "12ec83808895de34368b186ebce51753ce0cd6cd" },
+    { path = "platform/src/os/web/web_midi.rs", hash = "bf1b44d82f674efbef5e62f59b468c3d536e0f18" },
+    { path = "platform/src/os/web/web_network.rs", hash = "e9f971837b0c97e6a5fe0bc2d8d5dad8e842b2a8" },
+    { path = "platform/src/os/web/web_socket.rs", hash = "13e8dc4e15f7a40e4230fee19132c8d52a750dab" },
+    { path = "platform/src/os/windows/angle.rs", hash = "4e2adaaf9c103d364fd7a03da0e064bca3c6637c" },
+    { path = "platform/src/os/windows/d3d11.rs", hash = "ad47b4a1ed49b80ad8934157e7a50dfcdf3bd139" },
+    { path = "platform/src/os/windows/d3d11_texture.rs", hash = "5839f28b2aba25c423ed24f71eccbbd4b63d1ed6" },
+    { path = "platform/src/os/windows/dataobject.rs", hash = "1aba105fe6851e7aaad1f89b11e3c283cf651f69" },
+    { path = "platform/src/os/windows/dropfiles.rs", hash = "de2a1981cef04f5269d3169c8794921d945a2d72" },
+    { path = "platform/src/os/windows/dropsource.rs", hash = "b26d9afcc66b055f0a538cf583ab507095a65a68" },
+    { path = "platform/src/os/windows/droptarget.rs", hash = "38b909f4f6f0c2059199e2cbfd4f31c09ce8c0e2" },
+    { path = "platform/src/os/windows/enumformatetc.rs", hash = "853bf3f074031ecf6841ae5b38f3ed44a537585a" },
+    { path = "platform/src/os/windows/file_dialog.rs", hash = "188ae37dea05dcd17d8dcc5697a90c970b1185aa" },
+    { path = "platform/src/os/windows/implement_com.rs", hash = "c86f72c687e4861d5368777b356431e5cf1d2020" },
+    { path = "platform/src/os/windows/media_foundation.rs", hash = "7e7f0aa55cbcd50f6a0cd18dc329bc4553961adb" },
+    { path = "platform/src/os/windows/mod.rs", hash = "19aea0eb42dff17fcf4a0eaf2d940354bc884a93" },
+    { path = "platform/src/os/windows/video_file_decoder.rs", hash = "8ae309006854f275cf081d800a445c4083aa39eb" },
+    { path = "platform/src/os/windows/video_file_encoder.rs", hash = "b048830e375e936422fb4cf8f7e66a34b14b9fef" },
+    { path = "platform/src/os/windows/wasapi.rs", hash = "485bd71e39a7b41e7295cb1daf3f048257e16f4c" },
+    { path = "platform/src/os/windows/win32_app.rs", hash = "a72c52b34e96496a4dfdb160b4944e62398f4945" },
+    { path = "platform/src/os/windows/win32_event.rs", hash = "8a02d736c513496076b560a54824f8c3b329e3e1" },
+    { path = "platform/src/os/windows/win32_midi.rs", hash = "e5c8ec94cbadb48deb5b72f5bbeb696a50d439a2" },
+    { path = "platform/src/os/windows/win32_screen.rs", hash = "c7f070654bd76ccd3411d8b84a6b401fe296b21f" },
+    { path = "platform/src/os/windows/win32_window.rs", hash = "01a356dce812e32669008ae24b52a664552c104b" },
+    { path = "platform/src/os/windows/windows.rs", hash = "a99c2a04343078c5f0a12f888eb6b4d80ef4cdf4" },
+    { path = "platform/src/os/windows/windows_game_input.rs", hash = "d27cccf76ecad08a856787cd765686b0e655015f" },
+    { path = "platform/src/os/windows/windows_media.rs", hash = "96da97e592db5fe00b9e83f30bd342ecbabfdac1" },
+    { path = "platform/src/os/windows/windows_media_engine_notify.rs", hash = "455bb7d8e4d1b64f15e9c5d8e99654b9e7d89e72" },
+    { path = "platform/src/os/windows/windows_mf_source_reader.rs", hash = "f8f0119a50a4ec0bd36631b755da6f8cb50f9d75" },
+    { path = "platform/src/os/windows/windows_stdin.rs", hash = "1c9022d26413d2152f7eb61b63935109d201e9ac" },
+    { path = "platform/src/os/windows/windows_video_playback.rs", hash = "024764c2da22be37625a2a50ee6fb33fb577b460" },
+    { path = "platform/src/os/windows/windows_video_player.rs", hash = "9a7ac30bfae34fc12234f5e7d9884d43c4b54c34" },
+    { path = "platform/src/os/windows/winrt_midi.rs", hash = "321b1b9db5cc60210576d2c3d08a562c5d2d19aa" },
+    { path = "platform/src/perf_monitor.rs", hash = "032c4fd83a95abaa7cb3e1c48ab971ab0f09d575" },
+    { path = "platform/src/performance_stats.rs", hash = "dea7ec446d98d2d54cf08d4d965fbb0a2f28c7ea" },
+    { path = "platform/src/permission.rs", hash = "f57575ea18ae66b0efc07ca6c33e1dd51cb4659b" },
+    { path = "platform/src/pixel_probe.rs", hash = "616201f231846a1f72a269171e24ea7153845908" },
+    { path = "platform/src/playback_session.rs", hash = "51c5c2355db3799c887dc591c0b72b96760a5278" },
+    { path = "platform/src/remote.rs", hash = "722c0a0db32fe8418e6fde124d0462452695d20c" },
+    { path = "platform/src/screen.rs", hash = "c8c069c21eae9616747f792b42ffa7de7d047dec" },
+    { path = "platform/src/screen_capture.rs", hash = "5471ab0547f7ea07aa37033b600e54238d82326c" },
+    { path = "platform/src/script/cx.rs", hash = "ac9e4901a91d262afe2526ed1e3036bbc1209646" },
+    { path = "platform/src/script/draw.rs", hash = "054fdf74f9614647fd171f95bc541a7fc5e398a8" },
+    { path = "platform/src/script/event.rs", hash = "a743afb9af48293b6120638cb636fbc19da3bf5d" },
+    { path = "platform/src/script/mod.rs", hash = "c29069c7768758b50154c5875d67a582fe3b6192" },
+    { path = "platform/src/script/res.rs", hash = "c3e303e7023e8aa62dc2db5776ffbab35217ed09" },
+    { path = "platform/src/script/script.rs", hash = "4cdf253562f6f77fd2b8831d9ffe5bf5c62b7a1f" },
+    { path = "platform/src/script/std.rs", hash = "ea5c15c0cf9f4bd3fd621ff9a98b460b4c4c705a" },
+    { path = "platform/src/script/timer.rs", hash = "c390463010671b19e4f2fab142d4169b98542787" },
+    { path = "platform/src/script/vm.rs", hash = "fe1d9b943dc3375e7dd927cf8e093c865b50d840" },
+    { path = "platform/src/shader_error.rs", hash = "8639f56abf001410284113f949b120ae0f1f1ff8" },
+    { path = "platform/src/shared_bytes.rs", hash = "17caf716f8722e6b9af2f2da7a0705935bdee9e1" },
+    { path = "platform/src/sploded.rs", hash = "048cec2057a7b1896f2333f123f6f08addbbd6a5" },
+    { path = "platform/src/storage.rs", hash = "ed8de818a0b21e83f5a374698c7ddcc1ef6ed5ec" },
+    { path = "platform/src/texture.rs", hash = "5139d5b190b56648b37eda3a806c5f37aea33f14" },
+    { path = "platform/src/thread.rs", hash = "b97fe9a84274d82681ad216a2ab3a3fa58f495e5" },
+    { path = "platform/src/ui_runner.rs", hash = "b8c722dfbb7d9f67a5fb185d18db6a1864dc7fbe" },
+    { path = "platform/src/uniform_buffer.rs", hash = "d5ce3b1cbb37ad82d38ab2435dfe36547ed3b5f0" },
+    { path = "platform/src/video.rs", hash = "e9b1574c23c42d0de5fced7cd60794426e55d16b" },
+    { path = "platform/src/video_decode/mod.rs", hash = "51de3c414f7fd98a7c532a3dff98c624766f8ba9" },
+    { path = "platform/src/video_decode/software_video.rs", hash = "406b22ce8283ca00e1c44629540ea18d63363527" },
+    { path = "platform/src/video_decode/yuv.rs", hash = "e23ce00d95f0ea77d92d04125386238519bb76a8" },
+    { path = "platform/src/video_encode/camera_video_encoder.rs", hash = "cff081fad8b1657889320dd598dbe1658cf95b1b" },
+    { path = "platform/src/video_encode/mod.rs", hash = "ec950271687058368f323d59048be089e336917f" },
+    { path = "platform/src/video_file/mod.rs", hash = "9f0ae52e0a2b0bbd0bd3e8f55fc470d55cdbaca6" },
+    { path = "platform/src/video_session.rs", hash = "a28b32acedd8daa5772981fad4ce11bc494e4fcd" },
+    { path = "platform/src/web_socket.rs", hash = "c8f9915091e0d0fb34056bac4f67f1dd586c79f3" },
+    { path = "platform/src/window.rs", hash = "f0aa67b2e48556b3583eea3276914f5d118f9ca7" },
+    { path = "platform/src/xr_tsdf.rs", hash = "b64f72a0412969c6676610803318f88816a44bc0" },
+    { path = "platform/studio/src/cursor.rs", hash = "bf4ebf1e7225ca9621da43b946e71301b0e2a390" },
+    { path = "platform/studio/src/hub_protocol.rs", hash = "f564af62ac81aa6060fa883d373f7a3e1aeb57a8" },
+    { path = "platform/studio/src/keyboard.rs", hash = "287ec0b245434cc641f5a811f1da68fb6bc55b8c" },
+    { path = "platform/studio/src/lib.rs", hash = "e375ca0e0592ea776b0b5c3f895a89c695400d96" },
+    { path = "platform/studio/src/mouse.rs", hash = "d0e47b2e5881b27fef12f5f03627edada78e1a10" },
+    { path = "platform/studio/src/shared_framebuf.rs", hash = "bf04836e4b50e49f704ed52fe53f25f75201cf14" },
+    { path = "platform/studio/src/studio.rs", hash = "9626fed0be73cae918df5c0284ea2815cf3cce85" },
+    { path = "platform/tests/macos_cursors.rs", hash = "b891321dc161b42cba4ab812f96d625f37ada55c" },
+    { path = "platform/tests/texture_lifetime.rs", hash = "34260d5864ae57f82b31bd9a011e5d0a23e8e2c9" },
+    { path = "platform/tests/ui_waker_headless.rs", hash = "01077b39ebe22d1a562a3b2cd5687a642982085d" },
+    { path = "platform/video/src/annex_b.rs", hash = "de211425fabe80c480c3866de33b5510241b2374" },
+    { path = "platform/video/src/apple_decoder.rs", hash = "bca8fd66e219d8f0f65092f81b671ee43e98d7f8" },
+    { path = "platform/video/src/apple_encoder.rs", hash = "6cf668cc28304c683c7e247ee1c14c4c5efcddfb" },
+    { path = "platform/video/src/apple_intra_frame.rs", hash = "f8715b6d82f340c0b548d532c6706f2668837dc8" },
+    { path = "platform/video/src/apple_stream_decoder.rs", hash = "4d49b4ac859c9ca1cb029b1031a5cef334fed61c" },
+    { path = "platform/video/src/apple_stream_encoder.rs", hash = "bdc9aa11fce6cdaac28dbdf3b1311194e2d04cca" },
+    { path = "platform/video/src/lib.rs", hash = "ae418cdb62cc989b5283201a526aa53ebdbe59ff" },
+    { path = "platform/video/src/linux_decoder.rs", hash = "0c44c9e9958f4fef55fa59045db4613d533feaa7" },
+    { path = "platform/video/src/linux_encoder.rs", hash = "ba0085ca95a67e55ffb0e6a9cb0b71f3f9b11da1" },
+    { path = "platform/video/src/linux_gst_sys.rs", hash = "b42a91ac335420fe070f0f35188868bb9dde3c40" },
+    { path = "platform/video/src/mp4_first_frame.rs", hash = "d59bf5eb7a7b7d30baae1b5ffed40a6b3091690c" },
+    { path = "platform/video/src/mp4_single_frame.rs", hash = "ba18a17736cd4ddf0103be4714fb0c5d796c871f" },
+    { path = "platform/video/src/nv12.rs", hash = "301c23bbbecc454e9a92d7812ce371fe1d6a52f5" },
+    { path = "platform/video/src/stream_debug.rs", hash = "50c260ae6b5def750f01ef30a19c1b167ae74677" },
+    { path = "platform/video/src/stream_decoder.rs", hash = "7c5968efce7d2b2a4cadd2a5dc6a2d9f244d8037" },
+    { path = "platform/video/src/stream_encoder.rs", hash = "bffd4017c48c0c88e9004a24202fd436b591ef97" },
+    { path = "platform/video/src/windows_decoder.rs", hash = "b3446906bbf6f4fe470222fc989df79c56aab28e" },
+    { path = "platform/video/src/windows_encoder.rs", hash = "40303aee99cb9048a6ae23ceb7830d44717dd9be" },
+    { path = "platform/video/src/windows_mft.rs", hash = "85fe5f77d9d8d285b80a1e6e6226c9fbd93c2950" },
+    { path = "platform/video/src/windows_stream_decoder.rs", hash = "d3c6ec778a9d40707fe6b9aa11965a792aee1f21" },
+    { path = "platform/video/src/windows_stream_encoder.rs", hash = "ade3366e0532482d66af683f6aa009ed9f8254bb" },
+    { path = "platform/video/tests/file_seek.rs", hash = "bf07fd1585e2712af00ce14874f1c3f43654d526" },
+    { path = "platform/video/tests/first_frame_bytes.rs", hash = "fd0e7354ed0c2d0ae944c5065932d5ade96d05a8" },
+    { path = "platform/video/tests/intra_frame_mp4.rs", hash = "da6ca10149f1687daf3be7ee4a7b0663f6592ff0" },
+    { path = "platform/video/tests/stream_codec.rs", hash = "2bb6aa0c78ffc3c6803c0c999b3b0065ebcf06ce" },
+]
+overview = """
+Makepad platform connects an application's Cx and event handler to windows, input, graphics, media and network services on native systems and the web.
+OS callbacks enter one UI event loop; Draw callbacks record retained draw lists, then the selected renderer submits dirty passes to the GPU.
+Render submission lives in the inspected UI loops; the render lane marks a GPU boundary, not a universal extra thread.
+Warm workers handle background jobs through light and heavy queues, while audio runs in device callbacks or a web AudioWorklet.
+Signals bring results back to the UI, although legacy locks and unbounded channels remain.
+Cx owns resource pools and exposes a device-adjusted memory envelope; texture accounting includes allocations awaiting GPU completion.
+An optional localhost remote bridge queues inspection and input commands for UI dispatch.
+This is a subsystem map; actual resident memory, throughput and callback latency are unknown."""
+
+[lanes]
+audio = { title = "Audio callbacks / AudioWorklet" }
+render = { title = "Render / GPU boundary" }
+ui = { title = "Main / UI event thread" }
+workers = { title = "Background workers / HTTP threads" }
+
+[nodes]
+
+[nodes.audio]
+kind = "thread"
+title = "Audio callbacks"
+summary = "Device callbacks exchange PCM through a shared media API."
+story = """
+CxMediaApi installs input and output callbacks so applications can process PCM across native devices and web AudioWorklets.
+Callbacks receive device and sample-rate information; device changes return to the UI.
+Failed devices are tracked for fallback selection.
+The web callback still resizes buffers and uses lock_from_audio; a lock-free or allocation-free guarantee is absent.
+Latency and underrun budgets are unknown."""
+lane = "audio"
+refs = ["platform/src/audio.rs", "platform/src/media_api.rs::CxMediaApi", "platform/src/os/apple/apple_media.rs", "platform/src/os/apple/audio_unit.rs", "platform/src/os/web/web_audio.rs::wasm_audio_output_entrypoint", "platform/src/thread.rs::lock_from_audio"]
+
+[nodes.cx]
+kind = "component"
+title = "Cx application context"
+summary = "Owns application state, platform requests and rendering resources."
+story = """
+Cx gives the application one context for windows, input state, scripts, draw resources and background work.
+Native entry points hold it in Rc<RefCell<Cx>> and call the application with mutable access.
+Its operation queue lets APIs request OS work during event handling.
+Pool handles carry generations to distinguish reused slots; stale draw-list or texture generations log errors.
+Cx is not a shared worker-thread context."""
+lane = "ui"
+refs = ["platform/src/cx.rs::Cx", "platform/src/cx_api.rs::CxOsOp", "platform/src/os/apple/macos/macos.rs", "platform/src/draw_list.rs::CxDrawListPool", "platform/src/texture.rs::CxTexturePool"]
+
+[nodes.draw_graph]
+kind = "store"
+title = "Retained draw lists and passes"
+summary = "Retains draw calls, instances and pass relationships between repaints."
+story = """
+Draw lists store draw calls and instance data; passes connect those lists to windows or render textures.
+Retaining these records lets a repaint reuse recorded drawing.
+Dirty passes are ordered before backend submission, and uniform generations distinguish reused recordings.
+Stale pool generations log errors.
+On web, only window zero is presented; additional window passes are marked clean without presentation."""
+lane = "ui"
+refs = ["platform/src/draw_list.rs::DrawList", "platform/src/draw_pass.rs::CxDrawPassParent", "platform/src/draw_vars.rs", "platform/src/os/cx_shared.rs::Cx::call_draw_event", "platform/src/os/web/web.rs::Cx::handle_repaint"]
+
+[nodes.event_loop]
+kind = "thread"
+title = "UI event loop"
+summary = "Turns OS input, timers and wakeups into application events and redraws."
+story = """
+Native event loops and the web message entry dispatch Event values to the application.
+Startup initializes the memory envelope and warms the task pool; Draw asks the app to record its next visual state.
+Synchronous re-entry into the event handler is rejected and logged.
+Shutdown is not guaranteed on every platform, so cleanup cannot rely solely on that event."""
+lane = "ui"
+refs = ["platform/src/app_main.rs", "platform/src/event/mod.rs", "platform/src/event/event.rs::Event", "platform/src/os/cx_shared.rs::Cx::call_event_handler", "platform/src/os/apple/macos/macos.rs::Cx::event_loop", "platform/src/os/windows/windows.rs::Cx::event_loop", "platform/src/os/linux/windowing_backend.rs::Cx::event_loop", "platform/src/os/web/web.rs::Cx::process_to_wasm"]
+
+[nodes.gpu]
+kind = "gpu"
+title = "Backend renderer"
+summary = "Submits retained drawing through Metal, D3D11, OpenGL, WebGL or selected alternatives."
+story = """
+The selected backend uploads drawing data and textures, compiles shaders and renders passes.
+The inspected desktop and web loops submit from the UI path; GPU execution and completion form a separate boundary.
+Metal skips drawing after shader compilation errors, and readbacks can report device loss.
+Vulkan is configuration gated; headless has a separate software renderer.
+A universal render thread and GPU memory ceiling are unknown."""
+lane = "render"
+refs = ["platform/src/os/apple/metal.rs", "platform/src/os/windows/d3d11.rs", "platform/src/os/linux/opengl.rs", "platform/src/os/linux/mod.rs", "platform/src/os/web/web_gl.rs", "platform/src/os/headless/mod.rs", "platform/src/os/apple/macos/macos.rs", "platform/src/os/windows/windows.rs", "platform/src/os/linux/x11/linux_x11.rs", "platform/src/os/web/web.rs"]
+
+[nodes.memory_budget]
+kind = "memory"
+title = "Memory envelope and reporting"
+summary = "Publishes a device-adjusted cache budget and reports CPU resource usage."
+story = """
+Cx initializes and logs a process memory envelope for elastic caches and batches.
+Native policy uses physical memory when available and a default otherwise; web supplies its envelope at startup.
+This is guidance to consumers, not a hard allocator limit.
+CxMemoryReport counts CPU geometry, instance, texture and script-resource bytes; GPU texture accounting is separate.
+Actual process residency is unknown."""
+lane = "ui"
+refs = ["platform/src/cx.rs::Cx::initialize_memory_budget", "platform/src/cx.rs::Cx::memory_report", "platform/src/cx.rs::memory_budget_from_physical_memory", "platform/src/cx_api.rs::Cx::texture_pool_bytes"]
+budget = "Default 1536 MiB; desktop below 8 GiB RAM uses one quarter; iOS/Android quarter RAM clamped to 384–1536 MiB; web-reported envelope, phone policy 320 MiB."
+
+[nodes.midi]
+kind = "io"
+title = "MIDI ports"
+summary = "Exposes backend MIDI ports and three-byte messages."
+story = """
+MIDI wrappers let the application select ports and send or receive messages without choosing an OS implementation.
+CxMediaApi creates initialized input and output handles; their methods unwrap the backend, so using a default uninitialized handle can panic.
+Port-change events describe available devices.
+Message timing, queue capacity and delivery guarantees are unknown at this overview level."""
+refs = ["platform/src/midi.rs::MidiInput", "platform/src/midi.rs::MidiOutput", "platform/src/midi.rs::MidiData", "platform/src/media_api.rs::CxMediaApi", "platform/src/os/apple/apple_media.rs"]
+
+[nodes.network]
+kind = "io"
+title = "HTTP and WebSockets"
+summary = "Routes requests to platform backends and returns identified network responses."
+story = """
+Cx owns a NetworkRuntime that delegates HTTP and WebSocket operations to a backend.
+Responses keep request or socket IDs so the event loop can route them to scripts and application handlers.
+The response channel is unbounded and receiver access uses a mutex; this is not a uniformly lock-free path.
+Open/send operations return errors, and asynchronous failures become response events.
+Transport worker and callback placement depends on the backend."""
+refs = ["platform/src/cx.rs", "platform/src/event/network.rs", "platform/src/web_socket.rs", "platform/network/src/runtime.rs::NetworkRuntime", "platform/network/src/backend/apple/web_socket.rs::AppleWebSocket", "platform/src/os/web/web.rs"]
+
+[nodes.os_services]
+kind = "io"
+title = "Windows and OS adapters"
+summary = "Adapts window operations, input and lifecycle events to the selected platform."
+story = """
+CxOsApi and CxOsOp separate application requests from target-specific window and device APIs.
+Compile-time gates select Apple, Windows, Linux-family, web or headless code.
+Desktop Linux chooses Wayland or X11 from an override or environment; browser messages cross the wasm bridge.
+Capabilities differ: Wayland backdrop blur is a logged no-op, and some native initialization paths can panic.
+Uniform feature support is not guaranteed."""
+lane = "ui"
+refs = ["platform/src/lib.rs", "platform/src/cx_api.rs::CxOsApi", "platform/src/os/mod.rs", "platform/src/os/apple/mod.rs", "platform/src/os/windows/mod.rs", "platform/src/os/linux/mod.rs", "platform/src/os/linux/windowing_backend.rs", "platform/src/os/linux/wayland/linux_wayland.rs", "platform/src/os/web/mod.rs", "platform/src/os/web/from_wasm.rs", "platform/src/os/web/to_wasm.rs"]
+
+[nodes.remote]
+kind = "io"
+title = "Optional remote control"
+summary = "Queues localhost inspection, capture and input commands for the application's UI."
+story = """
+With remote control enabled, localhost HTTP threads accept commands and wait for replies while the UI polls its command queue.
+HTTP handlers never receive Cx; injected input uses the normal event dispatch path.
+The UI defers a contested command-queue lock, and capture encoding runs on a bounded long-lived worker.
+Busy or stopped event loops cause request timeouts; readback and capture admission can fail.
+This bridge is optional and platform gated."""
+lane = "workers"
+refs = ["platform/src/remote.rs", "platform/src/os/cx_shared.rs::Cx::poll_control_channel", "platform/src/texture.rs::ReadbackRequest"]
+
+[nodes.resources]
+kind = "store"
+title = "Script and font assets"
+summary = "Shares resource bytes while keeping script handles local to their owning heaps."
+story = """
+CxScriptResources tracks lazy assets through not-loaded, loading, loaded and error states.
+Resource data is shared at Cx level, but each script heap gets its own handle and path cache.
+Reusing a handle from another heap would corrupt its garbage-collection walk.
+Native file loading and web HTTP requests populate the same resource state.
+Failed loads retain an error; total asset residency and cache eviction policy are unknown."""
+lane = "ui"
+refs = ["platform/src/script/res.rs::CxScriptResources", "platform/src/script/res.rs::CxScriptResourceData", "platform/src/cx_api.rs::Cx::get_resource_font_bytes", "platform/src/cx.rs::Cx::memory_report"]
+
+[nodes.script]
+kind = "component"
+title = "Splash and script integration"
+summary = "Connects script heaps, resources and live reapplication to the application context."
+story = """
+Cx holds script VM state and platform modules that expose context, drawing, resources and timers.
+Live reapplication lets existing widget state respond to edited script values.
+ScriptReapply preserves runtime mutations without rerunning script_mod; LiveEdit reruns definitions and can overwrite those values.
+The platform owns this integration; parsing and VM internals live in the nested script crates.
+VM recovery guarantees are unknown here."""
+lane = "ui"
+refs = ["platform/src/cx.rs", "platform/src/script/mod.rs", "platform/src/script/cx.rs", "platform/src/script/script.rs::CxScriptData", "platform/src/event/event.rs::Event", "platform/src/cx_api.rs::Cx::request_script_reapply"]
+
+[nodes.task_pool]
+kind = "thread"
+title = "Background worker runtime"
+summary = "Keeps pool workers warm and supports dedicated long-lived worker loops."
+story = """
+The runtime starts pool workers at Startup so small background jobs avoid thread startup costs.
+Light and heavy work use separate lanes; ThreadSpawner also supports dedicated long-lived loops.
+Callers poll TaskHandle results, and blocking join rejects the UI thread.
+Failures include unsupported spawning, cancellation, panic and lost workers.
+Legacy lock wrappers still block natively or spin on wasm; the whole runtime is not lock-free."""
+lane = "workers"
+refs = ["platform/src/thread.rs::TaskPool", "platform/src/thread.rs::ThreadSpawner", "platform/src/thread.rs::TaskHandle", "platform/src/os/cx_shared.rs::Cx::call_event_handler"]
+
+[nodes.task_queues]
+kind = "queue"
+title = "Light and heavy job queues"
+summary = "Bounds queued work and returns refused jobs so callers can retry."
+story = """
+TaskPool reserves bounded queue slots before accepting work, with capacity and counters per lane.
+Worker-only receiver locks keep queue consumption off the UI.
+try_submit returns the original closure on QueueFull or Closed, so callers can retain it for another frame.
+TaskQueue can stage keyed work and limit how much enters the pool.
+Pool jobs must not wait for sibling pool jobs, which can starve the workers."""
+lane = "workers"
+refs = ["platform/src/thread.rs::LaneQueue", "platform/src/thread.rs::TaskPool::try_submit", "platform/src/thread.rs::TaskQueue"]
+
+[nodes.textures]
+kind = "memory"
+title = "Texture pool and readbacks"
+summary = "Reuses texture slots and retains released GPU allocations until completion."
+story = """
+CxTexturePool owns texture handles and compatible reusable slots.
+Supported backends retire released allocations against renderer serials instead of freeing resources still in flight.
+texture_pool_bytes includes free slots and pending releases, but omits unknown external allocations.
+Readback requests reserve bounded bytes and can fail under backpressure or device loss.
+Some backends return unknown accounting or leave release unsupported; no total pool cap is established."""
+lane = "ui"
+refs = ["platform/src/texture.rs::CxTexturePool", "platform/src/texture.rs::Texture", "platform/src/cx_api.rs::Cx::texture_pool_bytes", "platform/src/cx_api.rs::Cx::frame_completion_serial", "platform/src/os/apple/metal.rs"]
+budget = "Total pool cap unknown; readback staging/results reserve at most 32 MiB across at most 256 requests."
+
+[nodes.ui_signals]
+kind = "queue"
+title = "UI messages and wakeups"
+summary = "Carries worker results and coalesces notifications for the event loop."
+story = """
+SignalToUI uses atomic flags to coalesce wakes; ToUIReceiver exposes try_recv for UI polling.
+Bounded channels are available explicitly, while the default ToUIReceiver is unbounded.
+try_send reports Full or Disconnected with the value; send on a bounded channel can block.
+The wake callback registry uses a mutex.
+Applications must choose a suitable channel and retry policy; no universal capacity or nonblocking guarantee applies."""
+lane = "ui"
+refs = ["platform/src/thread.rs", "platform/network/src/ui_signal.rs::SignalToUI", "platform/network/src/ui_signal.rs::ToUIReceiver", "platform/network/src/ui_signal.rs::to_ui_bounded"]
+
+[nodes.video]
+kind = "component"
+title = "Video and camera sessions"
+summary = "Connects capture and playback backends to frame events, textures and audio."
+story = """
+The media APIs coordinate camera capture, encoding and playback without exposing each OS player to widgets.
+MediaTextureBridge allocates external or YUV textures, and MediaEventBridge emits prepared, updated, completed and error events.
+Registered frame sessions transfer ownership once into playback plumbing.
+Codec, source and texture support vary; unsupported encoding or decoding reports errors.
+Decode-worker counts and frame-buffer budgets are unknown."""
+lane = "ui"
+refs = ["platform/src/video.rs::VideoEncodeError", "platform/src/media_api.rs::CxMediaApi", "platform/src/media_host.rs::MediaTextureBridge", "platform/src/media_host.rs::MediaEventBridge", "platform/src/video_session.rs::take_registered_video_frame_session", "platform/src/playback_session.rs", "platform/src/video_decode/software_video.rs"]
+
+[edges]
+audio_change = { from = "audio", to = "ui_signals", kind = "sends", label = "Device changes" }
+cx_audio = { from = "cx", to = "audio", kind = "calls", label = "Select devices and install callbacks" }
+cx_draw = { from = "cx", to = "draw_graph", kind = "owns", label = "Draw and pass pools" }
+cx_memory = { from = "cx", to = "memory_budget", kind = "owns", label = "Envelope and reports" }
+cx_midi = { from = "cx", to = "midi", kind = "calls", label = "Select ports" }
+cx_network = { from = "cx", to = "network", kind = "owns", label = "NetworkRuntime" }
+cx_os = { from = "cx", to = "os_services", kind = "sends", label = "Queued CxOsOp requests" }
+cx_script = { from = "cx", to = "script", kind = "owns", label = "VM and platform modules" }
+cx_textures = { from = "cx", to = "textures", kind = "owns", label = "Texture handles and lifetime state" }
+cx_video = { from = "cx", to = "video", kind = "calls", label = "Capture and playback control" }
+cx_workers = { from = "cx", to = "task_pool", kind = "owns", label = "ThreadSpawner and warm pool" }
+draw_textures = { from = "draw_graph", to = "textures", kind = "reads", label = "Draw-call texture bindings" }
+event_cx = { from = "event_loop", to = "cx", kind = "owns", label = "UI context" }
+event_draw = { from = "event_loop", to = "draw_graph", kind = "writes", label = "Application Draw callbacks" }
+event_gpu = { from = "event_loop", to = "gpu", kind = "calls", label = "Submit dirty passes" }
+event_jobs = { from = "cx", to = "task_queues", kind = "sends", label = "Background job submission" }
+event_remote = { from = "event_loop", to = "remote", kind = "calls", label = "Poll queued control commands" }
+gpu_draw = { from = "gpu", to = "draw_graph", kind = "reads", label = "Instances, uniforms and passes" }
+memory_draw = { from = "memory_budget", to = "draw_graph", kind = "reads", label = "CPU instance capacities" }
+memory_textures = { from = "memory_budget", to = "textures", kind = "reads", label = "CPU texture bytes" }
+network_events = { from = "network", to = "event_loop", kind = "sends", label = "NetworkResponses" }
+os_events = { from = "os_services", to = "event_loop", kind = "sends", label = "Input and lifecycle events" }
+remote_events = { from = "remote", to = "event_loop", kind = "sends", label = "Inspection and injected input" }
+remote_textures = { from = "remote", to = "textures", kind = "reads", label = "Ticketed capture readback" }
+resources_network = { from = "resources", to = "network", kind = "calls", label = "Web asset requests" }
+script_resources = { from = "script", to = "resources", kind = "owns", label = "Heap-local handles, shared bytes" }
+signal_events = { from = "ui_signals", to = "event_loop", kind = "sends", label = "Coalesced wake and results" }
+textures_gpu = { from = "textures", to = "gpu", kind = "uploads_to", label = "Pixels and render allocations" }
+video_events = { from = "video", to = "event_loop", kind = "sends", label = "Prepared, frame and error events" }
+video_textures = { from = "video", to = "textures", kind = "allocates_from", label = "External and YUV planes" }
+worker_queues = { from = "task_pool", to = "task_queues", kind = "owns", label = "Light and heavy lanes" }
+worker_signal = { from = "task_pool", to = "ui_signals", kind = "sends", label = "Task completion wake" }

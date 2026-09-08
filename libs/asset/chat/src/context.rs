@@ -101,6 +101,7 @@ impl ClientProfile {
                     | C::WorldRemove { .. }
                     | C::WorldMove { .. }
                     | C::WorldList
+                    | C::WorldRender { .. }
                     | C::WorldGetSource
                     | C::WorldApi { .. }
                     | C::WorldGetPlan

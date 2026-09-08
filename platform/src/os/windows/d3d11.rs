@@ -226,14 +226,31 @@ impl Cx {
 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
-                    if draw_item.instances.as_ref().unwrap().len() == 0 {
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    if draw_item
+                        .retained_instances
+                        .as_ref()
+                        .map(|v| v.data())
+                        .unwrap_or_else(|| draw_item.instances.as_deref().unwrap())
+                        .len()
+                        == 0
+                    {
                         continue;
                     }
                     // update the instance buffer data
-                    draw_item.os.inst_vbuf.update_with_f32_vertex_data(
-                        d3d11_cx,
-                        draw_item.instances.as_ref().unwrap(),
-                    );
+                    if let Some(retained) = &draw_item.retained_instances {
+                        draw_item.os.inst_vbuf.update_retained_instances(
+                            d3d11_cx,
+                            retained.data(),
+                            draw_item.retained_upload_range.clone(),
+                        );
+                    } else {
+                        draw_item.os.inst_vbuf.update_with_f32_vertex_data(
+                            d3d11_cx,
+                            draw_item.instances.as_deref().unwrap(),
+                        );
+                    }
                 }
                 if draw_call.dyn_uniforms.len() != 0 {
                     draw_item
@@ -242,8 +259,11 @@ impl Cx {
                         .update_with_f32_constant_data(d3d11_cx, &mut draw_call.dyn_uniforms);
                 }
 
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                    / sh.mapping.instances.total_slots) as u64;
+                let instances = if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count as u64
+                } else {
+                    (draw_item.instances.as_ref().map_or(0, Vec::len) / sh.mapping.instances.total_slots) as u64
+                };
 
                 if instances == 0 {
                     continue;
@@ -255,7 +275,11 @@ impl Cx {
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances as usize,
                     );
                 }
@@ -424,10 +448,17 @@ impl Cx {
                         {
                             let cx_uniform_buffer =
                                 &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
-                            cx_uniform_buffer
-                                .os
-                                .buffer
-                                .update_with_constant_bytes(d3d11_cx, &cx_uniform_buffer.data);
+                            if cx_uniform_buffer.os.uploaded_generation
+                                != cx_uniform_buffer.generation
+                                || cx_uniform_buffer.os.buffer.buffer.is_none()
+                            {
+                                cx_uniform_buffer
+                                    .os
+                                    .buffer
+                                    .update_with_constant_bytes(d3d11_cx, &cx_uniform_buffer.data);
+                                cx_uniform_buffer.os.uploaded_generation =
+                                    cx_uniform_buffer.generation;
+                            }
                             buffer_slot(d3d11_cx, *idx, &cx_uniform_buffer.os.buffer.buffer);
                         } else {
                             buffer_slot(d3d11_cx, *idx, &None);
@@ -829,7 +860,11 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, &d3d11_cx);
-        self.textures.1.serials.submit();
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(pass_id, serial);
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.d3d_capture_texture_readbacks(Some(pass_id));
+        }
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
@@ -1320,6 +1355,172 @@ fn dwm_flush() {
     }
     unsafe {
         let _ = DwmFlush();
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct D3dReadbacks {
+    jobs: Vec<D3dReadback>,
+    worker: Option<crate::texture::ReadbackWorker>,
+}
+
+struct D3dReadback {
+    work: crate::texture::ReadbackWork,
+    // Both COM allocations remain alive through the EVENT query and worker
+    // lease, independently of texture handle release/reallocation.
+    source: ID3D11Texture2D,
+    staging: ID3D11Resource,
+    query: ID3D11Query,
+    context: ID3D11DeviceContext,
+    mapped: bool,
+    copy: Option<crate::texture::ReadbackCopyJob>,
+    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+}
+
+impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        if self.textures.1.readbacks.slots.is_empty() && self.textures.1.d3d_readbacks.jobs.is_empty() { return; }
+        self.d3d_capture_texture_readbacks(None);
+    }
+
+    fn d3d_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        if self.textures.1.d3d_readbacks.jobs.is_empty()
+            && !self.textures.1.readbacks.slots.iter().any(|slot| slot.pending && slot.pass == pass) {
+            return;
+        }
+        let Some(device) = self.os.d3d11_device.clone() else {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.d3d_poll_readback_leases();
+            return;
+        };
+        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.d3d_poll_readback_leases();
+            return;
+        };
+        if self.textures.1.d3d_readbacks.worker.is_none() {
+            match ReadbackWorker::new(self) {
+                Ok(worker) => self.textures.1.d3d_readbacks.worker = Some(worker),
+                Err(error) => { self.fail_pending_readbacks(error); return; }
+            }
+        }
+        let work = self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft);
+        for work in work {
+            debug_assert_ne!(work.ticket.0, 0);
+            let Some(source) = self.textures[work.texture_id].os.texture.clone() else {
+                work.completion.finish(Err(ReadbackError::NotRendered)); continue;
+            };
+            unsafe {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                source.GetDesc(&mut desc);
+                if desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+                    work.completion.finish(Err(ReadbackError::UnsupportedFormat)); continue;
+                }
+                if desc.Width as usize != work.width || desc.Height as usize != work.height {
+                    work.completion.finish(Err(ReadbackError::AllocationChanged)); continue;
+                }
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Usage = D3D11_USAGE(3); // STAGING
+                desc.BindFlags = 0;
+                desc.CPUAccessFlags = 0x20000; // READ
+                desc.MiscFlags = 0;
+                let create = || -> windows::core::Result<(ID3D11Resource, ID3D11Query)> {
+                    let mut staging = None;
+                    let mut query = None;
+                    device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+                    device.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query))?;
+                    let staging = staging.ok_or_else(windows::core::Error::empty)?.cast::<ID3D11Resource>()?;
+                    let query = query.ok_or_else(windows::core::Error::empty)?;
+                    Ok((staging, query))
+                };
+                let Ok((staging, query)) = create() else {
+                    work.completion.finish(Err(ReadbackError::DeviceLost)); continue;
+                };
+                context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &source, 0, None);
+                context.End(&query);
+                if pass.is_none() { self.textures.1.serials.submit(); }
+                self.textures.1.d3d_readbacks.jobs.push(D3dReadback { work, source, staging, query,
+                    context: context.clone(),
+                    mapped: false, copy: None, receive: None });
+            }
+        }
+        if !self.textures.1.d3d_readbacks.jobs.is_empty() {
+            // Submit even when this is an ordered copy with no window present.
+            unsafe { context.Flush(); }
+        }
+        self.d3d_poll_readback_leases();
+    }
+
+    fn d3d_poll_readback_leases(&mut self) {
+        use crate::texture::ReadbackError;
+        if self.textures.1.d3d_readbacks.jobs.is_empty() { return; }
+        let mut jobs = std::mem::take(&mut self.textures.1.d3d_readbacks.jobs);
+        let mut pending = Vec::new();
+        let worker = self.textures.1.d3d_readbacks.worker.as_ref().unwrap();
+        for mut job in jobs.drain(..) {
+            let context = &job.context;
+            let mut result = None;
+            unsafe {
+                if !job.mapped {
+                    let mut done = 0u32;
+                    if context.GetData(&job.query, Some((&mut done as *mut u32).cast()), 4, 1).is_err() {
+                        result = Some(Err(ReadbackError::DeviceLost));
+                    } else if done != 0 {
+                        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                        match context.Map(&job.staging, 0, D3D11_MAP(1), 0x100000, Some(&mut mapped)) { // DO_NOT_WAIT
+                            Ok(()) => {
+                                job.mapped = true;
+                                let pitch = mapped.RowPitch as usize;
+                                let width = job.work.width;
+                                let height = job.work.height;
+                                if mapped.pData.is_null() || pitch < width * 4 || pitch.checked_mul(height).is_none_or(|bytes| bytes > job.work.reserved_bytes) {
+                                    result = Some(Err(ReadbackError::Failed));
+                                } else {
+                                    let address = mapped.pData as usize;
+                                    let owner = job.staging.clone();
+                                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                    job.receive = Some(receive);
+                                    job.copy = Some(Box::new(move || {
+                                        // The lease owns a COM reference even
+                                        // if Cx is destroyed while copying.
+                                        let bytes = crate::texture::copy_readback_rows(address, pitch, width, height);
+                                        drop(owner);
+                                        let _ = send.try_send(bytes);
+                                    }));
+                                }
+                            }
+                            Err(error) if error.code().0 as u32 == 0x887a000a => {} // WAS_STILL_DRAWING
+                            Err(_) => result = Some(Err(ReadbackError::DeviceLost)),
+                        }
+                    }
+                }
+                if let Some(copy) = job.copy.take() {
+                    if let Err((copy, disconnected)) = worker.try_copy(copy) {
+                        if disconnected {
+                            drop(copy);
+                            result = Some(Err(ReadbackError::Failed));
+                        } else { job.copy = Some(copy); }
+                    }
+                }
+                if let Some(receive) = &job.receive {
+                    match receive.try_recv() {
+                        Ok(bytes) => result = Some(Ok(bytes)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => result = Some(Err(ReadbackError::Failed)),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if let Some(result) = result {
+                    if job.mapped { context.Unmap(&job.staging, 0); }
+                    // Immediate-context calls all occur on this owning thread.
+                    drop(job.source);
+                    job.work.completion.finish(result);
+                } else { pending.push(job); }
+            }
+        }
+        worker.set_active(!pending.is_empty());
+        self.textures.1.d3d_readbacks.jobs = pending;
     }
 }
 
@@ -2342,6 +2543,7 @@ pub struct CxOsDrawCall {
 #[derive(Default, Clone)]
 pub struct CxOsUniformBuffer {
     pub buffer: D3d11Buffer,
+    pub uploaded_generation: u64,
 }
 
 #[derive(Default, Clone)]
@@ -2351,6 +2553,61 @@ pub struct D3d11Buffer {
 }
 
 impl D3d11Buffer {
+    fn update_retained_instances(
+        &mut self,
+        cx: &D3d11Cx,
+        data: &[f32],
+        range: std::ops::Range<usize>,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        let mut start = range.start;
+        if self.buffer.is_none() || self.last_size < data.len() {
+            let capacity = data.len().next_power_of_two().max(64);
+            let desc = D3D11_BUFFER_DESC {
+                Usage: D3D11_USAGE_DYNAMIC,
+                ByteWidth: (capacity * 4) as u32,
+                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+                StructureByteStride: 0,
+            };
+            let mut buffer = None;
+            if let Err(e) = unsafe { cx.device.CreateBuffer(&desc, None, Some(&mut buffer)) } {
+                cx.note_error("retained instance allocation", &e);
+                return;
+            }
+            self.buffer = buffer;
+            self.last_size = capacity;
+            start = 0;
+        }
+        let buffer = self.buffer.as_ref().unwrap();
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // NO_OVERWRITE is only used for a proven immutable append; replacements
+        // DISCARD so the driver retains the old GPU-visible backing allocation.
+        let mode = if start == 0 {
+            D3D11_MAP_WRITE_DISCARD
+        } else {
+            D3D11_MAP_WRITE_NO_OVERWRITE
+        };
+        unsafe {
+            if let Err(e) = cx.context.Map(buffer, 0, mode, 0, Some(&mut mapped)) {
+                cx.note_error("retained instance upload", &e);
+                return;
+            }
+            for offset in (start..data.len()).step_by(64 * 1024) {
+                let count = (data.len() - offset).min(64 * 1024);
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(offset),
+                    (mapped.pData as *mut f32).add(offset),
+                    count,
+                );
+            }
+            cx.context.Unmap(buffer, 0);
+        }
+    }
+
     fn create_buffer_or_update(
         &mut self,
         d3d11_cx: &D3d11Cx,

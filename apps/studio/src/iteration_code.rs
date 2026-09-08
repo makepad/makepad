@@ -202,7 +202,9 @@ impl CodeAnalyser {
                     self.pending_source_revision = None;
                 }
                 GraphReply::Stopped => self.stopped = true,
-                GraphReply::Published(_) | GraphReply::Backpressure { .. } | GraphReply::Query(_) => {}
+                GraphReply::Published(_)
+                | GraphReply::Backpressure { .. }
+                | GraphReply::Query(_) => {}
             }
         }
         if let Some(graph) = graph {
@@ -227,7 +229,9 @@ impl CodeAnalyser {
 
     /// Ask for a publication that includes the lane's current sources.
     fn refresh(&mut self, source_revision: u64) {
-        if self.pending_source_revision.is_some() || self.included_source_revision == Some(source_revision) {
+        if self.pending_source_revision.is_some()
+            || self.included_source_revision == Some(source_revision)
+        {
             return;
         }
         let Some(client) = &mut self.client else {
@@ -266,8 +270,14 @@ impl CodeAnalyser {
     fn busy(&self, observed_source_revision: u64) -> (LaneError, Option<CodeStamp>, Value) {
         let phase = match (&self.graph, &self.last_error) {
             (None, Some(error)) => format!("the first index failed ({error}); it is being retried"),
-            (None, None) => format!("the first index has run for {} s", self.started.elapsed().as_secs()),
-            (Some(g), _) => format!("revision {} is published; the requested publication is still indexing", g.revision),
+            (None, None) => format!(
+                "the first index has run for {} s",
+                self.started.elapsed().as_secs()
+            ),
+            (Some(g), _) => format!(
+                "revision {} is published; the requested publication is still indexing",
+                g.revision
+            ),
         };
         let mut error = LaneError::busy(format!("the analyser is busy: {phase}"), 1500);
         error.resumable = true;
@@ -277,7 +287,11 @@ impl CodeAnalyser {
                 let coverage = stamp.coverage.clone();
                 (error, Some(stamp), coverage)
             }
-            None => (error, None, coverage_unavailable(&format!("no publication yet: {phase}"))),
+            None => (
+                error,
+                None,
+                coverage_unavailable(&format!("no publication yet: {phase}")),
+            ),
         }
     }
 
@@ -315,7 +329,11 @@ struct CodeLane {
 
 impl CodeLane {
     fn new() -> Self {
-        CodeLane { admission: Admission::new(CODE_RATE_PER_SECOND, CODE_BURST, CODE_OUTSTANDING), cursors: VecDeque::new(), serial: 0 }
+        CodeLane {
+            admission: Admission::new(CODE_RATE_PER_SECOND, CODE_BURST, CODE_OUTSTANDING),
+            cursors: VecDeque::new(),
+            serial: 0,
+        }
     }
 
     fn take_cursor(&mut self, text: &str) -> Option<CodeCursor> {
@@ -325,7 +343,12 @@ impl CodeLane {
 
     fn keep_cursor(&mut self, cursor: CodeCursor) -> String {
         self.serial += 1;
-        let text = format!("c{}-r{}-{:08x}", self.serial, cursor.stamp.revision, code_hash(&format!("{:?}", cursor.call)));
+        let text = format!(
+            "c{}-r{}-{:08x}",
+            self.serial,
+            cursor.stamp.revision,
+            code_hash(&format!("{:?}", cursor.call))
+        );
         self.cursors.push_back((text.clone(), cursor));
         while self.cursors.len() > CODE_SESSIONS {
             self.cursors.pop_front();
@@ -349,7 +372,11 @@ fn code_hash(text: &str) -> u32 {
 
 /// The base of a deferred comparison.
 enum CodeBase {
-    Tree { root: PathBuf, commit: String, cache_dir: Option<PathBuf> },
+    Tree {
+        root: PathBuf,
+        commit: String,
+        cache_dir: Option<PathBuf>,
+    },
     Graph(Arc<Graph>),
 }
 
@@ -385,9 +412,9 @@ enum CodeCompare {
 impl CodeCompare {
     fn submit(&mut self, job: CodeCompareJob) -> Result<(), LaneError> {
         match self {
-            CodeCompare::Thread { jobs, .. } => jobs
-                .try_send(job)
-                .map_err(|_| LaneError::busy("the comparison queue is full; try again shortly", 2000)),
+            CodeCompare::Thread { jobs, .. } => jobs.try_send(job).map_err(|_| {
+                LaneError::busy("the comparison queue is full; try again shortly", 2000)
+            }),
             CodeCompare::Inline { cache, done } => {
                 let id = job.job;
                 let result = code_compare_job(&job, cache);
@@ -418,7 +445,11 @@ impl CodeCompare {
     }
 }
 
-fn code_compare_thread(jobs: Receiver<CodeCompareJob>, done: SyncSender<CodeCompareDone>, cached: Arc<AtomicUsize>) {
+fn code_compare_thread(
+    jobs: Receiver<CodeCompareJob>,
+    done: SyncSender<CodeCompareDone>,
+    cached: Arc<AtomicUsize>,
+) {
     let mut cache: VecDeque<(String, Arc<Graph>)> = VecDeque::new();
     while let Ok(job) = jobs.recv() {
         let id = job.job;
@@ -437,7 +468,13 @@ fn code_validate_stamps(base: &Graph, now: &Graph) -> Result<(), LaneError> {
         return Err(LaneError::new(LaneErrorKind::ContextMismatch, format!("the base was analysed under context {} and this worktree under {}; comparisons need one requested context", makepad_code_graph::keys::hex(&base.requested_context.hash()), makepad_code_graph::keys::hex(&now.requested_context.hash()))));
     }
     if base.analyser_version != now.analyser_version {
-        return Err(LaneError::new(LaneErrorKind::ContextMismatch, format!("the base was analysed by analyser version {} and this worktree by {}", base.analyser_version, now.analyser_version)));
+        return Err(LaneError::new(
+            LaneErrorKind::ContextMismatch,
+            format!(
+                "the base was analysed by analyser version {} and this worktree by {}",
+                base.analyser_version, now.analyser_version
+            ),
+        ));
     }
     Ok(())
 }
@@ -448,11 +485,19 @@ fn code_compare_job(
 ) -> Result<(Vec<Value>, bool, Vec<String>), LaneError> {
     let base = match &job.base {
         CodeBase::Graph(graph) => graph.clone(),
-        CodeBase::Tree { root, commit, cache_dir } => code_base_graph(root, commit, cache_dir.clone(), cache)?,
+        CodeBase::Tree {
+            root,
+            commit,
+            cache_dir,
+        } => code_base_graph(root, commit, cache_dir.clone(), cache)?,
     };
     code_validate_stamps(&base, &job.now_graph)?;
-    let delta = compare(&base, &job.now_graph)
-        .map_err(|e| LaneError::new(LaneErrorKind::ContextMismatch, format!("the two graphs cannot be compared: {e}")))?;
+    let delta = compare(&base, &job.now_graph).map_err(|e| {
+        LaneError::new(
+            LaneErrorKind::ContextMismatch,
+            format!("the two graphs cannot be compared: {e}"),
+        )
+    })?;
     let (mut rows, truncated, mut notes) = registry::delta_rows(&delta, job.limit);
     if let Some(scope) = &job.scope {
         let prefix = registry::resolve_selector(&job.now_graph, scope)
@@ -462,10 +507,16 @@ fn code_compare_job(
         let before = rows.len();
         rows.retain(|row| {
             ["name", "from", "to"].iter().any(|field| {
-                row.get(field).and_then(Value::as_str).is_some_and(|n| n.starts_with(prefix.as_str()) || n.contains(scope.as_str()))
+                row.get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.starts_with(prefix.as_str()) || n.contains(scope.as_str()))
             })
         });
-        notes.push(format!("{} of {} delta rows lie under {scope}; the counts above are for the whole graph", rows.len(), before));
+        notes.push(format!(
+            "{} of {} delta rows lie under {scope}; the counts above are for the whole graph",
+            rows.len(),
+            before
+        ));
     }
     notes.push(format!(
         "base revision {} ({} files, context {}) against revision {} ({} files)",
@@ -490,24 +541,47 @@ fn code_base_graph(
     if let Some((_, graph)) = cache.iter().find(|(k, _)| *k == key) {
         return Ok(graph.clone());
     }
-    let mut repo = makepad_git::Repository::open(root)
-        .map_err(|e| LaneError::new(LaneErrorKind::Unknown, format!("the lane repository cannot be opened: {e}")))?;
+    let mut repo = makepad_git::Repository::open(root).map_err(|e| {
+        LaneError::new(
+            LaneErrorKind::Unknown,
+            format!("the lane repository cannot be opened: {e}"),
+        )
+    })?;
     let oid = makepad_git::ObjectId::from_hex(commit)
         .map_err(|e| LaneError::invalid(format!("base.commit is not an object id: {e}")))?;
     let tree = repo
         .read_commit(&oid)
-        .map_err(|e| LaneError::new(LaneErrorKind::UnknownKey, format!("commit {commit} is not readable in this repository: {e}")))?
+        .map_err(|e| {
+            LaneError::new(
+                LaneErrorKind::UnknownKey,
+                format!("commit {commit} is not readable in this repository: {e}"),
+            )
+        })?
         .tree;
     let policy = CorpusPolicy::default();
     let mut set = GitTreeSourceSet::new(repo, tree)
-        .map_err(|e| LaneError::new(LaneErrorKind::Unknown, format!("the base tree cannot be read: {e:?}")))?
+        .map_err(|e| {
+            LaneError::new(
+                LaneErrorKind::Unknown,
+                format!("the base tree cannot be read: {e:?}"),
+            )
+        })?
         .with_policy(policy.clone());
-    let frozen = freeze(&mut set, &policy)
-        .map_err(|e| LaneError::new(LaneErrorKind::Unknown, format!("the base tree cannot be frozen: {e:?}")))?;
+    let frozen = freeze(&mut set, &policy).map_err(|e| {
+        LaneError::new(
+            LaneErrorKind::Unknown,
+            format!("the base tree cannot be frozen: {e:?}"),
+        )
+    })?;
     let mut indexer = Indexer::new(cache_dir);
     let graph = indexer
         .index(frozen, AnalysisContext::host())
-        .map_err(|e| LaneError::new(LaneErrorKind::Unknown, format!("the base tree cannot be indexed: {e:?}")))?;
+        .map_err(|e| {
+            LaneError::new(
+                LaneErrorKind::Unknown,
+                format!("the base tree cannot be indexed: {e:?}"),
+            )
+        })?;
     while cache.len() >= CODE_BASE_GRAPHS {
         cache.pop_front();
     }
@@ -573,13 +647,22 @@ impl CodeRuntime {
     }
 
     fn lane(&mut self, flow: &str) -> &mut CodeLane {
-        self.lanes.entry(flow.to_owned()).or_insert_with(CodeLane::new)
+        self.lanes
+            .entry(flow.to_owned())
+            .or_insert_with(CodeLane::new)
     }
 
     /// Graphs held in memory across the runtime.
     fn retained_graphs(&self) -> usize {
-        self.analysers.values().map(CodeAnalyser::held_graphs).sum::<usize>()
-            + self.lanes.values().map(CodeLane::held_graphs).sum::<usize>()
+        self.analysers
+            .values()
+            .map(CodeAnalyser::held_graphs)
+            .sum::<usize>()
+            + self
+                .lanes
+                .values()
+                .map(CodeLane::held_graphs)
+                .sum::<usize>()
             + self.compare.as_ref().map_or(0, CodeCompare::cached_graphs)
     }
 
@@ -588,21 +671,43 @@ impl CodeRuntime {
     fn analyser(&mut self, target: &CodeTarget) -> Result<&mut CodeAnalyser, LaneError> {
         if !self.analysers.contains_key(&target.root) {
             let Some(spawner) = &self.spawner else {
-                return Err(LaneError::new(LaneErrorKind::Unavailable, "no analyser can be started for this worktree"));
+                return Err(LaneError::new(
+                    LaneErrorKind::Unavailable,
+                    "no analyser can be started for this worktree",
+                ));
             };
             if self.analysers.len() >= CODE_ANALYSERS {
-                if let Some(oldest) = self.analysers.iter().min_by_key(|(_, a)| a.last_used).map(|(k, _)| k.clone()) {
+                if let Some(oldest) = self
+                    .analysers
+                    .iter()
+                    .min_by_key(|(_, a)| a.last_used)
+                    .map(|(k, _)| k.clone())
+                {
                     if let Some(mut a) = self.analysers.remove(&oldest) {
                         a.shutdown();
                     }
                 }
             }
             let cache = self.cache_dir.as_ref().map(|d| d.join(&target.flow));
-            let analyser = CodeAnalyser::start(spawner, &target.root, &target.flow, cache, target.source_revision)
-                .map_err(|e| LaneError::new(LaneErrorKind::Unavailable, format!("the analyser could not start: {e}")))?;
+            let analyser = CodeAnalyser::start(
+                spawner,
+                &target.root,
+                &target.flow,
+                cache,
+                target.source_revision,
+            )
+            .map_err(|e| {
+                LaneError::new(
+                    LaneErrorKind::Unavailable,
+                    format!("the analyser could not start: {e}"),
+                )
+            })?;
             self.analysers.insert(target.root.clone(), analyser);
         }
-        let analyser = self.analysers.get_mut(&target.root).expect("inserted above");
+        let analyser = self
+            .analysers
+            .get_mut(&target.root)
+            .expect("inserted above");
         analyser.poll();
         analyser.refresh(target.source_revision);
         analyser.last_used = Instant::now();
@@ -618,14 +723,28 @@ impl CodeRuntime {
                     let cached = Arc::new(AtomicUsize::new(0));
                     let counter = cached.clone();
                     match spawner.spawn_worker(
-                        ThreadOptions { name: Some("studio-lane-compare".into()), ..Default::default() },
+                        ThreadOptions {
+                            name: Some("studio-lane-compare".into()),
+                            ..Default::default()
+                        },
                         move || code_compare_thread(rx, tx, counter),
                     ) {
-                        Ok(task) => CodeCompare::Thread { jobs, done, cached, _task: task },
-                        Err(_) => CodeCompare::Inline { cache: VecDeque::new(), done: VecDeque::new() },
+                        Ok(task) => CodeCompare::Thread {
+                            jobs,
+                            done,
+                            cached,
+                            _task: task,
+                        },
+                        Err(_) => CodeCompare::Inline {
+                            cache: VecDeque::new(),
+                            done: VecDeque::new(),
+                        },
                     }
                 }
-                None => CodeCompare::Inline { cache: VecDeque::new(), done: VecDeque::new() },
+                None => CodeCompare::Inline {
+                    cache: VecDeque::new(),
+                    done: VecDeque::new(),
+                },
             });
         }
         self.compare.as_mut().expect("set above")
@@ -649,7 +768,12 @@ impl CodeRuntime {
         let started = Instant::now();
         let tool = call.tool.clone();
         let worktree = target.flow.clone();
-        let basis_policy: Vec<String> = call.common.basis_policy.iter().map(|b| b.as_str().to_string()).collect();
+        let basis_policy: Vec<String> = call
+            .common
+            .basis_policy
+            .iter()
+            .map(|b| b.as_str().to_string())
+            .collect();
         let mut call = call;
         // a continuation serves the retained rows first, then the engine
         // cursor, against the graph the cursor was issued for
@@ -662,11 +786,23 @@ impl CodeRuntime {
             if stored.call != call {
                 return CodeOutcome::Answered(LaneEnvelope::failed(id, &tool, &worktree, LaneError::new(LaneErrorKind::StaleCursor, "the cursor belongs to a different call; pass the same tool and arguments plus the cursor")));
             }
-            let mut envelope = code_envelope(id, &tool, &worktree, &stored.stamp, stored.basis_policy.clone());
+            let mut envelope = code_envelope(
+                id,
+                &tool,
+                &worktree,
+                &stored.stamp,
+                stored.basis_policy.clone(),
+            );
             envelope.notes.push(format!("continuation of revision {}; the lane's sources may have changed since that publication", stored.stamp.revision));
             let graph = stored.graph.clone();
             let executed = if !stored.rest.is_empty() {
-                Executed { rows: stored.rest, next: stored.next, truncated: false, notes: Vec::new(), text: None }
+                Executed {
+                    rows: stored.rest,
+                    next: stored.next,
+                    truncated: false,
+                    notes: Vec::new(),
+                    text: None,
+                }
             } else if let Some(next) = stored.next {
                 let Some(analyser) = self.analysers.get_mut(&stored.root) else {
                     return CodeOutcome::Answered(LaneEnvelope::failed(id, &tool, &worktree, LaneError::new(LaneErrorKind::StaleCursor, "the analyser that issued this cursor was retired; repeat the call without it")));
@@ -682,7 +818,16 @@ impl CodeRuntime {
             } else {
                 Executed::default()
             };
-            if let Err(error) = self.finish(owner, &mut envelope, executed, call, graph, stored.root, stored.stamp, basis_policy) {
+            if let Err(error) = self.finish(
+                owner,
+                &mut envelope,
+                executed,
+                call,
+                graph,
+                stored.root,
+                stored.stamp,
+                basis_policy,
+            ) {
                 envelope.error = Some(error);
             }
             return CodeOutcome::Answered(envelope);
@@ -690,18 +835,34 @@ impl CodeRuntime {
         let (graph, stamp) = {
             let analyser = match self.analyser(target) {
                 Ok(a) => a,
-                Err(e) => return CodeOutcome::Answered(LaneEnvelope::failed(id, &tool, &worktree, e)),
+                Err(e) => {
+                    return CodeOutcome::Answered(LaneEnvelope::failed(id, &tool, &worktree, e))
+                }
             };
             let Some(graph) = analyser.graph.clone() else {
                 let (error, stamp, coverage) = analyser.busy(target.source_revision);
-                return CodeOutcome::Answered(code_busy_envelope(id, &tool, &worktree, error, stamp, coverage));
+                return CodeOutcome::Answered(code_busy_envelope(
+                    id, &tool, &worktree, error, stamp, coverage,
+                ));
             };
             let stamp = analyser.stamp_of(&graph, target.source_revision);
             if let Some(after) = call.common.after_save {
-                if analyser.included_source_revision.map_or(true, |included| included < after) {
+                if analyser
+                    .included_source_revision
+                    .map_or(true, |included| included < after)
+                {
                     let (mut error, stamp, coverage) = analyser.busy(target.source_revision);
-                    error.message = format!("source revision {after} is not included yet (included: {}); {}", analyser.included_source_revision.map(|r| r.to_string()).unwrap_or_else(|| "none".into()), error.message);
-                    return CodeOutcome::Answered(code_busy_envelope(id, &tool, &worktree, error, stamp, coverage));
+                    error.message = format!(
+                        "source revision {after} is not included yet (included: {}); {}",
+                        analyser
+                            .included_source_revision
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "none".into()),
+                        error.message
+                    );
+                    return CodeOutcome::Answered(code_busy_envelope(
+                        id, &tool, &worktree, error, stamp, coverage,
+                    ));
                 }
             }
             (graph, stamp)
@@ -718,7 +879,9 @@ impl CodeRuntime {
                         }
                         None => {
                             let (error, stamp, coverage) = analyser.busy(target.source_revision);
-                            return CodeOutcome::Answered(code_busy_envelope(id, &tool, &worktree, error, stamp, coverage));
+                            return CodeOutcome::Answered(code_busy_envelope(
+                                id, &tool, &worktree, error, stamp, coverage,
+                            ));
                         }
                     }
                 }
@@ -731,11 +894,18 @@ impl CodeRuntime {
                         envelope.error = Some(error);
                         return CodeOutcome::Answered(envelope);
                     }
-                    CodeBase::Tree { root: target.root.clone(), commit: commit.clone(), cache_dir: self.cache_dir.as_ref().map(|d| d.join("base")) }
+                    CodeBase::Tree {
+                        root: target.root.clone(),
+                        commit: commit.clone(),
+                        cache_dir: self.cache_dir.as_ref().map(|d| d.join("base")),
+                    }
                 }
                 Base::Worktree { revision, .. } => {
                     let Some(base) = base else {
-                        envelope.error = Some(LaneError::new(LaneErrorKind::PermissionDenied, "base.worktree is not an active lane of this Studio"));
+                        envelope.error = Some(LaneError::new(
+                            LaneErrorKind::PermissionDenied,
+                            "base.worktree is not an active lane of this Studio",
+                        ));
                         return CodeOutcome::Answered(envelope);
                     };
                     let other = match self.analyser(&base) {
@@ -747,11 +917,19 @@ impl CodeRuntime {
                     };
                     let Some(g) = other.graph.clone() else {
                         let (error, stamp, coverage) = other.busy(base.source_revision);
-                        return CodeOutcome::Answered(code_busy_envelope(id, &tool, &worktree, error, stamp, coverage));
+                        return CodeOutcome::Answered(code_busy_envelope(
+                            id, &tool, &worktree, error, stamp, coverage,
+                        ));
                     };
                     if let Some(wanted) = revision {
                         if *wanted != g.revision {
-                            envelope.error = Some(LaneError::new(LaneErrorKind::StaleRevision, format!("lane {} serves revision {}, not {wanted}", base.flow, g.revision)));
+                            envelope.error = Some(LaneError::new(
+                                LaneErrorKind::StaleRevision,
+                                format!(
+                                    "lane {} serves revision {}, not {wanted}",
+                                    base.flow, g.revision
+                                ),
+                            ));
                             return CodeOutcome::Answered(envelope);
                         }
                     }
@@ -759,7 +937,10 @@ impl CodeRuntime {
                         envelope.error = Some(e);
                         return CodeOutcome::Answered(envelope);
                     }
-                    envelope.notes.push(format!("base = lane {} at revision {}", base.flow, g.revision));
+                    envelope.notes.push(format!(
+                        "base = lane {} at revision {}",
+                        base.flow, g.revision
+                    ));
                     CodeBase::Graph(g)
                 }
             };
@@ -769,7 +950,13 @@ impl CodeRuntime {
             }
             let job = self.next_job;
             self.next_job += 1;
-            if let Err(e) = self.compare().submit(CodeCompareJob { job, base, now_graph: graph.clone(), scope: scope.clone(), limit: call.common.entities as usize * 4 }) {
+            if let Err(e) = self.compare().submit(CodeCompareJob {
+                job,
+                base,
+                now_graph: graph.clone(),
+                scope: scope.clone(),
+                limit: call.common.entities as usize * 4,
+            }) {
                 envelope.error = Some(e);
                 return CodeOutcome::Answered(envelope);
             }
@@ -777,7 +964,18 @@ impl CodeRuntime {
             self.jobs.insert(job, (namespace.into(), id.into()));
             self.deferred.insert(
                 (namespace.into(), id.into()),
-                CodeDeferred { namespace: namespace.into(), owner: owner.into(), control: control.to_path_buf(), claimed, call, args: args.clone(), started, envelope, graph, root: target.root.clone() },
+                CodeDeferred {
+                    namespace: namespace.into(),
+                    owner: owner.into(),
+                    control: control.to_path_buf(),
+                    claimed,
+                    call,
+                    args: args.clone(),
+                    started,
+                    envelope,
+                    graph,
+                    root: target.root.clone(),
+                },
             );
             return CodeOutcome::Deferred;
         }
@@ -788,7 +986,16 @@ impl CodeRuntime {
         self.lane(owner).admission.end();
         match executed {
             Ok(executed) => {
-                if let Err(error) = self.finish(owner, &mut envelope, executed, call, graph, target.root.clone(), stamp, basis_policy) {
+                if let Err(error) = self.finish(
+                    owner,
+                    &mut envelope,
+                    executed,
+                    call,
+                    graph,
+                    target.root.clone(),
+                    stamp,
+                    basis_policy,
+                ) {
                     envelope.error = Some(error);
                 }
             }
@@ -801,7 +1008,17 @@ impl CodeRuntime {
     /// envelope stays within `PAGE_BYTES`) and retain the remainder under a
     /// lane cursor that keeps the graph and stamp it was computed from.
     #[allow(clippy::too_many_arguments)]
-    fn finish(&mut self, owner: &str, envelope: &mut LaneEnvelope, executed: Executed, mut call: LaneCall, graph: Arc<Graph>, root: PathBuf, stamp: CodeStamp, basis_policy: Vec<String>) -> Result<(), LaneError> {
+    fn finish(
+        &mut self,
+        owner: &str,
+        envelope: &mut LaneEnvelope,
+        executed: Executed,
+        mut call: LaneCall,
+        graph: Arc<Graph>,
+        root: PathBuf,
+        stamp: CodeStamp,
+        basis_policy: Vec<String>,
+    ) -> Result<(), LaneError> {
         // the retained call is the one without any cursor: continuations
         // compare against it after their own cursor is taken
         call.common.cursor = None;
@@ -830,7 +1047,15 @@ impl CodeRuntime {
         }
         envelope.truncated = executed.truncated || !rest.is_empty() || executed.next.is_some();
         if !rest.is_empty() || executed.next.is_some() {
-            let cursor = self.lane(owner).keep_cursor(CodeCursor { call, rest, next: executed.next, graph, root, stamp, basis_policy });
+            let cursor = self.lane(owner).keep_cursor(CodeCursor {
+                call,
+                rest,
+                next: executed.next,
+                graph,
+                root,
+                stamp,
+                basis_policy,
+            });
             envelope.cursor = Some(cursor);
         }
         Ok(())
@@ -870,9 +1095,29 @@ impl CodeRuntime {
             let mut envelope = deferred.envelope.clone();
             match d.result {
                 Ok((rows, truncated, notes)) => {
-                    let stamp = CodeStamp { revision: envelope.revision.unwrap_or(0), context_hash: envelope.analysis_context_hash.clone().unwrap_or_default(), coverage: envelope.coverage.clone(), freshness: envelope.freshness.clone().unwrap_or_default() };
+                    let stamp = CodeStamp {
+                        revision: envelope.revision.unwrap_or(0),
+                        context_hash: envelope.analysis_context_hash.clone().unwrap_or_default(),
+                        coverage: envelope.coverage.clone(),
+                        freshness: envelope.freshness.clone().unwrap_or_default(),
+                    };
                     let basis_policy = envelope.basis_policy.clone();
-                    if let Err(error) = self.finish(&deferred.owner, &mut envelope, Executed { rows, next: None, truncated, notes, text: None }, deferred.call.clone(), deferred.graph.clone(), deferred.root.clone(), stamp, basis_policy) {
+                    if let Err(error) = self.finish(
+                        &deferred.owner,
+                        &mut envelope,
+                        Executed {
+                            rows,
+                            next: None,
+                            truncated,
+                            notes,
+                            text: None,
+                        },
+                        deferred.call.clone(),
+                        deferred.graph.clone(),
+                        deferred.root.clone(),
+                        stamp,
+                        basis_policy,
+                    ) {
                         envelope.error = Some(error);
                     }
                 }
@@ -891,7 +1136,13 @@ impl CodeRuntime {
     }
 }
 
-fn code_envelope(id: &str, tool: &str, worktree: &str, stamp: &CodeStamp, basis_policy: Vec<String>) -> LaneEnvelope {
+fn code_envelope(
+    id: &str,
+    tool: &str,
+    worktree: &str,
+    stamp: &CodeStamp,
+    basis_policy: Vec<String>,
+) -> LaneEnvelope {
     let mut envelope = LaneEnvelope::empty(id, tool, worktree);
     envelope.revision = Some(stamp.revision);
     envelope.analysis_context_hash = Some(stamp.context_hash.clone());
@@ -903,7 +1154,14 @@ fn code_envelope(id: &str, tool: &str, worktree: &str, stamp: &CodeStamp, basis_
 
 /// A busy reply keeps the last publication's stamp when there is one, and
 /// says explicitly that coverage is unavailable when there is none.
-fn code_busy_envelope(id: &str, tool: &str, worktree: &str, error: LaneError, stamp: Option<CodeStamp>, coverage: Value) -> LaneEnvelope {
+fn code_busy_envelope(
+    id: &str,
+    tool: &str,
+    worktree: &str,
+    error: LaneError,
+    stamp: Option<CodeStamp>,
+    coverage: Value,
+) -> LaneEnvelope {
     let mut envelope = match stamp {
         Some(stamp) => {
             let mut e = code_envelope(id, tool, worktree, &stamp, Vec::new());
@@ -966,7 +1224,15 @@ pub fn code_trace_read(control: &Path, limit: usize) -> Result<Vec<Value>, Strin
     Ok(records.into())
 }
 
-fn code_record(id: &str, tool: &str, args: &Value, worktree: &str, outcome: &str, envelope: &LaneEnvelope, duration: Duration) -> Value {
+fn code_record(
+    id: &str,
+    tool: &str,
+    args: &Value,
+    worktree: &str,
+    outcome: &str,
+    envelope: &LaneEnvelope,
+    duration: Duration,
+) -> Value {
     let mut fields = vec![
         ("at_ms", Value::Int(now() as i64)),
         ("request_id", s(id)),
@@ -975,8 +1241,17 @@ fn code_record(id: &str, tool: &str, args: &Value, worktree: &str, outcome: &str
         ("worktree", s(worktree)),
         ("outcome", s(outcome)),
         ("result_ref", s(format!("replies/{id}.json"))),
-        ("revision", envelope.revision.map(|r| Value::Int(r.min(i64::MAX as u64) as i64)).unwrap_or(Value::Null)),
-        ("duration_ms", Value::Int(duration.as_millis().min(i64::MAX as u128) as i64)),
+        (
+            "revision",
+            envelope
+                .revision
+                .map(|r| Value::Int(r.min(i64::MAX as u64) as i64))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "duration_ms",
+            Value::Int(duration.as_millis().min(i64::MAX as u128) as i64),
+        ),
         ("truncated", Value::Bool(envelope.truncated)),
         ("rows", Value::Int(envelope.rows.len() as i64)),
         (
@@ -995,19 +1270,26 @@ impl Host {
     /// active lane of this Studio named by `worktree`.
     fn code_target(&self, caller: &str, requested: Option<&str>) -> Result<CodeTarget, LaneError> {
         let id = requested.unwrap_or(caller);
-        let flow = self
-            .engine
-            .flows
-            .get(id)
-            .ok_or_else(|| LaneError::new(LaneErrorKind::PermissionDenied, format!("{id} is not a lane of this Studio")))?;
-        if id != caller && (flow.lifecycle == iteration::FlowLifecycle::Archived || flow.successor.is_some()) {
-            return Err(LaneError::new(LaneErrorKind::PermissionDenied, format!("{id} is not an active lane")));
+        let flow = self.engine.flows.get(id).ok_or_else(|| {
+            LaneError::new(
+                LaneErrorKind::PermissionDenied,
+                format!("{id} is not a lane of this Studio"),
+            )
+        })?;
+        if id != caller
+            && (flow.lifecycle == iteration::FlowLifecycle::Archived || flow.successor.is_some())
+        {
+            return Err(LaneError::new(
+                LaneErrorKind::PermissionDenied,
+                format!("{id} is not an active lane"),
+            ));
         }
-        let root = flow
-            .worktree
-            .clone()
-            .ok_or_else(|| LaneError::new(LaneErrorKind::Unknown, format!("lane {id} has no local worktree yet")))?;
-        Ok(CodeTarget { flow: id.into(), root, source_revision: flow.source_revision })
+        let root = flow.config.repo.clone();
+        Ok(CodeTarget {
+            flow: id.into(),
+            root,
+            source_revision: flow.source_revision,
+        })
     }
 
     /// Admit, parse, scope and serve one code call. `namespace` is the flow
@@ -1015,7 +1297,16 @@ impl Host {
     /// answered call leaves a trace record; deferred calls leave theirs when
     /// they complete.
     #[allow(clippy::too_many_arguments)]
-    fn code_call(&mut self, owner: &str, namespace: &str, id: &str, control: &Path, claimed: Option<PathBuf>, tool: &str, args: &Value) -> CodeOutcome {
+    fn code_call(
+        &mut self,
+        owner: &str,
+        namespace: &str,
+        id: &str,
+        control: &Path,
+        claimed: Option<PathBuf>,
+        tool: &str,
+        args: &Value,
+    ) -> CodeOutcome {
         let started = Instant::now();
         let mut outcome = self.code_call_inner(owner, namespace, id, control, claimed, tool, args);
         if let CodeOutcome::Answered(envelope) = &mut outcome {
@@ -1026,7 +1317,15 @@ impl Host {
                 .unwrap_or(PAGE_BYTES as u64) as usize;
             envelope.enforce_limit(bytes);
             let status = if envelope.is_error() { "error" } else { "ok" };
-            let record = code_record(id, tool, args, &envelope.worktree, status, envelope, started.elapsed());
+            let record = code_record(
+                id,
+                tool,
+                args,
+                &envelope.worktree,
+                status,
+                envelope,
+                started.elapsed(),
+            );
             if let Err(error) = code_trace(control, record) {
                 self.note = format!("{owner}: lane trace: {error}");
                 self.changed = true;
@@ -1036,12 +1335,28 @@ impl Host {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn code_call_inner(&mut self, owner: &str, namespace: &str, id: &str, control: &Path, claimed: Option<PathBuf>, tool: &str, args: &Value) -> CodeOutcome {
-        let failed = |error: LaneError| CodeOutcome::Answered(LaneEnvelope::failed(id, tool, owner, error));
+    fn code_call_inner(
+        &mut self,
+        owner: &str,
+        namespace: &str,
+        id: &str,
+        control: &Path,
+        claimed: Option<PathBuf>,
+        tool: &str,
+        args: &Value,
+    ) -> CodeOutcome {
+        let failed =
+            |error: LaneError| CodeOutcome::Answered(LaneEnvelope::failed(id, tool, owner, error));
         if !registry::lane_offers(tool, false) {
             return failed(match registry::lane_tool(tool) {
-                Some(t) if t.family == registry::Family::View => LaneError::new(LaneErrorKind::PermissionDenied, format!("{tool} drives the user's view; lanes are not granted view control")),
-                Some(_) => LaneError::new(LaneErrorKind::Unavailable, format!("{tool} is not available yet")),
+                Some(t) if t.family == registry::Family::View => LaneError::new(
+                    LaneErrorKind::PermissionDenied,
+                    format!("{tool} drives the user's view; lanes are not granted view control"),
+                ),
+                Some(_) => LaneError::new(
+                    LaneErrorKind::Unavailable,
+                    format!("{tool} is not available yet"),
+                ),
                 None => LaneError::invalid(format!("{tool} is not a code-intelligence tool")),
             });
         }
@@ -1060,13 +1375,18 @@ impl Host {
             Err(error) => return failed(error),
         };
         let base = match &call.op {
-            LaneOp::ArchDiff { base: Base::Worktree { flow, .. }, .. } => match self.code_target(owner, Some(flow)) {
+            LaneOp::ArchDiff {
+                base: Base::Worktree { flow, .. },
+                ..
+            } => match self.code_target(owner, Some(flow)) {
                 Ok(t) => Some(t),
                 Err(error) => return failed(error),
             },
             _ => None,
         };
-        self.code.serve(owner, namespace, id, control, claimed, args, call, &target, base)
+        self.code.serve(
+            owner, namespace, id, control, claimed, args, call, &target, base,
+        )
     }
 
     /// Finish deferred calls: answer through the spool in the receipt
@@ -1075,9 +1395,23 @@ impl Host {
         for (deferred, mut envelope) in self.code.poll() {
             envelope.enforce_limit(deferred.call.common.max_output_bytes);
             let status = if envelope.is_error() { "error" } else { "ok" };
-            let record = code_record(&envelope.request_id, &deferred.call.tool, &deferred.args, &envelope.worktree, status, &envelope, deferred.started.elapsed());
+            let record = code_record(
+                &envelope.request_id,
+                &deferred.call.tool,
+                &deferred.args,
+                &envelope.worktree,
+                status,
+                &envelope,
+                deferred.started.elapsed(),
+            );
             let result = (|| {
-                cli_answer(&deferred.control, &deferred.namespace, &envelope.request_id, status, Ok(envelope.json()))?;
+                cli_answer(
+                    &deferred.control,
+                    &deferred.namespace,
+                    &envelope.request_id,
+                    status,
+                    Ok(envelope.json()),
+                )?;
                 code_trace(&deferred.control, record)?;
                 if let Some(claimed) = &deferred.claimed {
                     if claimed.try_exists().map_err(err)? {
@@ -1087,7 +1421,10 @@ impl Host {
                 Ok::<_, String>(())
             })();
             if let Err(error) = result {
-                self.note = format!("{}: code call {}: {error}", deferred.owner, envelope.request_id);
+                self.note = format!(
+                    "{}: code call {}: {error}",
+                    deferred.owner, envelope.request_id
+                );
                 self.changed = true;
             }
         }
@@ -1153,19 +1490,33 @@ mod code_tests {
         names
             .iter()
             .map(|name| {
-                let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libs/code_atlas/tests/fixtures").join(name).canonicalize().unwrap();
+                let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../libs/code_atlas/tests/fixtures")
+                    .join(name)
+                    .canonicalize()
+                    .unwrap();
                 let policy = CorpusPolicy::default();
-                let identity = SourceIdentity { workspace_id: "lane-fixture".into(), worktree_id: (*name).into(), tree: None };
+                let identity = SourceIdentity {
+                    workspace_id: "lane-fixture".into(),
+                    worktree_id: (*name).into(),
+                    tree: None,
+                };
                 let mut set = FsSourceSet::new(root, identity).with_policy(policy.clone());
                 let frozen = freeze(&mut set, &policy).expect("freeze fixture");
-                ix.index(frozen, AnalysisContext::host()).expect("index fixture")
+                ix.index(frozen, AnalysisContext::host())
+                    .expect("index fixture")
             })
             .collect()
     }
 
     fn scratch(name: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("studio-code-{}-{}-{}", name, std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "studio-code-{}-{}-{}",
+            name,
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         #[cfg(unix)]
@@ -1181,17 +1532,43 @@ mod code_tests {
         let mut targets = Vec::new();
         for (flow, graph) in graphs {
             let root = PathBuf::from(format!("/fixture/{flow}"));
-            runtime.analysers.insert(root.clone(), CodeAnalyser::with_graph(graph.clone(), 3));
-            targets.push(CodeTarget { flow: (*flow).into(), root, source_revision: 3 });
+            runtime
+                .analysers
+                .insert(root.clone(), CodeAnalyser::with_graph(graph.clone(), 3));
+            targets.push(CodeTarget {
+                flow: (*flow).into(),
+                root,
+                source_revision: 3,
+            });
         }
         (runtime, targets)
     }
 
-    fn call(runtime: &mut CodeRuntime, target: &CodeTarget, id: &str, tool: &str, args: &str, control: &Path) -> LaneEnvelope {
+    fn call(
+        runtime: &mut CodeRuntime,
+        target: &CodeTarget,
+        id: &str,
+        tool: &str,
+        args: &str,
+        control: &Path,
+    ) -> LaneEnvelope {
         let args = json::parse(args.as_bytes()).unwrap();
         let call = registry::parse_lane_call(tool, &args).unwrap();
-        runtime.lane(&target.flow).admission.rewind(Duration::from_secs(1));
-        match runtime.serve(&target.flow, &target.flow, id, control, None, &args, call, target, None) {
+        runtime
+            .lane(&target.flow)
+            .admission
+            .rewind(Duration::from_secs(1));
+        match runtime.serve(
+            &target.flow,
+            &target.flow,
+            id,
+            control,
+            None,
+            &args,
+            call,
+            target,
+            None,
+        ) {
             CodeOutcome::Answered(e) => e,
             CodeOutcome::Deferred => panic!("{tool} deferred"),
         }
@@ -1208,14 +1585,30 @@ mod code_tests {
         let mut first_cursor = None;
         loop {
             let args = match &cursor {
-                Some(c) => format!(r#"{{"scope":"atlasfix","budget":{{"entities":3,"edges":1}},"cursor":"{c}"}}"#),
+                Some(c) => format!(
+                    r#"{{"scope":"atlasfix","budget":{{"entities":3,"edges":1}},"cursor":"{c}"}}"#
+                ),
                 None => r#"{"scope":"atlasfix","budget":{"entities":3,"edges":1}}"#.into(),
             };
-            let envelope = call(&mut runtime, &targets[0], &format!("req-{pages}"), "code_outline", &args, &control);
+            let envelope = call(
+                &mut runtime,
+                &targets[0],
+                &format!("req-{pages}"),
+                "code_outline",
+                &args,
+                &control,
+            );
             assert!(envelope.error.is_none(), "{:?}", envelope.error);
             let body = envelope.json().to_json();
-            assert!(body.len() <= PAGE_BYTES, "page {pages} is {} bytes", body.len());
-            assert!(envelope.analysis_context_hash.as_ref().is_some_and(|h| h.len() == 40));
+            assert!(
+                body.len() <= PAGE_BYTES,
+                "page {pages} is {} bytes",
+                body.len()
+            );
+            assert!(envelope
+                .analysis_context_hash
+                .as_ref()
+                .is_some_and(|h| h.len() == 40));
             rows += envelope.rows.len();
             pages += 1;
             if first_cursor.is_none() {
@@ -1232,11 +1625,34 @@ mod code_tests {
         }
         assert!(pages >= 2 && rows > 3, "{pages} pages, {rows} rows");
         // the first cursor was consumed by its continuation
-        let stale = call(&mut runtime, &targets[0], "req-stale", "code_outline", &format!(r#"{{"scope":"atlasfix","budget":{{"entities":3,"edges":1}},"cursor":"{}"}}"#, first_cursor.unwrap()), &control);
-        assert_eq!(stale.error.as_ref().map(|e| e.kind), Some(LaneErrorKind::StaleCursor));
+        let stale = call(
+            &mut runtime,
+            &targets[0],
+            "req-stale",
+            "code_outline",
+            &format!(
+                r#"{{"scope":"atlasfix","budget":{{"entities":3,"edges":1}},"cursor":"{}"}}"#,
+                first_cursor.unwrap()
+            ),
+            &control,
+        );
+        assert_eq!(
+            stale.error.as_ref().map(|e| e.kind),
+            Some(LaneErrorKind::StaleCursor)
+        );
         // a cursor never issued is stale too
-        let never = call(&mut runtime, &targets[0], "req-never", "code_outline", r#"{"scope":"atlasfix","cursor":"c9-r1-deadbeef"}"#, &control);
-        assert_eq!(never.error.as_ref().map(|e| e.kind), Some(LaneErrorKind::StaleCursor));
+        let never = call(
+            &mut runtime,
+            &targets[0],
+            "req-never",
+            "code_outline",
+            r#"{"scope":"atlasfix","cursor":"c9-r1-deadbeef"}"#,
+            &control,
+        );
+        assert_eq!(
+            never.error.as_ref().map(|e| e.kind),
+            Some(LaneErrorKind::StaleCursor)
+        );
     }
 
     #[test]
@@ -1251,15 +1667,31 @@ mod code_tests {
                 Some(c) => format!(r#"{{"scope":"atlasfix","cursor":"{c}"}}"#),
                 None => r#"{"scope":"atlasfix"}"#.into(),
             };
-            let e = call(&mut runtime, &targets[0], &format!("b{pages}"), "code_brief", &args, &control);
+            let e = call(
+                &mut runtime,
+                &targets[0],
+                &format!("b{pages}"),
+                "code_brief",
+                &args,
+                &control,
+            );
             assert!(e.error.is_none(), "{:?}", e.error);
-            assert!(e.json().to_json().len() <= PAGE_BYTES, "brief page {pages} is {} bytes", e.json().to_json().len());
+            assert!(
+                e.json().to_json().len() <= PAGE_BYTES,
+                "brief page {pages} is {} bytes",
+                e.json().to_json().len()
+            );
             if pages == 0 {
                 assert_eq!(e.rows[0].get("row").and_then(Value::as_str), Some("brief"));
             }
             for row in &e.rows {
                 if let Some(source) = row.get("entity").and_then(|x| x.get("source")) {
-                    assert_eq!(source.get("hash").and_then(Value::as_str).map(str::len), Some(40), "full content hash: {}", source.to_json());
+                    assert_eq!(
+                        source.get("hash").and_then(Value::as_str).map(str::len),
+                        Some(40),
+                        "full content hash: {}",
+                        source.to_json()
+                    );
                     assert!(source.get("workspace").is_some() && source.get("context").is_some());
                 }
             }
@@ -1277,26 +1709,69 @@ mod code_tests {
         let mut pair = fixture_sequence(&["atlasfix", "atlasfix_v2"]);
         let later = pair.pop().unwrap();
         let g1 = pair.pop().unwrap();
-        assert_ne!(g1.revision, later.revision, "one indexer advances revisions");
+        assert_ne!(
+            g1.revision, later.revision,
+            "one indexer advances revisions"
+        );
         let (mut runtime, targets) = runtime_with(&[("lane-a", g1.clone())]);
         let control = scratch("lease");
-        let first = call(&mut runtime, &targets[0], "r1", "code_outline", r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#, &control);
+        let first = call(
+            &mut runtime,
+            &targets[0],
+            "r1",
+            "code_outline",
+            r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#,
+            &control,
+        );
         let cursor = first.cursor.clone().expect("a small page has a cursor");
         assert_eq!(first.revision, Some(g1.revision));
         // a later publication replaces the served graph
-        runtime.analysers.get_mut(&targets[0].root).unwrap().publish(later.clone(), 9);
-        let fresh = call(&mut runtime, &targets[0], "r2", "code_size", r#"{"scope":"atlasfix"}"#, &control);
-        assert_eq!(fresh.revision, Some(later.revision), "new calls see the new publication");
+        runtime
+            .analysers
+            .get_mut(&targets[0].root)
+            .unwrap()
+            .publish(later.clone(), 9);
+        let fresh = call(
+            &mut runtime,
+            &targets[0],
+            "r2",
+            "code_size",
+            r#"{"scope":"atlasfix"}"#,
+            &control,
+        );
+        assert_eq!(
+            fresh.revision,
+            Some(later.revision),
+            "new calls see the new publication"
+        );
         // the continuation still answers from the graph and stamp it was issued for
-        let cont = call(&mut runtime, &targets[0], "r3", "code_outline", &format!(r#"{{"scope":"atlasfix","budget":{{"entities":2,"edges":1}},"cursor":"{cursor}"}}"#), &control);
+        let cont = call(
+            &mut runtime,
+            &targets[0],
+            "r3",
+            "code_outline",
+            &format!(
+                r#"{{"scope":"atlasfix","budget":{{"entities":2,"edges":1}},"cursor":"{cursor}"}}"#
+            ),
+            &control,
+        );
         assert!(cont.error.is_none(), "{:?}", cont.error);
         assert_eq!(cont.revision, Some(g1.revision));
         assert_eq!(cont.analysis_context_hash, first.analysis_context_hash);
-        assert!(cont.notes.iter().any(|n| n.starts_with("continuation of revision")));
-        assert!(cont.freshness.as_ref().is_some_and(|f| f.observed_source_revision == first.freshness.as_ref().unwrap().observed_source_revision));
+        assert!(cont
+            .notes
+            .iter()
+            .any(|n| n.starts_with("continuation of revision")));
+        assert!(cont
+            .freshness
+            .as_ref()
+            .is_some_and(|f| f.observed_source_revision
+                == first.freshness.as_ref().unwrap().observed_source_revision));
         // the retired graph is held by the remaining cursor, not released
         let analyser = runtime.analysers.get(&targets[0].root).unwrap();
-        assert!(analyser.retired.iter().any(|g| g.revision == g1.revision) || cont.cursor.is_none());
+        assert!(
+            analyser.retired.iter().any(|g| g.revision == g1.revision) || cont.cursor.is_none()
+        );
     }
 
     #[test]
@@ -1304,14 +1779,52 @@ mod code_tests {
         let g = fixture_graph("atlasfix");
         let (mut runtime, targets) = runtime_with(&[("lane-a", g.clone()), ("lane-b", g)]);
         let control = scratch("bound");
-        let first = call(&mut runtime, &targets[0], "r1", "code_outline", r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#, &control);
+        let first = call(
+            &mut runtime,
+            &targets[0],
+            "r1",
+            "code_outline",
+            r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#,
+            &control,
+        );
         let cursor = first.cursor.expect("a small page has a cursor");
-        let other = call(&mut runtime, &targets[0], "r2", "code_outline", &format!(r#"{{"scope":"atlasfix","budget":{{"entities":4,"edges":1}},"cursor":"{cursor}"}}"#), &control);
-        assert_eq!(other.error.as_ref().map(|e| e.kind), Some(LaneErrorKind::StaleCursor));
-        let second = call(&mut runtime, &targets[0], "r3", "code_outline", r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#, &control);
+        let other = call(
+            &mut runtime,
+            &targets[0],
+            "r2",
+            "code_outline",
+            &format!(
+                r#"{{"scope":"atlasfix","budget":{{"entities":4,"edges":1}},"cursor":"{cursor}"}}"#
+            ),
+            &control,
+        );
+        assert_eq!(
+            other.error.as_ref().map(|e| e.kind),
+            Some(LaneErrorKind::StaleCursor)
+        );
+        let second = call(
+            &mut runtime,
+            &targets[0],
+            "r3",
+            "code_outline",
+            r#"{"scope":"atlasfix","budget":{"entities":2,"edges":1}}"#,
+            &control,
+        );
         let cursor = second.cursor.unwrap();
-        let foreign = call(&mut runtime, &targets[1], "r4", "code_outline", &format!(r#"{{"scope":"atlasfix","budget":{{"entities":2,"edges":1}},"cursor":"{cursor}"}}"#), &control);
-        assert_eq!(foreign.error.as_ref().map(|e| e.kind), Some(LaneErrorKind::StaleCursor));
+        let foreign = call(
+            &mut runtime,
+            &targets[1],
+            "r4",
+            "code_outline",
+            &format!(
+                r#"{{"scope":"atlasfix","budget":{{"entities":2,"edges":1}},"cursor":"{cursor}"}}"#
+            ),
+            &control,
+        );
+        assert_eq!(
+            foreign.error.as_ref().map(|e| e.kind),
+            Some(LaneErrorKind::StaleCursor)
+        );
     }
 
     #[test]
@@ -1330,11 +1843,25 @@ mod code_tests {
         runtime.lane("lane-a").admission.end();
         runtime.lane("lane-a").admission.end();
         assert!(runtime.lane("lane-a").admission.admit().is_ok());
-        match runtime.serve("lane-a", "lane-a", "s1", &control, None, &args, parsed, &targets[0], None) {
+        match runtime.serve(
+            "lane-a",
+            "lane-a",
+            "s1",
+            &control,
+            None,
+            &args,
+            parsed,
+            &targets[0],
+            None,
+        ) {
             CodeOutcome::Answered(e) => assert!(e.error.is_none()),
             CodeOutcome::Deferred => panic!(),
         }
-        assert_eq!(runtime.lane("lane-a").admission.outstanding, 0, "a synchronous call releases its slot");
+        assert_eq!(
+            runtime.lane("lane-a").admission.outstanding,
+            0,
+            "a synchronous call releases its slot"
+        );
     }
 
     #[test]
@@ -1342,27 +1869,84 @@ mod code_tests {
         let g = fixture_graph("atlasfix");
         let (mut runtime, targets) = runtime_with(&[("lane-a", g.clone())]);
         let control = scratch("trace");
-        let brief = call(&mut runtime, &targets[0], "b1", "code_brief", r#"{"scope":"atlasfix"}"#, &control);
+        let brief = call(
+            &mut runtime,
+            &targets[0],
+            "b1",
+            "code_brief",
+            r#"{"scope":"atlasfix"}"#,
+            &control,
+        );
         assert!(brief.error.is_none(), "{:?}", brief.error);
-        assert_eq!(brief.rows[0].get("row").and_then(Value::as_str), Some("brief"));
-        assert!(brief.rows[0].get("text").and_then(Value::as_str).unwrap().contains("BRIEF"));
-        let impact = call(&mut runtime, &targets[0], "i1", "code_impact", r#"{"files":["src/c.rs"],"depth":3}"#, &control);
+        assert_eq!(
+            brief.rows[0].get("row").and_then(Value::as_str),
+            Some("brief")
+        );
+        assert!(brief.rows[0]
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("BRIEF"));
+        let impact = call(
+            &mut runtime,
+            &targets[0],
+            "i1",
+            "code_impact",
+            r#"{"files":["src/c.rs"],"depth":3}"#,
+            &control,
+        );
         assert!(impact.error.is_none(), "{:?}", impact.error);
-        let stamped = impact.rows.iter().filter_map(|r| r.get("entity").and_then(|e| e.get("source"))).count();
-        assert!(stamped >= 1, "dependents carry stamped sources: {}", Value::Arr(impact.rows.clone()).to_json());
+        let stamped = impact
+            .rows
+            .iter()
+            .filter_map(|r| r.get("entity").and_then(|e| e.get("source")))
+            .count();
+        assert!(
+            stamped >= 1,
+            "dependents carry stamped sources: {}",
+            Value::Arr(impact.rows.clone()).to_json()
+        );
         for row in &impact.rows {
             if let Some(source) = row.get("entity").unwrap().get("source") {
-                assert!(source.get("hash").is_some() && source.get("revision").is_some() && source.get("path").is_some(), "{}", source.to_json());
+                assert!(
+                    source.get("hash").is_some()
+                        && source.get("revision").is_some()
+                        && source.get("path").is_some(),
+                    "{}",
+                    source.to_json()
+                );
             }
         }
         for (id, tool, envelope) in [("b1", "code_brief", &brief), ("i1", "code_impact", &impact)] {
-            code_trace(&control, code_record(id, tool, &json::obj(vec![]), "lane-a", "ok", envelope, Duration::from_millis(3))).unwrap();
+            code_trace(
+                &control,
+                code_record(
+                    id,
+                    tool,
+                    &json::obj(vec![]),
+                    "lane-a",
+                    "ok",
+                    envelope,
+                    Duration::from_millis(3),
+                ),
+            )
+            .unwrap();
         }
         let records = code_trace_read(&control, CODE_TRACE_PAGE).unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].get("tool").and_then(Value::as_str), Some("code_brief"));
-        assert_eq!(records[1].get("result_ref").and_then(Value::as_str), Some("replies/i1.json"));
-        assert!(records[1].get("duration_ms").is_some() && records[1].get("revision").is_some() && records[1].get("truncated").is_some());
+        assert_eq!(
+            records[0].get("tool").and_then(Value::as_str),
+            Some("code_brief")
+        );
+        assert_eq!(
+            records[1].get("result_ref").and_then(Value::as_str),
+            Some("replies/i1.json")
+        );
+        assert!(
+            records[1].get("duration_ms").is_some()
+                && records[1].get("revision").is_some()
+                && records[1].get("truncated").is_some()
+        );
     }
 
     #[test]
@@ -1372,7 +1956,10 @@ mod code_tests {
         let (error, stamp, coverage) = analyser.busy(4);
         assert_eq!(error.kind, LaneErrorKind::IndexerBusy);
         assert_eq!(stamp.as_ref().map(|s| s.revision), Some(g.revision));
-        assert!(coverage.get("files_indexed").and_then(Value::as_i64).is_some());
+        assert!(coverage
+            .get("files_indexed")
+            .and_then(Value::as_i64)
+            .is_some());
         let e = code_busy_envelope("x", "code_size", "lane-a", error, stamp, coverage);
         assert_eq!(e.revision, Some(g.revision));
         assert!(e.freshness.is_some() && e.analysis_context_hash.is_some());
@@ -1380,7 +1967,13 @@ mod code_tests {
         let (error, stamp, coverage) = analyser.busy(4);
         assert!(stamp.is_none());
         let e = code_busy_envelope("y", "code_size", "lane-a", error, stamp, coverage);
-        assert_eq!(e.coverage.get("unavailable").and_then(Value::as_str).map(|s| s.starts_with("no publication yet")), Some(true));
+        assert_eq!(
+            e.coverage
+                .get("unavailable")
+                .and_then(Value::as_str)
+                .map(|s| s.starts_with("no publication yet")),
+            Some(true)
+        );
         assert_eq!(e.coverage.get("files_indexed"), Some(&Value::Null));
         assert!(e.json().to_json().contains("worker_update") || e.freshness.is_none());
     }
@@ -1389,19 +1982,53 @@ mod code_tests {
     fn traces_are_redacted_and_rotated() {
         let control = scratch("redact");
         let token = "a".repeat(64);
-        let args = json::obj(vec![("scope", s(format!("http://127.0.0.1:5/v1/{token}"))), ("note", s("Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789"))]);
+        let args = json::obj(vec![
+            ("scope", s(format!("http://127.0.0.1:5/v1/{token}"))),
+            (
+                "note",
+                s("Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789"),
+            ),
+        ]);
         let envelope = LaneEnvelope::empty("x1", "code_brief", "lane-a");
-        let record = code_record("x1", "code_brief", &args, "lane-a", "ok", &envelope, Duration::from_millis(1));
-        assert!(!record.to_json().contains(&token), "args are redacted before persistence");
+        let record = code_record(
+            "x1",
+            "code_brief",
+            &args,
+            "lane-a",
+            "ok",
+            &envelope,
+            Duration::from_millis(1),
+        );
+        assert!(
+            !record.to_json().contains(&token),
+            "args are redacted before persistence"
+        );
         code_trace(&control, record).unwrap();
         let text = fs::read_to_string(control.join("calls.jsonl")).unwrap();
-        assert!(!text.contains(&token) && !text.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{text}");
+        assert!(
+            !text.contains(&token) && !text.contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{text}"
+        );
         let big = LaneEnvelope::empty("x2", "code_brief", "lane-a");
         let filler = json::obj(vec![("pad", s("p".repeat(4000)))]);
         for i in 0..300 {
-            code_trace(&control, code_record(&format!("x{i}"), "code_brief", &filler, "lane-a", "ok", &big, Duration::from_millis(1))).unwrap();
+            code_trace(
+                &control,
+                code_record(
+                    &format!("x{i}"),
+                    "code_brief",
+                    &filler,
+                    "lane-a",
+                    "ok",
+                    &big,
+                    Duration::from_millis(1),
+                ),
+            )
+            .unwrap();
         }
-        assert!(fs::metadata(control.join("calls.jsonl")).unwrap().len() <= CODE_TRACE_LIMIT + 8192);
+        assert!(
+            fs::metadata(control.join("calls.jsonl")).unwrap().len() <= CODE_TRACE_LIMIT + 8192
+        );
         assert!(control.join("calls.1.jsonl").is_file());
         let _ = fs::remove_dir_all(&control);
     }
@@ -1411,18 +2038,45 @@ mod code_tests {
         let mut pair = fixture_sequence(&["atlasfix", "atlasfix_v2"]);
         let g2 = pair.pop().unwrap();
         let g1 = pair.pop().unwrap();
-        let (mut runtime, targets) = runtime_with(&[("lane-a", g1.clone()), ("lane-b", g1.clone())]);
+        let (mut runtime, targets) =
+            runtime_with(&[("lane-a", g1.clone()), ("lane-b", g1.clone())]);
         let control = scratch("diff");
         // lane-a's first publication is its baseline; a later publication differs from it
-        runtime.analysers.get_mut(&targets[0].root).unwrap().publish(g2.clone(), 5);
+        runtime
+            .analysers
+            .get_mut(&targets[0].root)
+            .unwrap()
+            .publish(g2.clone(), 5);
         let args = json::parse(br#"{"base":{"kind":"baseline"}}"#).unwrap();
         let parsed = registry::parse_lane_call("code_arch_diff", &args).unwrap();
-        match runtime.serve("lane-a", "lane-a", "diff", &control, None, &args, parsed.clone(), &targets[0], None) {
+        match runtime.serve(
+            "lane-a",
+            "lane-a",
+            "diff",
+            &control,
+            None,
+            &args,
+            parsed.clone(),
+            &targets[0],
+            None,
+        ) {
             CodeOutcome::Deferred => {}
-            CodeOutcome::Answered(e) => panic!("arch_diff answers through the spool: {:?}", e.error),
+            CodeOutcome::Answered(e) => {
+                panic!("arch_diff answers through the spool: {:?}", e.error)
+            }
         }
         // the same request id in another lane's namespace is a different deferred call
-        match runtime.serve("lane-b", "lane-b", "diff", &control, None, &args, parsed, &targets[1], None) {
+        match runtime.serve(
+            "lane-b",
+            "lane-b",
+            "diff",
+            &control,
+            None,
+            &args,
+            parsed,
+            &targets[1],
+            None,
+        ) {
             CodeOutcome::Deferred => {}
             CodeOutcome::Answered(e) => panic!("{:?}", e.error),
         }
@@ -1433,17 +2087,46 @@ mod code_tests {
         let (a, ea) = done.iter().find(|(d, _)| d.namespace == "lane-a").unwrap();
         assert_eq!(a.owner, "lane-a");
         assert!(ea.error.is_none(), "{:?}", ea.error);
-        assert!(ea.notes.iter().any(|n| n.starts_with("baseline = the lane's first publication")), "{:?}", ea.notes);
-        assert!(ea.notes.iter().any(|n| n.starts_with("entities +")), "{:?}", ea.notes);
+        assert!(
+            ea.notes
+                .iter()
+                .any(|n| n.starts_with("baseline = the lane's first publication")),
+            "{:?}",
+            ea.notes
+        );
+        assert!(
+            ea.notes.iter().any(|n| n.starts_with("entities +")),
+            "{:?}",
+            ea.notes
+        );
         assert!(!ea.rows.is_empty(), "v2 differs from the baseline");
         let (_, eb) = done.iter().find(|(d, _)| d.namespace == "lane-b").unwrap();
-        assert!(eb.rows.is_empty(), "lane-b never changed: {}", Value::Arr(eb.rows.clone()).to_json());
+        assert!(
+            eb.rows.is_empty(),
+            "lane-b never changed: {}",
+            Value::Arr(eb.rows.clone()).to_json()
+        );
         assert_eq!(runtime.lanes["lane-a"].admission.outstanding, 0);
         // a worktree base pinned to a revision the other lane does not serve is stale
-        let args = json::parse(br#"{"base":{"kind":"worktree","worktree":"lane-b","revision":99}}"#).unwrap();
+        let args =
+            json::parse(br#"{"base":{"kind":"worktree","worktree":"lane-b","revision":99}}"#)
+                .unwrap();
         let parsed = registry::parse_lane_call("code_arch_diff", &args).unwrap();
-        match runtime.serve("lane-a", "lane-a", "diff2", &control, None, &args, parsed, &targets[0], Some(targets[1].clone())) {
-            CodeOutcome::Answered(e) => assert_eq!(e.error.as_ref().map(|e| e.kind), Some(LaneErrorKind::StaleRevision)),
+        match runtime.serve(
+            "lane-a",
+            "lane-a",
+            "diff2",
+            &control,
+            None,
+            &args,
+            parsed,
+            &targets[0],
+            Some(targets[1].clone()),
+        ) {
+            CodeOutcome::Answered(e) => assert_eq!(
+                e.error.as_ref().map(|e| e.kind),
+                Some(LaneErrorKind::StaleRevision)
+            ),
             CodeOutcome::Deferred => panic!("pinned to a revision that is not served"),
         }
     }
@@ -1451,19 +2134,143 @@ mod code_tests {
     #[test]
     fn worktree_scoping_denies_unknown_and_archived_lanes() {
         let mut engine = Engine::default();
-        let config = FlowConfig { repo: PathBuf::from("/repo"), manifest: PathBuf::from("/repo/Cargo.toml"), package: "p".into(), binary: "p".into(), check_targets: vec!["p".into()], test_scope: TestScope::Workspace, agent_provider: None, delegation_context: "Astra manages".into() };
-        engine.apply(FlowCommand::Create { title: "a".into(), config: config.clone() }, 1).unwrap();
-        engine.apply(FlowCommand::Create { title: "b".into(), config }, 2).unwrap();
+        let config = FlowConfig {
+            repo: PathBuf::from("/repo"),
+            manifest: PathBuf::from("/repo/Cargo.toml"),
+            package: "p".into(),
+            binary: "p".into(),
+            check_targets: vec!["p".into()],
+            test_scope: TestScope::Workspace,
+            agent_provider: None,
+            delegation_context: "Astra manages".into(),
+            resume_token: None,
+        };
+        engine
+            .apply(
+                FlowCommand::Create {
+                    title: "a".into(),
+                    config: config.clone(),
+                },
+                1,
+            )
+            .unwrap();
+        engine
+            .apply(
+                FlowCommand::Create {
+                    title: "b".into(),
+                    config,
+                },
+                2,
+            )
+            .unwrap();
         let ids: Vec<String> = engine.flows.keys().cloned().collect();
         for id in &ids {
-            engine.flows.get_mut(id).unwrap().worktree = Some(PathBuf::from(format!("/wt/{id}")));
+            engine.flows.get_mut(id).unwrap().config.repo = PathBuf::from(format!("/wt/{id}"));
         }
         engine.flows.get_mut(&ids[1]).unwrap().lifecycle = iteration::FlowLifecycle::Archived;
         let host = Host::for_tests(engine);
-        assert_eq!(host.code_target(&ids[0], None).unwrap().root, PathBuf::from(format!("/wt/{}", ids[0])));
-        assert_eq!(host.code_target(&ids[0], Some("nope")).unwrap_err().kind, LaneErrorKind::PermissionDenied);
-        assert_eq!(host.code_target(&ids[0], Some(&ids[1])).unwrap_err().kind, LaneErrorKind::PermissionDenied, "archived lanes are not a target");
-        let parsed = registry::parse_lane_call("code_size", &json::parse(br#"{"worktree":"/wt/other"}"#).unwrap());
+        assert_eq!(
+            host.code_target(&ids[0], None).unwrap().root,
+            PathBuf::from(format!("/wt/{}", ids[0]))
+        );
+        assert_eq!(
+            host.code_target(&ids[0], Some("nope")).unwrap_err().kind,
+            LaneErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            host.code_target(&ids[0], Some(&ids[1])).unwrap_err().kind,
+            LaneErrorKind::PermissionDenied,
+            "archived lanes are not a target"
+        );
+        let parsed = registry::parse_lane_call(
+            "code_size",
+            &json::parse(br#"{"worktree":"/wt/other"}"#).unwrap(),
+        );
         assert_eq!(parsed.unwrap_err().kind, LaneErrorKind::InvalidArguments);
+    }
+
+    #[test]
+    fn create_by_click_yields_fable_lane_n() {
+        let mut engine = Engine::default();
+        let sequence = engine.revision + 1;
+        engine
+            .apply(
+                FlowCommand::Create {
+                    title: crate::iteration::automatic_lane_title("claude", sequence),
+                    config: crate::iteration::default_lane_config(PathBuf::from("/repo"), "claude"),
+                },
+                1,
+            )
+            .unwrap();
+        let flow = engine.flows.values().next().unwrap();
+        assert_eq!(flow.id, format!("flow-{sequence}"));
+        assert_eq!(flow.title, "Claude lane 1");
+        assert_eq!(flow.config.package, "makepad-studio");
+        assert_eq!(flow.config.binary, "studio");
+        assert!(flow.config.check_targets.is_empty());
+        assert_eq!(flow.config.test_scope, TestScope::Workspace);
+    }
+
+    #[test]
+    fn shift_click_routes_to_resume_hash_modal() {
+        use crate::iteration::{provider_lane_action, ProviderLaneAction};
+        assert_eq!(provider_lane_action(false), ProviderLaneAction::CreateFresh);
+        assert_eq!(
+            provider_lane_action(true),
+            ProviderLaneAction::OpenResumeHash
+        );
+    }
+
+    #[test]
+    fn resume_hash_ok_records_token_in_engine_event() {
+        use crate::iteration::lane_create_from_resume_hash;
+        let mut engine = Engine::default();
+        let (title, config) = lane_create_from_resume_hash(
+            PathBuf::from("/repo"),
+            "codex",
+            engine.revision + 1,
+            "  sess-abc123  ",
+        )
+        .unwrap();
+        assert_eq!(title, "Codex lane 1");
+        engine
+            .apply(FlowCommand::Create { title, config }, 1)
+            .unwrap();
+        let flow = engine.flows.values().next().unwrap();
+        assert_eq!(flow.config.resume_token.as_deref(), Some("sess-abc123"));
+        assert_eq!(
+            engine
+                .inspect(&flow.id)
+                .unwrap()
+                .get("status")
+                .and_then(json::Value::as_str),
+            Some("resumed")
+        );
+        let event = engine.events(&flow.id).next().unwrap();
+        let token = event
+            .operation
+            .get("command")
+            .and_then(|command| command.get("args"))
+            .and_then(|args| args.get("resume_token"))
+            .and_then(json::Value::as_str);
+        assert_eq!(token, Some("sess-abc123"));
+    }
+
+    #[test]
+    fn resume_hash_rejects_empty_and_invalid_tokens() {
+        use crate::iteration::{lane_create_from_resume_hash, validate_resume_token};
+        for token in [
+            "",
+            "   ",
+            "has space",
+            "has\ttab",
+            "has\nline",
+            &"x".repeat(129),
+        ] {
+            assert!(validate_resume_token(token).is_err(), "{token:?}");
+            assert!(
+                lane_create_from_resume_hash(PathBuf::from("/repo"), "claude", 1, token).is_err()
+            );
+        }
     }
 }

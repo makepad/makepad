@@ -1,4 +1,5 @@
 pub mod clone;
+mod bounded_read;
 pub mod commit;
 pub mod diff;
 pub mod error;
@@ -22,7 +23,8 @@ pub use commit::{Commit, Signature};
 pub use diff::{
     diff_blobs, diff_lines, diff_lines_bounded, diff_lines_with_limits, diff_trees,
     format_unified_diff, BoundedDiff, DiffLimits, DiffOp, Exhaustion, FileDiff, LineEnding,
-    LineIndex, LineRecord, TreeChange, UnavailableHunk,
+    LineIndex, LineRecord, TreeChange, UnavailableHunk, BoundedTreeDiff, TreeChangeKind,
+    TreeChangeRecord, TreeDiffCounters, TreeDiffExhaustion, TreeDiffLimits,
 };
 pub use error::GitError;
 pub use http_sync::{
@@ -46,3 +48,5 @@ pub use worktree::{
     FileStatus, Status, StatusEntry, StatusOptions,
 };
 pub use worktrees::{LinkedWorktree, WorktreeBranch};
+
+pub mod memory;

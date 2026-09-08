@@ -432,7 +432,7 @@ fn world_source_tools_roundtrip_and_bound() {
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 30);
+    assert_eq!(extra.len(), 31);
     assert!(extra.iter().any(|d| d.name == "world.get_plan"));
     assert!(extra.iter().any(|d| d.name == "world.set_plan"));
     for def in &extra {

@@ -134,10 +134,12 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn history_go(&mut self, delta: i32) {
-        self.cx.platform_ops.push_back(CxOsOp::SystemBrowserHistoryGo {
-            browser_id: self.id.0,
-            delta,
-        });
+        self.cx
+            .platform_ops
+            .push_back(CxOsOp::SystemBrowserHistoryGo {
+                browser_id: self.id.0,
+                delta,
+            });
     }
 
     pub fn close(&mut self) {
@@ -853,7 +855,8 @@ impl Cx {
         if let crate::script::res::CxScriptResourceData::Loaded(data) = &res.data {
             return Some(SharedBytes::from_owned(data.clone()));
         }
-        res.dependency_path.as_deref()
+        res.dependency_path
+            .as_deref()
             .and_then(|path| self.get_dependency(path).ok())
             .map(SharedBytes::from_owned)
     }
@@ -898,7 +901,16 @@ impl Cx {
     /// GL maps clip-space z/w from [-1, 1] to window depth [0, 1].
     /// Metal, Vulkan and D3D use [0, 1] clip depth directly.
     pub fn clip_depth_scale_bias(&self) -> (f32, f32) {
-        if cfg!(all(not(headless), not(use_vulkan), any(target_arch = "wasm32", target_os = "linux", target_os = "android", target_env = "ohos"))) {
+        if cfg!(all(
+            not(headless),
+            not(use_vulkan),
+            any(
+                target_arch = "wasm32",
+                target_os = "linux",
+                target_os = "android",
+                target_env = "ohos"
+            )
+        )) {
             (0.5, 0.5)
         } else {
             (1.0, 0.0)
@@ -918,15 +930,18 @@ impl Cx {
     }
 
     pub fn xr_advertise_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push_back(CxOsOp::XrAdvertiseAnchor(anchor));
+        self.platform_ops
+            .push_back(CxOsOp::XrAdvertiseAnchor(anchor));
     }
 
     pub fn xr_set_local_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push_back(CxOsOp::XrSetLocalAnchor(anchor));
+        self.platform_ops
+            .push_back(CxOsOp::XrSetLocalAnchor(anchor));
     }
 
     pub fn xr_set_local_floor(&mut self, floor_y: f32) {
-        self.platform_ops.push_back(CxOsOp::XrSetLocalFloor(floor_y));
+        self.platform_ops
+            .push_back(CxOsOp::XrSetLocalFloor(floor_y));
     }
 
     pub fn xr_discover_anchor(&mut self, id: u8) {
@@ -1077,12 +1092,15 @@ impl Cx {
             self.ime_area = area;
             let rect = area.rect(self);
             self.publish_hosted_ime(crate::ime::HostedImeState {
-                visible: !config.is_read_only && config.soft_keyboard.input_mode != crate::ime::InputMode::None,
+                visible: !config.is_read_only
+                    && config.soft_keyboard.input_mode != crate::ime::InputMode::None,
                 input_mode: config.soft_keyboard.input_mode,
                 return_key: config.soft_keyboard.return_key_type,
                 multiline: config.is_multiline,
-                x: rect.pos.x, y: rect.pos.y,
-                width: rect.size.x, height: rect.size.y,
+                x: rect.pos.x,
+                y: rect.pos.y,
+                width: rect.size.x,
+                height: rect.size.y,
             });
             self.platform_ops
                 .push_back(CxOsOp::ShowTextIME(area, cursor_rect, config));
@@ -1115,11 +1133,15 @@ impl Cx {
     }
 
     pub fn hosted_ime_state(&self) -> crate::ime::HostedImeState {
-        self.get_global_ref::<crate::ime::HostedImeState>().cloned().unwrap_or_default()
+        self.get_global_ref::<crate::ime::HostedImeState>()
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn publish_hosted_ime(&mut self, state: crate::ime::HostedImeState) {
-        if self.get_global_ref::<crate::ime::HostedImeState>() == Some(&state) { return; }
+        if self.get_global_ref::<crate::ime::HostedImeState>() == Some(&state) {
+            return;
+        }
         if self.in_makepad_studio {
             Self::send_studio_message(crate::studio::AppToStudio::Custom(state.to_json()));
         }
@@ -1133,11 +1155,7 @@ impl Cx {
     /// physically fixed: inner/outer size, safe-area insets, and native chrome
     /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
     /// this can be called from inside normal event/action handlers.
-    pub fn set_window_dpi_override(
-        &mut self,
-        window_id: WindowId,
-        dpi_override: Option<f64>,
-    ) {
+    pub fn set_window_dpi_override(&mut self, window_id: WindowId, dpi_override: Option<f64>) {
         let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
         let window = &mut self.windows[window_id];
         let current_dpi = window.effective_dpi_factor();
@@ -1254,12 +1272,12 @@ impl Cx {
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
         {
-        self.platform_ops.iter().for_each(|p| {
-            if let CxOsOp::StartDragging { .. } = p {
-                panic!("start drag twice");
-            }
-        });
-        self.platform_ops.push_back(CxOsOp::StartDragging(items));
+            self.platform_ops.iter().for_each(|p| {
+                if let CxOsOp::StartDragging { .. } = p {
+                    panic!("start drag twice");
+                }
+            });
+            self.platform_ops.push_back(CxOsOp::StartDragging(items));
         }
     }
 
@@ -1513,6 +1531,18 @@ impl Cx {
         cxpass.repaint_requested = true;
     }
 
+    /// An external grab/input-frame request is work even for an idle, hidden
+    /// window. Repaint its pass tree without invalidating tweaked draw buffers.
+    /// Standalone macOS first records any already-pending Draw, then submits
+    /// this window before later input, without advancing NextFrame. Other
+    /// backends service this work on their ordinary next-render path.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
+        if let Some(pass) = self.windows[window_id].main_pass_id {
+            self.repaint_pass_and_child_passes(pass);
+        }
+    }
+
     /// Parent `child` under `parent` for painting order on behalf of
     /// `attached_by`: the draw list being recorded, whose draw calls consume
     /// the child's output. That list is remembered with its current redraw
@@ -1525,8 +1555,7 @@ impl Cx {
         parent: DrawPassId,
         attached_by: Option<DrawListId>,
     ) {
-        let attached_by =
-            attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
+        let attached_by = attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
         let cxpass = &mut self.passes[child];
         cxpass.parent = CxDrawPassParent::DrawPass(parent);
         cxpass.attached_by = attached_by;
@@ -1892,11 +1921,12 @@ impl Cx {
     }
 
     pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
-        self.platform_ops.push_back(CxOsOp::UpdateCameraNativePreview {
-            video_id,
-            area,
-            visible,
-        });
+        self.platform_ops
+            .push_back(CxOsOp::UpdateCameraNativePreview {
+                video_id,
+                area,
+                visible,
+            });
     }
 
     pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
@@ -1906,14 +1936,16 @@ impl Cx {
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push_back(CxOsOp::BeginVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::BeginVideoPlayback(video_id));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
         // Last-wins coalescing: one frame should apply a single play/pause
         // intent even though the queue is FIFO.
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push_back(CxOsOp::PauseVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::PauseVideoPlayback(video_id));
     }
 
     pub fn resume_video_playback(&mut self, video_id: LiveId) {
@@ -1924,7 +1956,8 @@ impl Cx {
 
     pub fn mute_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_mute(video_id);
-        self.platform_ops.push_back(CxOsOp::MuteVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::MuteVideoPlayback(video_id));
     }
 
     pub fn unmute_video_playback(&mut self, video_id: LiveId) {
@@ -2022,7 +2055,8 @@ impl Cx {
     /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
         self.file_dialogs.begin(&dialog);
-        self.platform_ops.push_back(CxOsOp::SelectFileDialog(dialog));
+        self.platform_ops
+            .push_back(CxOsOp::SelectFileDialog(dialog));
     }
 
     /// Set the maximum bytes accepted for one virtual file and for one
@@ -2103,17 +2137,30 @@ mod stale_window_tests {
         let window = WindowHandle::new(&mut cx);
         let window_id = window.window_id();
         cx.windows[window_id].is_created = true;
-        let native = crate::event::WindowGeom { dpi_factor: 2.0, inner_size: dvec2(930.0, 848.0), ..Default::default() };
-        let first = cx.windows.stdin_apply_native_geom(window_id, native.clone());
+        let native = crate::event::WindowGeom {
+            dpi_factor: 2.0,
+            inner_size: dvec2(930.0, 848.0),
+            ..Default::default()
+        };
+        let first = cx
+            .windows
+            .stdin_apply_native_geom(window_id, native.clone());
         assert_eq!(first.new_geom.inner_size, dvec2(930.0, 848.0));
         cx.windows[window_id].dpi_override = Some(1.6);
         let again = cx.windows.stdin_apply_native_geom(window_id, native);
-        assert!((again.new_geom.inner_size.x - 1162.5).abs() < 1e-9, "{:?}", again.new_geom.inner_size);
+        assert!(
+            (again.new_geom.inner_size.x - 1162.5).abs() < 1e-9,
+            "{:?}",
+            again.new_geom.inner_size
+        );
         assert!((again.new_geom.inner_size.y - 1060.0).abs() < 1e-9);
         assert_eq!(again.new_geom.dpi_factor, 1.6);
         let mut pos = dvec2(100.0, 100.0);
         cx.dpi_override_scale(&mut pos, window_id);
-        assert!((pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9, "{pos:?}");
+        assert!(
+            (pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9,
+            "{pos:?}"
+        );
         // The host's point (900, 800) is still inside the window: containment is in host points.
         let (hit, origin) = cx.windows.window_id_contains(dvec2(900.0, 800.0));
         assert_eq!(hit, window_id);
@@ -2276,6 +2323,90 @@ mod tests {
 }
 
 impl Cx {
+    /// Drain completed tickets without waiting. Call on Event::Signal, also
+    /// when no pass needs repainting. Returned Arc payloads belong to the
+    /// caller and are no longer charged to the platform's result budget.
+    pub fn try_take_texture_readbacks(&mut self) -> Vec<crate::texture::TextureReadback> {
+        self.take_texture_readback_results(false)
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect()
+    }
+
+    pub(crate) fn take_texture_readback_results(
+        &mut self,
+        legacy: bool,
+    ) -> Vec<(TextureId, crate::texture::TextureReadback)> {
+        use crate::texture::ReadbackError;
+        if self.textures.1.readbacks.slots.is_empty() {
+            return Vec::new();
+        }
+        self.validate_pending_readbacks();
+        self.poll_texture_readbacks();
+        let state = &mut self.textures.1.readbacks;
+        let mut results = Vec::new();
+        let mut index = 0;
+        while index < state.slots.len() {
+            let slot = &mut state.slots[index];
+            if slot.legacy != legacy {
+                index += 1;
+                continue;
+            }
+            if let Some(receive) = &slot.receive {
+                match receive.try_recv() {
+                    Ok(result) => {
+                        slot.result.data = result;
+                        slot.receive = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        slot.result.data = Err(ReadbackError::DeviceLost);
+                        slot.receive = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if !slot.pending && slot.receive.is_none() {
+                let mut slot = state.slots.remove(index);
+                state.reserved_bytes -= slot.reserved_bytes;
+                if slot.cancelled {
+                    slot.result.data = Err(ReadbackError::Cancelled);
+                }
+                results.push((slot.texture.texture_id(), slot.result));
+            } else {
+                index += 1;
+            }
+        }
+        results
+    }
+
+    /// Cancel publication. An in-flight allocation stays pinned until its
+    /// copy/lease finishes; the ticket then yields Cancelled instead of bytes.
+    pub fn cancel_texture_readback(&mut self, ticket: crate::texture::ReadbackTicket) -> bool {
+        let Some(slot) = self
+            .textures
+            .1
+            .readbacks
+            .slots
+            .iter_mut()
+            .find(|slot| slot.result.ticket == ticket)
+        else {
+            return false;
+        };
+        slot.cancelled = true;
+        if slot.pending {
+            slot.pending = false;
+        }
+        crate::thread::SignalToUI::set_ui_signal();
+        true
+    }
+
+    pub fn texture_readback_usage(&self) -> crate::texture::TextureReadbackUsage {
+        crate::texture::TextureReadbackUsage {
+            requests: self.textures.1.readbacks.slots.len(),
+            reserved_bytes: self.textures.1.readbacks.reserved_bytes,
+        }
+    }
+
     /// Last submitted renderer serial. Recording a Draw event does not advance
     /// this value. See `Texture` for backend units and ordering guarantees.
     pub fn frame_submission_serial(&self) -> u64 {

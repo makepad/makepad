@@ -1,15 +1,16 @@
 //! Native overview of real iteration state. The worker supplies immutable
 //! snapshots; this widget performs no filesystem, process or network work.
+use crate::canvas_draw::DrawCanvasCard;
 use crate::iteration::{Artifact, BuildPhase, Engine, Flow, FlowLifecycle, RunRole, TodoState};
 use crate::iteration_host_view::IterationRunView;
 use crate::{
-    canvas::CanvasCamera,
     canvas_input::{remap_event, sync_handled},
+    presentation::Camera as CanvasCamera,
 };
-use crate::canvas_draw::DrawCanvasCard;
 use makepad_terminal::widget::{MpTerm, TerminalPresentationFrame};
 use makepad_widgets::image::DrawImage;
 use makepad_widgets::makepad_platform::{event::TouchState, thread::lock_from_ui};
+use makepad_widgets::popup_menu::PopupMenu;
 use makepad_widgets::tip::TipAction;
 use makepad_widgets::*;
 use std::{
@@ -30,6 +31,7 @@ script_mod! {
         ink: theme.color_text
         muted: mix(theme.color_bg_app, theme.color_text, 0.57)
         accent: theme.color_focus
+        agent_menu: PopupMenu{width: 500 menu_item: PopupMenuItem{draw_text +: {text_style: theme.font_regular{font_size: 10}}}}
         draw_card +: {shadow_color: #0002}
         draw_title +: {text_style: theme.font_regular{font_size: 9.5} color: theme.color_text}
         draw_text +: {text_style: theme.font_regular{font_size: 9} color: theme.color_text}
@@ -38,8 +40,18 @@ script_mod! {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum IterationViewAction {
+    DeleteFlow {
+        flow: String,
+    },
+    LaneMenu {
+        flow: String,
+    },
     SelectFlow {
         id: String,
+    },
+    SelectTerminal {
+        flow: String,
+        session: Option<String>,
     },
     ConnectTerminal {
         flow: String,
@@ -305,6 +317,18 @@ pub struct StudioIterationView {
     terminals_enabled: bool,
     #[rust]
     connection_labels: BTreeMap<String, String>,
+    #[live]
+    agent_menu: PopupMenu,
+    #[rust]
+    agent_menu_flow: Option<String>,
+    #[rust]
+    agent_menu_items: Vec<(String, String)>,
+    #[rust]
+    agent_menu_selected: usize,
+    #[rust]
+    agent_menu_offset: usize,
+    #[rust]
+    agent_menu_rows: usize,
     #[rust]
     apps: BTreeMap<String, LiveHost>,
     #[rust]
@@ -527,6 +551,28 @@ fn push_item(
 }
 
 impl StudioIterationView {
+    pub fn set_agent_menu(&mut self, cx: &mut Cx, items: Vec<(String, String)>) {
+        if self.agent_menu_items != items {
+            self.agent_menu_items = items;
+            self.agent_menu_selected = self.agent_menu_selected.min(self.agent_menu_items.len());
+            self.area.redraw(cx);
+        }
+    }
+    pub fn open_agent_menu(&mut self, cx: &mut Cx, flow: String) {
+        self.agent_menu_flow = Some(flow);
+        self.agent_menu_selected = 0;
+        self.agent_menu_offset = 0;
+        self.agent_menu.tree_parent = self.uid;
+        self.agent_menu.init_select_item(LiveId(0).into());
+        cx.set_key_focus(self.area);
+        cx.sweep_lock(self.area);
+        self.area.redraw(cx);
+    }
+    fn close_agent_menu(&mut self, cx: &mut Cx) {
+        self.agent_menu_flow = None;
+        cx.sweep_unlock(self.area);
+        self.area.redraw(cx);
+    }
     pub fn set_connection_labels(&mut self, cx: &mut Cx, labels: BTreeMap<String, String>) {
         if self.connection_labels != labels {
             self.connection_labels = labels;
@@ -1641,16 +1687,6 @@ impl StudioIterationView {
                 }
             }
         }
-        if let Some(error) = &flow.workspace_error {
-            push_item(
-                &mut lane,
-                "workspace-error".into(),
-                "Workspace needs attention".into(),
-                wrap(error, 2, text_columns),
-                None,
-                true,
-            );
-        }
         if let Some(job) = &flow.job {
             if !matches!(job.phase, BuildPhase::Succeeded | BuildPhase::Superseded)
                 && self.engine.as_ref().is_some_and(|engine| {
@@ -1700,7 +1736,6 @@ impl StudioIterationView {
                 .iter()
                 .any(|run| run.role == RunRole::AiTest && !run.closed)
             && !awaiting_launch
-            && flow.worktree.is_some()
             && flow.prepared.as_ref().is_some_and(|prepared| {
                 prepared.source_revision == flow.source_revision
                     && prepared.requirements_revision == flow.requirements_revision
@@ -2740,12 +2775,15 @@ impl StudioIterationView {
 
     fn action_tip(&self, action: &IterationViewAction) -> Option<&'static str> {
         Some(match action {
-            IterationViewAction::ConnectTerminal { .. } => "Connect to a running Studio terminal",
+            IterationViewAction::ConnectTerminal { .. }
+            | IterationViewAction::SelectTerminal { .. } => "Running agent",
             IterationViewAction::ToggleNavigator { .. } => "Navigate lane history",
             IterationViewAction::StartFlow { .. } => "Resume this lane",
             IterationViewAction::StopFlow { .. } => "Stop this lane and save its conversation",
             IterationViewAction::ToggleSplit { .. } => "Split lane",
             IterationViewAction::SplitFlow { .. } => "Split here",
+            IterationViewAction::DeleteFlow { .. } => "Delete lane",
+            IterationViewAction::LaneMenu { .. } => "Lane menu",
             IterationViewAction::ArchiveFlow { .. } => "Archive this lane",
             IterationViewAction::ClearHistory { .. } => "Clear lane history",
             IterationViewAction::DeleteRecordings { .. } => "Delete this lane’s video history",
@@ -2864,6 +2902,11 @@ impl StudioIterationView {
                 &[(5., 5.), (15., 13.)],
                 &[(5., 11.), (15., 3.)],
             ],
+            "Menu" => &[
+                &[(4., 4.), (12., 4.)],
+                &[(4., 8.), (12., 8.)],
+                &[(4., 12.), (12., 12.)],
+            ],
             "Archive" => &[
                 &[(1., 2.), (15., 2.), (15., 5.), (1., 5.), (1., 2.)],
                 &[(3., 5.), (3., 14.), (13., 14.), (13., 5.)],
@@ -2874,7 +2917,7 @@ impl StudioIterationView {
                 &[(5., 6.), (11., 12.)],
                 &[(8., 15.), (15., 15.)],
             ],
-            "Clear" => &[
+            "Delete lane" => &[
                 &[(2., 4.), (14., 4.)],
                 &[(6., 4.), (6., 1.), (10., 1.), (10., 4.)],
                 &[(4., 4.), (5., 14.), (11., 14.), (12., 4.)],
@@ -3499,6 +3542,11 @@ impl WidgetNode for StudioIterationView {
         }
     }
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if self.agent_menu_flow.is_some() {
+            for (id, item) in self.agent_menu.item_refs() {
+                visit(id, item);
+            }
+        }
         for (id, host) in &self.terminals {
             visit(LiveId::from_str(id), host.widget.clone());
         }
@@ -3581,14 +3629,15 @@ impl Widget for StudioIterationView {
                     grip_height,
                 ),
             );
-            let title = self.lanes[index].title.clone();
+            let title = self
+                .connection_labels
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| self.lanes[index].title.clone());
             let subtitle = if self.cut_flow.as_ref() == Some(&id) {
                 "Choose split point · Esc".to_owned()
             } else {
-                self.connection_labels
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| self.lanes[index].subtitle.clone())
+                self.lanes[index].subtitle.clone()
             };
             let items = self.lanes[index].items.clone();
             if self.follow_tail.contains(&id) {
@@ -3629,45 +3678,16 @@ impl Widget for StudioIterationView {
                 .as_ref()
                 .and_then(|engine| engine.flows.get(&id))
                 .is_some_and(|flow| flow.lifecycle == FlowLifecycle::Stopped);
-            if !self.is_archived(&id) {
-                for (button, label, action) in [
-                    (
-                        rect(x + width - 146.0, 5.0, 22.0, 22.0),
-                        "Erase",
-                        IterationViewAction::ClearHistory { flow: id.clone() },
-                    ),
-                    (
-                        rect(x + width - 122.0, 5.0, 22.0, 22.0),
-                        "Connect",
-                        IterationViewAction::ConnectTerminal { flow: id.clone() },
-                    ),
-                    (
-                        rect(x + width - 98.0, 5.0, 22.0, 22.0),
-                        if stopped { "Resume" } else { "Stop" },
-                        if stopped {
-                            IterationViewAction::StartFlow { flow: id.clone() }
-                        } else {
-                            IterationViewAction::StopFlow { flow: id.clone() }
-                        },
-                    ),
-                    (
-                        rect(x + width - 74.0, 5.0, 22.0, 22.0),
-                        "Split",
-                        IterationViewAction::ToggleSplit { flow: id.clone() },
-                    ),
-                    (
-                        rect(x + width - 50.0, 5.0, 22.0, 22.0),
-                        "Archive",
-                        IterationViewAction::ArchiveFlow { flow: id.clone() },
-                    ),
-                    (
-                        rect(x + width - 26.0, 5.0, 22.0, 22.0),
-                        "Clear",
-                        IterationViewAction::DeleteRecordings { flow: id.clone() },
-                    ),
-                ] {
-                    self.frame_button(cx, button, label, action, self.viewport);
-                }
+            let buttons = lane_header_buttons(&id, stopped, self.is_archived(&id));
+            let count = buttons.len();
+            for (index, (label, action)) in buttons.into_iter().enumerate() {
+                let button = rect(
+                    x + width - 26.0 - (count - 1 - index) as f64 * 24.0,
+                    5.0,
+                    22.0,
+                    22.0,
+                );
+                self.frame_button(cx, button, label, action, self.viewport);
             }
             let clip = self.lane_clip(index);
             let app_world = self.app_rect(index);
@@ -3876,10 +3896,105 @@ impl Widget for StudioIterationView {
         cx.pop_clip_rect();
         self.draw_floating_trays(cx);
         self.draw_pixel_view(cx);
+        if let Some(flow) = &self.agent_menu_flow {
+            if let Some(anchor) = self.targets.iter().find(|target| matches!(&target.action, IterationViewAction::ConnectTerminal { flow: id } if id == flow)).map(|target| target.rect) {
+                self.agent_menu_rows = ((cx.current_pass_size().y - 100.0) / 32.0).max(1.0) as usize;
+                self.agent_menu_offset = self.agent_menu_offset.min(self.agent_menu_items.len().saturating_sub(self.agent_menu_rows));
+                self.agent_menu.begin(cx);
+                for (index, (_, label)) in self.agent_menu_items.iter().enumerate().skip(self.agent_menu_offset).take(self.agent_menu_rows) {
+                    self.agent_menu.draw_item(cx, LiveId(index as u64).into(), label);
+                }
+                self.draw_shape.color = self.edge;
+                self.draw_shape.draw_walk(cx, Walk { height: Size::Fixed(1.0), ..Walk::fill() });
+                self.agent_menu.draw_item(cx, LiveId(self.agent_menu_items.len() as u64).into(), "New terminal");
+                let size = cx.current_pass_size();
+                let menu_height = cx.turtle().used_height() + 12.0;
+                let position = dvec2(anchor.pos.x.min((size.x - 500.0).max(0.0)), (anchor.pos.y + anchor.size.y).min((size.y - menu_height).max(0.0)));
+                self.agent_menu.end(cx, self.area, position - self.area.rect(cx).pos);
+            }
+        }
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(flow) = self.agent_menu_flow.clone() {
+            use makepad_widgets::popup_menu::PopupMenuAction;
+            let mut selected = None;
+            self.agent_menu
+                .handle_event_with(cx, event, self.area, &mut |_, action| {
+                    if let PopupMenuAction::WasSelected(id) = action {
+                        selected = Some(id.0 .0 as usize);
+                    }
+                });
+            if let Event::KeyDown(key) = event {
+                match key.key_code {
+                    KeyCode::Escape => self.close_agent_menu(cx),
+                    KeyCode::ArrowUp => {
+                        self.agent_menu_selected = self.agent_menu_selected.saturating_sub(1)
+                    }
+                    KeyCode::ArrowDown => {
+                        self.agent_menu_selected =
+                            (self.agent_menu_selected + 1).min(self.agent_menu_items.len())
+                    }
+                    KeyCode::ReturnKey => selected = Some(self.agent_menu_selected),
+                    _ => {}
+                }
+                if self.agent_menu_selected < self.agent_menu_items.len() {
+                    if self.agent_menu_selected < self.agent_menu_offset {
+                        self.agent_menu_offset = self.agent_menu_selected;
+                    }
+                    if self.agent_menu_selected
+                        >= self.agent_menu_offset + self.agent_menu_rows.max(1)
+                    {
+                        self.agent_menu_offset =
+                            self.agent_menu_selected + 1 - self.agent_menu_rows.max(1);
+                    }
+                }
+                self.agent_menu
+                    .init_select_item(LiveId(self.agent_menu_selected as u64).into());
+                self.area.redraw(cx);
+            }
+            if let Event::Scroll(scroll) = event {
+                let steps = (scroll.scroll.y.abs() / 20.0).ceil().max(1.0) as usize;
+                if scroll.scroll.y > 0.0 {
+                    self.agent_menu_offset = (self.agent_menu_offset + steps).min(
+                        self.agent_menu_items
+                            .len()
+                            .saturating_sub(self.agent_menu_rows),
+                    );
+                } else if scroll.scroll.y < 0.0 {
+                    self.agent_menu_offset = self.agent_menu_offset.saturating_sub(steps);
+                }
+                self.area.redraw(cx);
+            }
+            if let Some(index) = selected {
+                let session = self.agent_menu_items.get(index).map(|(key, _)| key.clone());
+                cx.widget_action(
+                    self.uid,
+                    IterationViewAction::SelectTerminal { flow, session },
+                );
+                self.close_agent_menu(cx);
+            } else if let Event::MouseDown(pointer) = event {
+                if !self.agent_menu.menu_contains_pos(cx, pointer.abs) {
+                    self.close_agent_menu(cx);
+                }
+            } else if matches!(event, Event::KeyFocus(e) if e.prev == self.area && e.focus != self.area)
+            {
+                self.close_agent_menu(cx);
+            }
+            if matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseUp(_)
+                    | Event::MouseMove(_)
+                    | Event::Scroll(_)
+                    | Event::KeyDown(_)
+                    | Event::KeyUp(_)
+                    | Event::TextInput(_)
+            ) {
+                return;
+            }
+        }
         if let Event::MouseDown(pointer) = event {
             if self.cut_flow.is_some()
                 && self.split_at(pointer.abs).is_none()
@@ -4638,4 +4753,70 @@ fn blend_color(a: Vec4f, b: Vec4f, t: f32) -> Vec4f {
         a.z + (b.z - a.z) * t,
         1.0,
     )
+}
+
+fn lane_header_buttons(
+    flow: &str,
+    stopped: bool,
+    archived: bool,
+) -> Vec<(&'static str, IterationViewAction)> {
+    let flow = flow.to_owned();
+    let mut buttons = vec![("Menu", IterationViewAction::LaneMenu { flow: flow.clone() })];
+    if !archived {
+        buttons.extend([
+            (
+                "Connect",
+                IterationViewAction::ConnectTerminal { flow: flow.clone() },
+            ),
+            (
+                if stopped { "Resume" } else { "Stop" },
+                if stopped {
+                    IterationViewAction::StartFlow { flow: flow.clone() }
+                } else {
+                    IterationViewAction::StopFlow { flow: flow.clone() }
+                },
+            ),
+            (
+                "Split",
+                IterationViewAction::ToggleSplit { flow: flow.clone() },
+            ),
+            (
+                "Archive",
+                IterationViewAction::ArchiveFlow { flow: flow.clone() },
+            ),
+        ]);
+    }
+    buttons.push(("Delete lane", IterationViewAction::DeleteFlow { flow }));
+    buttons
+}
+
+#[cfg(test)]
+mod lane_delete_tests {
+    use super::*;
+    #[test]
+    fn lane_header_trash_deletes_lane_and_preserves_archive() {
+        let buttons = lane_header_buttons("flow-1", false, false);
+        assert_eq!(
+            buttons.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["Menu", "Connect", "Stop", "Split", "Archive", "Delete lane"]
+        );
+        assert!(matches!(
+            buttons.last().unwrap().1,
+            IterationViewAction::DeleteFlow { .. }
+        ));
+        assert!(!buttons
+            .iter()
+            .any(|(_, action)| matches!(action, IterationViewAction::DeleteRecordings { .. })));
+        assert!(matches!(
+            lane_header_buttons("flow-1", true, false)[2].1,
+            IterationViewAction::StartFlow { .. }
+        ));
+        assert_eq!(
+            lane_header_buttons("flow-1", true, true)
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>(),
+            ["Menu", "Delete lane"]
+        );
+    }
 }

@@ -6,6 +6,7 @@
 //! only as a slow fallback for changes no watcher reported. The worker is
 //! the single authority for `FileSnapshot::revision`.
 
+use makepad_code_editor::{document::PreparedDocument, session::PreparedView, CodeDocument, CodeSession};
 use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions, ThreadSpawner};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -37,9 +38,60 @@ pub struct FileSnapshot {
     pub observed: Option<(u64, u64)>,
 }
 
+/// The editor's tokenised document and its unwrapped layout for a
+/// snapshot's text, prepared on this worker so the registry admits a cold
+/// document without tokenising on the UI thread
+/// (`DocumentRegistry::apply_prepared`, `CodeDocument::from_prepared`).
+#[derive(Clone)]
+pub struct PreparedSnapshot {
+    pub document: PreparedDocument,
+    pub view: PreparedView,
+    /// FileSnapshot revision this preparation was built for. Zero until the
+    /// worker stamps it; admission refuses a nonzero mismatch.
+    revision: u64,
+}
+
+impl PreparedSnapshot {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+}
+
+impl std::fmt::Debug for PreparedSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedSnapshot")
+            .field("digest", &self.document.digest())
+            .field("lines", &self.document.as_text().as_lines().len())
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
+/// Tokenise and lay out a text (worker-side; the UI only attaches it).
+pub fn prepare_snapshot(text: &str) -> PreparedSnapshot {
+    let document = CodeDocument::prepare(text.into());
+    let view = CodeSession::prepare_view(&document, None);
+    PreparedSnapshot { document, view, revision: 0 }
+}
+
+/// A snapshot with the editor state prepared for its text (`None` for an
+/// unreadable file).
+#[derive(Clone, Debug)]
+pub struct Delivery {
+    pub snapshot: Arc<FileSnapshot>,
+    pub prepared: Option<PreparedSnapshot>,
+}
+
 enum Command {
     Desired(Arc<Vec<PathBuf>>),
     Notify { path: PathBuf, epoch: u64, seq: u64 },
+    /// Re-read and re-prepare even if the last contents match: used when
+    /// admission refused a stale or mismatched preparation.
+    Refresh(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +113,7 @@ struct SaveRequest {
 
 pub struct DocumentWorker {
     commands: SyncSender<Command>,
-    snapshots: Receiver<Arc<FileSnapshot>>,
+    snapshots: Receiver<Delivery>,
     save_commands: SyncSender<SaveRequest>,
     save_results: Receiver<SaveResult>,
     pending_saves: VecDeque<SaveRequest>,
@@ -72,6 +124,7 @@ pub struct DocumentWorker {
     retry: bool,
     /// Notifications not yet admitted to the worker, latest (epoch, seq) per path.
     pending_notify: BTreeMap<PathBuf, (u64, u64)>,
+    pending_refresh: BTreeSet<PathBuf>,
     stop: Arc<AtomicBool>,
     task: TaskHandle<()>,
 }
@@ -90,7 +143,7 @@ impl DocumentWorker {
             let (commands, rx) = mpsc::sync_channel(MAX_PENDING_COMMANDS);
             // One slot per watchable document: a full watch set publishes in
             // one wake instead of dripping four snapshots per 50 ms timeout.
-            let (tx, snapshots) = mpsc::sync_channel(MAX_DOCUMENTS);
+            let (tx, snapshots) = mpsc::sync_channel::<Delivery>(MAX_DOCUMENTS);
             let (save_commands, save_rx) = mpsc::sync_channel(MAX_PENDING_SAVES);
             let (save_tx, save_results) = mpsc::sync_channel(MAX_PENDING_SAVES);
             let stop = Arc::new(AtomicBool::new(false));
@@ -103,7 +156,7 @@ impl DocumentWorker {
                 commands, snapshots, save_commands, save_results,
                 pending_saves: VecDeque::new(), outstanding_saves: BTreeMap::new(), next_save_id: 1,
                 desired: BTreeSet::new(), identities: BTreeMap::new(), retry: false,
-                pending_notify: BTreeMap::new(), stop, task,
+                pending_notify: BTreeMap::new(), pending_refresh: BTreeSet::new(), stop, task,
             })
         }
     }
@@ -149,8 +202,23 @@ impl DocumentWorker {
     pub fn unwatch(&mut self, path: &Path) {
         if self.desired.remove(path) {
             self.identities.remove(path);
+            self.pending_notify.remove(path);
+            self.pending_refresh.remove(path);
             self.retry = true; self.retry_commands();
         }
+    }
+
+    /// Force a re-read and re-prepare of an opened path. Admission uses this
+    /// after refusing a mismatched preparation so the worker, not the UI
+    /// thread, produces the next attempt.
+    pub fn refresh(&mut self, path: &Path) {
+        let known = self.desired.contains(path) || self.identities.values().any(|p| p == path)
+            || self.identities.contains_key(path);
+        if !known {
+            return;
+        }
+        self.pending_refresh.insert(path.to_owned());
+        self.retry_commands();
     }
 
     /// Queue an explicit save of an opened file. Admission, queue retry, and
@@ -226,21 +294,43 @@ impl DocumentWorker {
                 Err(TrySendError::Disconnected(_)) => { self.pending_notify.clear(); break; },
             }
         }
+        while let Some(path) = self.pending_refresh.pop_first() {
+            match self.commands.try_send(Command::Refresh(path.clone())) {
+                Ok(()) => {},
+                Err(TrySendError::Full(_)) => { self.pending_refresh.insert(path); break; },
+                Err(TrySendError::Disconnected(_)) => { self.pending_refresh.clear(); break; },
+            }
+        }
     }
 
-    pub fn poll(&mut self) -> Vec<Arc<FileSnapshot>> {
+    /// Drain the snapshot channel: retry outstanding saves, drop paths no
+    /// longer desired, and keep only the latest delivery per requested path.
+    fn take_deliveries(&mut self) -> Vec<Delivery> {
         self.retry_commands();
         self.retry_saves();
-        let mut latest = BTreeMap::new();
-        while let Ok(snapshot) = self.snapshots.try_recv() {
-            if self.desired.contains(&snapshot.requested_path) {
-                self.identities.insert(snapshot.requested_path.clone(), snapshot.path.clone());
-                latest.insert(snapshot.requested_path.clone(), snapshot);
+        let mut latest: BTreeMap<PathBuf, Delivery> = BTreeMap::new();
+        while let Ok(delivery) = self.snapshots.try_recv() {
+            if !self.desired.contains(&delivery.snapshot.requested_path) {
+                continue;
             }
+            self.identities.insert(
+                delivery.snapshot.requested_path.clone(),
+                delivery.snapshot.path.clone(),
+            );
+            latest.insert(delivery.snapshot.requested_path.clone(), delivery);
         }
         latest.into_values().collect()
     }
 
+    /// The snapshots alone (the prepared editor state is dropped): the
+    /// registry then tokenises on admission. Hosts use `poll_prepared`.
+    pub fn poll(&mut self) -> Vec<Arc<FileSnapshot>> {
+        self.take_deliveries().into_iter().map(|d| d.snapshot).collect()
+    }
+    /// Every delivered snapshot with its prepared editor state.
+    pub fn poll_prepared(&mut self) -> Vec<Delivery> {
+        self.take_deliveries()
+    }
     pub fn request_stop(&self) { self.stop.store(true, Ordering::Relaxed); }
     pub fn is_finished(&self) -> bool { self.task.is_finished() }
     pub fn watched_paths(&self) -> impl Iterator<Item = &PathBuf> { self.desired.iter() }
@@ -390,12 +480,12 @@ fn save_file(path: &Path, expected: &str, text: &str, request_id: u64, stop: &At
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run(
-    rx: Receiver<Command>, tx: SyncSender<Arc<FileSnapshot>>,
+    rx: Receiver<Command>, tx: SyncSender<Delivery>,
     save_rx: Receiver<SaveRequest>, save_tx: SyncSender<SaveResult>, stop: Arc<AtomicBool>,
     fallback: Duration,
 ) {
     let mut watches: BTreeMap<PathBuf, Watch> = BTreeMap::new();
-    let mut pending: BTreeMap<PathBuf, Arc<FileSnapshot>> = BTreeMap::new();
+    let mut pending: BTreeMap<PathBuf, Delivery> = BTreeMap::new();
     let mut revision = 0u64;
     let mut next_scan = Instant::now();
     let mut pending_results = VecDeque::new();
@@ -423,6 +513,14 @@ fn run(
                     for path in paths.iter().take(MAX_DOCUMENTS) { watches.entry(path.clone()).or_default(); }
                     next_scan = Instant::now();
                 }
+                Command::Refresh(path) => {
+                    for (requested, watch) in &mut watches {
+                        if requested == &path || watch.canonical.as_ref() == Some(&path) {
+                            watch.last = None;
+                        }
+                    }
+                    next_scan = Instant::now();
+                }
                 Command::Notify { path, epoch, seq } => {
                     if stop.load(Ordering::Relaxed) { return; }
                     // The notified path may be the requested spelling or the
@@ -438,12 +536,13 @@ fn run(
                         let reading = read_file(requested, watch);
                         if watch.last.as_ref() != Some(&reading) {
                             revision += 1;
-                            pending.insert(requested.clone(), Arc::new(FileSnapshot {
+                            let prepared = reading.text.as_deref().map(|t| prepare_snapshot(t).with_revision(revision));
+                            pending.insert(requested.clone(), Delivery { snapshot: Arc::new(FileSnapshot {
                                 requested_path: requested.clone(),
                                 path: watch.canonical.clone().unwrap_or_else(|| requested.clone()),
                                 revision, text: reading.text.clone(), error: reading.error.clone(),
                                 observed: Some((epoch, seq)),
-                            }));
+                            }), prepared });
                             watch.last = Some(reading);
                         }
                     }
@@ -461,14 +560,15 @@ fn run(
                 .and_then(|path| save_file(path, &request.expected_disk, &request.text, request.request_id, &stop));
             let (saved_text, saved_revision) = if outcome.is_ok() {
                 revision += 1;
+                let prepared = prepare_snapshot(&request.text).with_revision(revision);
                 for (requested, watch) in &mut watches {
                     if watch.canonical == canonical {
                         watch.last = Some(Reading { text: Some(request.text.clone()), error: None });
-                        pending.insert(requested.clone(), Arc::new(FileSnapshot {
+                        pending.insert(requested.clone(), Delivery { snapshot: Arc::new(FileSnapshot {
                             requested_path: requested.clone(), path: canonical.clone().unwrap(),
                             revision, text: Some(request.text.clone()), error: None,
                             observed: None,
-                        }));
+                        }), prepared: Some(prepared.clone()) });
                     }
                 }
                 (Some(request.text), Some(revision))
@@ -490,12 +590,13 @@ fn run(
                 let reading = read_file(requested, watch);
                 if watch.last.as_ref() != Some(&reading) {
                     revision += 1;
-                    pending.insert(requested.clone(), Arc::new(FileSnapshot {
+                    let prepared = reading.text.as_deref().map(|t| prepare_snapshot(t).with_revision(revision));
+                    pending.insert(requested.clone(), Delivery { snapshot: Arc::new(FileSnapshot {
                         requested_path: requested.clone(),
                         path: watch.canonical.clone().unwrap_or_else(|| requested.clone()),
                         revision, text: reading.text.clone(), error: reading.error.clone(),
                         observed: None,
-                    }));
+                    }), prepared });
                     watch.last = Some(reading);
                 }
             }
@@ -503,10 +604,10 @@ fn run(
         }
         // At most one pending snapshot per watched path; a full output queue
         // never blocks the worker or drops the most recent disk state.
-        while let Some((path, snapshot)) = pending.pop_first() {
-            match tx.try_send(snapshot) {
+        while let Some((path, delivery)) = pending.pop_first() {
+            match tx.try_send(delivery) {
                 Ok(()) => SignalToUI::set_ui_signal(),
-                Err(TrySendError::Full(snapshot)) => { pending.insert(path, snapshot); break; },
+                Err(TrySendError::Full(delivery)) => { pending.insert(path, delivery); break; },
                 Err(TrySendError::Disconnected(_)) => return,
             }
         }
@@ -769,6 +870,124 @@ mod tests {
         registry.apply_snapshot(&disk).unwrap();
         assert_eq!(doc.current_text(), "agent 2\n");
         assert!(!doc.has_conflict());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn poll_retries_pending_saves() {
+        let dir = scratch();
+        let path = dir.join("retry.rs");
+        std::fs::write(&path, "original\n").unwrap();
+        let cx = headless_cx();
+        let mut worker = DocumentWorker::start_with_fallback(&cx.thread_spawner(), Duration::from_secs(120)).unwrap();
+        worker.watch(path.clone()).unwrap();
+        let first = receive(&mut worker);
+        let expected = first.text.clone().unwrap();
+        let saved = Arc::new("saved-via-poll\n".to_owned());
+        let request_id = worker.next_save_id;
+        worker.next_save_id += 1;
+        worker.outstanding_saves.insert(request_id, path.clone());
+        worker.pending_saves.push_back(SaveRequest {
+            request_id,
+            path: path.clone(),
+            expected_disk: expected,
+            text: saved.clone(),
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let snapshot = loop {
+            if let Some(snapshot) = worker
+                .poll()
+                .into_iter()
+                .find(|s| s.text.as_deref().map(String::as_str) == Some(saved.as_str()))
+            {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "poll did not retry the pending save");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(snapshot.text.as_deref().map(String::as_str), Some(saved.as_str()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), *saved);
+        let ack = loop {
+            if let Some(result) = worker.poll_saves().pop() {
+                break result;
+            }
+            assert!(Instant::now() < deadline, "save produced no acknowledgement");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(ack.request_id, request_id);
+        assert!(ack.result.is_ok(), "{:?}", ack.result);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn poll_filters_snapshots_to_desired_paths() {
+        let dir = scratch();
+        let keep = dir.join("keep.rs");
+        let drop = dir.join("drop.rs");
+        std::fs::write(&keep, "keep-1\n").unwrap();
+        std::fs::write(&drop, "drop-1\n").unwrap();
+        let cx = headless_cx();
+        let mut worker = DocumentWorker::start_with_fallback(&cx.thread_spawner(), Duration::from_secs(120)).unwrap();
+        worker.watch(keep.clone()).unwrap();
+        worker.watch(drop.clone()).unwrap();
+        let mut seen_keep = false;
+        let mut seen_drop = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(seen_keep && seen_drop) {
+            for snapshot in worker.poll() {
+                seen_keep |= snapshot.requested_path == keep;
+                seen_drop |= snapshot.requested_path == drop;
+            }
+            assert!(Instant::now() < deadline, "initial snapshots missing");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker.unwatch(&drop);
+        std::fs::write(&keep, "keep-2\n").unwrap();
+        std::fs::write(&drop, "drop-2\n").unwrap();
+        worker.notify_changed(keep.clone(), 1, 1).unwrap();
+        worker.notify_changed(drop.clone(), 1, 2).unwrap();
+        let snapshots = collect(&mut worker, Duration::from_millis(400));
+        assert!(
+            snapshots.iter().any(|s| s.requested_path == keep && s.text.as_deref().map(String::as_str) == Some("keep-2\n")),
+            "{snapshots:?}"
+        );
+        assert!(
+            snapshots.iter().all(|s| s.requested_path != drop),
+            "unwatched path leaked: {snapshots:?}"
+        );
+        let prepared = worker.poll_prepared();
+        assert!(prepared.iter().all(|d| d.snapshot.requested_path != drop));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn poll_coalesces_to_the_latest_snapshot_per_path() {
+        let dir = scratch();
+        let path = dir.join("coalesce.rs");
+        std::fs::write(&path, "v1\n").unwrap();
+        let cx = headless_cx();
+        let mut worker = DocumentWorker::start_with_fallback(&cx.thread_spawner(), Duration::from_secs(120)).unwrap();
+        worker.watch(path.clone()).unwrap();
+        let first = receive(&mut worker);
+        assert_eq!(first.text.as_deref().map(String::as_str), Some("v1\n"));
+        std::fs::write(&path, "v2\n").unwrap();
+        worker.notify_changed(path.clone(), 2, 1).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        std::fs::write(&path, "v3\n").unwrap();
+        worker.notify_changed(path.clone(), 2, 2).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        let snapshots = worker.poll();
+        assert_eq!(snapshots.len(), 1, "{snapshots:?}");
+        assert_eq!(snapshots[0].text.as_deref().map(String::as_str), Some("v3\n"));
+        std::fs::write(&path, "v4\n").unwrap();
+        worker.notify_changed(path.clone(), 2, 3).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        std::fs::write(&path, "v5\n").unwrap();
+        worker.notify_changed(path.clone(), 2, 4).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        let prepared = worker.poll_prepared();
+        assert_eq!(prepared.len(), 1, "{prepared:?}");
+        assert_eq!(prepared[0].snapshot.text.as_deref().map(String::as_str), Some("v5\n"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

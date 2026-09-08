@@ -114,11 +114,18 @@ pub struct SessionSpec {
     /// An explicitly requested shell command. None opens the login shell.
     /// This is used only on first creation; reattachment never executes it.
     pub command: Option<String>,
+    /// User-supplied conversation id: start this provider by resuming that
+    /// session instead of opening a fresh chat.
+    pub resume_conversation: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub session_id: String,
+    pub state_dir: PathBuf,
+    pub title: String,
+    pub activity: String,
+    pub started_at_ms: u64,
     /// Monitor this process tree, not MpTerm's short-lived attachment PID.
     pub supervisor_pid: u32,
     /// Pass to MpTerm::restart_with. Attach connects only to the saved live PTY;
@@ -137,10 +144,69 @@ pub struct SessionInfo {
     pub recovery: Option<RecoveryInfo>,
 }
 
+impl SessionInfo {
+    pub fn key(&self) -> String {
+        format!("{}\n{}", self.state_dir.display(), self.session_id)
+    }
+    pub fn menu_label(&self, duplicate: bool) -> String {
+        let since = self.started_at_ms / 1000;
+        let time = if since == 0 {
+            "unknown".into()
+        } else {
+            format!("{:02}:{:02} UTC", since / 3600 % 24, since / 60 % 60)
+        };
+        let mut title: String = self.title.chars().take(48).collect();
+        if self.title.chars().count() > 48 {
+            title.push('…');
+        }
+        let suffix = if duplicate {
+            format!(
+                " · {}",
+                &self.session_id[self.session_id.len().saturating_sub(8)..]
+            )
+        } else {
+            String::new()
+        };
+        format!("{} · {} · since {}{}", title, self.activity, time, suffix)
+    }
+}
+
+/// Persist scope and opaque identity together; old unscoped links use Studio's directory.
+pub fn view_target(key: &str, default: &std::path::Path) -> Result<(PathBuf, String), String> {
+    let (state, id) = match key.split_once('\n') {
+        Some((state, id)) => (PathBuf::from(state), id),
+        None => (default.to_owned(), key),
+    };
+    validate_id(id)?;
+    if !state.is_absolute() {
+        return Err("Session state directory must be absolute".into());
+    }
+    Ok((state, id.into()))
+}
+
+pub fn terminal_menu(sessions: &[SessionInfo]) -> Vec<(String, String)> {
+    sessions
+        .iter()
+        .map(|info| {
+            (
+                info.key(),
+                info.menu_label(
+                    sessions
+                        .iter()
+                        .filter(|other| other.title == info.title)
+                        .count()
+                        > 1,
+                ),
+            )
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub enum SessionOutcome {
     Ready(SessionInfo),
     Inventory {
+        state_dir: PathBuf,
         sessions: Vec<SessionInfo>,
         views: Vec<(u64, String)>,
     },
@@ -167,7 +233,8 @@ pub struct SessionReply {
 }
 
 enum Operation {
-    List,
+    List(PathBuf),
+    NewView(u64, SessionSpec),
     SelectView(u64, Option<String>),
     Prepare(SessionSpec),
     PrepareProvider(SessionSpec, AgentProvider),
@@ -208,6 +275,39 @@ fn validate_id(id: &str) -> Result<(), String> {
         return Err(
             "Session IDs require 1–48 ASCII letters, digits, underscores or hyphens".into(),
         );
+    }
+    Ok(())
+}
+
+/// Called only by the iteration worker after an explicit lane deletion.
+/// Stop uses the same identity checks and process-group shutdown as Stop agent.
+pub(crate) fn delete_lane_session(state: PathBuf, tab: u64) -> Result<(), String> {
+    let id = format!("term-{tab:016x}");
+    let records = state.join("agent_sessions");
+    if !records.join(format!("{id}.ron")).exists() {
+        if records.join(format!("{id}.claim")).exists()
+            || records.join(format!("{id}.json")).exists()
+        {
+            return Err("Lane session identity is incomplete; cannot safely delete it".into());
+        }
+        return Ok(());
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    native::delete_lane_session(state, tab, &id)?;
+    #[cfg(windows)]
+    windows::delete_lane_session(state, tab, &id)?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    return Err("Lane terminal deletion is unsupported on this platform".into());
+    // The host has acknowledged exit before any session state is removed.
+    for entry in std::fs::read_dir(&records).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(&format!("{id}."))
+        {
+            std::fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -319,6 +419,9 @@ impl AgentSessionWorker {
         {
             return Err("Invalid provider working directory or launch configuration".into());
         }
+        if let Some(token) = spec.resume_conversation.as_deref() {
+            crate::iteration::validate_resume_token(token)?;
+        }
         self.enqueue(
             spec.session_id.clone(),
             Operation::PrepareProvider(spec, provider),
@@ -377,15 +480,30 @@ impl AgentSessionWorker {
         self.enqueue(session_id, Operation::Inspect)
     }
 
-    pub fn list(&mut self) -> Result<u64, String> {
-        self.enqueue("studio-inventory".into(), Operation::List)
+    pub fn list(&mut self, repo: PathBuf) -> Result<u64, String> {
+        self.enqueue("studio-inventory".into(), Operation::List(repo))
     }
 
     pub fn select_view(&mut self, tab: u64, session: Option<String>) -> Result<u64, String> {
         if let Some(id) = &session {
-            validate_id(id)?;
+            view_target(id, std::path::Path::new("/"))?;
         }
         self.enqueue("studio-view".into(), Operation::SelectView(tab, session))
+    }
+
+    pub fn new_view(
+        &mut self,
+        tab: u64,
+        cwd: PathBuf,
+        command: Option<String>,
+    ) -> Result<u64, String> {
+        let spec = SessionSpec {
+            session_id: new_session_id(tab),
+            cwd,
+            command,
+            resume_conversation: None,
+        };
+        self.enqueue(spec.session_id.clone(), Operation::NewView(tab, spec))
     }
 
     /// The sole operation that intentionally terminates the agent and its PTY.
@@ -1668,14 +1786,35 @@ mod native {
                 .filter(|pid| *pid > 1 && *pid <= i32::MAX as u64)
                 .ok_or("Studio PTY returned an invalid supervisor PID")?
                 as u32;
+            let state_dir = value
+                .get("state_dir")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.records.clone());
             let attach_command = format!(
                 "exec {} attach --state-dir {} --session {}",
                 shell_quote(self.program.as_os_str())?,
-                shell_quote(self.records.as_os_str())?,
+                shell_quote(state_dir.as_os_str())?,
                 shell_quote(OsStr::new(id))?
             );
             Ok(Some(SessionInfo {
                 session_id: id.into(),
+                state_dir,
+                title: value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(id)
+                    .into(),
+                activity: value
+                    .get("activity")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .into(),
+                started_at_ms: value
+                    .get("started_at_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
                 supervisor_pid: pid,
                 attach_command,
                 backend: "Makepad Screen",
@@ -1721,42 +1860,51 @@ mod native {
                 return Err("Too many terminal view links".into());
             }
             for (_, id) in &links {
-                validate_id(id)?;
+                view_target(id, &self.records)?;
             }
             Ok(links)
         }
 
-        fn inventory(&self, stop: &AtomicBool) -> Result<SessionOutcome, String> {
-            let (status, output) = self.run_command(
-                self.command()
-                    .arg("list")
-                    .arg("--state-dir")
-                    .arg(&self.records),
-                stop,
-            )?;
-            if !status.success() {
-                return Err(format!("Cannot list Studio PTYs: {}", output.trim()));
-            }
-            let value = json::parse(output.as_bytes()).map_err(|e| e.to_string())?;
-            let values = value
-                .as_arr()
-                .or_else(|| value.get("sessions").and_then(Value::as_arr))
-                .ok_or("Invalid Studio PTY inventory")?;
-            if values.len() > 256 {
-                return Err("Studio PTY inventory exceeds 256 sessions".into());
-            }
+        fn inventory(&self, repo: &Path, stop: &AtomicBool) -> Result<SessionOutcome, String> {
             let mut sessions = Vec::new();
-            for value in values {
-                let id = value
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .ok_or("Missing PTY session identity")?;
-                validate_id(id)?;
-                if let Some(info) = self.session_info(id, value)? {
-                    sessions.push(info);
+            for studio in [true, false] {
+                let mut command = self.command();
+                command.arg("list");
+                if studio {
+                    command.arg("--state-dir").arg(&self.records);
+                } else {
+                    command.arg("--cwd").arg(repo);
+                }
+                let (status, output) = self.run_command(&mut command, stop)?;
+                if !status.success() {
+                    return Err(format!("Cannot list running agents: {}", output.trim()));
+                }
+                let value = json::parse(output.as_bytes()).map_err(|e| e.to_string())?;
+                let values = value
+                    .as_arr()
+                    .or_else(|| value.get("sessions").and_then(Value::as_arr))
+                    .ok_or("Invalid agent inventory")?;
+                if values.len() > 1024 {
+                    return Err("Agent inventory exceeds its bound".into());
+                }
+                for value in values {
+                    let id = value
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .ok_or("Missing session identity")?;
+                    validate_id(id)?;
+                    if let Some(info) = self.session_info(id, value)? {
+                        if !sessions
+                            .iter()
+                            .any(|old: &SessionInfo| old.key() == info.key())
+                        {
+                            sessions.push(info);
+                        }
+                    }
                 }
             }
             Ok(SessionOutcome::Inventory {
+                state_dir: self.records.clone(),
                 sessions,
                 views: self.view_links()?,
             })
@@ -1769,9 +1917,13 @@ mod native {
             stop: &AtomicBool,
         ) -> Result<SessionOutcome, String> {
             let session = if let Some(id) = &selected {
+                let (records, id) = view_target(id, &self.records)?;
+                let mut backend = self.clone();
+                backend.records = records;
                 Some(
-                    self.live(id, stop)?
-                        .ok_or("The selected PTY has ended; its process was not restarted")?,
+                    backend
+                        .live(&id, stop)?
+                        .ok_or("The selected agent has ended")?,
                 )
             } else {
                 None
@@ -1837,7 +1989,11 @@ mod native {
                 );
             }
             if let Some(identity) = resume {
-                evidence_matches(identity, self.uid)?;
+                if identity.evidence_path.is_empty() {
+                    crate::iteration::validate_resume_token(&identity.conversation_id)?;
+                } else {
+                    evidence_matches(identity, self.uid)?;
+                }
             }
             let cwd = Path::new(&record.cwd)
                 .canonicalize()
@@ -1980,7 +2136,25 @@ mod native {
                 &format!("{}.provider.ron", record.session_id),
                 &launch.serialize_ron(),
             )?;
-            self.launch_provider(&record, &launch, None, stop)
+            let resume = spec
+                .resume_conversation
+                .as_ref()
+                .map(|token| -> Result<ResumeIdentity, String> {
+                    let token = crate::iteration::validate_resume_token(token)?;
+                    Ok(ResumeIdentity {
+                        provider,
+                        conversation_id: token,
+                        cwd: record.cwd.clone(),
+                        evidence_path: String::new(),
+                        program: launch.program.clone(),
+                        provider_home: provider_home(provider)?.to_string_lossy().into(),
+                        observed_pid: 0,
+                        process_start: String::new(),
+                        verified_at_ms: 0,
+                    })
+                })
+                .transpose()?;
+            self.launch_provider(&record, &launch, resume.as_ref(), stop)
         }
 
         fn capture_resume(&self, id: &str, stop: &AtomicBool) -> Result<SessionOutcome, String> {
@@ -2428,6 +2602,15 @@ exit "$result"
         }
     }
 
+    pub(super) fn delete_lane_session(state: PathBuf, tab: u64, id: &str) -> Result<(), String> {
+        let backend = Backend::open(state)?;
+        let stop = AtomicBool::new(false);
+        backend.stop_session(id, &stop)?;
+        backend.select_view(tab, None, &stop)?;
+        backend.mcp_tokens.revoke(id)?;
+        Ok(())
+    }
+
     pub(super) fn run(
         state_dir: PathBuf,
         commands: Receiver<Request>,
@@ -2443,8 +2626,28 @@ exit "$result"
             };
             let result = match &backend {
                 Err(error) => Err(error.clone()),
-                Ok(backend) if matches!(&request.operation, Operation::List) => {
-                    backend.inventory(&stop)
+                Ok(backend) if matches!(&request.operation, Operation::List(_)) => {
+                    if let Operation::List(repo) = request.operation {
+                        backend.inventory(&repo, &stop)
+                    } else {
+                        unreachable!()
+                    }
+                }
+                Ok(backend) if matches!(&request.operation, Operation::NewView(_, _)) => {
+                    if let Operation::NewView(tab, spec) = request.operation {
+                        backend
+                            .for_session(&spec.session_id, true, false, &stop)
+                            .and_then(|session| session.prepare(spec, &stop))
+                            .and_then(|outcome| {
+                                if let SessionOutcome::Ready(info) = outcome {
+                                    backend.select_view(tab, Some(info.key()), &stop)
+                                } else {
+                                    Err("New terminal did not become ready".into())
+                                }
+                            })
+                    } else {
+                        unreachable!()
+                    }
                 }
                 Ok(backend) if matches!(&request.operation, Operation::SelectView(_, _)) => {
                     if let Operation::SelectView(tab, session) = request.operation {
@@ -2467,7 +2670,9 @@ exit "$result"
                         &stop,
                     )
                     .and_then(|backend| match request.operation {
-                        Operation::List | Operation::SelectView(_, _) => unreachable!(),
+                        Operation::List(_)
+                        | Operation::NewView(_, _)
+                        | Operation::SelectView(_, _) => unreachable!(),
                         Operation::Prepare(spec) => backend.prepare(spec, &stop),
                         Operation::PrepareProvider(spec, provider) => {
                             backend.prepare_provider(spec, provider, &stop)
@@ -2500,5 +2705,52 @@ exit "$result"
             SignalToUI::set_ui_signal();
         }
         // Deliberately no server cleanup: agents must outlive Studio's UI.
+    }
+}
+
+#[cfg(test)]
+mod terminal_inventory_tests {
+    use super::*;
+    fn session(id: &str, state: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: id.into(),
+            state_dir: PathBuf::from(state),
+            title: "hello".into(),
+            activity: "idle".into(),
+            started_at_ms: 1_783_300_000_000,
+            supervisor_pid: 42,
+            attach_command: String::new(),
+            backend: "test",
+            transport_program: String::new(),
+            transport_version: "1".into(),
+            transport_warning: None,
+            scrollback_lines: 100,
+            cwd: PathBuf::from("/repo"),
+            clients: 1,
+            provider: AgentProvider::Shell,
+            resume: None,
+            resume_error: None,
+            recovery: None,
+        }
+    }
+    #[test]
+    fn menu_uses_names_and_scoped_ids_allow_duplicate_names() {
+        let sessions = [
+            session("term-00000001", "/studio"),
+            session("term-00000002", "/shell"),
+        ];
+        let menu = terminal_menu(&sessions);
+        assert_eq!(menu.len(), 2);
+        for (index, (key, label)) in menu.iter().enumerate() {
+            assert!(label.starts_with("hello · idle · since "));
+            assert!(label.contains(&format!("0000000{}", index + 1)));
+            let (state, id) = view_target(key, std::path::Path::new("/default")).unwrap();
+            assert_eq!(state, sessions[index].state_dir);
+            assert_eq!(id, sessions[index].session_id);
+        }
+        assert_ne!(menu[0].0, menu[1].0);
+        let same_id = [session("same-id", "/studio"), session("same-id", "/shell")];
+        assert_ne!(same_id[0].key(), same_id[1].key());
+        assert!(view_target("/scope\n../bad", std::path::Path::new("/default")).is_err());
     }
 }

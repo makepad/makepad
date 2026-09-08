@@ -1831,3 +1831,27 @@ impl Sdf2d {
         res
     }
 }
+
+// Fixed-size shader uniform arrays retain contiguous C layout and accept the
+// shader language's integer indices. Rust's built-in arrays only accept usize
+// and do not implement Default for arbitrary lengths.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct array<T, const N: usize>(pub [T; N]);
+impl<T: Default + Copy, const N: usize> Default for array<T, N> {
+    fn default() -> Self { Self([T::default(); N]) }
+}
+impl<T, const N: usize> std::ops::Index<u32> for array<T, N> {
+    type Output = T;
+    fn index(&self, index: u32) -> &T { &self.0[index as usize] }
+}
+impl<T, const N: usize> std::ops::IndexMut<u32> for array<T, N> {
+    fn index_mut(&mut self, index: u32) -> &mut T { &mut self.0[index as usize] }
+}
+impl<T, const N: usize> std::ops::Index<i32> for array<T, N> {
+    type Output = T;
+    fn index(&self, index: i32) -> &T { &self.0[index as usize] }
+}
+impl<T, const N: usize> std::ops::IndexMut<i32> for array<T, N> {
+    fn index_mut(&mut self, index: i32) -> &mut T { &mut self.0[index as usize] }
+}

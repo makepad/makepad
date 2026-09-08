@@ -42,7 +42,6 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ("flow_sync", "Apply the exact reviewed incoming sync into an owned clean checkout. Requires unchanged source/target hashes; never rewrites public history or discards dirty files.", "flow,source,target,source_oid,target_oid", Risk::Act),
         ("flow_fetch", "Fetch only origin/work and origin/dev. Does not merge, change the current app, or push a branch.", "flow", Risk::Act),
         ("flow_diff", "Inspect the upcoming unbuilt source diff, or an immutable artifact's source changes against the previous artifact. Does not check out old source or start a build.", "flow,artifact?", Risk::Read),
-        ("flow_release_workspace", "Remove an archived lane's local checkout. Its private branch and checkpoints stay, so restoring the lane recreates the checkout. Uncheckpointed work is refused unless force is \"true\".", "flow,force?", Risk::Act),
     ] {
         let fields:Vec<_> = names.split(',').collect();
         let properties=fields.iter().map(|name| {
@@ -54,16 +53,89 @@ pub fn tool_defs() -> Vec<ToolDef> {
         tools.push(ToolDef::new(name,description,&schema.to_json(),risk));
     }
     let mut properties = vec![];
-    for (name, max) in [("flow", 256), ("artifact_id", 256), ("run_id", 256), ("operation_id", 256), ("query", 256), ("key", 32), ("text", 4096), ("demo", 120)] {
-        properties.push((name.to_owned(), json::obj(vec![("type", json::s("string")), ("maxLength", Value::Int(max))])));
+    for (name, max) in [
+        ("flow", 256),
+        ("artifact_id", 256),
+        ("run_id", 256),
+        ("operation_id", 256),
+        ("query", 256),
+        ("key", 32),
+        ("text", 4096),
+        ("demo", 120),
+    ] {
+        properties.push((
+            name.to_owned(),
+            json::obj(vec![
+                ("type", json::s("string")),
+                ("maxLength", Value::Int(max)),
+            ]),
+        ));
     }
-    for (name, values) in [("action", vec!["start", "input", "snapshot", "stop", "status"]), ("input", vec!["click", "move", "down", "up", "scroll", "key_press", "key_down", "key_up", "text"])] {
-        properties.push((name.to_owned(), json::obj(vec![("type", json::s("string")), ("enum", Value::Arr(values.into_iter().map(json::s).collect()))])));
+    for (name, values) in [
+        (
+            "action",
+            vec!["start", "input", "snapshot", "stop", "status"],
+        ),
+        (
+            "input",
+            vec![
+                "click",
+                "move",
+                "down",
+                "up",
+                "scroll",
+                "key_press",
+                "key_down",
+                "key_up",
+                "text",
+            ],
+        ),
+    ] {
+        properties.push((
+            name.to_owned(),
+            json::obj(vec![
+                ("type", json::s("string")),
+                (
+                    "enum",
+                    Value::Arr(values.into_iter().map(json::s).collect()),
+                ),
+            ]),
+        ));
     }
-    for name in ["x", "y", "dx", "dy"] { properties.push((name.to_owned(), json::obj(vec![("type", json::s("number"))]))); }
-    for name in ["window", "button"] { properties.push((name.to_owned(), json::obj(vec![("type", json::s("integer")), ("minimum", Value::Int(0)), ("maximum", Value::Int(if name == "button" { 2 } else { u32::MAX.into() }))]))); }
-    for name in ["shift", "ctrl", "alt", "cmd"] { properties.push((name.to_owned(), json::obj(vec![("type", json::s("boolean"))]))); }
-    let schema = json::obj(vec![("type", json::s("object")), ("properties", Value::Obj(properties)), ("required", Value::Arr(vec![json::s("flow"), json::s("action")])), ("additionalProperties", Value::Bool(false))]);
+    for name in ["x", "y", "dx", "dy"] {
+        properties.push((
+            name.to_owned(),
+            json::obj(vec![("type", json::s("number"))]),
+        ));
+    }
+    for name in ["window", "button"] {
+        properties.push((
+            name.to_owned(),
+            json::obj(vec![
+                ("type", json::s("integer")),
+                ("minimum", Value::Int(0)),
+                (
+                    "maximum",
+                    Value::Int(if name == "button" { 2 } else { u32::MAX.into() }),
+                ),
+            ]),
+        ));
+    }
+    for name in ["shift", "ctrl", "alt", "cmd"] {
+        properties.push((
+            name.to_owned(),
+            json::obj(vec![("type", json::s("boolean"))]),
+        ));
+    }
+    let schema = json::obj(vec![
+        ("type", json::s("object")),
+        ("properties", Value::Obj(properties)),
+        (
+            "required",
+            Value::Arr(vec![json::s("flow"), json::s("action")]),
+        ),
+        ("additionalProperties", Value::Bool(false)),
+    ]);
     tools.push(ToolDef::new("flow_test", "Test a retained artifact in an owned hidden app with recording tiles. start requires artifact_id, a human-closed lane and no pending build; optional demo names a demonstration (1-120 characters, no controls, start only). input uses run_id and mouse x/y, key or text. snapshot saves widget rectangles and PNG; stop finalizes this test's MP4. Poll status with run_id/operation_id before another input; status lists results. Demo titles survive restart. Never controls human apps or infers pass or acceptance.", &schema.to_json(), Risk::Act));
     tools
 }
@@ -79,7 +151,6 @@ pub fn handles(name: &str) -> bool {
                 | "flow_sync"
                 | "flow_fetch"
                 | "flow_diff"
-                | "flow_release_workspace"
                 | "flow_test"
         )
 }
@@ -119,7 +190,11 @@ pub fn parse(call: &ServiceCall) -> Result<Request, String> {
     }
     if call.tool == "flow_test" {
         let action = crate::iteration_worker::parse_test_request(&args)?;
-        let flow = args.get("flow").and_then(Value::as_str).ok_or("flow must be a string")?.to_owned();
+        let flow = args
+            .get("flow")
+            .and_then(Value::as_str)
+            .ok_or("flow must be a string")?
+            .to_owned();
         return Ok(Request::Test { flow, action });
     }
     let Value::Obj(fields) = &args else {
@@ -132,7 +207,6 @@ pub fn parse(call: &ServiceCall) -> Result<Request, String> {
         "flow_sync_preview" => &["flow", "source", "target"],
         "flow_sync" => &["flow", "source", "target", "source_oid", "target_oid"],
         "flow_diff" => &["flow", "artifact"],
-        "flow_release_workspace" => &["flow", "force"],
         _ => return Err("Unknown flow operation".into()),
     };
     if fields
@@ -182,10 +256,6 @@ pub fn parse(call: &ServiceCall) -> Result<Request, String> {
             target_oid: text("target_oid")?,
         },
         "flow_fetch" => Request::Fetch { flow },
-        "flow_release_workspace" => Request::ReleaseWorkspace {
-            flow,
-            force: args.get("force").and_then(Value::as_str) == Some("true"),
-        },
         "flow_diff" => Request::Diff {
             flow,
             artifact: if args.get("artifact").is_some() {

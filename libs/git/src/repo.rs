@@ -31,6 +31,29 @@ pub struct Repository {
     pub(crate) alternates: Option<Vec<PathBuf>>,
     /// Pack indices from alternate object stores
     alternate_packs: Option<Vec<PackIndex>>,
+    read_cache: Option<ReadCache>,
+    blob_reads: u64,
+}
+
+struct ReadCache {
+    account: crate::memory::MemoryAccount,
+    budget: usize,
+    used: usize,
+    entries: HashMap<ObjectId, (Object, crate::memory::Reservation)>,
+    order: std::collections::VecDeque<ObjectId>,
+    hits: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RepositoryReadStats {
+    pub blob_reads: u64,
+    pub cache_hits: u64,
+    pub cache_bytes: usize,
+    pub pack_index_bytes: usize,
+    pub pack_load_ms: f64,
+    pub inflate_ms: f64,
+    pub pack_bytes_read: u64,
+    pub objects_inflated: u64,
 }
 
 /// The directories a working directory maps to.
@@ -299,6 +322,8 @@ impl Repository {
             packs: None,
             alternates: None,
             alternate_packs: None,
+            read_cache: None,
+            blob_reads: 0,
         }
     }
 
@@ -344,7 +369,44 @@ impl Repository {
 
     /// Read any object by OID. Tries loose objects first, then pack files,
     /// then alternates.
+    /// Configure a persistent worker reader. Pack reads use bounded windows;
+    /// decoded read-cache entries reserve from the same history account.
+    pub fn set_read_cache_budget(&mut self, account: crate::memory::MemoryAccount, bytes: usize) -> Result<(), GitError> {
+        self.read_cache = Some(ReadCache { account: account.clone(), budget: bytes, used: 0, entries: HashMap::new(), order: std::collections::VecDeque::new(), hits: 0 });
+        for pack in self.packs.iter_mut().chain(self.alternate_packs.iter_mut()).flatten() { pack.set_read_budget(account.clone(), bytes)?; }
+        Ok(())
+    }
+    pub fn read_stats(&self) -> RepositoryReadStats {
+        let mut stats = RepositoryReadStats { blob_reads: self.blob_reads, ..Default::default() };
+        if let Some(cache) = &self.read_cache { stats.cache_hits = cache.hits; stats.cache_bytes = cache.used; }
+        for pack in self.packs.iter().chain(self.alternate_packs.iter()).flatten() {
+            let p = pack.read_phases(); stats.pack_load_ms += p.pack_load_ms; stats.inflate_ms += p.inflate_ms; stats.pack_bytes_read += p.pack_bytes_read; stats.objects_inflated += p.objects_inflated; stats.pack_index_bytes += pack.retained_bytes();
+        }
+        stats
+    }
+    pub fn clear_read_cache(&mut self) {
+        if let Some(cache) = &mut self.read_cache { cache.entries = HashMap::new(); cache.order = std::collections::VecDeque::new(); cache.used = 0; }
+    }
     pub fn read_object(&mut self, oid: &ObjectId) -> Result<Object, GitError> {
+        if let Some(cache) = &mut self.read_cache {
+            if let Some((obj, _)) = cache.entries.get(oid) { cache.hits += 1; return Ok(obj.clone()); }
+        }
+        let object = self.read_object_uncached(oid)?;
+        if let Some(cache) = &mut self.read_cache {
+            let bytes = object.data.len().saturating_add(256);
+            if bytes <= cache.budget {
+                while cache.used.saturating_add(bytes) > cache.budget {
+                    let Some(old) = cache.order.pop_front() else { break };
+                    if let Some((_, lease)) = cache.entries.remove(&old) { cache.used = cache.used.saturating_sub(lease.bytes()); }
+                }
+                if let Some(lease) = cache.account.try_reserve(bytes) {
+                    cache.entries.insert(*oid, (object.clone(), lease)); cache.order.push_back(*oid); cache.used += bytes;
+                }
+            }
+        }
+        Ok(object)
+    }
+    fn read_object_uncached(&mut self, oid: &ObjectId) -> Result<Object, GitError> {
         // Try loose first
         match read_loose_object(&self.common_dir, oid) {
             Ok(obj) => return Ok(obj),
@@ -428,6 +490,7 @@ impl Repository {
 
     /// Read a blob's data.
     pub fn read_blob(&mut self, oid: &ObjectId) -> Result<Vec<u8>, GitError> {
+        self.blob_reads += 1;
         let obj = self.read_object(oid)?;
         if obj.kind != ObjectKind::Blob {
             return Err(GitError::InvalidObject(format!(
@@ -756,6 +819,62 @@ impl Repository {
     }
 
     // --- Diff Operations ---
+
+    /// Blob-free, admitted tree comparison. `None` is the empty tree. All
+    /// decoding/path/result storage competes in `account`; a refusal returns
+    /// explicit incomplete coverage. Cancellation discards the whole result.
+    /// Uses uncached metadata reads without changing this reader's cache policy.
+    pub fn diff_trees_bounded(
+        &mut self,
+        old: Option<ObjectId>,
+        new: Option<ObjectId>,
+        limits: &diff::TreeDiffLimits,
+        account: &crate::memory::MemoryAccount,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<diff::BoundedTreeDiff, GitError> {
+        diff::bounded_tree_diff(&self.common_dir, old, new, limits, account, cancel, &mut self.blob_reads)
+    }
+
+    /// Compare commit trees with the same bounds. `None` denotes an empty
+    /// endpoint, including the reference for a root commit. Missing commits
+    /// (e.g. shallow parents) remain errors, never empty endpoints.
+    pub fn diff_commits_bounded(
+        &mut self,
+        old: Option<ObjectId>,
+        new: Option<ObjectId>,
+        limits: &diff::TreeDiffLimits,
+        account: &crate::memory::MemoryAccount,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<diff::BoundedTreeDiff, GitError> {
+        if cancel() { return Err(GitError::Cancelled); }
+        if old == new { return Ok(diff::BoundedTreeDiff::empty(account)); }
+        let scratch = crate::bounded_read::Scratch::new(account, limits.max_scratch_bytes);
+        let mut bytes_read = 0;
+        let mut tree = |oid: Option<ObjectId>| -> Result<Option<ObjectId>, GitError> {
+            let Some(oid) = oid else { return Ok(None); };
+            let bytes = crate::bounded_read::read(&self.common_dir, &oid, ObjectKind::Commit,
+                &scratch, &mut bytes_read, cancel)?;
+            let line = bytes.data.split(|b| *b == b'\n').next().unwrap_or_default();
+            let tree = line.strip_prefix(b"tree ").and_then(|s| std::str::from_utf8(s).ok())
+                .ok_or_else(|| GitError::InvalidObject("commit: missing tree header".into()))?;
+            ObjectId::from_hex(tree).map(Some)
+        };
+        let trees = tree(old).and_then(|old| tree(new).map(|new| (old, new)));
+        self.blob_reads = self.blob_reads.saturating_add(scratch.blob_reads.get());
+        let mut result = match trees {
+            Ok((old, new)) => self.diff_trees_bounded(old, new, limits, account, cancel)?,
+            Err(GitError::TreeDiffLimit(reason)) => {
+                let mut result = diff::BoundedTreeDiff::empty(account);
+                result.exhaust(reason, true);
+                result
+            }
+            Err(error) => return Err(error),
+        };
+        if cancel() { return Err(GitError::Cancelled); }
+        result.counters.bytes_read = result.counters.bytes_read.saturating_add(bytes_read);
+        result.counters.scratch_peak_bytes = result.counters.scratch_peak_bytes.max(scratch.peak());
+        Ok(result)
+    }
 
     /// Diff two trees, returning the list of changes.
     pub fn diff_trees(
@@ -1394,7 +1513,9 @@ impl Repository {
     pub(crate) fn ensure_object_sources(&mut self) -> Result<(), GitError> {
         if self.packs.is_none() || self.alternates.is_none() {
             let sources = object_sources(&self.common_dir)?;
-            self.packs = Some(sources.packs);
+            let mut packs = sources.packs;
+            if let Some(cache) = &self.read_cache { for pack in &mut packs { pack.set_read_budget(cache.account.clone(), cache.budget)?; } }
+            self.packs = Some(packs);
             self.alternates = Some(sources.alternate_dirs);
             self.alternate_packs = Some(Vec::new());
         }

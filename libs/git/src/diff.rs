@@ -1,6 +1,264 @@
 use crate::error::GitError;
 use crate::oid::ObjectId;
 use crate::tree::{Tree, TreeEntry};
+use crate::bounded_read::{self, Bytes, Scratch, ScratchLease};
+use crate::memory::{MemoryAccount, Reservation};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeChangeKind { Added, Deleted, Modified, ModeOnly, TypeChanged }
+
+/// A changed leaf (regular file, symlink or gitlink), with repository-relative
+/// UTF-8 path. File/directory replacements expand to deletion/addition leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeChangeRecord {
+    pub path: String,
+    pub kind: TreeChangeKind,
+    pub old: Option<(ObjectId, u32)>,
+    pub new: Option<(ObjectId, u32)>,
+    /// Always false for this file-expanded API; no directory summaries are
+    /// substituted for file records, including when traversal is exhausted.
+    pub is_tree_recursive_root: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeDiffExhaustion { Records, ResultBytes, ScratchBytes, PathLength, Depth, MemoryAccount }
+
+#[derive(Debug, Clone)]
+pub struct TreeDiffLimits {
+    pub max_records: usize,
+    pub max_result_bytes: usize,
+    pub max_scratch_bytes: usize,
+    /// Maximum UTF-8 bytes in a repository-relative file path.
+    pub max_path_bytes: usize,
+    /// Root tree is depth zero. Values above 256 are clamped for stack safety.
+    pub max_depth: usize,
+}
+
+impl Default for TreeDiffLimits {
+    fn default() -> Self {
+        Self { max_records: 20_000, max_result_bytes: 16 * 1024 * 1024,
+            max_scratch_bytes: 32 * 1024 * 1024, max_path_bytes: 4096, max_depth: 128 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TreeDiffCounters {
+    pub trees_decoded: u64,
+    /// Entries parsed in decoded trees, including unchanged siblings.
+    pub entries_visited: u64,
+    /// Decoded tree payload bytes, excluding pack delta bases.
+    pub object_bytes: u64,
+    /// Compressed loose/pack bytes read, including delta bases; excludes index IO.
+    pub bytes_read: u64,
+    pub scratch_peak_bytes: usize,
+    /// Retained record capacity plus path capacities.
+    pub result_bytes: usize,
+}
+
+/// Incomplete manifests must not be presented as the whole comparison.
+/// Results are sorted by UTF-8 path bytes even when incomplete. Record/result
+/// refusal continues counting within traversal limits; it need not be a prefix.
+#[derive(Debug)]
+pub struct BoundedTreeDiff {
+    pub records: Vec<TreeChangeRecord>,
+    pub complete: bool,
+    /// Exact number of omitted leaf records iff `omitted_records_exact`.
+    /// Otherwise a lower bound, excluding the unopened subtree comparisons.
+    pub omitted_records: u64,
+    pub omitted_records_exact: bool,
+    pub omitted_subtrees: u64,
+    /// First refusal in deterministic traversal order.
+    pub reason: Option<TreeDiffExhaustion>,
+    pub counters: TreeDiffCounters,
+    /// Keep this with records if transferring their ownership. The result is
+    /// deliberately not Clone: copying records requires fresh admission.
+    pub reservation: Reservation,
+}
+
+impl BoundedTreeDiff {
+    pub(crate) fn empty(account: &MemoryAccount) -> Self {
+        Self { records: Vec::new(), complete: true, omitted_records: 0,
+            omitted_records_exact: true, omitted_subtrees: 0, reason: None,
+            counters: TreeDiffCounters::default(), reservation: account.try_reserve(0).unwrap() }
+    }
+
+    pub(crate) fn exhaust(&mut self, reason: TreeDiffExhaustion, subtree: bool) {
+        self.complete = false;
+        self.reason.get_or_insert(reason);
+        if subtree {
+            self.omitted_subtrees = self.omitted_subtrees.saturating_add(1);
+            self.omitted_records_exact = false;
+        } else { self.omitted_records = self.omitted_records.saturating_add(1); }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RawTreeEntry { start: usize, end: usize, mode: u32, oid: ObjectId }
+
+fn raw_entry(data: &[u8], pos: &mut usize) -> Result<RawTreeEntry, GitError> {
+    let invalid = || GitError::InvalidObject("invalid tree entry".into());
+    let space = *pos + data[*pos..].iter().position(|b| *b == b' ').ok_or_else(invalid)?;
+    let mode = u32::from_str_radix(std::str::from_utf8(&data[*pos..space]).map_err(|_| invalid())?, 8).map_err(|_| invalid())?;
+    let start = space + 1;
+    let end = start + data[start..].iter().position(|b| *b == 0).ok_or_else(invalid)?;
+    let name = std::str::from_utf8(&data[start..end]).map_err(|_| invalid())?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." { return Err(invalid()); }
+    let oid = ObjectId::from_slice(data.get(end + 1..end + 21).ok_or_else(invalid)?)?;
+    *pos = end + 21;
+    Ok(RawTreeEntry { start, end, mode, oid })
+}
+
+struct DecodedTree { raw: Bytes, entries: Vec<RawTreeEntry>, _lease: ScratchLease }
+
+impl DecodedTree {
+    fn name(&self, entry: RawTreeEntry) -> &str {
+        // Validated by raw_entry before allocating the entry table.
+        std::str::from_utf8(&self.raw.data[entry.start..entry.end]).unwrap()
+    }
+}
+
+struct TreeDiffWalk<'a> {
+    common_dir: &'a std::path::Path,
+    limits: &'a TreeDiffLimits,
+    scratch: Scratch,
+    cancel: &'a dyn Fn() -> bool,
+    result: BoundedTreeDiff,
+}
+
+impl TreeDiffWalk<'_> {
+    fn decode(&mut self, oid: Option<ObjectId>) -> Result<Option<DecodedTree>, GitError> {
+        let Some(oid) = oid else { return Ok(None); };
+        let raw = bounded_read::read(self.common_dir, &oid, crate::ObjectKind::Tree, &self.scratch,
+            &mut self.result.counters.bytes_read, self.cancel)?;
+        let mut pos = 0;
+        let mut count = 0usize;
+        while pos < raw.data.len() { raw_entry(&raw.data, &mut pos)?; count += 1; }
+        let lease = self.scratch.reserve(count.checked_mul(std::mem::size_of::<RawTreeEntry>())
+            .ok_or(GitError::TreeDiffLimit(TreeDiffExhaustion::ScratchBytes))?)?;
+        let mut entries = Vec::with_capacity(count);
+        pos = 0;
+        while pos < raw.data.len() { entries.push(raw_entry(&raw.data, &mut pos)?); }
+        // Git tree order treats directories as name + '/'; match by bare name
+        // here, then sort the final file manifest by its full path.
+        entries.sort_unstable_by(|a, b| raw.data[a.start..a.end].cmp(&raw.data[b.start..b.end]));
+        if entries.windows(2).any(|p| raw.data[p[0].start..p[0].end] == raw.data[p[1].start..p[1].end]) {
+            return Err(GitError::InvalidObject("duplicate tree name".into()));
+        }
+        self.result.counters.trees_decoded += 1;
+        self.result.counters.entries_visited += count as u64;
+        self.result.counters.object_bytes += raw.data.len() as u64;
+        Ok(Some(DecodedTree { raw, entries, _lease: lease }))
+    }
+
+    fn record(&mut self, prefix: &str, name: &str, old: Option<(ObjectId, u32)>, new: Option<(ObjectId, u32)>) {
+        let path_len = prefix.len().saturating_add(name.len());
+        let result = &mut self.result;
+        if path_len > self.limits.max_path_bytes { result.exhaust(TreeDiffExhaustion::PathLength, false); return; }
+        if result.records.len() >= self.limits.max_records { result.exhaust(TreeDiffExhaustion::Records, false); return; }
+        let old_slots = result.records.capacity() * std::mem::size_of::<TreeChangeRecord>();
+        let capacity = if result.records.len() == result.records.capacity() {
+            result.records.capacity().saturating_mul(2).max(1).min(self.limits.max_records)
+        } else { result.records.capacity() };
+        let slots = capacity.saturating_mul(std::mem::size_of::<TreeChangeRecord>());
+        let bytes = result.reservation.bytes().saturating_sub(old_slots).saturating_add(slots).saturating_add(path_len);
+        if bytes > self.limits.max_result_bytes { result.exhaust(TreeDiffExhaustion::ResultBytes, false); return; }
+        // Account both old/new backing arrays during replacement, before any
+        // allocation. Path ownership moves; its reservation stays continuous.
+        let additional = if slots != old_slots { slots.saturating_add(path_len) } else { path_len };
+        let Some(mut lease) = self.scratch.account.try_reserve(additional) else { result.exhaust(TreeDiffExhaustion::MemoryAccount, false); return; };
+        if slots != old_slots {
+            let mut records = Vec::with_capacity(capacity);
+            records.append(&mut result.records);
+            result.records = records;
+            assert!(result.reservation.shrink_to(result.reservation.bytes() - old_slots));
+        }
+        assert!(result.reservation.merge(&mut lease));
+        let mut path = String::with_capacity(path_len);
+        path.push_str(prefix);
+        path.push_str(name);
+        let kind = match (old, new) {
+            (None, _) => TreeChangeKind::Added,
+            (_, None) => TreeChangeKind::Deleted,
+            (Some((a, am)), Some((b, bm))) => {
+                if am & 0o170000 != bm & 0o170000 { TreeChangeKind::TypeChanged }
+                else if a == b { TreeChangeKind::ModeOnly }
+                else { TreeChangeKind::Modified }
+            }
+        };
+        result.records.push(TreeChangeRecord { path, kind, old, new, is_tree_recursive_root: false });
+    }
+
+    fn visit(&mut self, old: Option<ObjectId>, new: Option<ObjectId>, prefix: &str, depth: usize) -> Result<(), GitError> {
+        if (self.cancel)() { return Err(GitError::Cancelled); }
+        if old == new { return Ok(()); }
+        if depth > self.limits.max_depth.min(256) {
+            self.result.exhaust(TreeDiffExhaustion::Depth, true); return Ok(());
+        }
+        let decoded = (|| {
+            let frame = self.scratch.reserve(2048)?;
+            let old = self.decode(old)?;
+            let new = self.decode(new)?;
+            Ok((frame, old, new))
+        })();
+        let (_frame, old, new) = match decoded {
+            Ok(trees) => trees,
+            Err(GitError::TreeDiffLimit(reason)) => { self.result.exhaust(reason, true); return Ok(()); }
+            Err(error) => return Err(error),
+        };
+        let old_entries = old.as_ref().map_or(&[][..], |t| t.entries.as_slice());
+        let new_entries = new.as_ref().map_or(&[][..], |t| t.entries.as_slice());
+        let (mut i, mut j) = (0, 0);
+        while i < old_entries.len() || j < new_entries.len() {
+            let a = old_entries.get(i).copied();
+            let b = new_entries.get(j).copied();
+            let an = a.map(|e| old.as_ref().unwrap().name(e));
+            let bn = b.map(|e| new.as_ref().unwrap().name(e));
+            let (a, b, name) = match (an, bn) {
+                (Some(an), Some(bn)) if an == bn => { i += 1; j += 1; (a, b, an) }
+                (Some(an), Some(bn)) if an < bn => { i += 1; (a, None, an) }
+                (Some(an), None) => { i += 1; (a, None, an) }
+                (_, Some(bn)) => { j += 1; (None, b, bn) }
+                _ => unreachable!(),
+            };
+            if a.map(|e| (e.oid, e.mode)) == b.map(|e| (e.oid, e.mode)) { continue; }
+            let at = a.filter(|e| e.mode == 0o040000);
+            let bt = b.filter(|e| e.mode == 0o040000);
+            let af = a.filter(|e| e.mode != 0o040000).map(|e| (e.oid, e.mode));
+            let bf = b.filter(|e| e.mode != 0o040000).map(|e| (e.oid, e.mode));
+            if af.is_some() || bf.is_some() { self.record(prefix, name, af, bf); }
+            if at.is_some() || bt.is_some() {
+                if at.map(|e| e.oid) == bt.map(|e| e.oid) { continue; }
+                if depth >= self.limits.max_depth.min(256) { self.result.exhaust(TreeDiffExhaustion::Depth, true); continue; }
+                let length = prefix.len().saturating_add(name.len()).saturating_add(1);
+                if length > self.limits.max_path_bytes { self.result.exhaust(TreeDiffExhaustion::PathLength, true); continue; }
+                let _lease = match self.scratch.reserve(length) {
+                    Ok(lease) => lease,
+                    Err(GitError::TreeDiffLimit(reason)) => { self.result.exhaust(reason, true); continue; }
+                    Err(error) => return Err(error),
+                };
+                let mut path = String::with_capacity(length);
+                path.push_str(prefix); path.push_str(name); path.push('/');
+                self.visit(at.map(|e| e.oid), bt.map(|e| e.oid), &path, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn bounded_tree_diff(common_dir: &std::path::Path, old: Option<ObjectId>, new: Option<ObjectId>,
+    limits: &TreeDiffLimits, account: &MemoryAccount, cancel: &dyn Fn() -> bool, blob_reads: &mut u64) -> Result<BoundedTreeDiff, GitError>
+{
+    let mut walk = TreeDiffWalk { common_dir, limits, scratch: Scratch::new(account, limits.max_scratch_bytes),
+        cancel, result: BoundedTreeDiff::empty(account) };
+    let visited = walk.visit(old, new, "", 0);
+    *blob_reads = blob_reads.saturating_add(walk.scratch.blob_reads.get());
+    visited?;
+    if cancel() { return Err(GitError::Cancelled); }
+    walk.result.records.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    walk.result.counters.scratch_peak_bytes = walk.scratch.peak();
+    walk.result.counters.result_bytes = walk.result.reservation.bytes();
+    Ok(walk.result)
+}
 
 /// A single diff operation on lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1281,205 @@ fn build_hunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree_repo() -> (crate::test_support::TempDir, crate::Repository) {
+        let dir = crate::test_support::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        let repo = crate::Repository::open_git_dir(git, dir.path().to_path_buf()).unwrap();
+        (dir, repo)
+    }
+
+    fn fixture_tree(repo: &crate::Repository, entries: &[(&str, u32, ObjectId)]) -> ObjectId {
+        repo.write_tree(&Tree { entries: entries.iter().map(|(name, mode, oid)| TreeEntry {
+            name: (*name).into(), mode: *mode, oid: *oid,
+        }).collect() }).unwrap()
+    }
+
+    #[test]
+    fn bounded_tree_two_thousand_files_are_admitted_without_blob_reads() {
+        let (_dir, mut repo) = tree_repo();
+        let blob = repo.write_blob(b"never read this blob").unwrap();
+        // Calibrate the reader counter, then make any subsequent blob read fail.
+        assert_eq!(repo.read_blob(&blob).unwrap(), b"never read this blob");
+        let before = repo.read_stats().blob_reads;
+        let (dir, file) = blob.loose_path_components();
+        std::fs::remove_file(repo.common_dir.join("objects").join(dir).join(file)).unwrap();
+        let tree = repo.write_tree(&Tree { entries: (0..2000).map(|i| TreeEntry {
+            name: format!("file-{i:04}"), mode: 0o100644, oid: blob,
+        }).collect() }).unwrap();
+        let account = MemoryAccount::new(64 * 1024 * 1024);
+        let limits = TreeDiffLimits::default();
+        for (old, new, kind) in [(None, Some(tree), TreeChangeKind::Added), (Some(tree), None, TreeChangeKind::Deleted)] {
+            let result = repo.diff_trees_bounded(old, new, &limits, &account, &|| false).unwrap();
+            assert!(result.complete);
+            assert_eq!(result.records.len(), 2000);
+            assert!(result.records.iter().all(|r| r.kind == kind && !r.is_tree_recursive_root));
+            assert!(result.records.windows(2).all(|p| p[0].path < p[1].path));
+            assert_eq!(result.omitted_records, 0);
+            assert_eq!(result.counters.trees_decoded, 1);
+            assert_eq!(result.counters.entries_visited, 2000);
+            assert!(result.counters.object_bytes > 0);
+            assert!(result.counters.bytes_read > 0);
+            assert!(result.counters.scratch_peak_bytes <= limits.max_scratch_bytes);
+            assert_eq!(account.reserved(), result.counters.result_bytes);
+            assert_eq!(result.counters.result_bytes, result.records.capacity() * std::mem::size_of::<TreeChangeRecord>()
+                + result.records.iter().map(|r| r.path.capacity()).sum::<usize>());
+            drop(result);
+            assert_eq!(account.reserved(), 0);
+        }
+        assert_eq!(repo.read_stats().blob_reads, before);
+    }
+
+    #[test]
+    fn bounded_tree_record_result_path_limits_count_omitted_leaves() {
+        let (_dir, mut repo) = tree_repo();
+        let tree = fixture_tree(&repo, &[("a", 0o100644, ObjectId::ZERO), ("bb", 0o100644, ObjectId::ZERO), ("ccc", 0o100644, ObjectId::ZERO)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        for (limits, reason, retained, omitted) in [
+            (TreeDiffLimits { max_records: 1, ..Default::default() }, TreeDiffExhaustion::Records, 1, 2),
+            (TreeDiffLimits { max_result_bytes: std::mem::size_of::<TreeChangeRecord>() + 1, ..Default::default() }, TreeDiffExhaustion::ResultBytes, 1, 2),
+            (TreeDiffLimits { max_path_bytes: 1, ..Default::default() }, TreeDiffExhaustion::PathLength, 1, 2),
+            (TreeDiffLimits { max_records: 0, ..Default::default() }, TreeDiffExhaustion::Records, 0, 3),
+        ] {
+            let result = repo.diff_trees_bounded(None, Some(tree), &limits, &account, &|| false).unwrap();
+            assert!(!result.complete);
+            assert_eq!(result.reason, Some(reason));
+            assert_eq!(result.records.len(), retained);
+            assert_eq!(result.omitted_records, omitted);
+            assert!(result.omitted_records_exact);
+            assert_eq!(result.omitted_subtrees, 0);
+            assert!(result.counters.result_bytes <= limits.max_result_bytes);
+            drop(result);
+            assert_eq!(account.reserved(), 0);
+        }
+    }
+
+    #[test]
+    fn bounded_tree_scratch_depth_and_path_refusals_do_not_invent_counts() {
+        let (_dir, mut repo) = tree_repo();
+        let child = fixture_tree(&repo, &[("leaf", 0o100644, ObjectId::ZERO)]);
+        let tree = fixture_tree(&repo, &[("dir", 0o040000, child)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        for (limits, reason, decoded) in [
+            (TreeDiffLimits { max_scratch_bytes: 0, ..Default::default() }, TreeDiffExhaustion::ScratchBytes, 0),
+            (TreeDiffLimits { max_depth: 0, ..Default::default() }, TreeDiffExhaustion::Depth, 1),
+            (TreeDiffLimits { max_path_bytes: 3, ..Default::default() }, TreeDiffExhaustion::PathLength, 1),
+        ] {
+            let result = repo.diff_trees_bounded(None, Some(tree), &limits, &account, &|| false).unwrap();
+            assert!(!result.complete);
+            assert_eq!(result.reason, Some(reason));
+            assert_eq!(result.omitted_records, 0);
+            assert!(!result.omitted_records_exact);
+            assert_eq!(result.omitted_subtrees, 1);
+            assert_eq!(result.counters.trees_decoded, decoded);
+            assert!(result.records.is_empty());
+            assert!(result.counters.scratch_peak_bytes <= limits.max_scratch_bytes);
+        }
+        let full = repo.diff_trees_bounded(None, Some(tree), &TreeDiffLimits { max_depth: 1, max_path_bytes: 8, ..Default::default() }, &account, &|| false).unwrap();
+        assert!(full.complete);
+        assert_eq!(full.records[0].path, "dir/leaf");
+    }
+
+    #[test]
+    fn bounded_tree_shared_pressure_refuses_and_releases_scratch() {
+        let (_dir, mut repo) = tree_repo();
+        let tree = fixture_tree(&repo, &[("file", 0o100644, ObjectId::ZERO)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        let pin = account.try_reserve(account.capacity()).unwrap();
+        let result = repo.diff_trees_bounded(None, Some(tree), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+        assert_eq!(result.reason, Some(TreeDiffExhaustion::MemoryAccount));
+        assert_eq!(result.omitted_subtrees, 1);
+        assert_eq!(account.reserved(), account.capacity());
+        drop(result);
+        drop(pin);
+        assert_eq!(account.reserved(), 0);
+    }
+
+    #[test]
+    fn bounded_reader_blob_counter_observes_mistyped_tree_objects() {
+        let (_dir, mut repo) = tree_repo();
+        let blob = repo.write_blob(b"not a tree").unwrap();
+        let account = MemoryAccount::new(1024 * 1024);
+        assert!(matches!(repo.diff_trees_bounded(None, Some(blob), &TreeDiffLimits::default(), &account, &|| false), Err(GitError::InvalidObject(_))));
+        assert_eq!(repo.read_stats().blob_reads, 1);
+        assert_eq!(account.reserved(), 0);
+        crate::test_support::pack_all_loose(&repo.git_dir).unwrap();
+        assert!(matches!(repo.diff_trees_bounded(None, Some(blob), &TreeDiffLimits::default(), &account, &|| false), Err(GitError::InvalidObject(_))));
+        assert_eq!(repo.read_stats().blob_reads, 2);
+        assert_eq!(account.reserved(), 0);
+    }
+
+    #[test]
+    fn bounded_tree_cancellation_discards_an_already_retained_record() {
+        let (_dir, mut repo) = tree_repo();
+        let child = fixture_tree(&repo, &[("file", 0o100644, ObjectId::ZERO)]);
+        let root = fixture_tree(&repo, &[("a", 0o100644, ObjectId::ZERO), ("z", 0o040000, child)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        let calls = std::cell::Cell::new(0);
+        let cancel = || { let n = calls.get() + 1; calls.set(n); n == 3 };
+        let result = repo.diff_trees_bounded(None, Some(root), &TreeDiffLimits::default(), &account, &cancel);
+        // Calls 1/2 enter and read root; call 3 visits z after storing a.
+        assert!(matches!(result, Err(GitError::Cancelled)));
+        assert_eq!(calls.get(), 3);
+        assert_eq!(account.reserved(), 0);
+        assert!(account.peak() > 0);
+        assert!(matches!(repo.diff_trees_bounded(None, None, &TreeDiffLimits::default(), &account, &|| true), Err(GitError::Cancelled)));
+    }
+
+    #[test]
+    fn bounded_tree_equal_subtrees_skip_missing_objects_and_order_paths() {
+        let (_dir, mut repo) = tree_repo();
+        let child = fixture_tree(&repo, &[("z", 0o100644, ObjectId::ZERO)]);
+        let old = fixture_tree(&repo, &[("missing", 0o040000, ObjectId::ZERO)]);
+        let new = fixture_tree(&repo, &[("missing", 0o040000, ObjectId::ZERO), ("foo", 0o040000, child), ("foo.txt", 0o100644, ObjectId::ZERO)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        let result = repo.diff_trees_bounded(Some(old), Some(new), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+        assert!(result.complete);
+        assert_eq!(result.records.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["foo.txt", "foo/z"]);
+        assert_eq!(result.counters.trees_decoded, 3);
+        let empty = repo.diff_trees_bounded(Some(ObjectId::ZERO), Some(ObjectId::ZERO), &TreeDiffLimits::default(), &MemoryAccount::new(0), &|| false).unwrap();
+        assert!(empty.complete);
+        assert_eq!(empty.counters, TreeDiffCounters::default());
+    }
+
+    #[test]
+    fn bounded_tree_modes_types_and_directory_replacements() {
+        let (_dir, mut repo) = tree_repo();
+        let blob = repo.write_blob(b"content").unwrap();
+        let other = repo.write_blob(b"other").unwrap();
+        let child = fixture_tree(&repo, &[("leaf", 0o100644, blob)]);
+        let old = fixture_tree(&repo, &[("mode", 0o100644, blob), ("type", 0o100644, blob), ("dir", 0o040000, child), ("modified", 0o100644, blob), ("link", 0o160000, blob)]);
+        let new = fixture_tree(&repo, &[("mode", 0o100755, blob), ("type", 0o120000, blob), ("dir", 0o100644, blob), ("modified", 0o100644, other), ("link", 0o160000, other)]);
+        let account = MemoryAccount::new(1024 * 1024);
+        for (old, new) in [(old, new), (new, old)] {
+            let result = repo.diff_trees_bounded(Some(old), Some(new), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+            assert!(result.complete);
+            assert_eq!(result.records.len(), 6);
+            for (name, kind) in [("mode", TreeChangeKind::ModeOnly), ("type", TreeChangeKind::TypeChanged), ("modified", TreeChangeKind::Modified), ("link", TreeChangeKind::Modified)] {
+                assert_eq!(result.records.iter().find(|r| r.path == name).unwrap().kind, kind);
+            }
+            let legacy = repo.diff_trees(&old, &new).unwrap();
+            assert_eq!(legacy.len(), result.records.len());
+        }
+        assert_eq!(repo.read_stats().blob_reads, 0);
+    }
+
+    #[test]
+    fn bounded_tree_loose_inflation_is_admitted_before_decoding() {
+        let (_dir, mut repo) = tree_repo();
+        let tree = repo.write_tree(&Tree { entries: vec![TreeEntry {
+            name: "x".repeat(256 * 1024), mode: 0o100644, oid: ObjectId::ZERO,
+        }] }).unwrap();
+        let account = MemoryAccount::new(1024 * 1024);
+        let limits = TreeDiffLimits { max_scratch_bytes: 64 * 1024, ..Default::default() };
+        let result = repo.diff_trees_bounded(None, Some(tree), &limits, &account, &|| false).unwrap();
+        assert_eq!(result.reason, Some(TreeDiffExhaustion::ScratchBytes));
+        assert_eq!(result.counters.trees_decoded, 0);
+        assert_eq!(result.omitted_subtrees, 1);
+        assert!(account.peak() <= limits.max_scratch_bytes);
+        assert_eq!(account.reserved(), 0);
+    }
 
     #[test]
     fn test_diff_identical() {

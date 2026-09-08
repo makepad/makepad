@@ -1,0 +1,76 @@
+# Architecture plan schema v0. This annotated instance is valid schema input.
+# Locations: the repository-root arch/ tree mirrors the source tree:
+# arch/<crate path>/crate.toml and arch/<crate path>/<module path>.toml.
+# All fields below are required unless explicitly marked optional.
+# Unknown fields, duplicate IDs/paths, invalid kinds, and dangling IDs fail.
+# Limits may be tightened by callers; schema limits cannot be increased.
+# Prose limits count Unicode scalar values, not UTF-8 bytes.
+# Input <= 256 KiB, nesting <= 16, values + key segments <= 8,192,
+# decoded strings / scalar tokens <= 16 KiB. Checks precede TOML allocation.
+# These resource limits also apply to the canonical representation, so an
+# accepted plan can always be read again with the same Limits after formatting.
+# Formatting sorts IDs and file paths, uses a fixed key order, and puts
+# sentences on separate lines without changing their decoded prose bytes.
+# Comments/quoting are canonicalized; canonical no-op round trips are identical.
+
+[arch]
+version = 0
+scope = "fictional/" # Repo-relative directory or .rs file; '.' means repo root.
+title = "A small service"
+prompt = "arch/0"
+generator = "unknown" # Free text, no prescribed provider or model.
+
+[source]
+# Sorted, unique manifest of every eligible .rs in the scope, <= 512 files.
+# Hash: 40 lowercase hex digits, Git blob SHA-1 (code_graph content_hash).
+# Obtain using try_manifest(scope, repo_root); never guess or hash plan files.
+# Discovery excludes arch/ at every depth, non-.rs, symlinks, nested repos,
+# hidden directories, target* directories, and CorpusPolicy's default prefixes:
+# old/, local/, libs/{windows,apple_sys,jni-sys,objc-sys,vulkan}/.
+# Discovery stops with an error above 512 files, 100,000 entries, or depth 128.
+# manifest() returns [] on errors; try_manifest() returns their diagnostics.
+files = [{ path = "fictional/src/lib.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" }]
+# TOML table scope places overview under source, not at the document root.
+overview = """
+This fictional service demonstrates the shape of a plan.
+Its implementation behavior is unknown.""" # <= 1,200 characters.
+
+[lanes] # Optional table, <= 8; ID keys match [a-z][a-z0-9_-]{0,63}.
+ui = { title = "UI thread" }
+
+[nodes] # Required table (may be empty), <= 24; same ID syntax.
+# Inline nodes and [nodes.<id>] tables are equivalent. The formatter uses
+# ordinary tables so multiline prose does not need multiline inline tables.
+
+[nodes.service]
+# Exactly: component | thread | queue | store | memory | gpu | io.
+kind = "component"
+title = "Service"
+summary = "Coordinates requests" # <= 120 characters.
+story = """
+The service coordinates requests to keep the public interface small.
+Its invariants and failure handling are unknown.""" # <= 600 characters.
+lane = "ui" # Optional; if present it must name a lane (empty is not a lane).
+# Required string array, may be empty with a validation warning.
+# path[:positive-1-based-line][::Symbol]; nested symbols use :: separators.
+# Only existence/containment and suffix syntax are checked in v0.
+# No symbol resolution or source line-range checks.
+refs = ["fictional/src/lib.rs", "fictional/src/lib.rs:1::Service"]
+budget = "unknown" # Optional free text; no numeric interpretation.
+child = "" # Optional repo-relative plan path; empty means no child.
+# Optional opaque string; preserved verbatim as a value, never interpreted.
+visual = '''splash is reserved for phase 1'''
+
+[edges] # Optional table, <= 48; same ID syntax as nodes/lanes.
+# Exactly: owns | spawns | sends | reads | writes | allocates_from |
+# uploads_to | calls. Endpoints must name existing nodes. Label is optional.
+dispatch = { from = "service", to = "service", kind = "calls", label = "dispatch" }
+
+# Validation errors: unsafe/absolute/parent paths, symlink escapes, missing
+# files/children/refs, invalid IDs/kinds/hashes, scope violations, and IO errors.
+# Warnings: empty prose/refs, refs outside the manifest, unrecorded discovered
+# sources, and a prompt tag differing from arch/0. Warnings do not invalidate.
+# Refs, child, source.files and scope resolve under the supplied repo_root.
+# changes_since hashes every recorded path, discovers additions in directory
+# scopes, and maps changed/removed refs to affected node IDs. Added referenced
+# files also affect their nodes. Errors always force unchanged = false.

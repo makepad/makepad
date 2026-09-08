@@ -16,9 +16,7 @@ use {
             shared_framebuf::PresentableDraw,
         },
         script::vm::*,
-        texture::{
-            CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel, TextureUpdated,
-        },
+        texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel, TextureUpdated},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_studio_protocol::{AppToStudio, GPUSample},
@@ -254,11 +252,20 @@ impl Cx {
 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
                     // update the instance buffer data
-                    let instance_bytes = (draw_item.instances.as_ref().unwrap().len()
+                    let instance_bytes = (draw_item
+                        .retained_instances
+                        .as_ref()
+                        .map(|v| v.data())
+                        .unwrap_or_else(|| draw_item.instances.as_deref().unwrap())
+                        .len()
                         * std::mem::size_of::<f32>())
                         as u64;
-                    if instance_bytes > 524_288 && crate::makepad_error_log::trace_enabled("present") {
+                    if instance_bytes > 524_288
+                        && crate::makepad_error_log::trace_enabled("present")
+                    {
                         crate::trace!(
                             "present",
                             "MPUPLOAD list {:?} item {} — {:.1}MB re-uploaded",
@@ -275,10 +282,18 @@ impl Cx {
                         .os
                         .instance_bytes_uploaded
                         .saturating_add(instance_bytes);
-                    draw_item
-                        .os
-                        .instance_buffer
-                        .update(metal_cx, &draw_item.instances.as_ref().unwrap());
+                    if let Some(retained) = &draw_item.retained_instances {
+                        draw_item.os.instance_buffer.update_retained(
+                            metal_cx,
+                            retained.data(),
+                            draw_item.retained_upload_range.clone(),
+                        );
+                    } else {
+                        draw_item
+                            .os
+                            .instance_buffer
+                            .update(metal_cx, draw_item.instances.as_deref().unwrap());
+                    }
                 }
 
                 // update the zbias uniform if we have it.
@@ -290,8 +305,12 @@ impl Cx {
                 }
 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                    / sh.mapping.instances.total_slots) as u64;
+                let instances = if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count as u64
+                } else {
+                    (draw_item.instances.as_ref().map_or(0, Vec::len)
+                        / sh.mapping.instances.total_slots) as u64
+                };
 
                 if instances == 0 {
                     continue;
@@ -299,10 +318,7 @@ impl Cx {
 
                 if self.passes[draw_pass_id].depth_texture.is_some() {
                     let depth_state = if draw_call.options.depth_write {
-                        self.passes[draw_pass_id]
-                            .os
-                            .mtl_depth_state_write
-                            .as_ref()
+                        self.passes[draw_pass_id].os.mtl_depth_state_write.as_ref()
                     } else {
                         self.passes[draw_pass_id]
                             .os
@@ -378,7 +394,11 @@ impl Cx {
                     Self::debug_dump_draw_call(
                         draw_item_id,
                         sh,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         draw_call,
                         instances,
                     );
@@ -468,18 +488,24 @@ impl Cx {
                                 msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
                             continue;
                         };
-                        let data = &self.uniform_buffers[uniform_buffer.uniform_buffer_id()].data;
-                        if data.is_empty() {
-                            let () =
-                                msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
-                            let () =
-                                msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
-                            continue;
+                        let uniform = &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
+                        if uniform.os.uploaded_generation != uniform.generation
+                            || uniform.os.buffer.inner.is_none()
+                        {
+                            uniform.os.buffer.update(metal_cx, &uniform.data);
+                            uniform.os.uploaded_generation = uniform.generation;
+                            uniform_bytes_uploaded =
+                                uniform_bytes_uploaded.saturating_add(uniform.data.len() as u64);
                         }
-                        let () = msg_send![encoder, setVertexBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
-                        let () = msg_send![encoder, setFragmentBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
-                        uniform_bytes_uploaded =
-                            uniform_bytes_uploaded.saturating_add((data.len() * 2) as u64);
+                        uniform.os.buffer.mark_bound(metal_cx);
+                        let buffer = uniform
+                            .os
+                            .buffer
+                            .inner
+                            .as_ref()
+                            .map_or(nil, |b| b.buffer.as_id());
+                        let () = msg_send![encoder,setVertexBuffer:buffer offset:0 atIndex:*id];
+                        let () = msg_send![encoder,setFragmentBuffer:buffer offset:0 atIndex:*id];
                     }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
@@ -577,7 +603,11 @@ impl Cx {
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances as usize,
                     );
                 }
@@ -671,13 +701,12 @@ impl Cx {
     ) -> bool {
         if metal_cx.cb_seq == 0 {
             metal_cx.lifetime_serials = self.textures.1.serials.clone();
+            self.textures.1.metal_readbacks.queue =
+                NonNull::new(metal_cx.command_queue).map(RcObjcId::from_unowned);
         }
         // PerfMonitor "draw" channel: CPU-side pass encode (all passes of a
         // frame sum), separate from the nextDrawable wait timed by the caller.
-        let perf_t0 = self
-            .perf_monitor
-            .enabled()
-            .then(std::time::Instant::now);
+        let perf_t0 = self.perf_monitor.enabled().then(std::time::Instant::now);
         let perf_encode_t0 = std::time::Instant::now();
         self.os.bytes_written = 0;
         self.os.draw_calls_done = 0;
@@ -727,11 +756,7 @@ impl Cx {
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[draw_pass_id].set_ortho_matrix(
-                pass_rect.pos,
-                pass_rect.size,
-                uniforms_gen,
-            );
+            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size, uniforms_gen);
         }
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
@@ -887,17 +912,16 @@ impl Cx {
             // create depth state
             if self.passes[draw_pass_id].os.mtl_depth_state_write.is_none() {
                 let desc = RcObjcId::from_owned(
-                    NonNull::new(unsafe {
-                        msg_send![class!(MTLDepthStencilDescriptor), new]
-                    })
-                    .unwrap(),
+                    NonNull::new(unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] })
+                        .unwrap(),
                 );
                 let () = unsafe {
                     msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
                 };
                 let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: true] };
-                let depth_stencil_state: ObjcId =
-                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()] };
+                let depth_stencil_state: ObjcId = unsafe {
+                    msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()]
+                };
                 self.passes[draw_pass_id].os.mtl_depth_state_write =
                     NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
             }
@@ -907,17 +931,16 @@ impl Cx {
                 .is_none()
             {
                 let desc = RcObjcId::from_owned(
-                    NonNull::new(unsafe {
-                        msg_send![class!(MTLDepthStencilDescriptor), new]
-                    })
-                    .unwrap(),
+                    NonNull::new(unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] })
+                        .unwrap(),
                 );
                 let () = unsafe {
                     msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
                 };
                 let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: false] };
-                let depth_stencil_state: ObjcId =
-                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()] };
+                let depth_stencil_state: ObjcId = unsafe {
+                    msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()]
+                };
                 self.passes[draw_pass_id].os.mtl_depth_state_no_write =
                     NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
             }
@@ -932,9 +955,8 @@ impl Cx {
         static BATCH_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let batch_enabled =
             *BATCH_ON.get_or_init(|| std::env::var_os("MAKEPAD_BATCH_PASSES").is_some());
-        let batch_this_pass = batch_enabled
-            && !Self::gpu_profile_enabled()
-            && matches!(mode, DrawPassMode::Texture);
+        let batch_this_pass =
+            batch_enabled && !Self::gpu_profile_enabled() && matches!(mode, DrawPassMode::Texture);
         if !batch_this_pass {
             // Entering a present-bound pass: commit the batched offscreen
             // work NOW so the GPU pipelines it under this pass's CPU encode.
@@ -961,21 +983,14 @@ impl Cx {
         // CPU->GPU uploads for the Vec textures this pass samples go on THIS
         // command buffer, ahead of its render encoder, so the GPU orders them
         // after every earlier reader and before this pass (`VecUploadEncoder`).
-        let texture_bytes =
-            self.encode_vec_texture_uploads(metal_cx, draw_list_id, command_buffer);
-        self.os.texture_bytes_uploaded = self
-            .os
-            .texture_bytes_uploaded
-            .saturating_add(texture_bytes);
+        let texture_bytes = self.encode_vec_texture_uploads(metal_cx, draw_list_id, command_buffer);
+        self.os.texture_bytes_uploaded =
+            self.os.texture_bytes_uploaded.saturating_add(texture_bytes);
         let encoder: ObjcId = unsafe {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
 
-        if let Some(depth_state) = self.passes[draw_pass_id]
-            .os
-            .mtl_depth_state_write
-            .as_ref()
-        {
+        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state_write.as_ref() {
             let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state.as_id()] };
         }
 
@@ -1013,7 +1028,10 @@ impl Cx {
                 name.clone()
             }
         });
-        let gpu_time_query = self.passes[draw_pass_id].gpu_time_query.clone();
+        let gpu_time_query = self.passes[draw_pass_id]
+            .gpu_time_query
+            .as_ref()
+            .map(|query| query.recorder.clone());
         let gpu_counters = GpuSampleCounters {
             draw_calls: self.os.draw_calls_done as u64,
             instances: self.os.instances_done,
@@ -1316,16 +1334,28 @@ impl Cx {
             );
             unsafe {
                 let blit_encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
-                let () = msg_send![blit_encoder, copyFromTexture: in_texture toTexture:texture.as_id()];
-                let () = msg_send![blit_encoder, synchronizeTexture: texture.as_id() slice:0 level:0];
+                let () =
+                    msg_send![blit_encoder, copyFromTexture: in_texture toTexture:texture.as_id()];
+                let () =
+                    msg_send![blit_encoder, synchronizeTexture: texture.as_id() slice:0 level:0];
                 let () = msg_send![blit_encoder, endEncoding];
             };
+            crate::trace!(
+                "remote.grab",
+                "copy ids={:?} window={:?} repaint={} sz={}x{}",
+                request_ids,
+                window_id,
+                self.repaint_id,
+                tex_width,
+                tex_height
+            );
             return Some(ScreenshotInfo {
                 request_ids,
                 width: tex_width as _,
                 height: tex_height as _,
                 window_id,
                 texture,
+                wants_capture,
             });
         }
         None
@@ -1355,36 +1385,44 @@ impl Cx {
                 addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
                     // alright lets grab a texture if need be
                     if let Some(sf) = screenshot_info.lock().unwrap().take(){
-                        let mut bgra = vec![0u8; sf.width * sf.height * 4];
+                        // getBytes fills every byte. Allocate the shared payload
+                        // once, without zeroing then copying a full-size Vec.
+                        let mut bgra = Arc::<[u8]>::new_uninit_slice(sf.width * sf.height * 4);
+                        let pixels = Arc::get_mut(&mut bgra).unwrap().as_mut_ptr().cast::<u8>();
                         let region = MTLRegion {
                             origin: MTLOrigin {x: 0, y: 0, z: 0},
                             size: MTLSize {width: sf.width as u64, height: sf.height as u64, depth: 1}
                         };
                         let _:() = unsafe{msg_send![
                             sf.texture.as_id(),
-                            getBytes: bgra.as_mut_ptr()
+                            getBytes: pixels
                             bytesPerRow: sf.width *4
                             bytesPerImage: sf.width * sf.height * 4
                             fromRegion: region
                             mipmapLevel: 0
                             slice: 0
                         ]};
-                        // Metal readback for BGRA8 textures returns BGRA bytes. Convert to RGBA
-                        // before PNG encoding so AppToStudio::Screenshot always transports PNG bytes.
-                        for px in bgra.chunks_exact_mut(4) {
-                            px.swap(0, 2);
-                        }
-                        // Continuous capture sinks (the ScreenCap recorder) take the
-                        // raw bytes; they carry no request id and never consume one.
-                        crate::screen_capture::deliver_capture_frame(
-                            sf.window_id,
-                            sf.width as u32,
-                            sf.height as u32,
-                            &bgra,
+                        // Publish raw pixels before encoding or channel conversion.
+                        // The staging copy belongs to this presenting command buffer,
+                        // so a slow PNG worker cannot change the captured frame.
+                        let mut bgra: Arc<[u8]> = unsafe { bgra.assume_init() };
+                        let mut request_ids = crate::remote::deliver_grab_pixels(
+                            sf.request_ids, sf.width as u32, sf.height as u32, bgra.clone(),
+                            sf.width * 4, crate::texture::ReadbackChannelOrder::Bgra,
+                            crate::texture::ReadbackOrigin::TopLeft,
                         );
-                        // Pixel probes (the eyedropper) want one sample, not a PNG.
-                        let mut request_ids = sf.request_ids;
-                        crate::pixel_probe::answer_pixel_probes(&mut request_ids, sf.width, sf.height, &bgra);
+                        // Preserve the RGBA contract for Studio, probes and recorders.
+                        // Remote-only grabs convert just the downsampled pixels on
+                        // the worker and do no PNG work on this completion thread.
+                        if sf.wants_capture || !request_ids.is_empty() {
+                            for px in Arc::make_mut(&mut bgra).chunks_exact_mut(4) {
+                                px.swap(0, 2);
+                            }
+                            crate::screen_capture::deliver_capture_frame(
+                                sf.window_id, sf.width as u32, sf.height as u32, &bgra,
+                            );
+                            crate::pixel_probe::answer_pixel_probes(&mut request_ids, sf.width, sf.height, &bgra);
+                        }
                         if !request_ids.is_empty() {
                             let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
                                 Ok(png) => png,
@@ -1652,6 +1690,7 @@ struct ScreenshotInfo {
     /// to one window does not swallow another window's frames.
     window_id: Option<usize>,
     texture: RcObjcId,
+    wants_capture: bool,
 }
 
 pub enum DrawPassMode {
@@ -1765,7 +1804,11 @@ fn describe_passes(passes: &[InFlightPass]) -> String {
             out,
             "{:?} \"{}\" shaders [{}]; ",
             pass.pass_id,
-            if pass.name.is_empty() { "main" } else { &pass.name },
+            if pass.name.is_empty() {
+                "main"
+            } else {
+                &pass.name
+            },
             shaders.join(", ")
         );
     }
@@ -1886,7 +1929,10 @@ fn metal_hang_watchdog_start() {
                 // starved GPU shared with another process looks identical).
                 // Without it the diagnostic is logged and the stall is
                 // re-checked after a pause instead of re-reported every tick.
-                if std::env::var("MAKEPAD_GPU_HANG_ABORT").map(|v| v == "1").unwrap_or(false) {
+                if std::env::var("MAKEPAD_GPU_HANG_ABORT")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
                     std::process::abort();
                 } else {
                     std::thread::sleep(std::time::Duration::from_secs(5));
@@ -2103,7 +2149,15 @@ impl MetalCx {
     fn new_command_buffer(&mut self) -> ObjcId {
         metal_hang_watchdog_start();
         let buffer: ObjcId = unsafe { msg_send![self.command_queue, commandBuffer] };
-        self.cb_seq = self.cb_seq.saturating_add(1);
+        // Reserve queue order now, including opt-in batched buffers that are
+        // committed later. An intervening readback-only buffer cannot pass its
+        // still-uncommitted producer on this queue.
+        let () = unsafe { msg_send![buffer, enqueue] };
+        self.cb_seq = self
+            .lifetime_serials
+            .encoded
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
         let seq = self.cb_seq;
         self.lifetime_serials.encoded.store(seq, Ordering::Release);
         self.current_cb_seq = seq;
@@ -2180,7 +2234,8 @@ impl MetalCx {
     /// work waiting on the GPU; growth there is queue growth, not pool growth.
     #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn trace_memory_once_per_second(&mut self) {
-        if gpu_trace_threshold_ms().is_none() || self.memory_trace_at.elapsed() < Duration::from_secs(1)
+        if gpu_trace_threshold_ms().is_none()
+            || self.memory_trace_at.elapsed() < Duration::from_secs(1)
         {
             return;
         }
@@ -2190,7 +2245,10 @@ impl MetalCx {
                 .staging_pool
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (pool.len(), pool.iter().map(|buffer| buffer.len).sum::<usize>())
+            (
+                pool.len(),
+                pool.iter().map(|buffer| buffer.len).sum::<usize>(),
+            )
         };
         let live_count = STAGING_LIVE_COUNT.load(Ordering::Relaxed);
         let live_bytes = STAGING_LIVE_BYTES.load(Ordering::Relaxed);
@@ -2430,7 +2488,11 @@ impl DrawVars {
             // Cache 1: Check if this exact object has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+                if let Some(&shader_id) = cx
+                    .draw_shaders
+                    .cache_object_id_to_shader
+                    .get(&(heap_key, io_self))
+                {
                     // log!("Shader cache HIT (object_id)");
                     self.finalize_cached_shader(vm, shader_id);
                     return;
@@ -2631,7 +2693,10 @@ impl CxOsDrawShader {
             let dir = crate::log::trace_log_dir("shader.dump");
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&mtlsl, &mut hasher);
-            let name = dir.join(format!("shader_{:016x}.metal", std::hash::Hasher::finish(&hasher)));
+            let name = dir.join(format!(
+                "shader_{:016x}.metal",
+                std::hash::Hasher::finish(&hasher)
+            ));
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&name, mtlsl.as_bytes());
         }
@@ -2750,7 +2815,8 @@ impl CxOsDrawShader {
             crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => RcObjcId::from_owned(
                 NonNull::new(unsafe {
                     let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
-                    let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];
+                    let color_attachment: ObjcId =
+                        msg_send![color_attachments, objectAtIndexedSubscript: 0];
                     let () = msg_send![color_attachment, setBlendingEnabled: NO];
                     let mut error: ObjcId = nil;
                     msg_send![
@@ -2769,9 +2835,14 @@ impl CxOsDrawShader {
         // Opt-in: shader compile timing is only interesting when someone is
         // measuring it, and every boot compiles dozens of shaders.
         if crate::makepad_error_log::trace_enabled("shader.bench") {
-            crate::trace!("shader.bench", "src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
-                _mp_src_len, _mp_lib_ms, _mp_t1.elapsed().as_secs_f64()*1000.0,
-                _mp_t0.elapsed().as_secs_f64()*1000.0);
+            crate::trace!(
+                "shader.bench",
+                "src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
+                _mp_src_len,
+                _mp_lib_ms,
+                _mp_t1.elapsed().as_secs_f64() * 1000.0,
+                _mp_t0.elapsed().as_secs_f64() * 1000.0
+            );
         }
         crate::startup_acc("metal newLibraryWithSource", _mp_lib_ms);
         crate::startup_acc(
@@ -2825,7 +2896,10 @@ pub struct CxOsDrawCall {
 }
 
 #[derive(Default)]
-pub struct CxOsUniformBuffer {}
+pub struct CxOsUniformBuffer {
+    buffer: MetalBuffer,
+    uploaded_generation: u64,
+}
 
 #[derive(Default)]
 pub struct CxOsGeometry {
@@ -2839,6 +2913,61 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
+    /// Append-only uploads can use unconsumed capacity even while earlier
+    /// records have GPU readers. Replacements use fresh storage until actual
+    /// command-buffer completion, like ordinary MetalBuffer::update.
+    fn update_retained(&mut self, metal_cx: &MetalCx, data: &[f32], range: std::ops::Range<usize>) {
+        let len = std::mem::size_of_val(data);
+        if len == 0 {
+            return;
+        }
+        let start = range.start * 4;
+        let reusable = self.inner.as_ref().is_some_and(|inner| {
+            len <= inner.capacity
+                && (start >= inner.len
+                    || inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire))
+        });
+        let upload_start = if reusable { start } else { 0 };
+        if !reusable {
+            let capacity = len.next_power_of_two().max(256);
+            self.inner = Some(MetalBufferInner {
+                buffer: RcObjcId::from_owned(
+                    NonNull::new(unsafe {
+                        msg_send![metal_cx.device,newBufferWithLength:capacity as u64 options:nil]
+                    })
+                    .unwrap(),
+                ),
+                len: 0,
+                capacity,
+                last_bound_seq: 0,
+            });
+        }
+        let inner = self.inner.as_mut().unwrap();
+        let dst: *mut std::ffi::c_void = unsafe { msg_send![inner.buffer.as_id(), contents] };
+        if dst.is_null() {
+            return;
+        }
+        // Every submission range is bounded, including the first admission.
+        for offset in (upload_start..len).step_by(256 * 1024) {
+            let bytes = (len - offset).min(256 * 1024);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (data.as_ptr() as *const u8).add(offset),
+                    (dst as *mut u8).add(offset),
+                    bytes,
+                );
+            }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let range = NSRange {
+                    location: offset as u64,
+                    length: bytes as u64,
+                };
+                let _: () = msg_send![inner.buffer.as_id(),didModifyRange:range];
+            }
+        }
+        inner.len = len;
+    }
     /// Bind-time stamp: until the command buffer being encoded completes,
     /// the GPU may be reading this buffer.
     fn mark_bound(&mut self, metal_cx: &MetalCx) {
@@ -2860,8 +2989,7 @@ impl MetalBuffer {
             // audit's fix 2). At UI rates the GPU retired the last frame long
             // before the next update, so this is the common path; only a
             // buffer the GPU is still holding gets a fresh allocation.
-            let gpu_done =
-                inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire);
+            let gpu_done = inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire);
             if gpu_done && len <= inner.capacity {
                 let dst = unsafe {
                     let ptr: *mut std::ffi::c_void = msg_send![inner.buffer.as_id(), contents];
@@ -2964,10 +3092,8 @@ impl Cx {
         let mtl_tex = cxtexture.os.texture.as_ref()?.as_id();
         unsafe {
             let device: ObjcId = msg_send![mtl_tex, device];
-            let descriptor = RcObjcId::from_owned(NonNull::new(msg_send![
-                class!(MTLTextureDescriptor),
-                new
-            ])?);
+            let descriptor =
+                RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLTextureDescriptor), new])?);
             let () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
             let () = msg_send![descriptor.as_id(), setWidth: width as u64];
             let () = msg_send![descriptor.as_id(), setHeight: height as u64];
@@ -3023,6 +3149,120 @@ impl Cx {
 
 // Requests and the receiving endpoint belong only to the UI thread. GPU
 // completion callbacks hold a cloned bounded sender, never a lock the UI uses.
+#[derive(Default)]
+pub(crate) struct MetalReadbacks {
+    queue: Option<RcObjcId>,
+}
+
+impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        if !self
+            .textures
+            .1
+            .readbacks
+            .slots
+            .iter()
+            .any(|slot| slot.pending && slot.pass.is_none())
+        {
+            return;
+        }
+        let Some(queue) = self.textures.1.metal_readbacks.queue.clone() else {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            return;
+        };
+        unsafe {
+            // The renderer's queue orders this copy after already submitted
+            // producers. There is no render pass, private queue or CPU wait.
+            let command_buffer: ObjcId = msg_send![queue.as_id(), commandBuffer];
+            if command_buffer == nil {
+                self.fail_pending_readbacks(ReadbackError::DeviceLost);
+                return;
+            }
+            let () = msg_send![command_buffer, enqueue];
+            let serials = self.textures.1.serials.clone();
+            let serial = serials
+                .encoded
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            for work in
+                self.take_readback_work(None, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft)
+            {
+                self.encode_texture_readback(work, command_buffer);
+            }
+            serials.submitted.fetch_max(serial, Ordering::Release);
+            let () = msg_send![command_buffer, addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
+                serials.complete(serial);
+            })];
+            let () = msg_send![command_buffer, commit];
+        }
+    }
+
+    fn encode_texture_readback(
+        &mut self,
+        work: crate::texture::ReadbackWork,
+        command_buffer: ObjcId,
+    ) {
+        use crate::texture::ReadbackError;
+        debug_assert_ne!(work.ticket.0, 0);
+        let Some(source) = self.textures[work.texture_id].os.texture.clone() else {
+            work.completion.finish(Err(ReadbackError::NotRendered));
+            return;
+        };
+        unsafe {
+            let device: ObjcId = msg_send![source.as_id(), device];
+            let stride = (work.width * 4 + 255) & !255;
+            let length = stride * work.height;
+            if length > work.reserved_bytes {
+                work.completion.finish(Err(ReadbackError::Backpressure));
+                return;
+            }
+            // A buffer gives a known, charged staging extent (unlike opaque
+            // texture allocation padding). Metal requires 256-byte blit rows.
+            let staging: ObjcId = msg_send![device, newBufferWithLength: length as u64 options: MTLResourceOptions::StorageModeShared];
+            let Some(staging) = NonNull::new(staging).map(RcObjcId::from_owned) else {
+                work.completion.finish(Err(ReadbackError::DeviceLost));
+                return;
+            };
+            let blit: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+            if blit == nil {
+                work.completion.finish(Err(ReadbackError::DeviceLost));
+                return;
+            }
+            let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+            let size = MTLSize {
+                width: work.width as u64,
+                height: work.height as u64,
+                depth: 1,
+            };
+            let () = msg_send![blit, copyFromTexture: source.as_id() sourceSlice: 0u64 sourceLevel: 0u64
+                sourceOrigin: origin sourceSize: size toBuffer: staging.as_id() destinationOffset: 0u64
+                destinationBytesPerRow: stride as u64 destinationBytesPerImage: length as u64];
+            let () = msg_send![blit, endEncoding];
+            // This mutex is exclusively callback-owned; the UI never takes it.
+            // Retain BOTH the source allocation and staging through completion.
+            let capture = Mutex::new(Some((source, staging, work)));
+            let () = msg_send![command_buffer, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
+                if let Some((_source, staging, work)) = capture.lock().unwrap().take() {
+                    let status: u64 = msg_send![cb, status];
+                    let result = if status != 4 { Err(ReadbackError::DeviceLost) } else {
+                        let src: *const u8 = msg_send![staging.as_id(), contents];
+                        if src.is_null() { Err(ReadbackError::Failed) } else {
+                            let mut bytes = Arc::<[u8]>::new_uninit_slice(work.width * work.height * 4);
+                            let dst = Arc::get_mut(&mut bytes).unwrap().as_mut_ptr().cast::<u8>();
+                            for y in 0..work.height {
+                                std::ptr::copy_nonoverlapping(src.add(y * stride), dst.add(y * work.width * 4), work.width * 4);
+                            }
+                            Ok(bytes.assume_init())
+                        }
+                    };
+                    work.completion.finish(result);
+                }
+            })];
+        }
+    }
+}
+
 type RenderCaptureResult = (crate::texture::TextureId, usize, usize, Vec<u8>);
 thread_local! {
     static RENDER_TEXTURE_CAPTURE_REQUESTS: std::cell::RefCell<Vec<crate::texture::TextureId>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -3046,10 +3286,15 @@ impl Cx {
     pub fn request_render_texture_capture(&mut self, texture: &Texture) -> bool {
         let tid = texture.texture_id();
         RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests| {
-            let mut requests=requests.borrow_mut();
-            if requests.contains(&tid){return true;}
-            if requests.len()>=8{return false;}
-            requests.push(tid);true
+            let mut requests = requests.borrow_mut();
+            if requests.contains(&tid) {
+                return true;
+            }
+            if requests.len() >= 8 {
+                return false;
+            }
+            requests.push(tid);
+            true
         })
     }
 
@@ -3059,7 +3304,7 @@ impl Cx {
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        RENDER_TEXTURE_CAPTURE_BUS.with(|(_,receive)|receive.try_iter().collect())
+        RENDER_TEXTURE_CAPTURE_BUS.with(|(_, receive)| receive.try_iter().collect())
     }
 
     /// The encode half of the capture (called from `draw_pass` right after
@@ -3072,7 +3317,18 @@ impl Cx {
         draw_pass_id: DrawPassId,
         command_buffer: ObjcId,
     ) {
-        if RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests|requests.borrow().is_empty()) {
+        self.readback_pass_submitted(draw_pass_id, metal_cx.current_cb_seq);
+        if !self.textures.1.readbacks.slots.is_empty() {
+            use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
+            for work in self.take_readback_work(
+                Some(draw_pass_id),
+                ReadbackChannelOrder::Bgra,
+                ReadbackOrigin::TopLeft,
+            ) {
+                self.encode_texture_readback(work, command_buffer);
+            }
+        }
+        if RENDER_TEXTURE_CAPTURE_REQUESTS.with(|requests| requests.borrow().is_empty()) {
             return;
         }
         let tids: Vec<crate::texture::TextureId> = self.passes[draw_pass_id]
@@ -3142,7 +3398,7 @@ impl Cx {
                 let () = msg_send![blit, synchronizeTexture: staging.as_id() slice: 0 level: 0];
                 let () = msg_send![blit, endEncoding];
                 let capture = Mutex::new(Some((tid, width, height, bpp, staging)));
-                let sender = RENDER_TEXTURE_CAPTURE_BUS.with(|(sender,_)|sender.clone());
+                let sender = RENDER_TEXTURE_CAPTURE_BUS.with(|(sender, _)| sender.clone());
                 let () = msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |_cmd: ObjcId| {
@@ -3320,13 +3576,25 @@ impl CxTexture {
                     height,
                     data,
                     ..
-                } => (*width, *height, 4, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    4,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 TextureFormat::VecCubeBGRAu8_32 {
                     width,
                     height,
                     data,
                     ..
-                } => (*width, *height, 4, VecLayout::Cube, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    4,
+                    VecLayout::Cube,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 TextureFormat::VecMipBGRAu8_32 {
                     width,
                     height,
@@ -3362,25 +3630,49 @@ impl CxTexture {
                     height,
                     data,
                     ..
-                } => (*width, *height, 16, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    16,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 TextureFormat::VecRu8 {
                     width,
                     height,
                     data,
                     ..
-                } => (*width, *height, 1, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    1,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 TextureFormat::VecRGu8 {
                     width,
                     height,
                     data,
                     ..
-                } => (*width, *height, 2, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    2,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 TextureFormat::VecRf32 {
                     width,
                     height,
                     data,
                     ..
-                } => (*width, *height, 4, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                } => (
+                    *width,
+                    *height,
+                    4,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
                 _ => return 0,
             };
         if width == 0 || height == 0 {
@@ -3784,7 +4076,11 @@ impl CxTexture {
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
             let usage = MTLTextureUsage::RenderTarget as u64
-                | if self.format.is_sampled_depth() { MTLTextureUsage::ShaderRead as u64 } else { 0 };
+                | if self.format.is_sampled_depth() {
+                    MTLTextureUsage::ShaderRead as u64
+                } else {
+                    0
+                };
             let _: () = unsafe { msg_send![descriptor.as_id(), setUsage: usage] };
             let _: () = unsafe {
                 msg_send![
@@ -4280,11 +4576,7 @@ impl EaglRenderBridge {
 /// The `gpu.profile` topic prints a per-pass GPU-time + geometry table once
 /// a second from the command-buffer completion threads. Names are the
 /// passes' debug names; ms are summed GPU intervals over the window.
-fn gpu_profile_accumulate(
-    label: &str,
-    gpu_seconds: f64,
-    counters: &GpuSampleCounters,
-) {
+fn gpu_profile_accumulate(label: &str, gpu_seconds: f64, counters: &GpuSampleCounters) {
     use std::collections::HashMap;
     use std::sync::Mutex;
     #[derive(Default, Clone)]
@@ -4298,8 +4590,7 @@ fn gpu_profile_accumulate(
     }
     static TABLE: Mutex<Option<(std::time::Instant, HashMap<String, Slot>)>> = Mutex::new(None);
     let Ok(mut guard) = TABLE.lock() else { return };
-    let (started, table) =
-        guard.get_or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
+    let (started, table) = guard.get_or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
     let slot = table.entry(label.to_string()).or_default();
     if gpu_seconds.is_finite() && gpu_seconds > 0.0 {
         slot.gpu_s += gpu_seconds;
@@ -4357,7 +4648,13 @@ mod vec_upload_tests {
         out
     }
 
-    fn set_image(cx: &mut Cx, texture: &Texture, data: Vec<f32>, width: usize, updated: TextureUpdated) {
+    fn set_image(
+        cx: &mut Cx,
+        texture: &Texture,
+        data: Vec<f32>,
+        width: usize,
+        updated: TextureUpdated,
+    ) {
         let height = data.len() / (width * 4);
         cx.textures[texture.texture_id()].format = TextureFormat::VecRGBAf32 {
             width,
@@ -4420,13 +4717,25 @@ mod vec_upload_tests {
         // Frame 2: the atlas appended a row; only that row is dirty. The
         // MTLTexture is reallocated — row 0 must come along.
         set_image(&mut cx, &texture, image(W, 2, 7.0), W, rows(W, 1..2));
-        assert_eq!(upload(&mut cx, &mut metal_cx, &texture), (W * 2 * 16) as u64, "a fresh texture uploads whole");
-        assert_eq!(read_back(&mut cx, &texture), (W, 2, image(W, 2, 7.0)), "row 0 lost on growth");
+        assert_eq!(
+            upload(&mut cx, &mut metal_cx, &texture),
+            (W * 2 * 16) as u64,
+            "a fresh texture uploads whole"
+        );
+        assert_eq!(
+            read_back(&mut cx, &texture),
+            (W, 2, image(W, 2, 7.0)),
+            "row 0 lost on growth"
+        );
 
         // Frame 3: another row, another reallocation; rows 0 and 1 must survive.
         set_image(&mut cx, &texture, image(W, 3, 7.0), W, rows(W, 2..3));
         upload(&mut cx, &mut metal_cx, &texture);
-        assert_eq!(read_back(&mut cx, &texture), (W, 3, image(W, 3, 7.0)), "rows 0-1 lost on growth");
+        assert_eq!(
+            read_back(&mut cx, &texture),
+            (W, 3, image(W, 3, 7.0)),
+            "rows 0-1 lost on growth"
+        );
 
         // Frame 4: no growth — an in-place partial rewrite of row 1 touches
         // exactly row 1 (the sub-region blit path stays a sub-region blit).
@@ -4434,7 +4743,11 @@ mod vec_upload_tests {
         partial[W * 4..W * 8].copy_from_slice(&image(W, 1, 9.0));
         let expected = partial.clone();
         set_image(&mut cx, &texture, partial, W, rows(W, 1..2));
-        assert_eq!(upload(&mut cx, &mut metal_cx, &texture), (W * 16) as u64, "an in-place row goes up as a sub-rect");
+        assert_eq!(
+            upload(&mut cx, &mut metal_cx, &texture),
+            (W * 16) as u64,
+            "an in-place row goes up as a sub-rect"
+        );
         assert_eq!(read_back(&mut cx, &texture), (W, 3, expected));
 
         // Frame 5: a stale Partial (data taken and put back the same size)
@@ -4505,7 +4818,11 @@ fn present_pulse() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        crate::trace!("present", "MPINPUT input→present {:.1}ms", (now_us.saturating_sub(input_at)) as f64 / 1000.0);
+        crate::trace!(
+            "present",
+            "MPINPUT input→present {:.1}ms",
+            (now_us.saturating_sub(input_at)) as f64 / 1000.0
+        );
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

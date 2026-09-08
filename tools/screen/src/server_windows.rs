@@ -94,6 +94,13 @@ fn claim(location: &SessionLocation) -> Result<Option<Value>, String> {
 fn stopped_status(session: &str, previous: Option<&Value>) -> Value {
     json::obj(vec![
         ("running", Value::Bool(false)),
+        (
+            "title",
+            previous
+                .and_then(|v| v.get("title"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
         ("version", Value::Int(VERSION as i64)),
         ("session_id", json::s(session)),
         ("pid", Value::Null),
@@ -125,7 +132,7 @@ fn running_status(location: &SessionLocation, previous: &Value) -> Result<Value,
     if frame.kind != STATUS_REPLY {
         return Err("Invalid screen status frame".into());
     }
-    let value = parse_object(&frame.payload)?;
+    let mut value = parse_object(&frame.payload)?;
     if value.get("running").and_then(Value::as_bool) != Some(true)
         || value.get("version").and_then(Value::as_u64) != Some(VERSION)
         || value.get("session_id").and_then(Value::as_str) != Some(&location.session_id)
@@ -136,6 +143,33 @@ fn running_status(location: &SessionLocation, previous: &Value) -> Result<Value,
             .is_none_or(|pid| pid == 0)
     {
         return Err("Screen endpoint identity differs from its saved claim".into());
+    }
+    if value.get("title").is_none() {
+        // Existing version-1 hosts already project their OSC title. Read it
+        // without resizing, stopping or replacing their running session.
+        let hello = json::obj(vec![
+            ("version", Value::Int(VERSION as i64)),
+            ("session_id", json::s(&location.session_id)),
+            ("cols", Value::Int(80)),
+            ("rows", Value::Int(24)),
+            ("read_only", Value::Bool(true)),
+        ]);
+        if let Ok(frame) = exchange(
+            location,
+            HELLO,
+            hello.to_json().as_bytes(),
+            Duration::from_secs(2),
+        ) {
+            if frame.kind == SNAPSHOT {
+                let mut terminal = HostedTerminal::new(80, 24, 0);
+                terminal.process(&frame.payload);
+                if !terminal.title().is_empty() {
+                    if let Value::Obj(fields) = &mut value {
+                        fields.push(("title".into(), json::s(terminal.title())));
+                    }
+                }
+            }
+        }
     }
     Ok(value)
 }
@@ -192,6 +226,22 @@ pub fn status(state_dir: &Path, session: &str) -> Result<Value, String> {
     }
     Ok(stopped_status(session, previous.as_ref()))
 }
+pub fn name(state_dir: &Path, session: &str, title: &str) -> Result<Value, String> {
+    let location = SessionLocation::open(state_dir, session, false)?;
+    let frame = exchange(
+        &location,
+        NAME,
+        json::obj(vec![("title", json::s(title))])
+            .to_json()
+            .as_bytes(),
+        Duration::from_secs(2),
+    )?;
+    if frame.kind != STATUS_REPLY {
+        return Err(String::from_utf8_lossy(&frame.payload).into_owned());
+    }
+    parse_object(&frame.payload)
+}
+
 pub fn list(state_dir: &Path) -> Result<Value, String> {
     if !state_dir.is_absolute() {
         return Err("Screen state directory must be absolute".into());
@@ -234,7 +284,16 @@ pub fn list(state_dir: &Path) -> Result<Value, String> {
             continue;
         }
         match running_status(&location, &previous) {
-            Ok(value) => sessions.push(value),
+            Ok(mut value) => {
+                if let Value::Obj(fields) = &mut value {
+                    fields.retain(|(key, _)| key != "state_dir");
+                    fields.push((
+                        "state_dir".into(),
+                        json::s(location.state_dir.to_string_lossy()),
+                    ));
+                }
+                sessions.push(value);
+            }
             Err(_) if SessionLock::acquire(&location)?.is_some() => {}
             Err(error) => return Err(error),
         }
@@ -326,6 +385,14 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
         ("cwd", json::s(options.cwd.to_string_lossy())),
         ("program", json::s(options.program.to_string_lossy())),
         ("command_hash", json::s(&hash)),
+        (
+            "title",
+            previous
+                .as_ref()
+                .and_then(|v| v.get("title"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
         ("instance", json::s(&instance)),
         ("phase", json::s("starting")),
         ("launcher_pid", Value::Int(std::process::id().into())),
@@ -481,9 +548,25 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
         client_count: 0,
         stopping: None,
         killed: false,
+        started_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        last_output: Instant::now(),
     };
-    let started = host.status();
-    write_private(&location.metadata_path, started.to_json().as_bytes())?;
+    let default_title = Path::new(&host.options.program)
+        .file_name()
+        .unwrap_or(&host.options.program)
+        .to_string_lossy()
+        .into_owned();
+    host.terminal.set_title(
+        previous
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&default_title),
+    );
+    host.persist_name()?;
     let result = host.run(listener);
     let phase = if result.is_ok() { "ended" } else { "failed" };
     let code = result.as_ref().ok().copied().flatten();

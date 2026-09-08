@@ -21,9 +21,9 @@ use std::{
 use crate::{
     model::{self, FileEntry, SortSpec},
     ops::{OpKind, OpRequest, Undo},
-    treemap::{Node, ScanProgress},
     vfs::{outcome_message, OpOutcome, Vfs, VfsError},
 };
+use makepad_diskmap::treemap::{Node, ScanProgress};
 
 /// The demo's home. Rooted somewhere that cannot be mistaken for a real
 /// path and reads cleanly in the breadcrumb — `/Demo`, `/Demo/Documents`,

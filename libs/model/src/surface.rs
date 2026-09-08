@@ -153,6 +153,7 @@ impl SurfaceLayer {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceMaterial {
+    pub fur: Option<makepad_gltf::GlbFurMaterial>,
     pub base_color: [f64; 4],
     pub metallic: f64,
     pub roughness: f64,
@@ -168,6 +169,7 @@ pub struct SurfaceMaterial {
 impl Default for SurfaceMaterial {
     fn default() -> Self {
         Self {
+            fur: None,
             base_color: [1.; 4],
             metallic: 0.,
             roughness: 1.,
@@ -344,6 +346,9 @@ fn pattern_valid(p: &SurfacePattern) -> bool {
 }
 impl SurfaceMaterial {
     pub fn validate(&self, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<()> {
+        if self.fur.is_some_and(|fur| !fur.valid()) {
+            return Err(Error::Invalid("fur material: length 0.001..0.05m, density 0.05..1, scale 20..1000, seed 0..65535"));
+        }
         if !color_valid(&self.base_color)
             || !unit(self.metallic)
             || !unit(self.roughness)

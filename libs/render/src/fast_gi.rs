@@ -293,6 +293,7 @@ struct Gpu {
     ray_width:usize, position_width:usize,
 }
 struct PreparedPlacement { placement:placement::Placement, samples:emitters::Samples }
+struct DisplayField { origin:Vec3f, config:GiConfig, blockers:usize, bank:f32 }
 pub(crate) struct FastGi {
     mode:GiMode, config:GiConfig, gpu:Option<Gpu>,
     debug:GiDebug,
@@ -302,10 +303,11 @@ pub(crate) struct FastGi {
     generation:u64, revision:Option<(u64,u64,u64)>, pending:Option<Arc<Prepared>>,
     origin:Vec3f, origin_key:Option<[i32;3]>, cursor:usize, traced:usize,
     startup:GiStartup,
+    previous_display:Option<DisplayField>,
     pub stats:GiStats,
 }
 impl Default for FastGi {
-    fn default()->Self{Self{mode:GiMode::Off,debug:GiDebug::Off,config:GiConfig::default(),gpu:None,placement:None,placement_generation:0,job:None,generation:0,revision:None,pending:None,origin:Vec3f::default(),origin_key:None,cursor:0,traced:0,startup:GiStartup::default(),stats:GiStats::default()}}
+    fn default()->Self{Self{mode:GiMode::Off,debug:GiDebug::Off,config:GiConfig::default(),gpu:None,placement:None,placement_generation:0,job:None,generation:0,revision:None,pending:None,origin:Vec3f::default(),origin_key:None,cursor:0,traced:0,startup:GiStartup::default(),previous_display:None,stats:GiStats::default()}}
 }
 impl FastGi {
     pub fn mode(&self)->GiMode{self.mode}
@@ -321,7 +323,7 @@ impl FastGi {
         self.config=c;
     }
     fn reset_progress(&mut self){self.cursor=0;self.traced=0;self.startup=GiStartup::default();self.stats.ready_probes=0;self.stats.startup_sweeps=0;self.stats.display_blend=0.0;}
-    pub fn reset(&mut self){if let Some(job)=self.job.take(){job.cancel();}if let Some(job)=self.placement.take(){job.cancel();}self.placement_generation=self.placement_generation.wrapping_add(1);self.gpu=None;self.pending=None;self.revision=None;self.generation=self.generation.wrapping_add(1);self.origin_key=None;self.reset_progress();self.stats=GiStats::default();}
+    pub fn reset(&mut self){if let Some(job)=self.job.take(){job.cancel();}if let Some(job)=self.placement.take(){job.cancel();}self.placement_generation=self.placement_generation.wrapping_add(1);self.gpu=None;self.previous_display=None;self.pending=None;self.revision=None;self.generation=self.generation.wrapping_add(1);self.origin_key=None;self.reset_progress();self.stats=GiStats::default();}
     /// Reserve BEFORE extracting scene data; queue pressure never loses a job.
     pub fn needs_scene(&self,key:(u64,u64,u64))->bool{self.mode!=GiMode::Off&&self.revision!=Some(key)&&self.job.is_none()}
     pub fn reject(&mut self,key:(u64,u64,u64),error:&str){self.reset();self.revision=Some(key);self.stats.rejected_scene=true;log!("fast GI: {error}");}
@@ -330,7 +332,7 @@ impl FastGi {
         self.generation=self.generation.wrapping_add(1);
         // A preparation that just completed can already be superseded by
         // this frame's world revision. Never let ensure() adopt that scene.
-        self.revision=Some(key);self.gpu=None;self.pending=None;self.reset_progress();self.stats.building=true;
+        self.revision=Some(key);self.gpu=None;self.previous_display=None;self.pending=None;self.origin_key=None;self.reset_progress();self.stats.building=true;
         self.stats.waiting_for_worker=false;
         self.generation
     }
@@ -359,11 +361,11 @@ impl FastGi {
         let nodes_height=p.nodes.len()/DATA_WIDTH/4;let tri_height=p.triangles.len()/DATA_WIDTH/4;
         self.stats.uploads_bytes=(p.nodes.len()+p.triangles.len())*4;
         let data=|cx:&mut Cx,data:Vec<f32>|Texture::new_with_format(cx,TextureFormat::VecRGBAf32{width:DATA_WIDTH,height:data.len()/DATA_WIDTH/4,data:Some(data),updated:TextureUpdated::Full});
-        let target=|cx:&mut Cx,w|Texture::new_with_format(cx,TextureFormat::RenderRGBAf32{size:TextureSize::Fixed{width:w,height:if w==PROBE_TEXELS{self.config.probe_count().max(MAX_BLOCKERS)}else{self.config.probe_count()}},initial:true});
+        let target=|cx:&mut Cx,w|Texture::new_with_format(cx,TextureFormat::RenderRGBAf32{size:TextureSize::Fixed{width:w,height:if w==PROBE_TEXELS{self.config.probe_count().max(MAX_BLOCKERS)*2}else{self.config.probe_count()}},initial:true});
         // Explicit dependencies below order trace -> relight -> gather -> scene.
         let mut stages:Vec<_>=["GI gather","GI relight","GI trace"].into_iter().map(|name|{let pass=DrawPass::new_with_name(cx,name);pass.set_gpu_timing_enabled(cx,true);Stage{pass,list:DrawList::new(cx)}}).collect();stages.reverse();
         let mover_data=padded(vec![0.0;(MAX_BLOCKERS*6+self.config.probe_count())*4]);
-        self.stats.resident_bytes=self.stats.uploads_bytes+((RAYS*2+1)*self.config.probe_count()+PROBE_TEXELS*2*self.config.probe_count().max(MAX_BLOCKERS))*16+mover_data.len()*4+256;
+        self.stats.resident_bytes=self.stats.uploads_bytes+((RAYS*2+1)*self.config.probe_count()+PROBE_TEXELS*4*self.config.probe_count().max(MAX_BLOCKERS))*16+mover_data.len()*4+256;
         self.stats.preparation_cpu_bytes=p.bvh.tris.len()*std::mem::size_of::<Tri>()+p.bvh.nodes.len()*std::mem::size_of::<makepad_raytrace::bvh::FlatNode>()+p.bvh.tri_order.len()*4+p.bvh.priorities.len()*2+p.bvh.coplanar_groups.len()*4+p.static_boxes.len()*std::mem::size_of::<Mover>()+p.emitters.len()*std::mem::size_of::<emitters::Emitter>();
         self.gpu=Some(Gpu{stages,trace,relight,gather,nodes:data(cx,p.nodes),triangles:data(cx,p.triangles),hits:Texture::new(cx),radiance:Texture::new(cx),probes:target(cx,PROBE_TEXELS),history:target(cx,PROBE_TEXELS),movers:data(cx,mover_data),sun_rows:Texture::new_with_format(cx,TextureFormat::VecRGBAf32{width:16,height:1,data:Some(vec![0.0;64]),updated:TextureUpdated::Full}),nodes_height,tri_height,node_count:p.node_count,positions:Texture::new(cx),bvh:p.bvh,placed:false,static_boxes:p.static_boxes,static_visibility:placement::StaticVisibility::default(),field_blockers:0,emitters:p.emitters,emitter_count:0,ray_width:RAYS,position_width:1});
         true
@@ -377,7 +379,16 @@ impl FastGi {
         if !finite(center)||!self.ensure(cx.cx){return;}
         let c=self.config;let count=c.probe_count();
         let key=[(center.x/(c.spacing*2.0)).round()as i32,(center.y/(c.spacing*2.0)).round()as i32,(center.z/(c.spacing*2.0)).round()as i32];
-        if self.origin_key!=Some(key) {
+        // Finish one replacement before chasing another camera cell. This
+        // bounds work while walking and avoids continually cancelling warmup.
+        if self.origin_key.is_none() || (self.origin_key!=Some(key) && self.stats.display_blend>=1.0) {
+            if self.stats.display_blend>=1.0 {
+                let gpu=self.gpu.as_ref().unwrap();
+                self.previous_display=Some(DisplayField{origin:self.origin,config:c,blockers:gpu.field_blockers,bank:0.0});
+            }
+            if std::env::var_os("MAKEPAD_GI_STATS").is_some() {
+                log!("fast GI scroll: {:?} -> {:?}, retained lighting={}",self.origin_key,key,self.previous_display.is_some());
+            }
             if let Some(job)=self.placement.take(){job.cancel();}self.placement_generation=self.placement_generation.wrapping_add(1);
             // Non-integer offsets avoid an entire plane of probes lying
             // exactly on common integer-aligned floors and wall faces.
@@ -385,9 +396,9 @@ impl FastGi {
             self.reset_progress();
             let gpu=self.gpu.as_mut().unwrap();
             gpu.placed=false;gpu.field_blockers=0;
-            for (tex,w) in [(&mut gpu.probes,PROBE_TEXELS),(&mut gpu.history,PROBE_TEXELS)] {
-                *tex=Texture::new_with_format(cx.cx,TextureFormat::RenderRGBAf32{size:TextureSize::Fixed{width:w,height:if w==PROBE_TEXELS{count.max(MAX_BLOCKERS)}else{count}},initial:true});
-            }
+            // Preserve bank zero until gather copies it to the retained bank.
+            // Untraced rows in the replacement are cleared by gi_on=0 in its
+            // first gather, so stale probes never enter transport feedback.
         }
         self.stats.probes=count;
         if !self.gpu.as_ref().unwrap().placed {
@@ -443,6 +454,8 @@ impl FastGi {
         self.stats.rejected_scene=self.stats.omitted_movers>0;
         if self.stats.rejected_scene{return;}
         self.stats.mover_count=movers.len();
+        let keep_previous=self.previous_display.is_some();
+        let copy_previous=self.previous_display.as_ref().is_some_and(|p|p.bank==0.0);
         let gpu=self.gpu.as_mut().unwrap();
         let previous_blockers=gpu.field_blockers;
         let current_blockers=movers.len()+gpu.static_visibility.boxes.len();
@@ -492,6 +505,9 @@ impl FastGi {
             if i==0&&!tracing {self.stats.gpu_ms[i]=0.0;continue;}
             let quad=match i{0=>&mut gpu.trace.quad,1=>&mut gpu.relight.quad,_=>&mut gpu.gather.quad};
             let dv=&mut quad.draw_vars;
+            dv.set_uniform(cx2.cx,live_id!(gi_transition),&[1.0]);
+            dv.set_uniform(cx2.cx,live_id!(gi_keep_previous),&[if keep_previous{1.0}else{0.0}]);
+            dv.set_uniform(cx2.cx,live_id!(gi_copy_previous),&[if copy_previous{1.0}else{0.0}]);
             dv.set_uniform(cx2.cx,live_id!(gi_origin),&[self.origin.x,self.origin.y,self.origin.z,c.spacing]);
             dv.set_uniform(cx2.cx,live_id!(gi_grid),&[c.grid[0]as f32,c.grid[1]as f32,c.grid[2]as f32,count as f32]);
             dv.set_uniform(cx2.cx,live_id!(gi_batch),&[self.cursor as f32,batch as f32,c.ray_distance,trace_limit as f32]);
@@ -513,7 +529,7 @@ impl FastGi {
                 dv.set_uniform(cx2.cx,live_id!(gi_light_ids0),&light_ids[..4]);dv.set_uniform(cx2.cx,live_id!(gi_light_ids1),&light_ids[4..]);
             }
             let width=if i==2{PROBE_TEXELS}else{gpu.ray_width};
-            let height=if i==2{count.max(MAX_BLOCKERS)}else{count};
+            let height=if i==2{count.max(MAX_BLOCKERS)*2}else{count};
             let target=match i{0=>&gpu.hits,1=>&gpu.radiance,_=>&gpu.probes};
             let next=if i<2{Some(gpu.stages[i+1].pass.draw_pass_id())}else{None};
             let stage=&mut gpu.stages[i];
@@ -533,6 +549,8 @@ impl FastGi {
         self.stats.ready_probes=self.traced;self.cursor=(self.cursor+batch)%count;
         self.stats.display_blend=self.startup.advance(self.cursor==0,Cx::monotonic_now());
         self.stats.startup_sweeps=self.startup.sweeps;
+        if let Some(previous)=self.previous_display.as_mut(){previous.bank=1.0;}
+        if self.stats.display_blend>=1.0 {self.previous_display=None;}
         self.stats.encode_us=((Cx::monotonic_now()-start)*1e6)as u64;
     }
     fn display_strength(&self)->f32 {
@@ -540,8 +558,17 @@ impl FastGi {
         self.config.strength*if self.debug==GiDebug::Off{self.stats.display_blend}else{1.0}
     }
     pub fn bind(&self,cx:&Cx,dv:&mut DrawVars){
-        let on=self.mode==GiMode::Fast&&self.gpu.is_some()&&self.stats.ready_probes>0&&!self.stats.rejected_scene;
-        dv.set_uniform(cx,live_id!(gi_on),&[if on{self.display_strength()}else{0.0}]);
+        let previous=self.previous_display.as_ref().filter(|_|self.debug==GiDebug::Off);
+        let on=self.mode==GiMode::Fast&&self.gpu.is_some()&&(self.stats.ready_probes>0||previous.is_some())&&!self.stats.rejected_scene;
+        dv.set_uniform(cx,live_id!(gi_on),&[if on{if previous.is_some(){self.config.strength}else{self.display_strength()}}else{0.0}]);
+        dv.set_uniform(cx,live_id!(gi_transition),&[if previous.is_some(){self.stats.display_blend}else{1.0}]);
+        if let Some(previous)=previous {
+            dv.set_uniform(cx,live_id!(gi_previous_bank),&[previous.bank]);
+            let p=previous.origin;let c=previous.config;
+            dv.set_uniform(cx,live_id!(gi_previous_origin),&[p.x,p.y,p.z,c.spacing]);
+            dv.set_uniform(cx,live_id!(gi_previous_grid),&[c.grid[0]as f32,c.grid[1]as f32,c.grid[2]as f32,c.probe_count()as f32]);
+            dv.set_uniform(cx,live_id!(gi_previous_blockers),&[previous.blockers as f32]);
+        }
         dv.set_uniform(cx,live_id!(gi_debug),&[self.debug as u8 as f32]);
         dv.set_uniform(cx,live_id!(gi_blocker_count),&[if on{self.gpu.as_ref().unwrap().field_blockers as f32}else{0.0}]);
         if !on {

@@ -1,5 +1,5 @@
 //! End-to-end behaviour of the repository API on repositories built with the
-//! API itself: no git binary anywhere. Where the old suite asked git to
+//! API itself, with a separately ignored read-only Git diff oracle. Where the old suite asked git to
 //! confirm an object, the assertion is now the object id git assigns to the
 //! same content (computed independently of this crate's serialisers).
 use makepad_git::test_support::{
@@ -462,6 +462,176 @@ fn test_unstage_file() {
 }
 
 // ===== Diff Tests =====
+
+type ChangeTuple = (String, Option<(ObjectId, u32)>, Option<(ObjectId, u32)>);
+
+fn legacy_records(changes: Vec<TreeChange>) -> Vec<ChangeTuple> {
+    changes.into_iter().map(|change| match change {
+        TreeChange::Added { path, oid, mode } => (path, None, Some((oid, mode))),
+        TreeChange::Deleted { path, oid, mode } => (path, Some((oid, mode)), None),
+        TreeChange::Modified { path, old_oid, new_oid, old_mode, new_mode } => (path, Some((old_oid, old_mode)), Some((new_oid, new_mode))),
+    }).collect()
+}
+
+fn this_repository_pairs(repo: &mut Repository) -> Vec<(ObjectId, ObjectId)> {
+    let head = repo.head_oid().unwrap();
+    let mut target = head;
+    let mut pairs = Vec::new();
+    for _ in 0..24 {
+        let commit = repo.read_commit(&target).unwrap();
+        let parent = commit.first_parent().expect("this repository must have 24 first-parent pairs");
+        pairs.push((parent, target));
+        target = parent;
+    }
+    // Also cover arbitrary endpoint distance and reversal.
+    pairs.push((target, head));
+    pairs.push((head, target));
+    let history = repo.log(&head, usize::MAX).unwrap();
+    if let Some((oid, commit)) = history.iter().find(|(_, commit)| commit.parents.len() > 1) {
+        pairs.push((commit.parents[0], *oid));
+        eprintln!("bounded-tree real merge: {oid}, first parent {}", commit.parents[0]);
+    }
+    eprintln!("bounded-tree real repository: HEAD={head}, history={}, pairs={}", history.len(), pairs.len());
+    pairs
+}
+
+#[test]
+fn bounded_tree_diff_matches_real_repository_commits() {
+    let mut repo = Repository::open(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let pairs = this_repository_pairs(&mut repo);
+    assert!(pairs.len() >= 24);
+    let account = memory::MemoryAccount::new(64 * 1024 * 1024);
+    let limits = TreeDiffLimits::default();
+    let mut total = TreeDiffCounters::default();
+    let mut records = 0;
+    let mut elapsed = std::time::Duration::ZERO;
+    for (old, new) in pairs {
+        let before = repo.read_stats().blob_reads;
+        let start = std::time::Instant::now();
+        let bounded = repo.diff_commits_bounded(Some(old), Some(new), &limits, &account, &|| false).unwrap();
+        elapsed += start.elapsed();
+        assert!(bounded.complete, "{old}..{new}: {:?}", bounded.reason);
+        assert_eq!(bounded.omitted_records, 0);
+        assert_eq!(repo.read_stats().blob_reads, before);
+        let legacy = legacy_records(repo.diff_commits(&old, &new).unwrap());
+        let actual: Vec<_> = bounded.records.iter().map(|r| (r.path.clone(), r.old, r.new)).collect();
+        assert_eq!(actual, legacy, "{old}..{new}");
+        total.trees_decoded += bounded.counters.trees_decoded;
+        total.entries_visited += bounded.counters.entries_visited;
+        total.object_bytes += bounded.counters.object_bytes;
+        total.bytes_read += bounded.counters.bytes_read;
+        total.scratch_peak_bytes = total.scratch_peak_bytes.max(bounded.counters.scratch_peak_bytes);
+        total.result_bytes = total.result_bytes.max(bounded.counters.result_bytes);
+        records += bounded.records.len();
+        drop(bounded);
+        assert_eq!(account.reserved(), 0);
+    }
+    eprintln!("bounded-tree real totals: records={records}, counters={total:?}, account_peak={}, time_ms={:.3}, blob_reads={}", account.peak(), elapsed.as_secs_f64() * 1000.0, repo.read_stats().blob_reads);
+}
+
+#[test]
+#[ignore = "read-only external Git name-status oracle on this repository"]
+fn bounded_tree_diff_git_name_status_oracle() {
+    let mut repo = Repository::open(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let pairs = this_repository_pairs(&mut repo);
+    let account = memory::MemoryAccount::new(64 * 1024 * 1024);
+    let mut records = 0;
+    for (old, new) in pairs {
+        let bounded = repo.diff_commits_bounded(Some(old), Some(new), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+        assert!(bounded.complete);
+        let output = std::process::Command::new("git").current_dir(&repo.workdir)
+            .args(["diff", "--name-status", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", &old.to_hex(), &new.to_hex(), "--"])
+            .output().expect("Git must be available for the ignored oracle");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let fields: Vec<_> = output.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
+        assert_eq!(fields.len() % 2, 0);
+        let expected: Vec<_> = fields.chunks_exact(2).map(|p| (std::str::from_utf8(p[0]).unwrap(), std::str::from_utf8(p[1]).unwrap())).collect();
+        let actual: Vec<_> = bounded.records.iter().map(|r| (match r.kind {
+            TreeChangeKind::Added => "A", TreeChangeKind::Deleted => "D", TreeChangeKind::TypeChanged => "T",
+            TreeChangeKind::Modified | TreeChangeKind::ModeOnly => "M",
+        }, r.path.as_str())).collect();
+        assert_eq!(actual, expected, "{old}..{new}");
+        records += actual.len();
+    }
+    eprintln!("bounded-tree Git oracle matched {records} records");
+}
+
+#[test]
+fn bounded_commit_root_empty_and_missing_parent() {
+    let dir = test_support::tempdir().unwrap();
+    init_layout(dir.path());
+    let mut repo = Repository::open(dir.path()).unwrap();
+    let blob = repo.write_blob(b"root file").unwrap();
+    let tree = repo.write_tree(&Tree { entries: vec![TreeEntry { name: "root".into(), mode: 0o100644, oid: blob }] }).unwrap();
+    let root = repo.write_commit(&Commit { tree, parents: vec![], author: test_sig(), committer: test_sig(), message: "Root\n\nStudio-Local-Checkpoint: true\n".into() }).unwrap();
+    let account = memory::MemoryAccount::new(1024 * 1024);
+    let limits = TreeDiffLimits::default();
+    assert_eq!(repo.read_commit(&root).unwrap().first_parent(), None);
+    for (old, new, kind) in [(None, Some(root), TreeChangeKind::Added), (Some(root), None, TreeChangeKind::Deleted)] {
+        let result = repo.diff_commits_bounded(old, new, &limits, &account, &|| false).unwrap();
+        assert!(result.complete);
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].kind, kind);
+        assert_eq!(result.records[0].path, "root");
+    }
+    assert!(matches!(repo.diff_commits_bounded(Some(ObjectId::ZERO), Some(root), &limits, &account, &|| false), Err(GitError::ObjectNotFound(_))));
+    assert!(matches!(repo.diff_commits_bounded(None, Some(root), &limits, &account, &|| true), Err(GitError::Cancelled)));
+    let refused = repo.diff_commits_bounded(None, Some(root), &TreeDiffLimits { max_scratch_bytes: 0, ..limits }, &account, &|| false).unwrap();
+    assert_eq!(refused.reason, Some(TreeDiffExhaustion::ScratchBytes));
+    assert_eq!(refused.omitted_records, 0);
+    assert!(!refused.omitted_records_exact);
+    assert_eq!(repo.read_stats().blob_reads, 0);
+}
+
+#[test]
+fn bounded_tree_packed_ofs_and_ref_delta_and_alternates() {
+    let dir = test_support::tempdir().unwrap();
+    init_layout(dir.path());
+    let mut repo = Repository::open(dir.path()).unwrap();
+    let bytes = |name: &str| tree::serialize_tree(&Tree { entries: vec![TreeEntry { name: name.into(), mode: 0o100644, oid: ObjectId::ZERO }] });
+    let base = bytes("base");
+    let first = bytes("first");
+    let second = bytes("second");
+    let base_oid = oid::hash_object("tree", &base);
+    let delta = |result: &[u8]| { let mut delta = delta_header(base.len(), result.len()); delta.extend(delta_insert(result)); delta };
+    let ids = write_pack_entries(&repo.git_dir, &[
+        PackEntry::Full(ObjectKind::Tree, base.clone()),
+        PackEntry::OfsDelta { kind: ObjectKind::Tree, base_index: 0, delta: delta(&first), result: first },
+        PackEntry::RefDelta { kind: ObjectKind::Tree, base: base_oid, delta: delta(&second), result: second },
+    ]).unwrap();
+    let account = memory::MemoryAccount::new(1024 * 1024);
+    for oid in &ids {
+        let result = repo.diff_trees_bounded(None, Some(*oid), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+        assert!(result.complete);
+        assert_eq!(result.records.len(), 1);
+        assert!(result.counters.bytes_read > 0);
+    }
+    let alternate = test_support::tempdir().unwrap();
+    init_layout(alternate.path());
+    let mut other = Repository::open(alternate.path()).unwrap();
+    fs::create_dir_all(other.git_dir.join("objects/info")).unwrap();
+    fs::write(other.git_dir.join("objects/info/alternates"), format!("{}\n", repo.git_dir.join("objects").display())).unwrap();
+    let result = other.diff_trees_bounded(Some(ids[1]), Some(ids[2]), &TreeDiffLimits::default(), &account, &|| false).unwrap();
+    assert!(result.complete);
+    assert_eq!(result.records.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(other.read_stats().blob_reads, 0);
+
+    // A small compressed delta can announce an enormous result. Admission
+    // must reject that size before allocation, even with a tiny base tree.
+    let mut enormous = delta_header(base.len(), 8 * 1024 * 1024);
+    enormous.extend(delta_insert(b"x"));
+    let oversized = write_pack_entries(&repo.git_dir, &[
+        PackEntry::Full(ObjectKind::Tree, base.clone()),
+        PackEntry::RefDelta { kind: ObjectKind::Tree, base: base_oid, delta: enormous, result: bytes("oversized") },
+    ]).unwrap()[1];
+    let limits = TreeDiffLimits { max_scratch_bytes: 128 * 1024, ..Default::default() };
+    let refused = repo.diff_trees_bounded(None, Some(oversized), &limits, &account, &|| false).unwrap();
+    assert_eq!(refused.reason, Some(TreeDiffExhaustion::ScratchBytes));
+    assert_eq!(refused.counters.trees_decoded, 0);
+    assert_eq!(refused.omitted_subtrees, 1);
+    assert!(!refused.omitted_records_exact);
+    assert!(refused.counters.scratch_peak_bytes <= limits.max_scratch_bytes);
+}
 
 #[test]
 fn test_diff_trees_add_delete_modify() {

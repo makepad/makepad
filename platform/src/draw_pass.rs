@@ -12,61 +12,66 @@ use crate::{
     window::WindowId,
 };
 use std::{
-    collections::VecDeque,
+    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+        Arc,
     },
 };
 
-#[derive(Clone, Default)]
+/// The UI owns the receiver; only the bounded sender crosses to completion
+/// callbacks. Cloned pass descriptions remain on the UI thread.
+#[derive(Clone)]
 pub(crate) struct GpuTimeQuery {
-    samples_ms: Arc<Mutex<VecDeque<(u64, f64)>>>,
-    /// App-owned label for the pass content, captured at ENCODE time into
-    /// each completion sample. A pass replays on every window repaint, not
-    /// only when its owner rebuilt it, so completed durations cannot be
-    /// matched to submissions by arrival order — the tag travels with the
-    /// command buffer instead.
-    tag: Arc<AtomicU64>,
+    pub(crate) recorder: GpuTimeRecorder,
+    receiver: Rc<Receiver<(u64, f64)>>,
 }
-
+#[derive(Clone)]
+pub(crate) struct GpuTimeRecorder {
+    sender: SyncSender<(u64, f64)>,
+    tag: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+}
+impl Default for GpuTimeQuery {
+    fn default() -> Self {
+        let (sender, receiver) = sync_channel(1024);
+        Self {
+            recorder: GpuTimeRecorder {
+                sender,
+                tag: Arc::new(AtomicU64::new(0)),
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            receiver: Rc::new(receiver),
+        }
+    }
+}
 // Only backends that report command-buffer timing (Metal today) call the
 // recording half; the other backends still compile it.
 #[allow(dead_code)]
-impl GpuTimeQuery {
+impl GpuTimeRecorder {
     pub(crate) fn record_seconds_tagged(&self, tag: u64, seconds: f64) {
         let ms = seconds * 1000.0;
         if !ms.is_finite() || ms < 0.0 {
             return;
         }
-        let mut samples = self
-            .samples_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if samples.len() == 1024 {
-            samples.pop_front();
+        if matches!(self.sender.try_send((tag, ms)), Err(TrySendError::Full(_))) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        samples.push_back((tag, ms));
     }
-
-    pub(crate) fn set_tag(&self, tag: u64) {
-        self.tag.store(tag, Ordering::Relaxed);
-    }
-
     pub(crate) fn current_tag(&self) -> u64 {
         self.tag.load(Ordering::Relaxed)
     }
-
-    fn take_samples(&self) -> Vec<f64> {
-        self.take_tagged_samples().into_iter().map(|(_, ms)| ms).collect()
+}
+impl GpuTimeQuery {
+    fn set_tag(&self, tag: u64) {
+        self.recorder.tag.store(tag, Ordering::Relaxed);
     }
-
+    fn take_samples(&self) -> Vec<f64> {
+        self.receiver.try_iter().map(|(_, ms)| ms).collect()
+    }
     fn take_tagged_samples(&self) -> Vec<(u64, f64)> {
-        self.samples_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain(..)
-            .collect()
+        self.receiver.try_iter().collect()
     }
 }
 
@@ -405,12 +410,7 @@ impl DrawPass {
     /// the command buffer's GPUStartTime/GPUEndTime; unsupported backends
     /// simply leave the sample queue empty.
     pub fn set_gpu_timing_enabled(&self, cx: &mut Cx, enabled: bool) {
-        let pass = &mut cx.passes[self.draw_pass_id()];
-        if enabled {
-            pass.gpu_time_query.get_or_insert_with(GpuTimeQuery::default);
-        } else {
-            pass.gpu_time_query = None;
-        }
+        cx.passes[self.draw_pass_id()].set_gpu_timing_enabled(enabled);
     }
 
     /// Drain completed command-buffer durations without blocking for work
@@ -564,6 +564,35 @@ pub struct CxDrawPass {
     pub(crate) gpu_time_query: Option<GpuTimeQuery>,
 }
 
+impl CxDrawPass {
+    /// Opt in when a widget borrows its containing pass. No OS/GPU wait.
+    pub fn set_gpu_timing_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.gpu_time_query
+                .get_or_insert_with(GpuTimeQuery::default);
+        } else {
+            self.gpu_time_query = None;
+        }
+    }
+    pub fn set_gpu_time_tag(&self, tag: u64) {
+        if let Some(query) = &self.gpu_time_query {
+            query.set_tag(tag);
+        }
+    }
+    /// Drain completed samples into reusable caller storage. The queue is
+    /// bounded; missing samples remain missing rather than blocking a frame.
+    pub fn drain_gpu_time_samples(&self, out: &mut Vec<(u64, f64)>) {
+        if let Some(query) = &self.gpu_time_query {
+            out.extend(query.receiver.try_iter());
+        }
+    }
+    pub fn gpu_time_samples_dropped(&self) -> u64 {
+        self.gpu_time_query
+            .as_ref()
+            .map_or(0, |q| q.recorder.dropped.load(Ordering::Relaxed))
+    }
+}
+
 impl Default for CxDrawPass {
     fn default() -> Self {
         CxDrawPass {
@@ -712,8 +741,14 @@ mod depth_attachment_size_tests {
 
     #[test]
     fn a_window_pass_sizes_depth_from_the_pass_rect() {
-        assert_eq!(depth_attachment_size(None, dvec2(1126.0, 680.0), 2.0), (2252, 1360));
-        assert_eq!(depth_attachment_size(None, dvec2(800.0, 600.0), 1.0), (800, 600));
+        assert_eq!(
+            depth_attachment_size(None, dvec2(1126.0, 680.0), 2.0),
+            (2252, 1360)
+        );
+        assert_eq!(
+            depth_attachment_size(None, dvec2(800.0, 600.0), 1.0),
+            (800, 600)
+        );
     }
 
     #[test]
@@ -731,5 +766,42 @@ mod depth_attachment_size_tests {
             depth_attachment_size(Some((1024, 512)), dvec2(1126.0, 680.0), 2.0),
             (1024, 512)
         );
+    }
+}
+
+#[cfg(test)]
+mod gpu_time_tests {
+    use super::*;
+    #[test]
+    fn bounded_completion_samples_preserve_tags_and_report_full_queue() {
+        let mut pass = CxDrawPass::default();
+        pass.set_gpu_timing_enabled(true);
+        let recorder = pass.gpu_time_query.as_ref().unwrap().recorder.clone();
+        pass.set_gpu_time_tag(17);
+        let captured = recorder.current_tag();
+        pass.set_gpu_time_tag(18);
+        std::thread::spawn(move || {
+            for index in 0..1025 {
+                recorder.record_seconds_tagged(captured, index as f64 / 1000.0);
+            }
+            for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+                recorder.record_seconds_tagged(99, invalid);
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(pass.gpu_time_samples_dropped(), 1);
+        let mut samples = Vec::with_capacity(1024);
+        pass.drain_gpu_time_samples(&mut samples);
+        assert_eq!(samples.len(), 1024);
+        for (index, (tag, ms)) in samples.iter().enumerate() {
+            assert_eq!(*tag, 17);
+            assert!((*ms - index as f64).abs() < 1e-9);
+        }
+        samples.clear();
+        pass.drain_gpu_time_samples(&mut samples);
+        assert!(samples.is_empty());
+        pass.set_gpu_timing_enabled(false);
+        assert_eq!(pass.gpu_time_samples_dropped(), 0);
     }
 }

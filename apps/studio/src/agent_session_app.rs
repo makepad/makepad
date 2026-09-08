@@ -13,12 +13,13 @@ struct AgentSessionAppState {
     terminal_reservations: HashMap<String, (u64, AgentTerminalRequest)>,
     inventory: Vec<makepad_studio::agent_session::SessionInfo>,
     inventory_request: Option<u64>,
+    inventory_state_dir: Option<PathBuf>,
     view_requests: HashMap<u64, u64>,
     mirrors: HashMap<u64, makepad_studio::agent_session::SessionInfo>,
     saved_views: HashMap<u64, String>,
     views_loaded: bool,
-    picker_tab: Option<u64>,
-    picker_ids: Vec<Option<String>>,
+    next_inventory_probe: f64,
+    reported_titles: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,8 @@ struct AgentTerminalBinding {
     provider: makepad_studio::agent_session::AgentProvider,
     resume: Option<makepad_studio::agent_session::ResumeIdentity>,
     recovery: Option<makepad_studio::agent_session::RecoveryInfo>,
+    /// User-supplied conversation id for the first Prepare of this tab.
+    resume_conversation: Option<String>,
 }
 
 impl App {
@@ -98,7 +101,7 @@ impl App {
     fn bind_agent_terminals(&mut self, cx: &mut Cx) {
         let dock = self.ui.dock(cx, ids!(dock));
         if !self.iterations.snapshot_ready {
-            // Restored Dock widgets do not yet know their flow worktree or
+            // Restored Dock widgets do not yet know their repository or
             // provider. Hold them unloaded until the worker's first snapshot
             // lets bind_flow_terminals configure that identity first.
             for (id, item) in dock.clone_state().unwrap_or_default() {
@@ -169,6 +172,7 @@ impl App {
                 binding.reconnect_attempts = 0;
             } else {
                 let provider = self.provider_for_terminal(id.0);
+                let resume_conversation = self.resume_conversation_for_terminal(id.0);
                 self.agent_sessions.bindings.insert(
                     id.0,
                     AgentTerminalBinding {
@@ -197,6 +201,7 @@ impl App {
                         provider,
                         resume: None,
                         recovery: None,
+                        resume_conversation,
                     },
                 );
             }
@@ -354,6 +359,7 @@ impl App {
             session_id: session_id.clone(),
             cwd: binding.cwd.clone(),
             command: binding.initial_command.clone(),
+            resume_conversation: binding.resume_conversation.clone(),
         };
         let worker = self.agent_sessions.worker.as_mut().ok_or_else(|| {
             self.agent_sessions.error.clone().unwrap_or_else(|| {
@@ -529,8 +535,8 @@ impl App {
         if let Some(info) = self.agent_sessions.mirrors.get(&tab) {
             return Some(format!(
                 "Connected to {} · commands report to {} · closing this view detaches",
-                info.session_id,
-                self.session_owner_flow(&info.session_id)
+                info.title,
+                self.info_owner_flow(info)
                     .unwrap_or_else(|| "its originating terminal".into())
             ));
         }
@@ -630,6 +636,10 @@ impl App {
 
     fn drain_agent_sessions(&mut self, cx: &mut Cx) {
         self.sync_terminal_busy();
+        if cx.seconds_since_app_start() >= self.agent_sessions.next_inventory_probe {
+            self.agent_sessions.next_inventory_probe = cx.seconds_since_app_start() + 1.0;
+            let _ = self.refresh_terminal_inventory();
+        }
         self.restore_terminal_views(cx);
         let now = cx.seconds_since_app_start();
         if now >= self.agent_sessions.next_resume_probe {
@@ -849,6 +859,16 @@ impl App {
         Ok(format!("Stop agent queued for terminal {tab:x} (request {request}); inspect agent sessions for its acknowledgement"))
     }
 
+    fn resume_conversation_for_terminal(&self, tab: u64) -> Option<String> {
+        self.iterations
+            .snapshot
+            .engine
+            .flows
+            .values()
+            .find(|flow| flow.successor.is_none() && self.flow_terminal_id(&flow.id) == tab)
+            .and_then(|flow| flow.config.resume_token.clone())
+    }
+
     fn provider_for_terminal(&self, tab: u64) -> makepad_studio::agent_session::AgentProvider {
         use makepad_studio::agent_session::AgentProvider;
         self.iterations
@@ -1015,10 +1035,7 @@ impl App {
                 .flows
                 .get(flow)
                 .ok_or("Unknown flow")?;
-            let cwd = state
-                .worktree
-                .clone()
-                .ok_or("This flow has no available worktree")?;
+            let cwd = state.config.repo.clone();
             let provider = self.provider_for_terminal(tab);
             self.agent_sessions.bindings.insert(
                 tab,
@@ -1036,6 +1053,7 @@ impl App {
                     provider,
                     resume: None,
                     recovery: None,
+                    resume_conversation: None,
                 },
             );
         }

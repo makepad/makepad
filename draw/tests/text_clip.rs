@@ -41,6 +41,9 @@ struct Scene {
 fn render(scene: Scene, directory: &Path) -> Vec<u8> {
     std::fs::create_dir_all(directory).unwrap();
     std::env::set_var("MAKEPAD_HEADLESS_OUT_DIR", directory);
+    // Another explicit renderer gate in the same test binary may disable PNGs.
+    std::env::set_var("MAKEPAD_HEADLESS_FRAMES", "on");
+    std::env::set_var("MAKEPAD_HEADLESS_DPI", "1");
     let mut state = None;
     let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
         if matches!(event, Event::Startup) {
