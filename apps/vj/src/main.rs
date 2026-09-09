@@ -6710,6 +6710,41 @@ fn seven_bit_detent(position: f32, neutral: f32) -> f32 {
 }
 
 #[cfg(test)]
+mod fault_level_tests {
+    /// The log ranks its lines by level, and a fault ranked with every
+    /// note is a fault nobody finds after the set. The level a line is said
+    /// at has no witness but the source, so the source is what these read.
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn said_at_error_level(words: &str) -> bool {
+        SOURCE.contains(&format!("error!(\"{words}"))
+            && !SOURCE.contains(&format!("log!(\"{words}"))
+    }
+
+    #[test]
+    fn a_deck_that_could_not_be_loaded_is_said_at_error_level() {
+        assert!(said_at_error_level("deck {deck:?}: {title} could not be decoded"));
+        assert!(said_at_error_level("deck {deck:?}: {title} could not be fetched"));
+        assert!(said_at_error_level("deck {deck:?}: {text}"));
+    }
+
+    #[test]
+    fn a_worker_that_stopped_short_is_said_at_error_level() {
+        for words in [
+            "prefetch: decode failed",
+            "preview: decode failed",
+            "preview: fetch failed",
+            "preprocess: {key} could not be decoded",
+            "preprocess: {key} could not be fetched",
+            "models: {short} install failed",
+            "import failed",
+            "import refused",
+        ] {
+            assert!(said_at_error_level(words), "{words}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod console_mode_tests {
     use super::*;
@@ -19939,18 +19974,22 @@ p2 {}
                 }
             }
             MediaPurpose::Deck { deck, gen, .. } => {
+                // The same fault one step earlier: the store never handed the
+                // bytes over. Said at the same level, for the same reason.
+                let title = self.decks.deck(deck).title().unwrap_or("?").to_string();
+                error!("deck {deck:?}: {title} could not be fetched ({error})");
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
             }
             MediaPurpose::Analyze { key, .. } => {
                 // The track stays marked done, so an unreachable blob is not
                 // re-fetched every scan for the rest of the session.
-                log!("preprocess: {key} could not be fetched ({error})");
+                error!("preprocess: {key} could not be fetched ({error})");
                 self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
             }
             MediaPurpose::Preview { gen, .. } => {
                 if gen == self.phones_preview_gen {
-                    log!("preview: fetch failed: {error}");
+                    error!("preview: fetch failed: {error}");
                     self.stop_preview(cx);
                 }
             }
@@ -20080,7 +20119,7 @@ p2 {}
         let token = up.token.clone();
         let cache = service::session_config_from_env().cache_parent;
         if let Err(error) = self.import.start(endpoints, server_id, token, cache) {
-            crate::log!("import refused: {error}");
+            crate::error!("import refused: {error}");
         }
         self.sync_import_ui(cx);
     }
@@ -20802,7 +20841,7 @@ p2 {}
                     crate::log!("import: {}", summary.notes.join("  ·  "));
                 }
             }
-            ImportPhase::Failed(error) => crate::log!("import failed: {error}"),
+            ImportPhase::Failed(error) => crate::error!("import failed: {error}"),
             _ => {}
         }
         self.ui.redraw(cx);
@@ -20870,7 +20909,7 @@ p2 {}
                             self.prefetch.stage = PrefetchStage::Separating;
                         }
                         Err(error) => {
-                            log!("prefetch: decode failed: {error}");
+                            error!("prefetch: decode failed: {error}");
                             self.prefetch_release(true);
                         }
                     }
@@ -20887,7 +20926,7 @@ p2 {}
                                 self.sync_phones_player_ui(cx);
                             }
                             Err(error) => {
-                                log!("preview: decode failed: {error}");
+                                error!("preview: decode failed: {error}");
                                 self.stop_preview(cx);
                             }
                         }
@@ -21037,6 +21076,12 @@ p2 {}
                         self.sync_deck_controls(cx);
                     }
                     Err(error) => {
+                        // At ERROR level, the first line in the app that is: a
+                        // deck that could not load used to show it on its
+                        // artist line alone, which nobody across the booth can
+                        // read, and the log ranked it with every note.
+                        let title = self.decks.deck(deck).title().unwrap_or("?").to_string();
+                        error!("deck {deck:?}: {title} could not be decoded ({error})");
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
                     }
@@ -26772,7 +26817,7 @@ p2 {}
                     self.model_install_note = format!("models: {short} installed");
                 }
                 models::InstallMsg::Failed { short, error } => {
-                    log!("models: {short} install failed: {error}");
+                    error!("models: {short} install failed: {error}");
                     self.model_install_note = format!("models: {short} failed — {error}");
                 }
                 models::InstallMsg::Cancelled => {
@@ -27190,7 +27235,7 @@ p2 {}
             Err(error) => {
                 // Stays in `prep_analysed`, so an unreadable file is not
                 // retried every pump for the rest of the session.
-                log!("preprocess: {key} could not be decoded ({error})");
+                error!("preprocess: {key} could not be decoded ({error})");
                 self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
             }
         }
@@ -27252,7 +27297,7 @@ p2 {}
             match message {
                 SideChannelMsg::Stems(message) => messages.push(message),
                 SideChannelMsg::Fallback { deck, gen, reason } => {
-                    log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
+                    warning!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
                     self.deck_side_channels[deck.index()] = None;
                     self.fall_back_to_separation(deck, gen);
                 }
@@ -27264,11 +27309,16 @@ p2 {}
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
-                    self.deck_stem_status[deck.index()] = text;
                     // `working: false` is the worker's word for "this is as
                     // far as it got" — the checkpoint is missing, the device
                     // had no room. Latching it here is what keeps the reason
-                    // on screen instead of behind the next karaoke line.
+                    // on screen instead of behind the next karaoke line; the
+                    // log carries the same words at error level, so the
+                    // fault is there for whoever reads the log after the set.
+                    if !working && self.deck_stem_busy[deck.index()] != Some(false) {
+                        error!("deck {deck:?}: {text}");
+                    }
+                    self.deck_stem_status[deck.index()] = text;
                     self.deck_stem_busy[deck.index()] = Some(working);
                 }
                 StemsMsg::Done { deck, gen } => {
