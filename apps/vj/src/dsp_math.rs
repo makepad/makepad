@@ -43,6 +43,28 @@ pub fn mono_f64(frame: [i16; 2]) -> f64 {
     (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0
 }
 
+/// The stereo pair to take from one interleaved frame of any width.
+///
+/// The first PAIR, and not the first channel with the last -- which is
+/// what three separate decode paths did. It is right for mono, right for
+/// stereo, and wrong for everything else: every interleaving order in use
+/// puts the front pair first, so the LAST channel of a six-channel file is
+/// a rear or the low-frequency effects send. A film soundtrack played
+/// through it came out as front-left in one ear and the subwoofer feed in
+/// the other.
+///
+/// Mono duplicates rather than going silent on one side. `None` only for
+/// a frame with no samples in it at all, which is a caller error rather
+/// than a channel layout.
+#[inline]
+pub fn stereo_pair<T: Copy>(frame: &[T]) -> Option<[T; 2]> {
+    match (frame.first(), frame.get(1)) {
+        (Some(&left), Some(&right)) => Some([left, right]),
+        (Some(&mono), None) => Some([mono, mono]),
+        _ => None,
+    }
+}
+
 /// `a` towards `b` by `t`.
 ///
 /// Written as `a + (b - a) * t` rather than `a * (1 - t) + b * t`: the two
@@ -164,5 +186,22 @@ mod tests {
                 0.5 - 0.5 * (2.0 * std::f64::consts::PI * index as f64 / len as f64).cos();
             assert_eq!(hann_f64(index, len), had64, "{index}/{len}");
         }
+    }
+    /// The front pair, whatever the file's width.
+    ///
+    /// The defect this replaces: three decode paths took the first channel
+    /// and the LAST one. Right for mono and stereo, and wrong for
+    /// everything else -- a six-channel film soundtrack came out as
+    /// front-left in one ear and the low-frequency effects send in the
+    /// other, which is a channel nobody has ever wanted in a headphone.
+    #[test]
+    fn a_wide_frame_gives_up_its_front_pair_and_not_its_last_channel() {
+        // Front L, front R, centre, LFE, rear L, rear R.
+        let surround = [10i16, 20, 30, 40, 50, 60];
+        assert_eq!(stereo_pair(&surround), Some([10, 20]));
+        assert_eq!(stereo_pair(&[7i16, 8]), Some([7, 8]), "stereo is itself");
+        assert_eq!(stereo_pair(&[7i16]), Some([7, 7]), "mono goes to both ears");
+        assert_eq!(stereo_pair(&[1.0f32, 2.0, 3.0]), Some([1.0, 2.0]), "and at any type");
+        assert_eq!(stereo_pair::<i16>(&[]), None, "no samples is not a layout");
     }
 }

@@ -2917,8 +2917,9 @@ impl Mixer {
             if write.saturating_sub(read) >= MAX_SLOT_QUEUE_FRAMES as u64 {
                 break;
             }
-            let l = frame[0] as f32 / 32768.0;
-            let r = frame[ch - 1] as f32 / 32768.0;
+            let Some(pair) = crate::dsp_math::stereo_pair(frame) else { continue };
+            let l = pair[0] as f32 / 32768.0;
+            let r = pair[1] as f32 / 32768.0;
             let packed = (l.to_bits() as u64) | ((r.to_bits() as u64) << 32);
             shared.buf[(write as usize) & (SLOT_RING_FRAMES - 1)].store(packed, Ordering::Relaxed);
             write += 1;

@@ -1987,7 +1987,10 @@ pub fn decode_audio_clip(
                             if frames.len() >= max_frames {
                                 return Err("audio clip exceeds the decode budget".into());
                             }
-                            frames.push([frame[0], frame[ch - 1]]);
+                            let Some(pair) = crate::dsp_math::stereo_pair(frame) else {
+                                continue;
+                            };
+                            frames.push(pair);
                         }
                     }
                 }
@@ -2019,7 +2022,8 @@ fn decode_repo_audio(
     let mut frames: Vec<[i16; 2]> = Vec::with_capacity(audio.frames());
     for frame in audio.pcm_interleaved_f32.chunks_exact(channels) {
         let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
-        frames.push([sample(frame[0]), sample(frame[channels - 1])]);
+        let Some(pair) = crate::dsp_math::stereo_pair(frame) else { continue };
+        frames.push([sample(pair[0]), sample(pair[1])]);
     }
     if frames.is_empty() {
         return Err(format!("{format:?} decoded to zero frames"));
