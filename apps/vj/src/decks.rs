@@ -2833,13 +2833,43 @@ impl DeckEngine {
         }
     }
 
+    /// The rung the ladder steps FROM.
+    ///
+    /// Normally the armed count -- but only while nothing is looping. A
+    /// span the operator set by hand has a length the count never learnt:
+    /// dragging a four-beat loop's OUT to six leaves the count saying
+    /// four, so `<` halves the sound to three and the readout to two, and
+    /// they disagree from then on. From MAN it is worse than stale, since
+    /// the count is zero and doubling out of zero starts at the SHORTEST
+    /// rung whatever is playing -- press `>` on a hand-made eight-beat
+    /// loop and it reads a thirty-second of a beat.
+    ///
+    /// So while a loop is running the ladder steps from the rung nearest
+    /// what is ACTUALLY looping. Where the ladder made the loop itself the
+    /// two agree by construction, so this only ever moves under a hand.
+    ///
+    /// The bookmark rung is not a length and is left alone: it says what
+    /// the next `[` will drop, not what is playing now.
+    fn ladder_rung(&self, deck: DeckId) -> u32 {
+        let state = self.deck(deck);
+        if state.loop_ticks == LOOP_BEATS_INF {
+            return state.loop_ticks;
+        }
+        let Some(span) = state.loop_span else { return state.loop_ticks };
+        let beat = state.counted_beat_secs();
+        if !(beat > 0.0) {
+            return state.loop_ticks;
+        }
+        nearest_loop_rung(span.len_secs() / beat)
+    }
+
     /// `<` and `>` differ only in the factor. They move the armed count AND
     /// cut the running loop by the same factor, anchored on IN. The cut is
     /// on DURATION, not beat count, so an off-grid manual span cuts just as
     /// well as a measured one — and for a beat loop the two are the same
     /// arithmetic anyway.
     fn loop_scale(&mut self, deck: DeckId, factor: f64) -> Vec<DeckCmd> {
-        let beats = self.deck(deck).loop_ticks;
+        let beats = self.ladder_rung(deck);
         // The bookmark rung's transitions come first: they change what the
         // current object IS, never its size, and the direct pick owns
         // that logic.
@@ -7171,6 +7201,68 @@ mod tests {
         assert!(e.set_crossovers(DeckId::A, f32::NAN, 2_000.0).is_empty());
         let state = e.deck(DeckId::A);
         assert_eq!((state.eq_low_hz, state.eq_high_hz), before);
+    }
+
+    /// The ladder steps from the loop that is RUNNING, not from a count
+    /// nobody updated.
+    ///
+    /// `[` and `]` in MAN make a span of whatever length the operator
+    /// played, and the armed count stays at zero because MAN is what
+    /// zero means. Doubling out of zero used to start at the SHORTEST
+    /// rung: press `>` on a hand-made eight-beat loop and the readout
+    /// said a thirty-second of a beat while the ear heard sixteen.
+    #[test]
+    fn the_ladder_steps_from_the_loop_that_is_running() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beat_secs = 0.5
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).loop_ticks = 0; // MAN
+
+        // Eight beats, by hand: `[` at 4 s and `]` at 8 s.
+        e.deck_mut(DeckId::A).position_secs = 4.0;
+        e.loop_in(DeckId::A);
+        e.deck_mut(DeckId::A).position_secs = 8.0;
+        e.loop_out(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("a hand-set loop");
+        assert!((span.len_secs() - 4.0).abs() < 1e-6, "eight beats at 120 bpm");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 0, "still MAN: the count is not a length");
+
+        // `>` doubles what is playing, and the count now describes it.
+        e.loop_double(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.len_secs() - 8.0).abs() < 1e-6, "sixteen beats");
+        assert_eq!(
+            e.deck(DeckId::A).loop_ticks,
+            16 * LOOP_TICKS_PER_BEAT,
+            "the readout has to say what the loop is",
+        );
+
+        // And back down again, from the length rather than from a rung
+        // two steps away from it.
+        e.loop_halve(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.len_secs() - 4.0).abs() < 1e-6, "eight beats again");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 8 * LOOP_TICKS_PER_BEAT);
+    }
+
+    /// Where the ladder made the loop itself, the count and the span
+    /// already agree, so reading the rung off the span must not move it.
+    #[test]
+    fn a_ladder_made_loop_steps_exactly_as_it_always_did() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).position_secs = 8.0;
+        e.set_loop_beats(DeckId::A, 4 * LOOP_TICKS_PER_BEAT);
+        e.loop_out(DeckId::A); // four beats back from here
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 4 * LOOP_TICKS_PER_BEAT);
+        let span = e.deck(DeckId::A).loop_span.expect("a four-beat loop");
+        assert!((span.len_secs() - 2.0).abs() < 1e-6);
+
+        e.loop_halve(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 2 * LOOP_TICKS_PER_BEAT);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.len_secs() - 1.0).abs() < 1e-6);
     }
 
     #[test]
