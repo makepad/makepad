@@ -102,6 +102,8 @@ mod mesh_view;
 // CC, and that CC drives it from then on — persistent (midi-map.txt).
 mod midi_clock;
 mod midi_learn;
+// The MIDI page's rules: which ports are heard, what midi.txt holds.
+mod midi_binding;
 mod mix;
 mod mixer;
 mod program_mix;
@@ -1088,6 +1090,13 @@ script_mod! {
                             // 5-pin DIN, lit while learn mode is on.
                             Tip{ text: "MIDI learn: click a control, wiggle a CC"
                                 midi_learn_btn := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/midi.svg") } }
+                            }
+                            // The MIDI page: which ports are heard, and what
+                            // a learned control does with what it hears. The
+                            // switches that used to live only in midi.txt
+                            // have their controls there.
+                            Tip{ text: "MIDI devices and learned controls"
+                                midi_page_btn := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/gear.svg") } }
                             }
                             // The house clock, sent out as MIDI beat clock
                             // for anything else in the rig to follow. Off
@@ -3942,6 +3951,472 @@ script_mod! {
                                     align: Align{x: 1.0, y: 0.5}
                                     phones_close := ChromeButton{width: 60 text: "Close"}
                                 }
+                            }
+                        }
+                    }
+                    }
+                    // The MIDI page: which ports are heard, and what a learned
+                    // control does with what it hears. Zero-footprint host, like the
+                    // headphone rig's, so it draws on the overlay from any mode.
+                    View{
+                    width: 0
+                    height: 0
+                    midi_modal := Modal{
+                        can_dismiss: true
+                        content +: {
+                            width: 560
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                Icon{
+                                    width: 14
+                                    height: 14
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/midi.svg")
+                                        color: #x35c05f
+                                    }
+                                }
+                                Label{
+                                    text: "MIDI"
+                                    draw_text.color: #xff5c39
+                                    draw_text.text_style: theme.font_bold{font_size: 11}
+                                }
+                            }
+                            Label{
+                                width: Fill text: "Which ports are heard, and what a learned control does with what it hears."
+                                draw_text.color: #x8e9aa7
+                                draw_text.text_style.font_size: 9
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                PanelLabel{width: 90 text: "SURFACE"}
+                                midi_surface_on := CheckBox{width: 26 text: ""}
+                                midi_surface_name := Tick{width: Fill}
+                            }
+                            midi_surface_note := Label{
+                                width: Fill text: "the surface plays the lighting desk too; unticked, neither hears it"
+                                draw_text.color: #x6f7b87
+                                draw_text.text_style.font_size: 9
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                Tick{width: 26 text: ""}
+                                Tick{width: Fill text: "INPUT PORT"}
+                                Tick{width: 120 text: "STATE"}
+                            }
+                            midi_dev_row0 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on0 := CheckBox{width: 26 text: ""}
+                                midi_dev_name0 := Tick{width: Fill}
+                                midi_dev_state0 := Tick{width: 120}
+                            }
+                            midi_dev_row1 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on1 := CheckBox{width: 26 text: ""}
+                                midi_dev_name1 := Tick{width: Fill}
+                                midi_dev_state1 := Tick{width: 120}
+                            }
+                            midi_dev_row2 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on2 := CheckBox{width: 26 text: ""}
+                                midi_dev_name2 := Tick{width: Fill}
+                                midi_dev_state2 := Tick{width: 120}
+                            }
+                            midi_dev_row3 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on3 := CheckBox{width: 26 text: ""}
+                                midi_dev_name3 := Tick{width: Fill}
+                                midi_dev_state3 := Tick{width: 120}
+                            }
+                            midi_dev_row4 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on4 := CheckBox{width: 26 text: ""}
+                                midi_dev_name4 := Tick{width: Fill}
+                                midi_dev_state4 := Tick{width: 120}
+                            }
+                            midi_dev_row5 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on5 := CheckBox{width: 26 text: ""}
+                                midi_dev_name5 := Tick{width: Fill}
+                                midi_dev_state5 := Tick{width: 120}
+                            }
+                            midi_dev_row6 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on6 := CheckBox{width: 26 text: ""}
+                                midi_dev_name6 := Tick{width: Fill}
+                                midi_dev_state6 := Tick{width: 120}
+                            }
+                            midi_dev_row7 := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                midi_dev_on7 := CheckBox{width: 26 text: ""}
+                                midi_dev_name7 := Tick{width: Fill}
+                                midi_dev_state7 := Tick{width: 120}
+                            }
+                            midi_dev_note := Label{
+                                width: Fill text: "nothing else plugged in"
+                                draw_text.color: #x6f7b87
+                                draw_text.text_style.font_size: 9
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                PanelLabel{width: 90 text: "LAST HEARD"}
+                                midi_last_heard := Label{
+                                    width: Fill text: "nothing yet: touch a control"
+                                    draw_text.color: #x8e9aa7
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                PanelLabel{width: 90 text: "CROSSFADER"}
+                                midi_takeover := CheckBox{width: 26 text: ""}
+                                Label{
+                                    width: Fill text: "picks the value up before moving it; a fader left behind waits until it crosses back"
+                                    draw_text.color: #x6f7b87
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                PanelLabel{width: 90 text: "MONITOR"}
+                                midi_monitor_on := CheckBox{width: 26 text: ""}
+                                midi_monitor_note := Label{
+                                    width: Fill text: "every message, in words, in the log"
+                                    draw_text.color: #x6f7b87
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
+                            Label{
+                                text: "LEARNED CONTROLS"
+                                draw_text.color: #xff5c39
+                                draw_text.text_style: theme.font_bold{font_size: 10}
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{x: 0.0, y: 0.5}
+                                Tick{width: Fill text: "CONTROL"}
+                                Tick{width: 84 text: "SOURCE"}
+                                Tick{width: 26 text: ""}
+                            }
+                            midi_bindings := ScrollYView{
+                                width: Fill
+                                height: 200
+                                flow: Down
+                                spacing: 6
+                                midi_bind_row0 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name0 := Tick{width: Fill}
+                                    midi_bind_src0 := Tick{width: 84}
+                                    midi_bind_clear0 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row1 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name1 := Tick{width: Fill}
+                                    midi_bind_src1 := Tick{width: 84}
+                                    midi_bind_clear1 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row2 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name2 := Tick{width: Fill}
+                                    midi_bind_src2 := Tick{width: 84}
+                                    midi_bind_clear2 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row3 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name3 := Tick{width: Fill}
+                                    midi_bind_src3 := Tick{width: 84}
+                                    midi_bind_clear3 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row4 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name4 := Tick{width: Fill}
+                                    midi_bind_src4 := Tick{width: 84}
+                                    midi_bind_clear4 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row5 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name5 := Tick{width: Fill}
+                                    midi_bind_src5 := Tick{width: 84}
+                                    midi_bind_clear5 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row6 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name6 := Tick{width: Fill}
+                                    midi_bind_src6 := Tick{width: 84}
+                                    midi_bind_clear6 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row7 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name7 := Tick{width: Fill}
+                                    midi_bind_src7 := Tick{width: 84}
+                                    midi_bind_clear7 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row8 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name8 := Tick{width: Fill}
+                                    midi_bind_src8 := Tick{width: 84}
+                                    midi_bind_clear8 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row9 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name9 := Tick{width: Fill}
+                                    midi_bind_src9 := Tick{width: 84}
+                                    midi_bind_clear9 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row10 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name10 := Tick{width: Fill}
+                                    midi_bind_src10 := Tick{width: 84}
+                                    midi_bind_clear10 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row11 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name11 := Tick{width: Fill}
+                                    midi_bind_src11 := Tick{width: 84}
+                                    midi_bind_clear11 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row12 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name12 := Tick{width: Fill}
+                                    midi_bind_src12 := Tick{width: 84}
+                                    midi_bind_clear12 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row13 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name13 := Tick{width: Fill}
+                                    midi_bind_src13 := Tick{width: 84}
+                                    midi_bind_clear13 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row14 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name14 := Tick{width: Fill}
+                                    midi_bind_src14 := Tick{width: 84}
+                                    midi_bind_clear14 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row15 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name15 := Tick{width: Fill}
+                                    midi_bind_src15 := Tick{width: 84}
+                                    midi_bind_clear15 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row16 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name16 := Tick{width: Fill}
+                                    midi_bind_src16 := Tick{width: 84}
+                                    midi_bind_clear16 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row17 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name17 := Tick{width: Fill}
+                                    midi_bind_src17 := Tick{width: 84}
+                                    midi_bind_clear17 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row18 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name18 := Tick{width: Fill}
+                                    midi_bind_src18 := Tick{width: 84}
+                                    midi_bind_clear18 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row19 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name19 := Tick{width: Fill}
+                                    midi_bind_src19 := Tick{width: 84}
+                                    midi_bind_clear19 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row20 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name20 := Tick{width: Fill}
+                                    midi_bind_src20 := Tick{width: 84}
+                                    midi_bind_clear20 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row21 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name21 := Tick{width: Fill}
+                                    midi_bind_src21 := Tick{width: 84}
+                                    midi_bind_clear21 := ChromeButton{width: 26 text: "X"}
+                                }
+                                midi_bind_row22 := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    midi_bind_name22 := Tick{width: Fill}
+                                    midi_bind_src22 := Tick{width: 84}
+                                    midi_bind_clear22 := ChromeButton{width: 26 text: "X"}
+                                }
+                            }
+                            midi_bind_note := Label{
+                                width: Fill text: "nothing learned yet: press the MIDI key in the top bar, click a control, wiggle it"
+                                draw_text.color: #x6f7b87
+                                draw_text.text_style.font_size: 9
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                align: Align{x: 1.0, y: 0.5}
+                                midi_close := ChromeButton{width: 60 text: "Close"}
+                            }
                             }
                         }
                     }
@@ -8979,9 +9454,9 @@ pub struct App {
     /// Input ports to open besides the control surface's own, by name.
     ///
     /// Recognition is what picks the DIALECT; it should never have been
-    /// what decides whether a device is heard at all. Until the device list
-    /// has a page, this is the operator's way of saying "open that one too"
-    /// -- and once a port is open, the learn layer can bind anything on it,
+    /// what decides whether a device is heard at all. The MIDI page's
+    /// device rows write this; a name typed into midi.txt works too --
+    /// and once a port is open, the learn layer can bind anything on it,
     /// because learn has always been port-blind and simply never had
     /// anything but the surface to hear.
     #[rust]
@@ -8997,10 +9472,38 @@ pub struct App {
     /// OFF by default, which is what this console has always done: the next
     /// message wins whatever else moved the value. On, a fader that has been
     /// left behind waits until it crosses back. It changes what an operator
-    /// feels under their hand, so it is theirs to turn on, and it lives in
-    /// `midi.txt` until the MIDI device list has a page to put it on.
+    /// feels under their hand, so it is theirs to turn on, in `midi.txt` or
+    /// on the MIDI page.
     #[rust]
     soft_takeover: bool,
+    /// Whether the control surface's own ports are heard at all. On unless
+    /// the operator switched it off on the MIDI page -- a named const,
+    /// because the first run on a fresh data dir writes the constructed
+    /// value into `midi.txt` before anything reads it back.
+    #[rust(midi_binding::SURFACE_ON_DEFAULT)]
+    surface_on: bool,
+    /// Whether `VJ_TRACE_LED` is holding the monitor on for this run, so
+    /// the page can say so rather than show a box that cannot win.
+    #[rust]
+    midi_monitor_env: bool,
+    /// The newest line the monitor would have printed, whether or not it
+    /// did: the page shows it, so a device can be identified by touching
+    /// it without switching the log on.
+    #[rust]
+    midi_last_heard: String,
+    #[rust]
+    midi_last_heard_shown: String,
+    /// The device rows as last painted, name and port, so a tick resolves
+    /// to a port from this and never from a label's text.
+    #[rust]
+    midi_page_rows: Vec<(String, MidiPortId)>,
+    /// The surfaces recognised and passed over, for their rows to say so.
+    #[rust]
+    apc_passed_over: Vec<MidiPortId>,
+    /// A device tick was refused because the file holds no more names;
+    /// said once, on the next repaint.
+    #[rust]
+    midi_page_refused: bool,
     /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
     #[rust]
     midi_learn: MidiLearn,
@@ -10940,6 +11443,210 @@ impl App {
             };
         }
         self.paint_icon_button(cx, ids!(midi_learn_btn), self.midi_learn.active());
+        // The page lists the bindings, so a learn or a clear redraws it.
+        self.sync_midi_page(cx);
+    }
+
+    // ---- the MIDI page ------------------------------------------------------
+
+    /// The page's eight device rows: the row itself (hidden whole past
+    /// the port count, so it takes no spacing), the tick, the name, the
+    /// state word.
+    const MIDI_DEV_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId]); 8] = [
+        (ids!(midi_dev_row0), ids!(midi_dev_on0), ids!(midi_dev_name0), ids!(midi_dev_state0)),
+        (ids!(midi_dev_row1), ids!(midi_dev_on1), ids!(midi_dev_name1), ids!(midi_dev_state1)),
+        (ids!(midi_dev_row2), ids!(midi_dev_on2), ids!(midi_dev_name2), ids!(midi_dev_state2)),
+        (ids!(midi_dev_row3), ids!(midi_dev_on3), ids!(midi_dev_name3), ids!(midi_dev_state3)),
+        (ids!(midi_dev_row4), ids!(midi_dev_on4), ids!(midi_dev_name4), ids!(midi_dev_state4)),
+        (ids!(midi_dev_row5), ids!(midi_dev_on5), ids!(midi_dev_name5), ids!(midi_dev_state5)),
+        (ids!(midi_dev_row6), ids!(midi_dev_on6), ids!(midi_dev_name6), ids!(midi_dev_state6)),
+        (ids!(midi_dev_row7), ids!(midi_dev_on7), ids!(midi_dev_name7), ids!(midi_dev_state7)),
+    ];
+
+    /// The page's binding rows, one per learnable, in `LEARNABLES` order:
+    /// the row itself, the control's name, its source, the clear button.
+    const MIDI_BIND_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId]); 23] = [
+        (ids!(midi_bind_row0), ids!(midi_bind_name0), ids!(midi_bind_src0), ids!(midi_bind_clear0)),
+        (ids!(midi_bind_row1), ids!(midi_bind_name1), ids!(midi_bind_src1), ids!(midi_bind_clear1)),
+        (ids!(midi_bind_row2), ids!(midi_bind_name2), ids!(midi_bind_src2), ids!(midi_bind_clear2)),
+        (ids!(midi_bind_row3), ids!(midi_bind_name3), ids!(midi_bind_src3), ids!(midi_bind_clear3)),
+        (ids!(midi_bind_row4), ids!(midi_bind_name4), ids!(midi_bind_src4), ids!(midi_bind_clear4)),
+        (ids!(midi_bind_row5), ids!(midi_bind_name5), ids!(midi_bind_src5), ids!(midi_bind_clear5)),
+        (ids!(midi_bind_row6), ids!(midi_bind_name6), ids!(midi_bind_src6), ids!(midi_bind_clear6)),
+        (ids!(midi_bind_row7), ids!(midi_bind_name7), ids!(midi_bind_src7), ids!(midi_bind_clear7)),
+        (ids!(midi_bind_row8), ids!(midi_bind_name8), ids!(midi_bind_src8), ids!(midi_bind_clear8)),
+        (ids!(midi_bind_row9), ids!(midi_bind_name9), ids!(midi_bind_src9), ids!(midi_bind_clear9)),
+        (ids!(midi_bind_row10), ids!(midi_bind_name10), ids!(midi_bind_src10), ids!(midi_bind_clear10)),
+        (ids!(midi_bind_row11), ids!(midi_bind_name11), ids!(midi_bind_src11), ids!(midi_bind_clear11)),
+        (ids!(midi_bind_row12), ids!(midi_bind_name12), ids!(midi_bind_src12), ids!(midi_bind_clear12)),
+        (ids!(midi_bind_row13), ids!(midi_bind_name13), ids!(midi_bind_src13), ids!(midi_bind_clear13)),
+        (ids!(midi_bind_row14), ids!(midi_bind_name14), ids!(midi_bind_src14), ids!(midi_bind_clear14)),
+        (ids!(midi_bind_row15), ids!(midi_bind_name15), ids!(midi_bind_src15), ids!(midi_bind_clear15)),
+        (ids!(midi_bind_row16), ids!(midi_bind_name16), ids!(midi_bind_src16), ids!(midi_bind_clear16)),
+        (ids!(midi_bind_row17), ids!(midi_bind_name17), ids!(midi_bind_src17), ids!(midi_bind_clear17)),
+        (ids!(midi_bind_row18), ids!(midi_bind_name18), ids!(midi_bind_src18), ids!(midi_bind_clear18)),
+        (ids!(midi_bind_row19), ids!(midi_bind_name19), ids!(midi_bind_src19), ids!(midi_bind_clear19)),
+        (ids!(midi_bind_row20), ids!(midi_bind_name20), ids!(midi_bind_src20), ids!(midi_bind_clear20)),
+        (ids!(midi_bind_row21), ids!(midi_bind_name21), ids!(midi_bind_src21), ids!(midi_bind_clear21)),
+        (ids!(midi_bind_row22), ids!(midi_bind_name22), ids!(midi_bind_src22), ids!(midi_bind_clear22)),
+    ];
+
+    /// Paint the MIDI page from the port list, the switches and the learn
+    /// map. Called when it opens, whenever the learn map changes, and
+    /// whenever the port list does, so a plug or an unplug redraws it.
+    /// Setting a box or a label emits no action, so this never feeds the
+    /// handler.
+    fn sync_midi_page(&mut self, cx: &mut Cx) {
+        // The surface row: the same words the status line has.
+        let surface_name = match self.apc_input_ports.is_empty() {
+            true => "none recognised".to_string(),
+            false => self.midi_status.clone(),
+        };
+        self.ui.label(cx, ids!(midi_surface_name)).set_text(cx, &surface_name);
+        self.ui.check_box(cx, ids!(midi_surface_on)).set_active(cx, self.surface_on, Animate::No);
+        // The device rows, from the machine's list -- never read back from
+        // a label.
+        let heard = self.midi_open_inputs();
+        let rows: Vec<(String, MidiPortId)> =
+            midi_binding::device_rows(&self.midi_ports, &self.apc_input_ports)
+                .into_iter()
+                .map(|desc| (desc.name.clone(), desc.port_id))
+                .collect();
+        for (slot, (view, on, name, state)) in Self::MIDI_DEV_ROWS.iter().enumerate() {
+            let row = rows.get(slot);
+            self.ui.widget(cx, view).set_visible(cx, row.is_some());
+            let Some((port_name, port)) = row else { continue };
+            let open = heard.contains(port);
+            let word = midi_binding::device_state_word(
+                self.apc_passed_over.contains(port),
+                open,
+                apc40::is_loopback_port(port_name),
+            );
+            self.ui.check_box(cx, on).set_active(cx, open, Animate::No);
+            self.ui.label(cx, name).set_text(cx, port_name);
+            self.ui.label(cx, state).set_text(cx, word);
+        }
+        let note = if rows.is_empty() {
+            "nothing else plugged in".to_string()
+        } else if rows.len() > Self::MIDI_DEV_ROWS.len() {
+            format!(
+                "{} more input port(s) than rows: name them in midi.txt",
+                rows.len() - Self::MIDI_DEV_ROWS.len()
+            )
+        } else if self.midi_page_refused {
+            "sixteen names is all the file holds".to_string()
+        } else {
+            String::new()
+        };
+        self.midi_page_refused = false;
+        self.ui.widget(cx, ids!(midi_dev_note)).set_visible(cx, !note.is_empty());
+        self.ui.label(cx, ids!(midi_dev_note)).set_text(cx, &note);
+        self.midi_page_rows = rows;
+        // What was heard last, whether or not the monitor logged it.
+        let last = match self.midi_last_heard.is_empty() {
+            true => "nothing yet: touch a control",
+            false => self.midi_last_heard.as_str(),
+        };
+        self.ui.label(cx, ids!(midi_last_heard)).set_text(cx, last);
+        self.midi_last_heard_shown = self.midi_last_heard.clone();
+        // The switches. The monitor's box shows the run's truth: held on by
+        // the environment, it is ticked and says so.
+        self.ui.check_box(cx, ids!(midi_takeover)).set_active(cx, self.soft_takeover, Animate::No);
+        let monitor = self.midi_monitor || self.midi_monitor_env;
+        self.ui.check_box(cx, ids!(midi_monitor_on)).set_active(cx, monitor, Animate::No);
+        let monitor_note = match self.midi_monitor_env {
+            true => "held on by the environment",
+            false => "every message, in words, in the log",
+        };
+        self.ui.label(cx, ids!(midi_monitor_note)).set_text(cx, monitor_note);
+        // The learned controls, one row per learnable, shown while bound.
+        let mut any = false;
+        for (slot, (view, name, src, _clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
+            let control = LEARNABLES[slot].1;
+            let bound = self.midi_learn.binding(control);
+            self.ui.widget(cx, view).set_visible(cx, bound.is_some());
+            let Some((channel, cc)) = bound else { continue };
+            any = true;
+            self.ui.label(cx, name).set_text(cx, control);
+            // Zero-based, as the learn log and the monitor already are.
+            self.ui.label(cx, src).set_text(cx, &format!("ch{channel} cc{cc}"));
+        }
+        self.ui.widget(cx, ids!(midi_bind_note)).set_visible(cx, !any);
+        self.ui.redraw(cx);
+    }
+
+    /// The page's own controls. One change per frame, then out: every
+    /// change repaints the page from the state it just changed.
+    fn handle_midi_page(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(midi_page_btn)).clicked(actions) {
+            self.sync_midi_page(cx);
+            self.ui.modal(cx, ids!(midi_modal)).open(cx);
+            return;
+        }
+        if self.ui.button(cx, ids!(midi_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(midi_modal)).close(cx);
+            return;
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(midi_surface_on)).changed(actions) {
+            if !on {
+                // Put the lamps out WHILE the ports are still open and the
+                // writer still passes: a surface that loses its owner with
+                // its pads lit stays lit until it is unplugged.
+                self.darken_control_surface();
+            }
+            self.surface_on = on;
+            self.save_midi_settings();
+            self.apply_midi_ports(cx);
+            if on {
+                // The diff's idea of the surface advanced while nothing was
+                // sent; restate everything rather than trust it.
+                self.apc_leds.invalidate();
+                self.sync_apc_leds();
+            }
+            self.sync_midi_page(cx);
+            return;
+        }
+        for (slot, (_, on, _, _)) in Self::MIDI_DEV_ROWS.iter().enumerate() {
+            let Some(tick) = self.ui.check_box(cx, on).changed(actions) else { continue };
+            let Some((name, _)) = self.midi_page_rows.get(slot).cloned() else { return };
+            let accepted = midi_binding::toggle_extra_input(
+                &mut self.midi_extra_inputs,
+                &name,
+                tick,
+                MAX_EXTRA_INPUTS,
+                port_name_matches,
+            );
+            self.midi_page_refused = !accepted;
+            self.save_midi_settings();
+            self.apply_midi_ports(cx);
+            self.sync_midi_page(cx);
+            return;
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(midi_takeover)).changed(actions) {
+            self.soft_takeover = on;
+            self.save_midi_settings();
+            return;
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(midi_monitor_on)).changed(actions) {
+            if self.midi_monitor_env {
+                // The box cannot win against the environment; it snaps back
+                // and the note beside it says why.
+                self.sync_midi_page(cx);
+                return;
+            }
+            self.midi_monitor = on;
+            self.save_midi_settings();
+            return;
+        }
+        for (slot, (_, _, _, clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
+            if self.ui.button(cx, clear).clicked(actions) {
+                // The same path the alt-click clear takes.
+                self.midi_learn.clear(LEARNABLES[slot].1);
+                self.save_midi_map();
+                self.sync_midi_learn_ui(cx);
+                return;
+            }
+        }
     }
 
     /// A learned CC's value lands on its control — the same state changes
@@ -14129,29 +14836,43 @@ p2 {}
         service::session_config_from_env().cache_parent.join("midi.txt")
     }
 
+    /// Read, merge, write. The store keeps keys this build does not know,
+    /// but only if it is handed the file rather than built empty -- and a
+    /// page that rewrites the file at runtime would otherwise drop a newer
+    /// build's keys on the first tick. The merge is a pure function, tested
+    /// where it lives.
     fn save_midi_settings(&self) {
-        let mut store = crate::settings::Settings::new();
-        store.set_bool("midi.soft_takeover", self.soft_takeover);
-        store.set_bool("midi.monitor", self.midi_monitor);
-        for (index, name) in self.midi_extra_inputs.iter().enumerate() {
-            store.set_text(&format!("midi.open.{index}"), name);
-        }
-        let _ = crate::durable::write_file(&Self::midi_settings_path(), store.to_text());
+        let path = Self::midi_settings_path();
+        let existing = std::fs::read_to_string(&path).ok();
+        let store = midi_binding::merge_midi_settings(
+            existing.as_deref(),
+            self.surface_on,
+            self.soft_takeover,
+            self.midi_monitor,
+            self.midi_monitor_env,
+            &self.midi_extra_inputs,
+            MAX_EXTRA_INPUTS,
+        );
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_midi_settings(&mut self) {
         // Read once, not per frame: this used to be an environment lookup
-        // inside the LED writer, which runs twenty times a second.
-        self.midi_monitor = std::env::var_os("VJ_TRACE_LED").is_some();
+        // inside the LED writer, which runs twenty times a second. Read
+        // BEFORE the early return below, which writes the constructed
+        // values out on a fresh data dir.
+        self.midi_monitor_env = std::env::var_os("VJ_TRACE_LED").is_some();
+        self.midi_monitor = self.midi_monitor_env;
         let Ok(body) = std::fs::read_to_string(Self::midi_settings_path()) else {
-            // Written out on the first run so the switch can be FOUND. It
-            // has no control on screen yet, and a setting that exists only
-            // in a source file is a setting nobody has.
+            // Written out on the first run so the switches can be FOUND in
+            // the file as well as on the page.
             self.save_midi_settings();
             return;
         };
         let store = crate::settings::Settings::from_text(&body);
-        // The default is what this console has always done.
+        // The defaults are what this console has always done: the surface
+        // heard, nothing else, no pick-up rule, no monitor.
+        self.surface_on = store.bool("midi.surface", midi_binding::SURFACE_ON_DEFAULT);
         self.soft_takeover = store.bool("midi.soft_takeover", false);
         self.midi_monitor |= store.bool("midi.monitor", false);
         // Indexed rows with the NAME in the value: a key may not hold a
@@ -15498,29 +16219,33 @@ p2 {}
         self.run_pad_cmds(cmds);
     }
 
-    /// Every input port to open: the control surface's own, plus any the
-    /// operator named in the settings file.
+    /// Every input port to open: the control surface's own while it is
+    /// switched on, plus any the operator ticked on the MIDI page or named
+    /// in the settings file.
     ///
-    /// ONE decider, because there are two callers -- the port scan and the
-    /// clock switch -- and an open set computed in two places is a rule
-    /// that only holds until somebody flips the other switch.
+    /// ONE decider, because there are three callers -- the port scan, the
+    /// clock switch and the page -- and an open set computed in two places
+    /// is a rule that only holds until somebody flips the other switch.
+    /// The rule itself lives in `midi_binding::open_input_set`, where it is
+    /// tested.
     fn midi_open_inputs(&self) -> Vec<MidiPortId> {
-        let mut open = self.apc_input_ports.clone();
-        for desc in &self.midi_ports {
-            if !desc.port_type.is_input() || open.contains(&desc.port_id) {
-                continue;
-            }
-            if self.midi_extra_inputs.iter().any(|w| port_name_matches(&desc.name, w)) {
-                open.push(desc.port_id);
-            }
-        }
-        open
+        midi_binding::open_input_set(
+            &self.midi_ports,
+            &self.apc_input_ports,
+            self.surface_on,
+            &self.midi_extra_inputs,
+            port_name_matches,
+        )
     }
 
-    /// Every output port to open: the surface's own, and -- while the clock
-    /// is going out -- everything else the machine has, minus its own echo.
+    /// Every output port to open: the surface's own while it is switched
+    /// on, and -- while the clock is going out -- everything else the
+    /// machine has, minus its own echo.
     fn midi_open_outputs(&self) -> Vec<MidiPortId> {
-        let mut open = self.apc_output_ports.clone();
+        let mut open = match self.surface_on {
+            true => self.apc_output_ports.clone(),
+            false => Vec::new(),
+        };
         if self.clock_out {
             for port in &self.all_output_ports {
                 if !open.contains(port) {
@@ -15540,15 +16265,35 @@ p2 {}
             .unwrap_or("unknown port")
     }
 
+    /// Hand the open sets to the platform and say what is heard. The one
+    /// apply path: the port scan, the clock switch and the MIDI page all
+    /// end here, so the log line reads the same whichever of them moved.
+    /// The platform's API is set-based, so "not heard" is "left out of
+    /// this call".
+    fn apply_midi_ports(&mut self, cx: &mut Cx) {
+        let inputs = self.midi_open_inputs();
+        let outputs = self.midi_open_outputs();
+        let names: Vec<String> =
+            inputs.iter().map(|port| self.midi_port_name(*port).to_string()).collect();
+        log!("midi: hearing {} input(s): {}", inputs.len(), names.join(", "));
+        cx.use_midi_inputs(&inputs);
+        cx.use_midi_outputs(&outputs);
+        self.clock_out_ports = outputs;
+    }
+
     /// One line of the monitor. `took` is who the message went to, which is
     /// the half of the answer a controller report usually needs: a knob
     /// that does nothing has either not arrived, arrived on a port nobody
     /// opened, or been claimed by a layer its owner forgot about.
-    fn note_midi_in(&self, port: MidiPortId, data: [u8; 3], took: &str) {
-        if !self.midi_monitor {
-            return;
+    ///
+    /// Kept whether or not it was logged: the MIDI page shows the newest
+    /// line, so a device can be told apart by touching it with the log off.
+    fn note_midi_in(&mut self, port: MidiPortId, data: [u8; 3], took: &str) {
+        let line = format!("[{}] {} -> {}", self.midi_port_name(port), describe_midi(data), took);
+        if self.midi_monitor {
+            log!("midi in {line}");
         }
-        log!("midi in [{}] {} -> {}", self.midi_port_name(port), describe_midi(data), took);
+        self.midi_last_heard = line;
     }
 
     fn pump_apc40(&mut self, cx: &mut Cx) {
@@ -15664,8 +16409,13 @@ p2 {}
                     message[2]
                 );
             }
-            for port in &self.apc_output_ports {
-                self.midi_output.send(Some(*port), MidiData { data: message });
+            // A surface switched off on the MIDI page gets nothing: its
+            // outputs are closed, and a send to a closed output is dropped
+            // on the floor by the platform without a word.
+            if self.surface_on {
+                for port in &self.apc_output_ports {
+                    self.midi_output.send(Some(*port), MidiData { data: message });
+                }
             }
         }
     }
@@ -15755,8 +16505,13 @@ p2 {}
                     apc40::PAD_PALETTE[(message[2] & 0x7f) as usize]
                 );
             }
-            for port in &self.apc_output_ports {
-                self.midi_output.send(Some(*port), MidiData { data: message });
+            // Gated at the send and not at the top: the bank clamp and the
+            // diff above keep running while the surface is switched off, so
+            // switching it back on is an invalidate and a restatement.
+            if self.surface_on {
+                for port in &self.apc_output_ports {
+                    self.midi_output.send(Some(*port), MidiData { data: message });
+                }
             }
         }
     }
@@ -17597,6 +18352,13 @@ p2 {}
         }
         self.publish_lighting_controls();
         self.pump_apc40(cx);
+        // The page's LAST HEARD line follows the newest message. A label on
+        // a closed modal takes the text without complaint, so no open-state
+        // tracking is needed.
+        if self.midi_last_heard != self.midi_last_heard_shown {
+            self.midi_last_heard_shown = self.midi_last_heard.clone();
+            self.ui.label(cx, ids!(midi_last_heard)).set_text(cx, &self.midi_last_heard_shown);
+        }
         self.pump_session(cx);
         self.pump_chat(cx);
         self.pump_subscriber(cx);
@@ -24691,7 +25453,13 @@ p2 {}
         let _ = &status_text;
         self.set_status_label(cx, ids!(status_label), "");
         self.status_text = status_text;
-        let show = format!("{} · {}", self.lighting_status, self.midi_status);
+        // A surface switched off on the MIDI page says so beside its name,
+        // so a dark surface is not mistaken for a broken one.
+        let heard = match self.surface_on {
+            true => "",
+            false => ", not heard",
+        };
+        let show = format!("{} · {}{}", self.lighting_status, self.midi_status, heard);
         self.set_status_label(cx, ids!(show_status_label), &show);
         // Video program labels + position mirror. Each slot header says
         // what its well is showing: LIVE (on program), NEXT (the cue being
@@ -32450,14 +33218,11 @@ impl MatchEvent for App {
             .collect();
         self.apc_input_ports = inputs;
         self.apc_output_ports = outputs;
+        self.apc_passed_over = choice.ignored.iter().map(port_at).collect();
         // The clock, when it is on, goes to every output; the LEDs only
         // ever go to the surface's own. Inputs are the surface's plus
-        // whatever the operator asked for by name.
-        let opened_in = self.midi_open_inputs();
-        let opened_out = self.midi_open_outputs();
-        cx.use_midi_inputs(&opened_in);
-        cx.use_midi_outputs(&opened_out);
-        self.clock_out_ports = opened_out;
+        // whatever the operator ticked or asked for by name.
+        self.apply_midi_ports(cx);
         self.apc_leds.set_model(model.unwrap_or_default());
         // The press decoder translates grid notes with the same per-model
         // mapping the LEDs use — one truth for both directions.
@@ -32492,6 +33257,8 @@ impl MatchEvent for App {
             )
         };
         self.sync_apc_leds();
+        // A plug or an unplug redraws the page's rows.
+        self.sync_midi_page(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -33398,6 +34165,7 @@ impl MatchEvent for App {
                 }
             }
         }
+        self.handle_midi_page(cx, actions);
 
         // ---- lower-region tabs ----
         if self.ui.button(cx, ids!(chip_lights)).clicked(actions) {

@@ -70,6 +70,14 @@ impl Settings {
         self.values.insert(key.to_string(), flat);
     }
 
+    /// Forget a key. Returns what it said, if it was there. A store that
+    /// is read, edited and written back has to be able to shorten a list
+    /// as well as lengthen it, and setting a key to nothing is not the
+    /// same: a bare key is still written, and still read.
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        self.values.remove(key)
+    }
+
     pub fn bool(&self, key: &str, default: bool) -> bool {
         match self.values.get(key).map(|value| value.trim()) {
             Some("1") | Some("true") | Some("on") | Some("yes") => true,
@@ -231,6 +239,18 @@ pub mod legacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_forgets_a_key_and_returns_what_it_said() {
+        let mut store = Settings::new();
+        store.set_text("a.b", "one");
+        store.set_text("a.c", "two");
+        assert_eq!(store.remove("a.b").as_deref(), Some("one"));
+        assert!(!store.has("a.b"), "gone, not blanked");
+        assert_eq!(store.remove("a.b"), None, "and gone is gone");
+        assert!(!store.to_text().contains("a.b"), "a removed key writes nothing");
+        assert_eq!(store.text("a.c", ""), "two", "its neighbour is untouched");
+    }
 
     #[test]
     fn the_autopilot_file_on_disk_today_reads_into_the_right_keys() {
