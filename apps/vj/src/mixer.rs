@@ -2306,6 +2306,17 @@ struct MixState {
 }
 
 impl MixState {
+    /// Put the master's ceiling on the phones' limiter, wherever the
+    /// master's was set from. The comment on `cue_limiter` has said the
+    /// two are alike since it was written; nothing made them so, and an
+    /// operator who lowered the room's ceiling left the cans where they
+    /// were. The compressor above it stays the room's alone: that is a
+    /// sound rather than a guarantee.
+    fn follow_master_ceiling(&mut self) {
+        let ceiling = self.program_mix.master_params().ceiling_db;
+        self.cue_limiter.set_ceiling(crate::dsp_math::db_to_ratio(ceiling));
+    }
+
     /// The chain a target names. Exhaustive and infallible on purpose:
     /// the audio callback must not regain a way to unwind, so there is no
     /// index to be out of range and no `Option` to unwrap.
@@ -2353,8 +2364,15 @@ impl MixState {
             cue_mode: CueMode::default(),
             preview: PreviewVoice::new(),
             // The rate is not known until the first buffer; the look-ahead
-            // re-windows itself then, allocation-free.
-            cue_limiter: crate::music_dsp::Limiter::new(0.0),
+            // re-windows itself then, allocation-free. The ceiling is the
+            // master's from the start, and follows it after.
+            cue_limiter: {
+                let mut limiter = crate::music_dsp::Limiter::new(0.0);
+                limiter.set_ceiling(crate::dsp_math::db_to_ratio(
+                    crate::program_mix::MasterParams::default().ceiling_db,
+                ));
+                limiter
+            },
             score_preview: ScorePreviewVoice::new(48_000),
             synth: SynthRack::new(48_000),
             program_mix: ProgramMix::new(),
@@ -5604,9 +5622,13 @@ impl MixEngine {
             MixCmd::SetStripGain { strip, gain } => s.program_mix.set_gain(strip, gain),
             MixCmd::SetStripMuted { strip, muted } => s.program_mix.set_muted(strip, muted),
             MixCmd::SetStripSoloed { strip, soloed } => s.program_mix.set_soloed(strip, soloed),
-            MixCmd::SetMasterDynamics(params) => s.program_mix.set_master_params(params),
+            MixCmd::SetMasterDynamics(params) => {
+                s.program_mix.set_master_params(params);
+                s.follow_master_ceiling();
+            }
             MixCmd::SetMasterDynamicsParam { param, value } => {
-                s.program_mix.set_master_param(param, value)
+                s.program_mix.set_master_param(param, value);
+                s.follow_master_ceiling();
             }
             MixCmd::SetMasterDynamicsBypass(bypass) => {
                 s.program_mix.set_master_bypass(bypass)
@@ -8624,6 +8646,50 @@ mod tests {
     /// and the phones got one with it, in the same commit -- and then the
     /// engine swap put the clamp back on the phones alone, so the room and
     /// the headphones stopped agreeing about what two hot decks sound like.
+    #[test]
+    fn the_phones_ceiling_is_the_ceiling_the_room_keeps() {
+        // The comment on the phones limiter said it was on the master's
+        // settings; it was built at full scale and never told otherwise,
+        // so lowering the room's ceiling left the cans where they were.
+        let hot = |rate: u32, seconds: f64| {
+            let len = (rate as f64 * seconds) as usize;
+            let frames = (0..len)
+                .map(|index| {
+                    let phase = 2.0 * std::f64::consts::PI * 220.0 * index as f64 / rate as f64;
+                    let sample = (phase.sin() * 32_000.0) as i16;
+                    [sample, sample]
+                })
+                .collect();
+            Arc::new(TrackPcm { frames, sample_rate: rate })
+        };
+        let peak_with = |ceiling_db: f32| {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            mixer.set_cue_armed(true);
+            let mut params = crate::program_mix::MasterParams::default();
+            params.ceiling_db = ceiling_db;
+            mixer.set_master_dynamics(params);
+            for deck in [DeckId::A, DeckId::B] {
+                mixer.install_deck(deck, hot(48_000, 4.0));
+                mixer.set_deck_playing(deck, true);
+                mixer.set_deck_cue(deck, true);
+            }
+            render(&mixer, 48_000.0, 8_192);
+            render(&mixer, 48_000.0, 8_192);
+            let mut state = CueReadState::default();
+            let cue = consume_cue(&mixer, &mut state, 48_000.0, 512);
+            cue.channel(0)[128..].iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+        };
+        // Two records near full scale into one bus: without a ceiling that
+        // means about twice full scale, so whatever comes out is the
+        // ceiling doing its work.
+        let low = peak_with(-6.0);
+        assert!(low <= 0.501 + 1e-3, "the phones kept the room's ceiling: peaked at {low}");
+        assert!(low > 0.3, "and did not go quiet instead: {low}");
+        let high = peak_with(-0.5);
+        assert!(high > low * 1.5, "a higher ceiling is audibly higher: {high} against {low}");
+    }
+
     #[test]
     fn two_hot_decks_in_the_phones_are_limited_and_not_flat_topped() {
         // Near full scale, so cueing both puts about twice full scale into
