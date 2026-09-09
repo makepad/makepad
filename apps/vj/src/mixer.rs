@@ -2174,6 +2174,14 @@ struct MixState {
     cue_deck: [bool; 2],
     cue_mode: CueMode,
     preview: PreviewVoice,
+    /// The headphone bus ends on a limiter of its own, on the master's
+    /// settings. Two instances and not one because they carry different
+    /// signals -- but alike, for two reasons. A clamp is a clipper, so the
+    /// phones would grit where the room does not; and a limiter looks
+    /// ahead, so a bus with one runs later than a bus without, and a
+    /// headphone feed that is a look-ahead EARLY is a beat-match error
+    /// nobody can see.
+    cue_limiter: crate::music_dsp::Limiter,
     score_preview: ScorePreviewVoice,
     synth: SynthRack,
     program_mix: ProgramMix,
@@ -2208,6 +2216,9 @@ impl MixState {
             cue_deck: [false; 2],
             cue_mode: CueMode::default(),
             preview: PreviewVoice::new(),
+            // The rate is not known until the first buffer; the look-ahead
+            // re-windows itself then, allocation-free.
+            cue_limiter: crate::music_dsp::Limiter::new(0.0),
             score_preview: ScorePreviewVoice::new(48_000),
             synth: SynthRack::new(48_000),
             program_mix: ProgramMix::new(),
@@ -6179,11 +6190,12 @@ impl MixEngine {
                         }
                     }
                 }
-                shared.cue_ring.push(
-                    cue_pos,
-                    cue.0.clamp(-CLAMP, CLAMP),
-                    cue.1.clamp(-CLAMP, CLAMP),
-                );
+                // `audible` before the limiter, because a non-finite
+                // sample would poison its peak read and duck the bus for
+                // good -- the same guard the master's own limiter takes.
+                s.cue_limiter.set_sample_rate(rate as f32);
+                let cued = s.cue_limiter.process([audible(cue.0), audible(cue.1)]);
+                shared.cue_ring.push(cue_pos, cued[0], cued[1]);
                 cue_pos = cue_pos.saturating_add(1);
             }
 
@@ -8204,6 +8216,61 @@ mod tests {
         assert!(
             over > unity * 1.4,
             "the fader's top third moved nothing: unity {unity}, full {over}",
+        );
+    }
+
+    /// The phones end on a limiter, not a clamp.
+    ///
+    /// A clamp is a clipper: pushed past full scale it flat-tops every
+    /// sample that got there, which is a square wave's worth of harmonics
+    /// and reads as grit. The master got a limiter for exactly that reason
+    /// and the phones got one with it, in the same commit -- and then the
+    /// engine swap put the clamp back on the phones alone, so the room and
+    /// the headphones stopped agreeing about what two hot decks sound like.
+    #[test]
+    fn two_hot_decks_in_the_phones_are_limited_and_not_flat_topped() {
+        // Near full scale, so cueing both puts about twice full scale into
+        // a bus whose ceiling is one.
+        let hot = |rate: u32, seconds: f64| {
+            let len = (rate as f64 * seconds) as usize;
+            let frames = (0..len)
+                .map(|index| {
+                    let phase = 2.0 * std::f64::consts::PI * 220.0 * index as f64 / rate as f64;
+                    let sample = (phase.sin() * 32_000.0) as i16;
+                    [sample, sample]
+                })
+                .collect();
+            Arc::new(TrackPcm { frames, sample_rate: rate })
+        };
+
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_cue_armed(true);
+        for deck in [DeckId::A, DeckId::B] {
+            mixer.install_deck(deck, hot(48_000, 4.0));
+            mixer.set_deck_playing(deck, true);
+            mixer.set_deck_cue(deck, true);
+        }
+        render(&mixer, 48_000.0, 8_192);
+        render(&mixer, 48_000.0, 8_192);
+
+        let mut cue_state = CueReadState::default();
+        let cue = consume_cue(&mixer, &mut cue_state, 48_000.0, 512);
+        // Past the ring's prime and the limiter's attack, so what is left
+        // is the steady state.
+        let tail = &cue.channel(0)[128..];
+        let pinned = tail.iter().filter(|s| s.abs() >= 0.999).count();
+        let peak = tail.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+
+        assert!(peak <= 1.0 + 1e-6, "the ceiling is a ceiling: peaked at {peak}");
+        assert!(peak > 0.5, "the phones went quiet instead of being limited: {peak}");
+        // A clamp pins about two thirds of a sine at twice full scale; a
+        // limiter turns the gain down and the shape survives, so only the
+        // very tips of the wave reach the ceiling at all.
+        assert!(
+            pinned * 20 < tail.len(),
+            "{pinned} of {} samples flat-topped: that is a clipper, not a limiter",
+            tail.len(),
         );
     }
 
