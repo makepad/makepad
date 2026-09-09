@@ -21,7 +21,7 @@ pub struct ChainState {
     pub echo_pingpong: bool,
     /// How much of an echo repeat feeds the next one, in
     /// [`crate::music_dsp::ECHO_FEEDBACK_MAX`]'s range. Edited from the
-    /// SFX page rather than the deck header -- there is no room there
+    /// rack on the mix page rather than the deck header -- there is no room there
     /// for a fourth knob -- so it is part of the channel strip like the
     /// rung beside it: a swap carries it and a load leaves it.
     pub echo_feedback: f32,

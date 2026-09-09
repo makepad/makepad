@@ -241,7 +241,9 @@ use crate::pipelines::{PipeDone, PipeReq, Pipelines};
 use crate::gen::{GenCmd, GenModel, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
+use crate::chain_state::ChainState;
 use crate::mixer::{
+    ChainTarget,
     EffectParam, TrackStems,
     CueMode, CueReadState, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
     VideoTransitionPhase,
@@ -3027,7 +3029,7 @@ script_mod! {
                                     }
                                 }
                                 View{
-                                    width: Fill height: Fill flow: Right spacing: 10
+                                    width: Fill height: Fit flow: Right spacing: 10
                                     FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
@@ -3035,9 +3037,399 @@ script_mod! {
                                     FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    View{width: 8 height: Fill}
+                                }
+                                View{
+                                    width: Fill height: Fill flow: Right spacing: 8
+                                    mix_rack := ScrollYView{
+                                        width: Fill height: Fill flow: Down spacing: 4
+                                        // The effects rack, on the page where every
+                                        // audio source meets: the chips say which
+                                        // source the knobs below are on -- one of the
+                                        // seven strips above, both decks at once, or
+                                        // the final mix. The A, B and BOTH chips keep
+                                        // the ids they had on the SFX page.
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            PanelLabel{text: "fx on"}
+                                            fx_target_video := PillButton{width: 52 text: "VIDEO"}
+                                            sfx_fx_a := PillButton{width: 32 text: "A"}
+                                            sfx_fx_b := PillButton{width: 32 text: "B"}
+                                            sfx_fx_mix := PillButton{width: 48 text: "BOTH"}
+                                            fx_target_sfx := PillButton{width: 40 text: "SFX"}
+                                            fx_target_piano := PillButton{width: 52 text: "PIANO"}
+                                            fx_target_ironfish := PillButton{width: 44 text: "IRON"}
+                                            fx_target_drums := PillButton{width: 56 text: "DRUMS"}
+                                            fx_target_master := PillButton{width: 64 text: "MASTER"}
+                                            View{width: Fill height: 1}
+                                            sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            PanelLabel{width: 62 text: "EQ SPLIT"}
+                                            sfx_eq_low_hz := Slider{
+                                                width: 170
+                                                text: "low | mid"
+                                                min: 80.0
+                                                max: 800.0
+                                                default: 250.0
+                                                taper: Log
+                                                unit: "Hz"
+                                                precision: 0
+                                            }
+                                            sfx_eq_high_hz := Slider{
+                                                width: 170
+                                                text: "mid | high"
+                                                min: 1000.0
+                                                max: 8000.0
+                                                default: 2500.0
+                                                taper: Log
+                                                unit: "Hz"
+                                                precision: 0
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
+                                            sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
+                                            sfx_fx_feedback := Slider{
+                                                width: 170
+                                                text: "echo feedback"
+                                                min: 0.0
+                                                max: 0.95
+                                                default: 0.55
+                                                unit: "%"
+                                                display_scale: 100.0
+                                                precision: 0
+                                            }
+                                            sfx_fx_echo_ping := PillButton{width: 54 text: "PING"}
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_flanger := PillButton{width: 78 text: "FLANGER"}
+                                            sfx_fx_flanger_free := View{
+                                                width: Fit
+                                                height: Fit
+                                                sfx_fx_flanger_rate := Slider{
+                                                    width: 170
+                                                    text: "flanger rate"
+                                                    min: 0.02
+                                                    max: 8.0
+                                                    default: 0.25
+                                                    taper: Log
+                                                    unit: "Hz"
+                                                    precision: 2
+                                                }
+                                            }
+                                            sfx_fx_flanger_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            sfx_fx_flanger_locked := View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{x: 0.0, y: 0.5}
+                                                visible: false
+                                                sfx_fx_flanger_offset := Slider{
+                                                    width: 170
+                                                    text: "flanger offset"
+                                                    min: 0.0
+                                                    max: 1.0
+                                                    default: 0.0
+                                                    unit: "%"
+                                                    display_scale: 100.0
+                                                    precision: 0
+                                                }
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_bitcrusher := PillButton{width: 92 text: "BITCRUSH"}
+                                            sfx_fx_bitcrusher_bits := Slider{
+                                                width: 170
+                                                text: "bitcrusher bits"
+                                                min: 1.0
+                                                max: 16.0
+                                                default: 8.0
+                                                taper: Stepped
+                                                step: 1.0
+                                                unit: "bits"
+                                                precision: 0
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_tremolo := PillButton{width: 78 text: "TREMOLO"}
+                                            sfx_fx_tremolo_free := View{
+                                                width: Fit
+                                                height: Fit
+                                                sfx_fx_tremolo_rate := Slider{
+                                                    width: 170
+                                                    text: "tremolo rate"
+                                                    min: 0.1
+                                                    max: 20.0
+                                                    default: 4.0
+                                                    taper: Log
+                                                    unit: "Hz"
+                                                    precision: 2
+                                                }
+                                            }
+                                            sfx_fx_tremolo_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            sfx_fx_tremolo_locked := View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{x: 0.0, y: 0.5}
+                                                visible: false
+                                                sfx_fx_tremolo_offset := Slider{
+                                                    width: 170
+                                                    text: "tremolo offset"
+                                                    min: 0.0
+                                                    max: 1.0
+                                                    default: 0.0
+                                                    unit: "%"
+                                                    display_scale: 100.0
+                                                    precision: 0
+                                                }
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_distortion := PillButton{width: 92 text: "DISTORT"}
+                                            sfx_fx_distortion_drive := Slider{
+                                                width: 170
+                                                text: "distortion drive"
+                                                min: 1.0
+                                                max: 20.0
+                                                default: 4.0
+                                                taper: Log
+                                                unit: "x"
+                                                precision: 1
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_phaser := PillButton{width: 70 text: "PHASER"}
+                                            sfx_fx_phaser_free := View{
+                                                width: Fit
+                                                height: Fit
+                                                sfx_fx_phaser_rate := Slider{
+                                                    width: 170
+                                                    text: "phaser rate"
+                                                    min: 0.05
+                                                    max: 5.0
+                                                    default: 0.5
+                                                    taper: Log
+                                                    unit: "Hz"
+                                                    precision: 2
+                                                }
+                                            }
+                                            sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            sfx_fx_phaser_locked := View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{x: 0.0, y: 0.5}
+                                                visible: false
+                                                sfx_fx_phaser_offset := Slider{
+                                                    width: 170
+                                                    text: "phaser offset"
+                                                    min: 0.0
+                                                    max: 1.0
+                                                    default: 0.0
+                                                    unit: "%"
+                                                    display_scale: 100.0
+                                                    precision: 0
+                                                }
+                                            }
+                                            sfx_fx_phaser_feedback := Slider{
+                                                width: 170
+                                                text: "phaser feedback"
+                                                min: 0.0
+                                                max: 0.9
+                                                default: 0.3
+                                                unit: "%"
+                                                display_scale: 100.0
+                                                precision: 0
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_autopan := PillButton{width: 78 text: "AUTOPAN"}
+                                            sfx_fx_autopan_free := View{
+                                                width: Fit
+                                                height: Fit
+                                                sfx_fx_autopan_rate := Slider{
+                                                    width: 170
+                                                    text: "autopan rate"
+                                                    min: 0.1
+                                                    max: 20.0
+                                                    default: 1.0
+                                                    taper: Log
+                                                    unit: "Hz"
+                                                    precision: 2
+                                                }
+                                            }
+                                            sfx_fx_autopan_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            sfx_fx_autopan_locked := View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{x: 0.0, y: 0.5}
+                                                visible: false
+                                                sfx_fx_autopan_offset := Slider{
+                                                    width: 170
+                                                    text: "autopan offset"
+                                                    min: 0.0
+                                                    max: 1.0
+                                                    default: 0.0
+                                                    unit: "%"
+                                                    display_scale: 100.0
+                                                    precision: 0
+                                                }
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_stereo_width := PillButton{width: 56 text: "WIDTH"}
+                                            sfx_fx_stereo_width_amount := Slider{
+                                                width: 170
+                                                text: "width"
+                                                min: 0.0
+                                                max: 2.0
+                                                default: 1.0
+                                                arc_from_origin: true
+                                                unit: "x"
+                                                precision: 2
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_plate_reverb := PillButton{width: 70 text: "REVERB"}
+                                            sfx_fx_plate_reverb_size := Slider{
+                                                width: 170
+                                                text: "reverb size"
+                                                min: 0.0
+                                                max: 1.0
+                                                default: 0.5
+                                                unit: "%"
+                                                display_scale: 100.0
+                                                precision: 0
+                                            }
+                                        }
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_moog_ladder := PillButton{width: 70 text: "LADDER"}
+                                            sfx_fx_moog_ladder_cutoff := Slider{
+                                                width: 170
+                                                text: "ladder cutoff"
+                                                min: 60.0
+                                                max: 12000.0
+                                                default: 1200.0
+                                                taper: Log
+                                                unit: "Hz"
+                                                precision: 0
+                                            }
+                                            sfx_fx_moog_ladder_resonance := Slider{
+                                                width: 170
+                                                text: "ladder resonance"
+                                                min: 0.0
+                                                max: 1.0
+                                                default: 0.3
+                                                unit: "%"
+                                                display_scale: 100.0
+                                                precision: 0
+                                            }
+                                        }
+                                        // The compressor has no row in the levels
+                                        // modal on purpose. Its makeup IS a level
+                                        // rule -- derived from the threshold and
+                                        // the ratio, so the loud parts come down
+                                        // and the quiet ones come up by exactly
+                                        // what those two say -- and hanging a
+                                        // MATCH or a CAP off the slot as well
+                                        // would be gain-staging the same signal
+                                        // twice, the second stage undoing what
+                                        // the first was asked for.
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8
+                                            align: Align{x: 0.0, y: 0.5}
+                                            sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
+                                            sfx_fx_compressor_threshold := Slider{
+                                                width: 170
+                                                text: "comp threshold"
+                                                min: -40.0
+                                                max: 0.0
+                                                default: -18.0
+                                                unit: "dB"
+                                                precision: 0
+                                            }
+                                            sfx_fx_compressor_ratio := Slider{
+                                                width: 170
+                                                text: "comp ratio"
+                                                min: 1.0
+                                                max: 20.0
+                                                default: 4.0
+                                                taper: Log
+                                                unit: ":1"
+                                                precision: 1
+                                            }
+                                        }
+                                    }
                                     RoundedView{
-                                        width: Fill height: Fill flow: Down spacing: 3 padding: 8
+                                        width: 300 height: Fill flow: Down spacing: 3 padding: 8
                                         draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
                                         View{width: Fill height: Fit flow: Right
                                             Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
@@ -3067,384 +3459,9 @@ script_mod! {
                                 height: Fill
                                 flow: Down
                                 spacing: 8
-                                // Deck FX: parameters with no home on the
-                                // deck header (the FILTER row is already
-                                // three chips wide) and the accordion is
-                                // fixed at three panels, so they live here
-                                // instead. A / B picks a deck; MIX writes
-                                // both at once.
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    PanelLabel{text: "deck fx"}
-                                    sfx_fx_a := PillButton{width: 32 text: "A"}
-                                    sfx_fx_b := PillButton{width: 32 text: "B"}
-                                    sfx_fx_mix := PillButton{width: 44 text: "MIX"}
-                                    sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    PanelLabel{width: 62 text: "EQ SPLIT"}
-                                    sfx_eq_low_hz := Slider{
-                                        width: 170
-                                        text: "low | mid"
-                                        min: 80.0
-                                        max: 800.0
-                                        default: 250.0
-                                        taper: Log
-                                        unit: "Hz"
-                                        precision: 0
-                                    }
-                                    sfx_eq_high_hz := Slider{
-                                        width: 170
-                                        text: "mid | high"
-                                        min: 1000.0
-                                        max: 8000.0
-                                        default: 2500.0
-                                        taper: Log
-                                        unit: "Hz"
-                                        precision: 0
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
-                                    sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
-                                    sfx_fx_feedback := Slider{
-                                        width: 170
-                                        text: "echo feedback"
-                                        min: 0.0
-                                        max: 0.95
-                                        default: 0.55
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
-                                    sfx_fx_echo_ping := PillButton{width: 54 text: "PING"}
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_flanger := PillButton{width: 78 text: "FLANGER"}
-                                    sfx_fx_flanger_free := View{
-                                        width: Fit
-                                        height: Fit
-                                        sfx_fx_flanger_rate := Slider{
-                                            width: 170
-                                            text: "flanger rate"
-                                            min: 0.02
-                                            max: 8.0
-                                            default: 0.25
-                                            taper: Log
-                                            unit: "Hz"
-                                            precision: 2
-                                        }
-                                    }
-                                    sfx_fx_flanger_sync := VjBeatsDrop{width: 40 lfo_rows: true}
-                                    sfx_fx_flanger_locked := View{
-                                        width: Fit
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        visible: false
-                                        sfx_fx_flanger_offset := Slider{
-                                            width: 170
-                                            text: "flanger offset"
-                                            min: 0.0
-                                            max: 1.0
-                                            default: 0.0
-                                            unit: "%"
-                                            display_scale: 100.0
-                                            precision: 0
-                                        }
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_bitcrusher := PillButton{width: 92 text: "BITCRUSH"}
-                                    sfx_fx_bitcrusher_bits := Slider{
-                                        width: 170
-                                        text: "bitcrusher bits"
-                                        min: 1.0
-                                        max: 16.0
-                                        default: 8.0
-                                        taper: Stepped
-                                        step: 1.0
-                                        unit: "bits"
-                                        precision: 0
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_tremolo := PillButton{width: 78 text: "TREMOLO"}
-                                    sfx_fx_tremolo_free := View{
-                                        width: Fit
-                                        height: Fit
-                                        sfx_fx_tremolo_rate := Slider{
-                                            width: 170
-                                            text: "tremolo rate"
-                                            min: 0.1
-                                            max: 20.0
-                                            default: 4.0
-                                            taper: Log
-                                            unit: "Hz"
-                                            precision: 2
-                                        }
-                                    }
-                                    sfx_fx_tremolo_sync := VjBeatsDrop{width: 40 lfo_rows: true}
-                                    sfx_fx_tremolo_locked := View{
-                                        width: Fit
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        visible: false
-                                        sfx_fx_tremolo_offset := Slider{
-                                            width: 170
-                                            text: "tremolo offset"
-                                            min: 0.0
-                                            max: 1.0
-                                            default: 0.0
-                                            unit: "%"
-                                            display_scale: 100.0
-                                            precision: 0
-                                        }
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_distortion := PillButton{width: 92 text: "DISTORT"}
-                                    sfx_fx_distortion_drive := Slider{
-                                        width: 170
-                                        text: "distortion drive"
-                                        min: 1.0
-                                        max: 20.0
-                                        default: 4.0
-                                        taper: Log
-                                        unit: "x"
-                                        precision: 1
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_phaser := PillButton{width: 70 text: "PHASER"}
-                                    sfx_fx_phaser_free := View{
-                                        width: Fit
-                                        height: Fit
-                                        sfx_fx_phaser_rate := Slider{
-                                            width: 170
-                                            text: "phaser rate"
-                                            min: 0.05
-                                            max: 5.0
-                                            default: 0.5
-                                            taper: Log
-                                            unit: "Hz"
-                                            precision: 2
-                                        }
-                                    }
-                                    sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
-                                    sfx_fx_phaser_locked := View{
-                                        width: Fit
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        visible: false
-                                        sfx_fx_phaser_offset := Slider{
-                                            width: 170
-                                            text: "phaser offset"
-                                            min: 0.0
-                                            max: 1.0
-                                            default: 0.0
-                                            unit: "%"
-                                            display_scale: 100.0
-                                            precision: 0
-                                        }
-                                    }
-                                    sfx_fx_phaser_feedback := Slider{
-                                        width: 170
-                                        text: "phaser feedback"
-                                        min: 0.0
-                                        max: 0.9
-                                        default: 0.3
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_autopan := PillButton{width: 78 text: "AUTOPAN"}
-                                    sfx_fx_autopan_free := View{
-                                        width: Fit
-                                        height: Fit
-                                        sfx_fx_autopan_rate := Slider{
-                                            width: 170
-                                            text: "autopan rate"
-                                            min: 0.1
-                                            max: 20.0
-                                            default: 1.0
-                                            taper: Log
-                                            unit: "Hz"
-                                            precision: 2
-                                        }
-                                    }
-                                    sfx_fx_autopan_sync := VjBeatsDrop{width: 40 lfo_rows: true}
-                                    sfx_fx_autopan_locked := View{
-                                        width: Fit
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        visible: false
-                                        sfx_fx_autopan_offset := Slider{
-                                            width: 170
-                                            text: "autopan offset"
-                                            min: 0.0
-                                            max: 1.0
-                                            default: 0.0
-                                            unit: "%"
-                                            display_scale: 100.0
-                                            precision: 0
-                                        }
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_stereo_width := PillButton{width: 56 text: "WIDTH"}
-                                    sfx_fx_stereo_width_amount := Slider{
-                                        width: 170
-                                        text: "width"
-                                        min: 0.0
-                                        max: 2.0
-                                        default: 1.0
-                                        arc_from_origin: true
-                                        unit: "x"
-                                        precision: 2
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_plate_reverb := PillButton{width: 70 text: "REVERB"}
-                                    sfx_fx_plate_reverb_size := Slider{
-                                        width: 170
-                                        text: "reverb size"
-                                        min: 0.0
-                                        max: 1.0
-                                        default: 0.5
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
-                                }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_moog_ladder := PillButton{width: 70 text: "LADDER"}
-                                    sfx_fx_moog_ladder_cutoff := Slider{
-                                        width: 170
-                                        text: "ladder cutoff"
-                                        min: 60.0
-                                        max: 12000.0
-                                        default: 1200.0
-                                        taper: Log
-                                        unit: "Hz"
-                                        precision: 0
-                                    }
-                                    sfx_fx_moog_ladder_resonance := Slider{
-                                        width: 170
-                                        text: "ladder resonance"
-                                        min: 0.0
-                                        max: 1.0
-                                        default: 0.3
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
-                                }
-                                // The compressor has no row in the levels
-                                // modal on purpose. Its makeup IS a level
-                                // rule -- derived from the threshold and
-                                // the ratio, so the loud parts come down
-                                // and the quiet ones come up by exactly
-                                // what those two say -- and hanging a
-                                // MATCH or a CAP off the slot as well
-                                // would be gain-staging the same signal
-                                // twice, the second stage undoing what
-                                // the first was asked for.
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
-                                    sfx_fx_compressor_threshold := Slider{
-                                        width: 170
-                                        text: "comp threshold"
-                                        min: -40.0
-                                        max: 0.0
-                                        default: -18.0
-                                        unit: "dB"
-                                        precision: 0
-                                    }
-                                    sfx_fx_compressor_ratio := Slider{
-                                        width: 170
-                                        text: "comp ratio"
-                                        min: 1.0
-                                        max: 20.0
-                                        default: 4.0
-                                        taper: Log
-                                        unit: ":1"
-                                        precision: 1
-                                    }
-                                }
+                                // Empty until the tab goes: the pads moved
+                                // in with the synth and the rack moved to
+                                // the mix page.
                             }
 
                             // ============ MESH ============
@@ -5344,6 +5361,20 @@ impl ConsoleMode {
     }
 }
 
+/// The rack's target row, in the order the strips stand above it. The
+/// A, B and BOTH chips keep the ids they had on the SFX page.
+const FX_TARGET_CHIPS: [(&[LiveId], FxTarget); 9] = [
+    (ids!(fx_target_video), FxTarget::One(ChainTarget::Video)),
+    (ids!(sfx_fx_a), FxTarget::One(ChainTarget::DeckA)),
+    (ids!(sfx_fx_b), FxTarget::One(ChainTarget::DeckB)),
+    (ids!(sfx_fx_mix), FxTarget::Both),
+    (ids!(fx_target_sfx), FxTarget::One(ChainTarget::Sfx)),
+    (ids!(fx_target_piano), FxTarget::One(ChainTarget::Piano)),
+    (ids!(fx_target_ironfish), FxTarget::One(ChainTarget::Ironfish)),
+    (ids!(fx_target_drums), FxTarget::One(ChainTarget::Drums)),
+    (ids!(fx_target_master), FxTarget::One(ChainTarget::Master)),
+];
+
 const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 5] = [
     (ids!(mode_vj), ConsoleMode::Vj),
     (ids!(mode_dj), ConsoleMode::Dj),
@@ -6149,15 +6180,58 @@ enum LowerTab {
     Archive,
 }
 
-/// Which deck the SFX page's echo-feedback slider edits. MIX writes
-/// the same value to both decks at once rather than reading a blend of
-/// them -- there is no third feedback state, only a broadcast mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// Which chain the rack's knobs are on: one of the eight, or both decks
+/// at once. BOTH is a gesture and not a chain -- it writes the same value
+/// to both decks rather than reading a blend of them, so the rack shows
+/// deck A while it is up, and a toggle lands both on the side deck A was
+/// not on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FxTarget {
-    A,
-    B,
-    #[default]
-    Mix,
+    One(ChainTarget),
+    Both,
+}
+
+impl Default for FxTarget {
+    fn default() -> Self {
+        Self::Both
+    }
+}
+
+impl FxTarget {
+    /// Every chain an edit on this row goes to.
+    fn chains(self) -> Vec<ChainTarget> {
+        match self {
+            Self::One(target) => vec![target],
+            Self::Both => vec![ChainTarget::DeckA, ChainTarget::DeckB],
+        }
+    }
+
+    /// The chain whose settings the rack displays.
+    fn shown(self) -> ChainTarget {
+        match self {
+            Self::One(target) => target,
+            Self::Both => ChainTarget::DeckA,
+        }
+    }
+}
+
+#[cfg(test)]
+mod fx_target_tests {
+    use super::*;
+
+    /// BOTH edits two chains and shows one; a single target edits and
+    /// shows itself. A row that edited what it did not show would make
+    /// every knob a lie.
+    #[test]
+    fn both_edits_the_decks_and_shows_deck_a() {
+        assert_eq!(FxTarget::Both.chains(), vec![ChainTarget::DeckA, ChainTarget::DeckB]);
+        assert_eq!(FxTarget::Both.shown(), ChainTarget::DeckA);
+        for target in ChainTarget::ALL {
+            assert_eq!(FxTarget::One(target).chains(), vec![target]);
+            assert_eq!(FxTarget::One(target).shown(), target);
+        }
+        assert_eq!(FxTarget::default(), FxTarget::Both, "as the old MIX chip was");
+    }
 }
 
 impl LowerTab {
@@ -8250,9 +8324,14 @@ pub struct App {
     music_model: BrowseModel,
     #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
     sfx_model: BrowseModel,
-    /// Which deck the SFX page's echo-feedback slider currently edits.
+    /// Which chain the rack's knobs are on.
     #[rust]
     sfx_fx_target: FxTarget,
+    /// The standing settings of the six chains that are not a deck's:
+    /// video, the pads, the three synth tracks and the mix. The decks'
+    /// live with the decks, where a swap carries them.
+    #[rust]
+    rack_states: [ChainState; 6],
     #[rust(BrowseModel::dance())]
     mesh_model: BrowseModel,
     #[rust(CueEngine::new())]
@@ -16230,6 +16309,47 @@ p2 {}
         }
     }
 
+    /// The settings behind one chain. The decks' live with the decks.
+    fn chain_state(&self, target: ChainTarget) -> &ChainState {
+        match target.deck() {
+            Some(deck) => self.decks.chain(deck),
+            None => &self.rack_states[Self::rack_slot(target)],
+        }
+    }
+
+    fn chain_state_mut(&mut self, target: ChainTarget) -> &mut ChainState {
+        match target.deck() {
+            Some(deck) => self.decks.chain_mut(deck),
+            None => &mut self.rack_states[Self::rack_slot(target)],
+        }
+    }
+
+    /// Where a non-deck target's settings sit in `rack_states`.
+    fn rack_slot(target: ChainTarget) -> usize {
+        match target {
+            ChainTarget::Video => 0,
+            ChainTarget::Sfx => 1,
+            ChainTarget::Piano => 2,
+            ChainTarget::Ironfish => 3,
+            ChainTarget::Drums => 4,
+            ChainTarget::Master => 5,
+            // Never asked: the decks resolve above.
+            ChainTarget::DeckA | ChainTarget::DeckB => 0,
+        }
+    }
+
+    /// One edit, applied to every chain the target row points at, and
+    /// what changed sent to the engine. The one door for every knob on
+    /// the rack, so a handler says what to turn and never which chain.
+    fn edit_rack(&mut self, edit: impl Fn(&mut ChainState) -> Vec<EffectParam>) {
+        for target in self.sfx_fx_target.chains() {
+            let params = edit(self.chain_state_mut(target));
+            for param in params {
+                self.mixer.set_chain_effect(target, param);
+            }
+        }
+    }
+
     /// What a rack setter returned, sent on to the deck it was turned
     /// for. One door for every effect knob, so a handler names the deck
     /// once and never spells out a command.
@@ -16559,20 +16679,13 @@ p2 {}
     /// writes for target `A`/`B`; MIX reads deck A as its anchor, since
     /// there is nothing to blend -- moving the slider is what makes the
     /// two agree.
-    fn sfx_fx_deck(&self) -> DeckId {
-        match self.sfx_fx_target {
-            FxTarget::A | FxTarget::Mix => DeckId::A,
-            FxTarget::B => DeckId::B,
-        }
-    }
-
-    /// Put the A/B/MIX chips and the feedback/flanger controls back in
-    /// step with `self.sfx_fx_target` and the deck(s) it points at.
+    /// Put the target chips and every knob on the rack back in step with
+    /// `self.sfx_fx_target` and the chain it shows.
     fn sync_sfx_fx_ui(&mut self, cx: &mut Cx) {
-        self.paint_chip(cx, ids!(sfx_fx_a), self.sfx_fx_target == FxTarget::A, None);
-        self.paint_chip(cx, ids!(sfx_fx_b), self.sfx_fx_target == FxTarget::B, None);
-        self.paint_chip(cx, ids!(sfx_fx_mix), self.sfx_fx_target == FxTarget::Mix, None);
-        let chain = self.decks.chain(self.sfx_fx_deck());
+        for (chip, target) in FX_TARGET_CHIPS {
+            self.paint_chip(cx, chip, self.sfx_fx_target == target, None);
+        }
+        let chain = self.chain_state(self.sfx_fx_target.shown()).clone();
         let (feedback, flanger_on, flanger_rate, bitcrusher_on, bitcrusher_bits) = (
             chain.echo_feedback as f64,
             chain.flanger_on,
@@ -33503,33 +33616,14 @@ impl MatchEvent for App {
                 self.run_pad_cmds(cmds);
             }
         }
-        for (chip, target) in [
-            (ids!(sfx_fx_a), FxTarget::A),
-            (ids!(sfx_fx_b), FxTarget::B),
-            (ids!(sfx_fx_mix), FxTarget::Mix),
-        ] {
+        for (chip, target) in FX_TARGET_CHIPS {
             if self.ui.button(cx, chip).clicked(actions) {
                 self.sfx_fx_target = target;
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_feedback)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_echo_feedback(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_levels)).clicked(actions) {
             // Paint it before it is shown: the rows read the deck the FX
@@ -33553,22 +33647,7 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_level_default(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_level_default(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_level_default(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_level_default(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_level_default(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
@@ -33586,62 +33665,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_echo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_echo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_echo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_echo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_echo_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_echo_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_echo_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -33657,62 +33691,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_flanger_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_flanger_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_flanger_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_flanger_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_flanger_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_flanger_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_flanger_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -33728,62 +33717,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_bitcrusher_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_bitcrusher_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_bitcrusher_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -33799,62 +33743,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_tremolo_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_tremolo_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_tremolo_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -33870,62 +33769,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_distortion_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_distortion_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_distortion_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_distortion_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_distortion_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_distortion_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_distortion_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -33941,62 +33795,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_phaser_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_phaser_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_phaser_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_phaser_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_phaser_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_phaser_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_phaser_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -34012,62 +33821,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_autopan_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_autopan_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_autopan_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_autopan_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_autopan_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_autopan_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_autopan_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -34083,62 +33847,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_stereo_width_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_stereo_width_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_stereo_width_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_stereo_width_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_stereo_width_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_stereo_width_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_stereo_width_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -34154,62 +33873,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_plate_reverb_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_plate_reverb_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_plate_reverb_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         {
@@ -34225,62 +33899,17 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_level_mode(mode);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_moog_ladder_level_mode(mode));
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_mix)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_mix(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_moog_ladder_mix(v as f32));
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_ceiling)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_ceiling(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_moog_ladder_ceiling(v as f32));
             self.save_fx_levels_settings();
         }
         for (which, id) in [(0usize, ids!(sfx_eq_low_hz)), (1usize, ids!(sfx_eq_high_hz))] {
@@ -34290,48 +33919,23 @@ impl MatchEvent for App {
             // Both corners go every time: the engine holds them an octave
             // apart and may move the one that was not touched, so sending
             // only the dragged one would let the two disagree.
-            let send = |app: &mut Self, cx: &mut Cx, deck: DeckId| {
-                let chain = app.decks.chain(deck);
+            self.edit_rack(|chain| {
                 let (low, high) = match which {
                     0 => (v as f32, chain.eq_high_hz),
                     _ => (chain.eq_low_hz, v as f32),
                 };
-                let params = app.decks.chain_mut(deck).set_crossovers(low, high);
-                app.send_deck_effects(cx, deck, params);
-            };
-            match self.sfx_fx_target {
-                FxTarget::A => send(self, cx, DeckId::A),
-                FxTarget::B => send(self, cx, DeckId::B),
-                FxTarget::Mix => {
-                    send(self, cx, DeckId::A);
-                    send(self, cx, DeckId::B);
-                }
-            }
+                chain.set_crossovers(low, high)
+            });
             self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
             // The chip is the quick on/off the deck strip's E used to be:
             // off when it is sounding, and back to a beat when it is not.
-            let rung = match self.decks.chain(self.sfx_fx_deck()).echo_rung {
+            let rung = match self.chain_state(self.sfx_fx_target.shown()).echo_rung {
                 0 => 1,
                 _ => 0,
             };
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_echo_rung(rung));
             self.sync_sfx_fx_ui(cx);
         }
         {
@@ -34347,86 +33951,26 @@ impl MatchEvent for App {
                 }
             }
             if let Some(rung) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_echo_rung(rung));
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if self.ui.button(cx, ids!(sfx_fx_echo_ping)).clicked(actions) {
-            let on = !self.decks.chain(self.sfx_fx_deck()).echo_pingpong;
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_pingpong(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_pingpong(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_echo_pingpong(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_echo_pingpong(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            let on = !self.chain_state(self.sfx_fx_target.shown()).echo_pingpong;
+            self.edit_rack(|chain| chain.set_echo_pingpong(on));
             self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_flanger();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_flanger();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    // Both land on the SAME new side of the switch, not
-                    // each flip its own -- the pair could otherwise start
-                    // this press on opposite sides and end on opposite
-                    // sides too.
-                    let on = !self.decks.chain(DeckId::A).flanger_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).flanger_on;
+            self.edit_rack(|chain| chain.set_flanger(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_flanger_rate(v as f32));
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_flanger_sync)).widget_uid();
@@ -34441,118 +33985,36 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_flanger_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_flanger_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_flanger_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_flanger_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_flanger_sync_units(units));
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_flanger_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_flanger_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_flanger_beat_offset(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_bitcrusher)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_bitcrusher();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_bitcrusher();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).bitcrusher_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).bitcrusher_on;
+            self.edit_rack(|chain| chain.set_bitcrusher(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_bits(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_bits(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_bits(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_bits(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_bitcrusher_bits(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_tremolo)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_tremolo();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_tremolo();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).tremolo_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).tremolo_on;
+            self.edit_rack(|chain| chain.set_tremolo(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_tremolo_rate(v as f32));
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_tremolo_sync)).widget_uid();
@@ -34567,118 +34029,36 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_tremolo_sync_units(units));
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_tremolo_beat_offset(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_distortion)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_distortion();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_distortion();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).distortion_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).distortion_on;
+            self.edit_rack(|chain| chain.set_distortion(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_drive(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_drive(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_distortion_drive(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_distortion_drive(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_distortion_drive(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_phaser)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_phaser();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_phaser();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).phaser_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).phaser_on;
+            self.edit_rack(|chain| chain.set_phaser(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_phaser_rate(v as f32));
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_phaser_sync)).widget_uid();
@@ -34693,98 +34073,27 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_phaser_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_phaser_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_phaser_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_phaser_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_phaser_sync_units(units));
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_phaser_beat_offset(v as f32));
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_phaser_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_phaser_feedback(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_phaser_feedback(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_autopan)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_autopan();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_autopan();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).autopan_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).autopan_on;
+            self.edit_rack(|chain| chain.set_autopan(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_rate(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_autopan_rate(v as f32));
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_autopan_sync)).widget_uid();
@@ -34799,230 +34108,66 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                match self.sfx_fx_target {
-                    FxTarget::A => {
-                        let params = self.decks.chain_mut(DeckId::A).set_autopan_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                    }
-                    FxTarget::B => {
-                        let params = self.decks.chain_mut(DeckId::B).set_autopan_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                    FxTarget::Mix => {
-                        let params = self.decks.chain_mut(DeckId::A).set_autopan_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::A, params);
-                        let params = self.decks.chain_mut(DeckId::B).set_autopan_sync_units(units);
-                        self.send_deck_effects(cx, DeckId::B, params);
-                    }
-                }
+                self.edit_rack(|chain| chain.set_autopan_sync_units(units));
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_autopan_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_autopan_beat_offset(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_autopan_beat_offset(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_stereo_width)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_stereo_width();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_stereo_width();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).stereo_width_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).stereo_width_on;
+            self.edit_rack(|chain| chain.set_stereo_width(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_amount(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_amount(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_amount(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_amount(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_stereo_width_amount(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_plate_reverb)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_plate_reverb();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_plate_reverb();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).plate_reverb_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).plate_reverb_on;
+            self.edit_rack(|chain| chain.set_plate_reverb(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_size(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_size(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_size(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_size(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_plate_reverb_size(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_moog_ladder)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_moog_ladder();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_moog_ladder();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).moog_ladder_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).moog_ladder_on;
+            self.edit_rack(|chain| chain.set_moog_ladder(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_cutoff(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_cutoff(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_cutoff(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_cutoff(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_moog_ladder_cutoff(v as f32));
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_resonance(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_resonance(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_resonance(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_resonance(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_moog_ladder_resonance(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_compressor)).clicked(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).toggle_compressor();
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).toggle_compressor();
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let on = !self.decks.chain(DeckId::A).compressor_on;
-                    let params = self.decks.chain_mut(DeckId::A).set_compressor(on);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_compressor(on);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            // Every chain the row points at lands on the SAME new side of the
+            // switch, read from the one on show, rather than each flipping
+            // its own: a pair could otherwise start this press on opposite
+            // sides and end on opposite sides too.
+            let on = !self.chain_state(self.sfx_fx_target.shown()).compressor_on;
+            self.edit_rack(|chain| chain.set_compressor(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_compressor_threshold(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_compressor_threshold(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_compressor_threshold(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_compressor_threshold(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_compressor_threshold(v as f32));
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).slided(actions) {
-            match self.sfx_fx_target {
-                FxTarget::A => {
-                    let params = self.decks.chain_mut(DeckId::A).set_compressor_ratio(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                }
-                FxTarget::B => {
-                    let params = self.decks.chain_mut(DeckId::B).set_compressor_ratio(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-                FxTarget::Mix => {
-                    let params = self.decks.chain_mut(DeckId::A).set_compressor_ratio(v as f32);
-                    self.send_deck_effects(cx, DeckId::A, params);
-                    let params = self.decks.chain_mut(DeckId::B).set_compressor_ratio(v as f32);
-                    self.send_deck_effects(cx, DeckId::B, params);
-                }
-            }
+            self.edit_rack(|chain| chain.set_compressor_ratio(v as f32));
         }
 
         // ---- IMPORT: one quiet button, one live mini-panel ----
