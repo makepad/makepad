@@ -33689,20 +33689,29 @@ impl MatchEvent for App {
         // PRIVACY RULE: capture ONLY the explicit system-audio loopback
         // device. A microphone is never an implicit fallback — with no
         // loopback device the input list stays empty and the UI says so.
-        let loopback: Vec<_> = devices
-            .descs
-            .iter()
-            .filter(|desc| desc.device_type.is_loopback())
-            .map(|desc| desc.device_id)
-            .collect();
+        //
+        // In the order that puts the room's own output first: the beat
+        // lock listens to input zero, and a loopback of an endpoint
+        // nothing is playing to never fires a callback at all, so
+        // whichever device happened to enumerate first could leave the
+        // lock waiting on silence while saying it was listening.
+        let loopback = devices.loopback_capture_order();
         self.loopback_selected = !loopback.is_empty();
         self.loopback_failed = devices
             .descs
             .iter()
             .any(|desc| desc.device_type.is_loopback() && desc.has_failed);
         self.loopback_ids = loopback;
+        // Name the one the lock will actually listen through, so a log
+        // from a machine with several endpoints says which.
+        let listening = self
+            .loopback_ids
+            .first()
+            .and_then(|first| devices.descs.iter().find(|desc| desc.device_id == *first))
+            .map(|desc| desc.name.as_str())
+            .unwrap_or("nothing");
         log!(
-            "audio devices: {} loopback device(s), failed={}, monitor={}",
+            "audio devices: {} loopback device(s), listening to {listening}, failed={}, monitor={}",
             self.loopback_ids.len(),
             self.loopback_failed,
             self.monitor_audio

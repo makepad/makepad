@@ -111,6 +111,26 @@ impl AudioDevicesEvent {
         Vec::new()
     }
 
+    /// The loopback devices to capture the machine's own output from, the
+    /// one mirroring the default output first.
+    ///
+    /// They are listed in whatever order the platform enumerated them,
+    /// and an app that takes the first one it is handed can end up
+    /// capturing an endpoint nothing is playing to: that capture simply
+    /// never fires a callback, so it looks exactly like listening to
+    /// silence. The default output is the one the machine is actually
+    /// playing through, so its loopback goes first. Devices known to have
+    /// failed are left out; the rest keep the platform's order.
+    pub fn loopback_capture_order(&self) -> Vec<AudioDeviceId> {
+        let mut devices: Vec<&AudioDeviceDesc> = self
+            .descs
+            .iter()
+            .filter(|d| d.device_type.is_loopback() && !d.has_failed)
+            .collect();
+        devices.sort_by_key(|d| !d.is_default);
+        devices.iter().map(|d| d.device_id).collect()
+    }
+
     pub fn match_outputs(&self, outputs: &[&str]) -> Vec<AudioDeviceId> {
         let mut results = Vec::new();
         for d in &self.descs {
@@ -341,5 +361,59 @@ impl AudioBuffer {
                 interleaved[i * self.channel_count + j] = self.data[i + j * self.frame_count];
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::makepad_live_id::LiveId;
+
+    fn desc(n: u64, kind: AudioDeviceType, is_default: bool, has_failed: bool) -> AudioDeviceDesc {
+        AudioDeviceDesc {
+            device_id: AudioDeviceId(LiveId(n)),
+            device_type: kind,
+            is_default,
+            has_failed,
+            channel_count: 2,
+            name: format!("device {n}"),
+        }
+    }
+
+    /// A capture of an endpoint nothing is playing to never fires, which
+    /// looks exactly like listening to silence -- so the loopback that
+    /// mirrors the default output is the one to ask for first.
+    #[test]
+    fn the_loopback_that_mirrors_the_default_output_is_asked_for_first() {
+        let event = AudioDevicesEvent {
+            descs: vec![
+                desc(1, AudioDeviceType::Loopback, false, false),
+                desc(2, AudioDeviceType::Loopback, true, false),
+                desc(3, AudioDeviceType::Loopback, false, false),
+                desc(4, AudioDeviceType::Output, true, false),
+                desc(5, AudioDeviceType::Input, false, false),
+            ],
+        };
+        let order = event.loopback_capture_order();
+        assert_eq!(order.len(), 3, "the loopbacks and nothing else");
+        assert_eq!(order[0], AudioDeviceId(LiveId(2)), "the default's, first");
+        assert_eq!(
+            order[1..],
+            [AudioDeviceId(LiveId(1)), AudioDeviceId(LiveId(3))],
+            "and the rest in the order they were enumerated",
+        );
+    }
+
+    #[test]
+    fn a_loopback_that_failed_to_open_is_not_asked_for_again() {
+        let event = AudioDevicesEvent {
+            descs: vec![
+                desc(1, AudioDeviceType::Loopback, true, true),
+                desc(2, AudioDeviceType::Loopback, false, false),
+            ],
+        };
+        assert_eq!(event.loopback_capture_order(), vec![AudioDeviceId(LiveId(2))]);
+        let none = AudioDevicesEvent { descs: Vec::new() };
+        assert!(none.loopback_capture_order().is_empty());
     }
 }
