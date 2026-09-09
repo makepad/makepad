@@ -245,9 +245,8 @@ impl Host {
         // Metadata-only scan includes finalized evidence not currently expanded
         // or paged into the bounded thumbnail cache. No files are moved.
         let mut recordings = BTreeMap::new();
-        let terminal_origin = self.engine.terminal_origin(flow)?;
         for run in self.known_recording_runs() {
-            if self.engine.terminal_origin(&run.flow)? != terminal_origin {
+            if !self.engine.has_history_ancestor(flow, &run.flow) {
                 continue;
             }
             for sidecar in recording_sidecars(&self.directory, &run)? {
@@ -331,10 +330,13 @@ impl Host {
         self.attachments
             .iter()
             .filter(|original| {
-                self.engine.history_visible(
-                    self.attachment_owner(original),
-                    &format!("attachment/{}", original.id),
-                )
+                self.engine
+                    .flows
+                    .contains_key(self.attachment_owner(original))
+                    && self.engine.history_visible(
+                        self.attachment_owner(original),
+                        &format!("attachment/{}", original.id),
+                    )
             })
             .map(|original| {
                 let mut attachment = original.clone();
@@ -348,10 +350,11 @@ impl Host {
             .snapshot()
             .into_iter()
             .filter(|tile| {
-                self.engine.history_visible(
-                    self.recording_owner(tile),
-                    &format!("recording/{}", tile.id),
-                )
+                self.engine.flows.contains_key(self.recording_owner(tile))
+                    && self.engine.history_visible(
+                        self.recording_owner(tile),
+                        &format!("recording/{}", tile.id),
+                    )
             })
             .map(|mut tile| {
                 tile.flow = self

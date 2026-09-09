@@ -127,6 +127,108 @@ fn osc_and_current_session_cli_names_reach_list_and_attached_client() {
 }
 
 #[test]
+fn shell_started_session_is_listed_with_osc_title_in_workspace_scope() {
+    let root = std::env::temp_dir().join(format!(
+        "screen-inventory-{}-{}",
+        std::process::id(),
+        makepad_screen::protocol::random_token().unwrap()
+    ));
+    fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let session = Session {
+        state: root.join("local/agent_state/studio/iteration-verification/state/agent_sessions"),
+        root,
+    };
+    makepad_screen::protocol::private_directory(&session.state, true).unwrap();
+    let binary = env!("CARGO_BIN_EXE_makepad-screen");
+    // A shell starts the session before any Studio/client attaches. Omit cwd
+    // and state flags, as in tools/agents start --session NAME -- COMMAND.
+    let output = Command::new(binary)
+        .current_dir(&session.root)
+        .env_remove("MAKEPAD_SCREEN_STATE_DIR")
+        .env_remove("MAKEPAD_SCREEN_SESSION")
+        .args([
+            "start",
+            "--session",
+            "name-test",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '\\033]0;hello-agent\\007'; exec sleep 600",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}; host log: {}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(session.state.join("name-test.log")).unwrap_or_default()
+    );
+    for scope in ["workspace", "explicit", "inherited"] {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut list = Command::new(binary);
+            list.arg("list")
+                .current_dir(&session.root)
+                .env_remove("MAKEPAD_SCREEN_STATE_DIR");
+            match scope {
+                "explicit" => {
+                    // Explicit scope wins over an unrelated inherited scope.
+                    list.arg("--state-dir")
+                        .arg(&session.state)
+                        .env("MAKEPAD_SCREEN_STATE_DIR", session.root.join("empty"));
+                }
+                "inherited" => {
+                    // Outside the workspace, the inherited scope still wins.
+                    list.current_dir(&session.state)
+                        .env("MAKEPAD_SCREEN_STATE_DIR", &session.state);
+                }
+                _ => {}
+            }
+            let output = list.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{scope}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let inventory = json::parse(&output.stdout).unwrap();
+            let rows = inventory.as_arr().unwrap();
+            assert_eq!(rows.len(), 1, "{scope}: {inventory:?}");
+            let row = &rows[0];
+            assert_eq!(
+                row.get("session_id").and_then(Value::as_str),
+                Some("name-test")
+            );
+            assert_eq!(
+                row.get("state_dir").and_then(Value::as_str),
+                session.state.to_str()
+            );
+            assert_eq!(
+                row.get("cwd").and_then(Value::as_str),
+                session.root.to_str()
+            );
+            assert_eq!(row.get("running").and_then(Value::as_bool), Some(true));
+            assert_eq!(row.get("clients").and_then(Value::as_u64), Some(0));
+            if row.get("title").and_then(Value::as_str) == Some("hello-agent") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{scope}: OSC title missing: {row:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let stopped = server::stop(&session.state, "name-test").unwrap();
+    assert_eq!(stopped.get("running").and_then(Value::as_bool), Some(false));
+    assert!(server::list(&session.state)
+        .unwrap()
+        .as_arr()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn title_changes_project_to_existing_and_new_clients() {
     use makepad_screen::snapshot::Projection;
     let mut source = HostedTerminal::new(80, 24, 100);

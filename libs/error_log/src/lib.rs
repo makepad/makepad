@@ -302,8 +302,13 @@ fn log_with_level_rustc(
     );
 }
 
-pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)> =
-    RwLock::new(log_with_level_rustc);
+pub type LogHandler = fn(&str, u32, u32, u32, u32, String, LogLevel);
+static LOG_WITH_LEVEL: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(log_with_level_rustc as *mut ());
+
+pub fn set_log_handler(handler: LogHandler) {
+    LOG_WITH_LEVEL.store(handler as *mut (), std::sync::atomic::Ordering::Release);
+}
 
 /// An OBSERVER of everything logged, installed alongside (never instead of)
 /// the logger.
@@ -315,14 +320,13 @@ pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)
 /// for whoever just saved the file. Off by default and free when off.
 ///
 /// A tap must never log: it runs inside the logging call.
-static LOG_TAP: RwLock<Option<fn(&str, LogLevel)>> = RwLock::new(None);
-static LOG_TAP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOG_TAP: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Install (or with `None`, remove) the log tap. One per process.
 pub fn set_log_tap(tap: Option<fn(&str, LogLevel)>) {
-    let mut slot = LOG_TAP.write().expect("Log tap lock poisoned");
-    *slot = tap;
-    LOG_TAP_ON.store(tap.is_some(), std::sync::atomic::Ordering::Release);
+    LOG_TAP.store(tap.map_or(std::ptr::null_mut(), |f| f as *mut ()),
+        std::sync::atomic::Ordering::Release);
 }
 
 pub fn log_with_level(
@@ -334,14 +338,16 @@ pub fn log_with_level(
     message: String,
     level: LogLevel,
 ) {
-    if LOG_TAP_ON.load(std::sync::atomic::Ordering::Acquire) {
-        if let Ok(tap) = LOG_TAP.read() {
-            if let Some(tap) = *tap {
-                tap(&message, level);
-            }
-        }
+    let tap = LOG_TAP.load(std::sync::atomic::Ordering::Acquire);
+    if !tap.is_null() {
+        // Only set_log_tap writes this pointer, with this exact signature.
+        let tap: fn(&str, LogLevel) = unsafe { std::mem::transmute(tap) };
+        tap(&message, level);
     }
-    let logger = LOG_WITH_LEVEL.read().expect("Logger lock poisoned");
+    // Only set_log_handler writes this pointer; handlers are static functions.
+    let logger: LogHandler = unsafe {
+        std::mem::transmute(LOG_WITH_LEVEL.load(std::sync::atomic::Ordering::Acquire))
+    };
     logger(
         file_name,
         line_start,

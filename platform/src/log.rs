@@ -47,8 +47,9 @@ impl Cx {
         TRACE_TOPICS_INIT.get_or_init(|| {
             set_trace_topics(&std::env::var("MAKEPAD_TRACE").unwrap_or_default());
         });
-        let mut logger = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
-        *logger = log_with_level_makepad_platform;
+        #[cfg(not(target_arch = "wasm32"))]
+        async_sink::init();
+        set_log_handler(log_with_level_makepad_platform);
     }
 }
 
@@ -59,7 +60,81 @@ pub fn trace_log_dir(topic: &str) -> std::path::PathBuf {
     base.join(".makepad").join("logs").join(topic)
 }
 
+// The only native stdout/remote/Studio writer is this long-lived consumer.
+// Producers never wait for a pipe, a remote ring lock, or logger capacity.
+#[cfg(not(target_arch = "wasm32"))]
+mod async_sink {
+    use super::*;
+    use std::sync::{atomic::{AtomicU64, Ordering}, mpsc::{sync_channel, SyncSender}, OnceLock};
+
+    type Message = Box<dyn FnOnce() + Send>;
+    static SINK: OnceLock<Option<SyncSender<Message>>> = OnceLock::new();
+    static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn init() {
+        SINK.get_or_init(|| {
+            let (tx, rx) = sync_channel::<Message>(1024);
+            std::thread::Builder::new().name("makepad-log".into()).spawn(move || {
+                let mut reported = 0;
+                while let Ok(message) = rx.recv() {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(message)).is_err() {
+                        DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let dropped = DROPPED.load(Ordering::Relaxed);
+                    if dropped != reported {
+                        write_log_record("logger", 0, 0, 0, 0,
+                            format!("log sink dropped {} records (total {})", dropped - reported, dropped),
+                            LogLevel::Warning);
+                        reported = dropped;
+                    }
+                }
+            }).ok().map(|_| tx)
+        });
+    }
+
+    pub(super) fn submit(message: Message) {
+        if let Some(Some(tx)) = SINK.get() {
+            if tx.try_send(message).is_ok() { return; }
+        }
+        DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn dropped() -> u64 { DROPPED.load(Ordering::Relaxed) }
+}
+
+/// Number of log records refused by the bounded native sink.
+pub fn dropped_log_records() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    { async_sink::dropped() }
+    #[cfg(target_arch = "wasm32")]
+    { 0 }
+}
+
+/// Move expensive diagnostic formatting to the logger along with its values.
+pub fn defer_log(file: &'static str, line: u32, column: u32,
+    format: impl FnOnce() -> String + Send + 'static) {
+    #[cfg(not(target_arch = "wasm32"))]
+    async_sink::submit(Box::new(move || write_log_record(file, line, column, line, column,
+        format(), LogLevel::Log)));
+    #[cfg(target_arch = "wasm32")]
+    write_log_record(file, line, column, line, column, format(), LogLevel::Log);
+}
+
 pub(crate) fn log_with_level_makepad_platform(
+    file_name: &str, line_start: u32, column_start: u32, line_end: u32,
+    column_end: u32, message: String, level: LogLevel,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let file_name = file_name.to_owned();
+        async_sink::submit(Box::new(move || write_log_record(&file_name, line_start,
+            column_start, line_end, column_end, message, level)));
+    }
+    #[cfg(target_arch = "wasm32")]
+    write_log_record(file_name, line_start, column_start, line_end, column_end, message, level);
+}
+
+fn write_log_record(
     file_name: &str,
     line_start: u32,
     column_start: u32,
@@ -109,14 +184,13 @@ pub(crate) fn log_with_level_makepad_platform(
 
     if !studio_connected {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        println!(
-            "{} {}:{}:{} - {}",
-            log_level_prefix(level),
-            file_name,
-            line_start + 1,
-            column_start + 1,
-            message
-        );
+        {
+            use std::io::Write;
+            // A closed reader must not kill the consumer and strand every
+            // subsequent record. This lock is taken only on the logger.
+            let _ = writeln!(std::io::stdout().lock(), "{} {}:{}:{} - {}",
+                log_level_prefix(level), file_name, line_start + 1, column_start + 1, message);
+        }
         #[cfg(target_os = "ios")]
         {
             extern "C" {

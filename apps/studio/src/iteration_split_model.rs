@@ -70,6 +70,9 @@ impl Engine {
         let mut id = flow;
         for _ in 0..MAX_STORED_FLOWS {
             let state = self.flows.get(id).ok_or("Unknown iteration flow")?;
+            if let Some(origin) = self.terminal_origins.get(id) {
+                return Ok(origin);
+            }
             match state.predecessor.as_deref() {
                 Some(previous) => id = previous,
                 None => return Ok(id),
@@ -77,10 +80,36 @@ impl Engine {
         }
         Err("Lane predecessor chain exceeds its bound".into())
     }
-    fn has_history_ancestor(&self, flow: &str, ancestor: &str) -> bool {
+    fn history_lineage(&self, flow: &str) -> Vec<String> {
+        let mut ancestors = std::collections::BTreeSet::new();
         let mut id = flow;
         for _ in 0..MAX_STORED_FLOWS {
-            if id == ancestor {
+            if let Some(lineage) = self.history_lineage.get(id) {
+                ancestors.extend(lineage.iter().cloned());
+            }
+            let Some(previous) = self
+                .flows
+                .get(id)
+                .and_then(|flow| flow.predecessor.as_deref())
+            else {
+                break;
+            };
+            if !ancestors.insert(previous.to_owned()) {
+                break;
+            }
+            id = previous;
+        }
+        ancestors.into_iter().collect()
+    }
+    pub(crate) fn has_history_ancestor(&self, flow: &str, ancestor: &str) -> bool {
+        let mut id = flow;
+        for _ in 0..MAX_STORED_FLOWS {
+            if id == ancestor
+                || self
+                    .history_lineage
+                    .get(id)
+                    .is_some_and(|lineage| lineage.iter().any(|id| id == ancestor))
+            {
                 return true;
             }
             let Some(previous) = self
@@ -93,6 +122,28 @@ impl Engine {
             id = previous;
         }
         false
+    }
+    pub fn delete_confirmation(&self, flow: &str) -> Result<String, String> {
+        let lane = self.flows.get(flow).ok_or("Unknown lane")?;
+        let affected = self
+            .flows
+            .values()
+            .filter(|other| {
+                other.id != flow
+                    && (other.predecessor.as_deref() == Some(flow)
+                        || other.successor.as_deref() == Some(flow))
+            })
+            .count();
+        let terminal = if lane.successor.is_some() {
+            "Its history is removed; the shared terminal continues in its successor."
+        } else {
+            "Its terminal is stopped and its history removed."
+        };
+        let mut message = format!("Delete lane {}? {}", lane.title, terminal);
+        if affected != 0 {
+            message.push_str(&format!(" This also detaches {affected} split lane{}; their history and shared media are kept.", if affected == 1 { "" } else { "s" }));
+        }
+        Ok(message)
     }
     /// Membership is separate from immutable dependencies. A moved feedback
     /// item can still resolve an artifact/capture owned by the archived prefix.

@@ -115,6 +115,7 @@ impl Cx {
         zbias_step: f32,
         d3d11_cx: &D3d11Cx,
     ) {
+        let _phase = crate::thread::ui_hang::ui_phase_detail(crate::thread::UiPhase::DrawList, draw_list_id.index() as u32);
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -205,7 +206,7 @@ impl Cx {
                     let sh = &self.draw_shaders.shaders[draw_call.draw_shader_id.index];
                     if let Some(os_id) = sh.os_shader_id {
                         let shp = &mut self.draw_shaders.os_shaders[os_id];
-                        if shp.scope_uniforms_gen != sh.mapping.scope_uniforms_gen
+                        if (shp.scope_uniforms_gen != sh.mapping.scope_uniforms_gen || shp.scope_uniforms.buffer.is_none())
                             && !sh.mapping.scope_uniforms_buf.is_empty()
                         {
                             shp.scope_uniforms
@@ -868,168 +869,60 @@ impl Cx {
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        let cache_dir = shader_cache_dir();
-
-        // Step 1: adopt any background compiles that finished since the last
-        // call. The worker thread writes the DXBC into the on-disk cache
-        // before sending the completion, so CxOsDrawShader::new takes the
-        // cache-hit path (disk read + D3D11 object creation — a few ms).
-        // The scoped block below keeps the immutable borrow of
-        // draw_shaders.shaders short so we can mutate it afterwards to set
-        // os_shader_id; that avoids the explicit mapping/bindings clones
-        // an earlier revision used.
-        // Spread D3D11 shader-object creation across frames: creating many shader objects in one
-        // frame (e.g. when scrolling brings in lots of new content types at once) caused a visible
-        // hitch (tens of ms). Cap how many we create per call; the rest are deferred to following
-        // frames, and widgets whose shader isn't ready yet skip their draw (the existing
-        // `os_shader_id.is_none()` guard) and materialize a frame or two later.
-        const SHADER_CREATE_BUDGET: usize = 4;
-        let (ready_async, has_more_async) =
-            self.os.async_hlsl_compile.drain_ready(SHADER_CREATE_BUDGET);
-        let mut created = ready_async.len();
-        let mut any_async_ready = false;
-        for result in ready_async {
-            any_async_ready = true;
-            if let Err(msg) = &result.vs_status {
-                crate::error!(
-                    "Background vertex-shader compile failed for shader id {}: {}",
-                    result.shader_id,
-                    msg
-                );
-                continue;
+        let pending = &mut self.os.async_hlsl_compile.pending;
+        let mut adopted = false;
+        pending.retain(|id, (device, task)| {
+            // A completed shader belongs to the device that compiled it. Device
+            // recovery must never install objects from the retired device.
+            if device != &d3d11_cx.device {
+                self.draw_shaders.compile_set.insert(*id);
+                return false;
             }
-            if let Err(msg) = &result.ps_status {
-                crate::error!(
-                    "Background pixel-shader compile failed for shader id {}: {}",
-                    result.shader_id,
-                    msg
-                );
-                continue;
+            let Some(result) = task.try_take() else { return true };
+            match result {
+                Ok(Ok(shader)) => {
+                    self.draw_shaders.shaders[*id].os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.os_shaders.push(shader);
+                    adopted = true;
+                }
+                Ok(Err(D3dShaderError::Device(error))) => {
+                    d3d11_cx.note_error("background shader creation", &error);
+                    self.draw_shaders.compile_set.insert(*id);
+                }
+                Ok(Err(D3dShaderError::Compile)) => {},
+                Err(error) => crate::error!("Background shader {}: {:?}", id, error),
             }
-            let shader_id = result.shader_id;
-            let shp = {
-                let cx_shader = &self.draw_shaders.shaders[shader_id];
-                let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code else {
-                    continue;
-                };
-                CxOsDrawShader::new(
-                    d3d11_cx,
-                    code,
-                    cache_dir,
-                    &cx_shader.mapping,
-                    &cx_shader.mapping.uniform_buffer_bindings,
-                )
-            };
-            if let Some(shp) = shp {
-                let cx_shader = &mut self.draw_shaders.shaders[shader_id];
-                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                self.draw_shaders.os_shaders.push(shp);
-            }
-        }
-        if any_async_ready || has_more_async {
-            // Widgets that skipped their draw call because the shader wasn't ready need one more
-            // redraw to materialize now that it is (or once the deferred backlog is created).
-            self.redraw_all();
-        }
-
-        if self.draw_shaders.compile_set.is_empty() {
-            return;
-        }
+            false
+        });
+        if adopted { self.redraw_all(); }
+        let pool = self.task_pool();
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
-
-        // Step 2: partition by cache state, computing the cache key once.
-        //
-        // Cache hit  → sync path: disk read + D3D11 object creation, a few
-        //              ms total. Faster than thread/channel overhead.
-        // Cache miss → async path: D3DCompile can burn 100ms-multiple
-        //              seconds per shader, so it must not block the frame.
-        // `async_compile: true` (the SLUG helper) still forces async even
-        // on a cache hit, matching the Linux flag semantics — the one-frame
-        // latency on warm cache is acceptable, and this keeps behavior
-        // consistent across platforms.
-        let mut async_items: Vec<(usize, u64)> = Vec::new();
-        let mut sync_ids: Vec<usize> = Vec::new();
         for id in compile_set {
-            let sh = &self.draw_shaders.shaders[id];
-            let code = match &sh.mapping.code {
-                CxDrawShaderCode::Combined { code } => code,
-                CxDrawShaderCode::Separate { .. } => {
-                    crate::error!("D3D11 does not support separate vertex/fragment sources");
-                    continue;
-                }
-            };
-            let cache_key = hlsl_cache_key(code);
-            let cached = shader_bytes_cached(cache_dir, cache_key);
-            let force_async = sh.mapping.flags.async_compile;
-            if force_async || !cached {
-                async_items.push((id, cache_key));
-            } else {
-                sync_ids.push(id);
-            }
-        }
-
-        // Step 3: dispatch background compiles. The window presents this
-        // frame without waiting; widgets whose shader isn't ready skip
-        // their draw call via the `sh.os_shader_id.is_none()` guard in
-        // render_view. When workers finish, the next hlsl_compile_shaders
-        // call drains them and triggers a redraw.
-        for (id, cache_key) in async_items {
-            let hlsl = {
-                let sh = &self.draw_shaders.shaders[id];
-                let CxDrawShaderCode::Combined { code } = &sh.mapping.code else {
-                    continue;
-                };
-                code.clone()
-            };
-            self.os
-                .async_hlsl_compile
-                .spawn(id, hlsl, cache_key, cache_dir);
-        }
-
-        // Step 4: serial D3D11 object creation for the cache-hit shaders, up to the per-frame
-        // budget. Any beyond the budget are put back into compile_set for a following frame.
-        for draw_shader_id in sync_ids {
-            if created >= SHADER_CREATE_BUDGET {
-                self.draw_shaders.compile_set.insert(draw_shader_id);
+            if self.os.async_hlsl_compile.pending.contains_key(&id) { continue; }
+            // Reserve before cloning a mapping. A full queue leaves its source
+            // in compile_set for the next frame; the UI never runs the job.
+            let Ok(slot) = pool.reserve(crate::thread::Lane::Heavy) else {
+                self.draw_shaders.compile_set.insert(id);
                 continue;
-            }
-            created += 1;
-            let shp = {
-                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
-                if cx_shader.mapping.flags.debug_code {
-                    if let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code {
-                        crate::log!("{}", code);
-                    }
-                }
-                let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code else {
-                    continue;
-                };
-                CxOsDrawShader::new(
-                    d3d11_cx,
-                    code,
-                    cache_dir,
-                    &cx_shader.mapping,
-                    &cx_shader.mapping.uniform_buffer_bindings,
-                )
             };
-            if let Some(shp) = shp {
-                let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
-                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                self.draw_shaders.os_shaders.push(shp);
-            } else {
-                // `compile_set` was drained into `sync_ids`, so a shader dropped here is never
-                // asked for again and everything drawn with it silently stops rendering for
-                // the life of the process. Creation fails for a whole frame's worth of shaders
-                // when the device dies mid-compile, so put it back and let the next frame,
-                // against a rebuilt device, create it.
-                self.draw_shaders.compile_set.insert(draw_shader_id);
-            }
+            let mapping = D3dShaderInputs::from(&self.draw_shaders.shaders[id].mapping);
+            let device = d3d11_cx.device.clone();
+            let compile_device = device.clone();
+            let task = slot.submit_named("renderer.hlsl-pipeline", move || {
+                let CxDrawShaderCode::Combined { code } = &mapping.code else {
+                    crate::error!("D3D11 does not support separate vertex/fragment sources");
+                    return Err(D3dShaderError::Compile);
+                };
+                if mapping.flags.debug_code { crate::log!("{}", code); }
+                // Cache I/O, D3DCompile AND device shader/layout/sampler
+                // creation all run here. The immediate context stays on UI.
+                CxOsDrawShader::new(&compile_device, code, shader_cache_dir(),
+                    &mapping, &mapping.uniform_buffer_bindings)
+            });
+            self.os.async_hlsl_compile.pending.insert(id, (device, task));
         }
-
-        // If work was deferred (either async backlog or budgeted-out sync shaders), request a
-        // redraw so the next frame creates the rest and the skipped widgets re-materialize.
-        if has_more_async || !self.draw_shaders.compile_set.is_empty() {
-            self.redraw_all();
+        if !self.os.async_hlsl_compile.pending.is_empty() || !self.draw_shaders.compile_set.is_empty() {
+            self.demo_time_repaint = true;
         }
     }
 
@@ -2192,7 +2085,10 @@ impl D3d11Window {
                 // Between a device loss and the rebuild there is nothing to present to.
                 return false;
             };
-            let hr = swap_chain.Present(sync_interval, flags);
+            let hr = {
+                let _phase = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
+                swap_chain.Present(sync_interval, flags)
+            };
             if hr == DXGI_ERROR_WAS_STILL_DRAWING {
                 // DO_NOT_WAIT path only: a benign dropped frame; the caller schedules a retry.
                 return false;
@@ -2589,7 +2485,7 @@ impl D3d11Buffer {
         let mode = if start == 0 {
             D3D11_MAP_WRITE_DISCARD
         } else {
-            D3D11_MAP_WRITE_NO_OVERWRITE
+            D3D11_MAP(5) // D3D11_MAP_WRITE_NO_OVERWRITE (stripped bindings omit it)
         };
         unsafe {
             if let Err(e) = cx.context.Map(buffer, 0, mode, 0, Some(&mut mapped)) {
@@ -3835,19 +3731,6 @@ fn publish_shader_cache_entry(path: &std::path::Path, bytes: &[u8]) {
     }
 }
 
-// Cheap check used to decide whether a shader can go through the synchronous fast path (disk
-// reads only) or needs the async background compile path. A file that turns out to be
-// incomplete is recompiled by the read path below, so this only has to be right often enough
-// to be worth it.
-fn shader_bytes_cached(cache_dir: Option<&std::path::Path>, cache_key: u64) -> bool {
-    let Some(dir) = cache_dir else {
-        return false;
-    };
-    let vs = dir.join(format!("{:016x}_vs.dxbc", cache_key));
-    let ps = dir.join(format!("{:016x}_ps.dxbc", cache_key));
-    vs.exists() && ps.exists()
-}
-
 // Read the DXBC blob from the on-disk cache if present, otherwise compile and
 // write it. Disk I/O and D3DCompile are both thread-safe so this can run on a
 // worker thread.
@@ -3874,128 +3757,39 @@ fn get_or_compile_shader_bytes(
     d3d_compile_hlsl(target, entry, hlsl)
 }
 
-/// Result of a background D3DCompile for one shader.
-///
-/// The worker writes the compiled bytes to the on-disk cache before sending
-/// this result, so the main thread picks them back up via the disk cache in
-/// `CxOsDrawShader::new`. We only carry status (not the bytes themselves) so
-/// the channel doesn't ferry hundreds of KB of DXBC — the SLUG helper alone
-/// is ~240 KB. Error strings are kept for diagnostic output when a compile
-/// fails.
-struct AsyncCompileResult {
-    shader_id: usize,
-    vs_status: Result<(), String>,
-    ps_status: Result<(), String>,
+// VM source handles never cross the worker boundary. These are precisely
+// the immutable inputs consumed by device shader/layout/sampler creation.
+struct D3dShaderInputs {
+    code: CxDrawShaderCode,
+    flags: crate::draw_shader::DrawShaderFlags,
+    geometries: crate::draw_shader::DrawShaderInputs,
+    instances: crate::draw_shader::DrawShaderInputs,
+    uniform_buffers: Vec<crate::draw_shader::DrawShaderUniformBufferInput>,
+    samplers: Vec<ShaderSampler>,
+    uniform_buffer_bindings: UniformBufferBindings,
+}
+impl From<&CxDrawShaderMapping> for D3dShaderInputs {
+    fn from(mapping: &CxDrawShaderMapping) -> Self {
+        Self { code: mapping.code.clone(), flags: mapping.flags.clone(),
+            geometries: mapping.geometries.clone(), instances: mapping.instances.clone(),
+            uniform_buffers: mapping.uniform_buffers.clone(), samplers: mapping.samplers.clone(),
+            uniform_buffer_bindings: mapping.uniform_buffer_bindings.clone() }
+    }
 }
 
-/// Background HLSL compile queue used for `async_compile: true` shaders.
-///
-/// The DrawTextSlug helper is by far the most expensive shader to compile on
-/// Windows (hundreds of KB of DXBC, multiple seconds with the default FXC
-/// settings) and it is the primary motivation for this path — without it the
-/// SLUG helper blocks the main thread the first time a SLUG glyph is needed.
-/// Other shaders stay on the synchronous parallel-precompile path so the app
-/// still renders its widgets immediately on the first frame.
-///
-/// The worker threads call `D3DCompile`, write the resulting bytecode into
-/// the on-disk shader cache, then send a lightweight result to the main
-/// thread via an mpsc channel. The main thread drains completed results
-/// each paint tick, creates the D3D11 shader objects, and requests a redraw
-/// so the now-ready widgets get a chance to render.
+enum D3dShaderError {
+    Compile,
+    Device(crate::windows::core::Error),
+}
+
+/// UI-owned handles; workers own the device objects until publication. No
+/// shared lock, disk read, compiler or device state creation in the frame.
+#[derive(Default)]
 pub struct AsyncHlslCompile {
-    inner: std::sync::Mutex<AsyncHlslCompileInner>,
-}
-
-struct AsyncHlslCompileInner {
-    tx: std::sync::mpsc::Sender<AsyncCompileResult>,
-    rx: std::sync::mpsc::Receiver<AsyncCompileResult>,
-    pending: std::collections::HashSet<usize>,
-    /// Finished compiles that have been received from workers but whose D3D11 objects haven't
-    /// been created yet — held here so creation can be spread across frames (see `drain_ready`).
-    ready_backlog: std::collections::VecDeque<AsyncCompileResult>,
-}
-
-impl Default for AsyncHlslCompile {
-    fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        Self {
-            inner: std::sync::Mutex::new(AsyncHlslCompileInner {
-                tx,
-                rx,
-                pending: std::collections::HashSet::new(),
-                ready_backlog: std::collections::VecDeque::new(),
-            }),
-        }
-    }
-}
-
-impl AsyncHlslCompile {
-    /// Start a background compile for `shader_id`. No-op if that shader is
-    /// already being compiled. Returns true if a new worker was spawned.
-    fn spawn(
-        &self,
-        shader_id: usize,
-        hlsl: String,
-        cache_key: u64,
-        cache_dir: Option<&'static std::path::Path>,
-    ) -> bool {
-        let tx = {
-            let mut inner = self.inner.lock().unwrap();
-            if !inner.pending.insert(shader_id) {
-                return false;
-            }
-            inner.tx.clone()
-        };
-        std::thread::Builder::new()
-            .name(format!("hlsl-compile-{}", shader_id))
-            .spawn(move || {
-                // Discard the bytes once they hit the disk cache — the main
-                // thread re-reads them via CxOsDrawShader::new, and keeping
-                // them here would pin hundreds of KB per shader until the
-                // result is drained.
-                let vs_status = get_or_compile_shader_bytes(
-                    cache_dir,
-                    cache_key,
-                    "_vs",
-                    "vs_5_0\0",
-                    "vertex_main\0",
-                    &hlsl,
-                )
-                .map(drop);
-                let ps_status = get_or_compile_shader_bytes(
-                    cache_dir,
-                    cache_key,
-                    "_ps",
-                    "ps_5_0\0",
-                    "pixel_main\0",
-                    &hlsl,
-                )
-                .map(drop);
-                let _ = tx.send(AsyncCompileResult {
-                    shader_id,
-                    vs_status,
-                    ps_status,
-                });
-            })
-            .expect("failed to spawn HLSL compile worker");
-        true
-    }
-
-    /// Collect any workers that finished since the last call, then hand back at most `budget` of
-    /// them for D3D11 object creation this frame (the rest stay queued for following frames so a
-    /// burst of finished compiles doesn't stall a single frame). Returns `(results, has_more)`.
-    fn drain_ready(&self, budget: usize) -> (Vec<AsyncCompileResult>, bool) {
-        debug_assert!(budget >= 1, "drain_ready budget must be >= 1 or the backlog never drains");
-        let mut inner = self.inner.lock().unwrap();
-        while let Ok(result) = inner.rx.try_recv() {
-            inner.pending.remove(&result.shader_id);
-            inner.ready_backlog.push_back(result);
-        }
-        let take = budget.min(inner.ready_backlog.len());
-        let out: Vec<AsyncCompileResult> = inner.ready_backlog.drain(..take).collect();
-        let has_more = !inner.ready_backlog.is_empty();
-        (out, has_more)
-    }
+    pending: std::collections::HashMap<usize, (
+        ID3D11Device,
+        crate::thread::TaskHandle<Result<CxOsDrawShader, D3dShaderError>>,
+    )>,
 }
 
 #[derive(Clone)]
@@ -4023,12 +3817,12 @@ pub struct CxOsDrawShader {
 
 impl CxOsDrawShader {
     fn new(
-        d3d11_cx: &D3d11Cx,
+        device: &ID3D11Device,
         hlsl: &str,
         cache_dir: Option<&std::path::Path>,
-        mapping: &CxDrawShaderMapping,
+        mapping: &D3dShaderInputs,
         bindings: &UniformBufferBindings,
-    ) -> Option<Self> {
+    ) -> Result<Self, D3dShaderError> {
         fn split_source(src: &str) -> String {
             let mut r = String::new();
             let split = src.split("\n");
@@ -4120,7 +3914,7 @@ impl CxOsDrawShader {
                     msg,
                     split_source(hlsl)
                 );
-                return None;
+                return Err(D3dShaderError::Compile);
             }
             Ok(bytes) => bytes,
         };
@@ -4139,32 +3933,28 @@ impl CxOsDrawShader {
                     msg,
                     split_source(hlsl)
                 );
-                return None;
+                return Err(D3dShaderError::Compile);
             }
             Ok(bytes) => bytes,
         };
 
         let mut vs = None;
         if let Err(e) = unsafe {
-            d3d11_cx
-                .device
+            device
                 .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
         } {
             // The DXBC is valid — it just came from the compiler or the on-disk cache — so a
             // failure here is the device, not the shader. Returning `None` puts this shader
             // back in the compile queue for a later frame.
-            d3d11_cx.note_error("ID3D11Device::CreateVertexShader", &e);
-            return None;
+            return Err(D3dShaderError::Device(e));
         }
 
         let mut ps = None;
         if let Err(e) = unsafe {
-            d3d11_cx
-                .device
+            device
                 .CreatePixelShader(&ps_bytes, None, Some(&mut ps))
         } {
-            d3d11_cx.note_error("ID3D11Device::CreatePixelShader", &e);
-            return None;
+            return Err(D3dShaderError::Device(e));
         }
 
         let mut layout_desc = Vec::new();
@@ -4269,8 +4059,7 @@ impl CxOsDrawShader {
 
         let mut input_layout = None;
         let input_layout_res = unsafe {
-            d3d11_cx
-                .device
+            device
                 .CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout))
         };
         if let Err(err) = input_layout_res {
@@ -4287,16 +4076,14 @@ impl CxOsDrawShader {
             } else {
                 crate::error!("Set MAKEPAD_TRACE=shader.hlsl to dump full HLSL source.");
             }
-            d3d11_cx.note_error("ID3D11Device::CreateInputLayout", &err);
-            return None;
+            return Err(D3dShaderError::Device(err));
         }
 
         let live_uniforms = D3d11Buffer::default();
         let const_table_uniforms = D3d11Buffer::default();
-        let mut scope_uniforms = D3d11Buffer::default();
-        if !mapping.scope_uniforms_buf.is_empty() {
-            scope_uniforms.update_with_f32_constant_data(d3d11_cx, &mapping.scope_uniforms_buf);
-        }
+        // The immediate context is UI-owned. First binding uploads these
+        // uniforms there, after the worker publishes the immutable pipeline.
+        let scope_uniforms = D3d11Buffer::default();
 
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
@@ -4341,19 +4128,18 @@ impl CxOsDrawShader {
                 ..Default::default()
             };
             let mut state = None;
-            if let Err(error) = unsafe { d3d11_cx.device.CreateSamplerState(&desc, Some(&mut state)) } {
-                d3d11_cx.note_error("CreateSamplerState(shadow)", &error);
-                return None;
+            if let Err(error) = unsafe { device.CreateSamplerState(&desc, Some(&mut state)) } {
+                return Err(D3dShaderError::Device(error));
             }
-            samplers.push(Some(state?));
+            samplers.push(Some(state.ok_or(D3dShaderError::Compile)?));
         }
 
-        Some(Self {
+        Ok(Self {
             samplers,
             const_table_uniforms,
             live_uniforms,
             scope_uniforms,
-            scope_uniforms_gen: mapping.scope_uniforms_gen,
+            scope_uniforms_gen: 0,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
             pixel_shader_blob: ps_bytes,

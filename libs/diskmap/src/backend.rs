@@ -41,7 +41,12 @@ pub trait ScanBackend: Send + Sync {
     }
 
     fn load_scan_cache(&self, root: &Path) -> Option<Cached> {
-        sizecache::load(root)
+        let mut cached = sizecache::load(root)?;
+        // DiskMap calls this on its worker. Cached sizes remain valid, but
+        // source membership can change without any file changing size.
+        let mut kinds = SourceKinds::new(root);
+        reclassify(&mut cached.tree, root, &mut kinds);
+        Some(cached)
     }
 
     fn store_scan_cache(&self, root: &Path, bytes: &[u8]) {
@@ -59,7 +64,11 @@ pub trait ScanBackend: Send + Sync {
         sink: &(dyn Fn(ScanStep) + Sync),
         pool: &TaskPool,
     ) -> bool {
-        let classify = |p: &Path, is_dir: bool| kind_for(p, is_dir) as u8;
+        // This mutex belongs solely to scan workers, never to the UI.
+        let kinds = std::sync::Mutex::new(SourceKinds::new(root));
+        let classify = |p: &Path, is_dir: bool| {
+            kinds.lock().unwrap_or_else(|e| e.into_inner()).classify(p, is_dir)
+        };
         let home = kind::home_dir();
         let skip = |path: &Path| kind::skip_for_scan(path, &home);
         let rules = ScanRules {
@@ -68,6 +77,53 @@ pub trait ScanBackend: Send + Sync {
         };
         treemap::scan_stream(root, &rules, cancel, sink, pool)
     }
+}
+
+/// One source filter per native scan; no source bytes are read or hashed.
+struct SourceKinds {
+    root: std::path::PathBuf,
+    sources: makepad_code_graph::FsSourceSet,
+    reported_error: bool,
+}
+
+impl SourceKinds {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.into(),
+            sources: makepad_code_graph::FsSourceSet::new(root.into(), Default::default()),
+            reported_error: false,
+        }
+    }
+
+    fn classify(&mut self, path: &Path, is_dir: bool) -> u8 {
+        let kind = kind_for(path, is_dir);
+        if kind != kind::FileKind::Code { return kind as u8; }
+        let allowed = path.strip_prefix(&self.root).ok().is_some_and(|path| {
+            match self.sources.allows_path(&path.to_string_lossy().replace('\\', "/")) {
+                Ok(allowed) => allowed,
+                Err(error) => {
+                    if !self.reported_error {
+                        eprintln!("disk source membership unavailable: {error}");
+                        self.reported_error = true;
+                    }
+                    false
+                }
+            }
+        });
+        if allowed { kind as u8 } else { kind::FileKind::Text as u8 }
+    }
+}
+
+fn reclassify(node: &mut treemap::Node, path: &Path, kinds: &mut SourceKinds) {
+    for child in &mut node.children {
+        reclassify(child, &path.join(&child.name), kinds);
+    }
+    node.kind = if node.is_dir {
+        node.children.iter().max_by_key(|child| child.size)
+            .map_or(kind::FileKind::Folder as u8, |child| child.kind)
+    } else {
+        kinds.classify(path, false)
+    };
 }
 
 /// The host disk.

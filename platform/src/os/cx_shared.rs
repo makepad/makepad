@@ -1029,6 +1029,7 @@ impl Cx {
     }
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
+        let _phase = crate::thread::ui_event_phase(event);
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
@@ -1172,6 +1173,7 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        let _phase = crate::thread::ui_event_phase(event);
         if self.event_dispatch_is_reentrant(event) {
             return;
         }

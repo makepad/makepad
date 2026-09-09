@@ -14,6 +14,16 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 name = "macos_cursors"
 harness = false
 
+# Measure wake-up latency on the process main thread, without a UI backend.
+[[test]]
+name = "pool_latency"
+harness = false
+
+# Exercise the production watchdog on the process main thread without a GPU.
+[[test]]
+name = "ui_hang"
+harness = false
+
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }

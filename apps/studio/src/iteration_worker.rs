@@ -937,6 +937,12 @@ fn host(
             host.ingest_feedback();
         }
         if host.storage_error.is_none() && source_at.elapsed() > Duration::from_secs(1) {
+            // Playback may release its file handles after the lane disappears.
+            // Keep retrying the durable cleanup without resurrecting the lane.
+            if let Err(error) = host.cleanup_deleted_lanes() {
+                host.note = format!("Lane deleted; history cleanup pending: {error}");
+                host.changed = true;
+            }
             host.observe_sources();
             host.load_previews();
             host.load_recordings();
@@ -1033,12 +1039,32 @@ impl Host {
                 }
             }
         }
-        self.attachments.retain(|a| {
-            self.engine.flows.contains_key(
-                self.engine
-                    .history_owner(&a.flow, &format!("attachment/{}", a.id)),
-            )
+        // Cleanup manifests are retained separately from the bounded report overview.
+        if let Some(Value::Obj(deletions)) = value.get("deletions") {
+            if deletions.len() > iteration::MAX_STORED_FLOWS * 64 {
+                return Err("Too many pending lane deletions".into());
+            }
+            for (key, report) in deletions {
+                if !key.starts_with("delete:") {
+                    return Err("Invalid lane cleanup identity".into());
+                }
+                self.reports.insert(key.clone(), report.clone());
+            }
+        }
+        if let Some(Value::Obj(reports)) = value.get("recording_reports") {
+            self.reports.extend(reports.iter().cloned());
+        }
+        self.reports.retain(|key, report| {
+            key.starts_with("delete:") || Self::retained_lane_report(&self.engine, report)
         });
+        self.design_snapshots.retain(|id, _| {
+            self.engine
+                .flows
+                .values()
+                .any(|flow| flow.runs.iter().any(|run| &run.id == id))
+        });
+        self.attachments
+            .retain(|attachment| Self::retained_lane_attachment(&self.engine, attachment));
         self.terminal_heights
             .retain(|id, _| self.engine.flows.contains_key(id));
         self.lane_widths
@@ -1080,6 +1106,29 @@ impl Host {
     fn persist(&self) -> Result<(), String> {
         let value = json::obj(vec![
             ("engine", s(self.engine.encode())),
+            (
+                "recording_reports",
+                Value::Obj(
+                    self.reports
+                        .iter()
+                        .filter(|(_, report)| {
+                            report.get("test_video").and_then(Value::as_str).is_some()
+                                && Self::retained_lane_report(&self.engine, report)
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+            ),
+            (
+                "deletions",
+                Value::Obj(
+                    self.reports
+                        .iter()
+                        .filter(|(key, _)| key.starts_with("delete:"))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+            ),
             (
                 "attachments",
                 Value::Arr(self.attachments.iter().map(Attachment::json).collect()),
@@ -2013,65 +2062,39 @@ impl Host {
         {
             return Err("Lane processes have not exited".into());
         }
-        let survivors: Vec<_> = self
-            .engine
-            .flows
-            .values()
-            .filter(|lane| lane.id != flow)
-            .collect();
-        let shared_run = |id: &str| {
-            survivors
-                .iter()
-                .any(|lane| lane.runs.iter().any(|run| run.id == id))
-        };
-        let shared_artifact = |id: &str| {
-            survivors
-                .iter()
-                .any(|lane| lane.artifacts.iter().any(|artifact| artifact.id == id))
-        };
         let mut paths = BTreeSet::new();
-        for run in &lane.runs {
-            if !shared_run(&run.id) {
-                paths.insert(self.directory.join("runs").join(&run.id));
-            }
-        }
-        for capture in &lane.captures {
-            if !survivors
-                .iter()
-                .any(|lane| lane.captures.iter().any(|kept| kept.path == capture.path))
-            {
-                paths.insert(capture.path.clone());
-            }
-        }
-        for artifact in &lane.artifacts {
-            if !shared_artifact(&artifact.id) {
-                if let Some(parent) = artifact.path.parent() {
-                    paths.insert(parent.to_owned());
+        // Native-test recordings have run directories but no launched-app Run row.
+        let runs = self.directory.join("runs");
+        if runs.exists() {
+            for entry in fs::read_dir(&runs).map_err(err)? {
+                let entry = entry.map_err(err)?;
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("test-{flow}-"))
+                {
+                    paths.insert(entry.path());
                 }
             }
         }
-        if !survivors.iter().any(|lane| {
-            lane.artifacts.iter().any(|artifact| {
-                artifact
-                    .path
-                    .starts_with(self.directory.join("artifacts").join(flow))
-            })
-        }) {
-            paths.insert(self.directory.join("artifacts").join(flow));
-            paths.insert(self.directory.join("builds").join(flow));
+        // Record all candidates, including shared paths. The durable manifest
+        // retries shared paths when their final surviving reference disappears.
+        for run in &lane.runs {
+            paths.insert(self.directory.join("runs").join(&run.id));
         }
-        if !survivors
-            .iter()
-            .any(|lane| self.engine.terminal_origin(&lane.id).ok() == Some(flow))
-        {
-            paths.insert(self.directory.join("control").join(flow));
+        for capture in &lane.captures {
+            paths.insert(capture.path.clone());
+        }
+        for artifact in &lane.artifacts {
+            if let Some(parent) = artifact.path.parent() {
+                paths.insert(parent.to_owned());
+            }
+        }
+        for kind in ["artifacts", "builds", "control"] {
+            paths.insert(self.directory.join(kind).join(flow));
         }
         for attachment in &self.attachments {
-            if self
-                .engine
-                .history_owner(&attachment.flow, &format!("attachment/{}", attachment.id))
-                == flow
-            {
+            if attachment.flow == flow || self.attachment_owner(attachment) == flow {
                 paths.insert(attachment.path.clone());
             }
         }
@@ -2093,16 +2116,6 @@ impl Host {
             ]),
         );
         self.persist()?;
-        let removed_attachments: BTreeSet<_> = self
-            .attachments
-            .iter()
-            .filter(|a| {
-                self.engine
-                    .history_owner(&a.flow, &format!("attachment/{}", a.id))
-                    == flow
-            })
-            .map(|a| a.id.clone())
-            .collect();
         let removed_tiles: BTreeSet<_> = self
             .recordings
             .tiles
@@ -2112,7 +2125,7 @@ impl Host {
             .collect();
         self.observe(Observation::FlowDeleted { flow: flow.into() })?;
         self.attachments
-            .retain(|a| !removed_attachments.contains(&a.id));
+            .retain(|attachment| Self::retained_lane_attachment(&self.engine, attachment));
         self.recordings
             .tiles
             .retain(|id, _| !removed_tiles.contains(id));
@@ -2124,10 +2137,25 @@ impl Host {
         self.lane_widths.remove(flow);
         self.terminal_busy.remove(flow);
         self.fingerprints.remove(flow);
+        self.code.lanes.remove(flow);
+        self.code
+            .deferred
+            .retain(|_, pending| pending.owner != flow && pending.namespace != flow);
+        self.code
+            .jobs
+            .retain(|_, key| self.code.deferred.contains_key(key));
         self.reports.retain(|k, report| {
-            k == &key || report.get("flow").and_then(Value::as_str) != Some(flow)
+            k.starts_with("delete:") || Self::retained_lane_report(&self.engine, report)
         });
         for run in &lane.runs {
+            if self
+                .engine
+                .flows
+                .values()
+                .any(|lane| lane.runs.iter().any(|kept| kept.id == run.id))
+            {
+                continue;
+            }
             self.design_snapshots.remove(&run.id);
             self.seen_feedback
                 .retain(|key| !key.starts_with(&format!("{}:", run.id)));
@@ -2172,6 +2200,79 @@ impl Host {
         Ok(())
     }
 
+    fn retained_lane_attachment(engine: &Engine, attachment: &Attachment) -> bool {
+        let key = format!("attachment/{}", attachment.id);
+        let owner = engine.history_owner(&attachment.flow, &key);
+        (engine.flows.contains_key(owner) && engine.history_visible(owner, &key))
+            || engine.flows.values().any(|lane| {
+                lane.captures
+                    .iter()
+                    .any(|capture| capture.id == attachment.id || capture.path == attachment.path)
+                    || lane.feedback.iter().any(|feedback| {
+                        feedback
+                            .feedback
+                            .evidence
+                            .iter()
+                            .any(|evidence| evidence.capture_id == attachment.id)
+                    })
+            })
+    }
+
+    fn retained_lane_report(engine: &Engine, report: &Value) -> bool {
+        report
+            .get("flow")
+            .and_then(Value::as_str)
+            .is_none_or(|flow| engine.flows.contains_key(flow))
+            || report
+                .get("artifact")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    engine
+                        .flows
+                        .values()
+                        .any(|lane| lane.artifacts.iter().any(|artifact| artifact.id == id))
+                })
+    }
+
+    fn lane_delete_path_referenced(&self, path: &Path) -> bool {
+        self.engine.flows.values().any(|lane| {
+            lane.runs
+                .iter()
+                .any(|run| self.directory.join("runs").join(&run.id).starts_with(path))
+                || lane
+                    .captures
+                    .iter()
+                    .any(|capture| capture.path.starts_with(path))
+                || lane.artifacts.iter().any(|artifact| {
+                    artifact.path.starts_with(path)
+                        || self
+                            .engine
+                            .evidence_origin("artifact", &artifact.id)
+                            .is_some_and(|origin| {
+                                self.directory.join("builds").join(origin).starts_with(path)
+                            })
+                })
+                || self.engine.terminal_origin(&lane.id).is_ok_and(|origin| {
+                    self.directory
+                        .join("control")
+                        .join(origin)
+                        .starts_with(path)
+                })
+                || self
+                    .directory
+                    .join("control")
+                    .join(&lane.id)
+                    .starts_with(path)
+        }) || self
+            .attachments
+            .iter()
+            .any(|attachment| attachment.path.starts_with(path))
+            || self
+                .known_recording_runs()
+                .iter()
+                .any(|run| run.directory.starts_with(path))
+    }
+
     fn cleanup_deleted_lanes(&mut self) -> Result<(), String> {
         let pending: Vec<_> = self
             .reports
@@ -2185,10 +2286,16 @@ impl Host {
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        for (key, report) in pending {
-            for path in report.get("paths").and_then(Value::as_arr).unwrap_or(&[]) {
+        for (key, mut report) in pending {
+            let mut retained = Vec::new();
+            let original = report.get("paths").and_then(Value::as_arr).unwrap_or(&[]);
+            for path in original {
                 let path = PathBuf::from(path.as_str().ok_or("Invalid lane cleanup path")?);
                 self.validate_delete_path(&path)?;
+                if self.lane_delete_path_referenced(&path) {
+                    retained.push(s(path.to_string_lossy()));
+                    continue;
+                }
                 match fs::symlink_metadata(&path) {
                     Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
                         fs::remove_dir_all(&path).map_err(err)?
@@ -2198,6 +2305,17 @@ impl Host {
                     Err(error) => return Err(err(error)),
                 }
             }
+            if !retained.is_empty() && retained == original {
+                continue;
+            }
+            if retained.is_empty() {
+                self.reports.remove(&key);
+            } else if let Value::Obj(fields) = &mut report {
+                if let Some((_, paths)) = fields.iter_mut().find(|(name, _)| name == "paths") {
+                    *paths = Value::Arr(retained);
+                }
+                self.reports.insert(key, report);
+            }
             // Purge deleted history from the auxiliary archive too.
             let events = self
                 .engine
@@ -2206,7 +2324,6 @@ impl Host {
                 .collect::<String>();
             atomic_write(&self.directory.join("events.jsonl"), events.as_bytes())?;
             self.cli_archive_cursor = 0;
-            self.reports.remove(&key);
             self.persist()?;
         }
         Ok(())
@@ -2239,6 +2356,326 @@ mod delete_lane_tests {
         host.directory = directory;
         (host, "flow-1".into())
     }
+    // These fixtures exercise persisted identities/sidecar validation, not an encoder.
+    fn recorded_build(host: &mut Host, flow: &str, at: u64) -> (String, Vec<PathBuf>) {
+        let artifact = format!("artifact-{at}");
+        let run = format!("run-{}", at + 10);
+        let commit = "a".repeat(40);
+        let source_revision = host.engine.flows[flow].source_revision;
+        host.engine
+            .apply(
+                FlowCommand::Prepared {
+                    flow: flow.into(),
+                    source_revision,
+                    note: "ready".into(),
+                },
+                at,
+            )
+            .unwrap();
+        host.engine
+            .apply(
+                FlowCommand::Build {
+                    flow: flow.into(),
+                    source_revision,
+                    mode: iteration::LaunchMode::Standalone,
+                },
+                at + 1,
+            )
+            .unwrap();
+        let job = host.engine.flows[flow].job.as_ref().unwrap().id.clone();
+        host.engine
+            .observe(
+                Observation::Checkpointed {
+                    flow: flow.into(),
+                    job_id: job.clone(),
+                    commit: commit.clone(),
+                },
+                at + 2,
+            )
+            .unwrap();
+        host.engine
+            .observe(
+                Observation::BuildStarted {
+                    flow: flow.into(),
+                    job_id: job.clone(),
+                },
+                at + 3,
+            )
+            .unwrap();
+        let binary = host
+            .directory
+            .join("artifacts")
+            .join(flow)
+            .join(&artifact)
+            .join("app");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"retained executable fixture").unwrap();
+        fs::create_dir_all(host.directory.join("builds").join(flow)).unwrap();
+        host.engine
+            .observe(
+                Observation::BuildSucceeded {
+                    flow: flow.into(),
+                    job_id: job.clone(),
+                    artifact_id: artifact.clone(),
+                    path: binary,
+                },
+                at + 4,
+            )
+            .unwrap();
+        host.engine
+            .observe(
+                Observation::RunStarted {
+                    flow: flow.into(),
+                    artifact_id: artifact.clone(),
+                    run_id: run.clone(),
+                    pid: Some(123),
+                },
+                at + 5,
+            )
+            .unwrap();
+        host.engine
+            .observe(
+                Observation::RunClosed {
+                    flow: flow.into(),
+                    run_id: run.clone(),
+                    human_requested: true,
+                    exit_code: Some(0),
+                },
+                at + 6,
+            )
+            .unwrap();
+        host.engine
+            .apply(
+                FlowCommand::Feedback {
+                    flow: flow.into(),
+                    feedback: iteration::Feedback {
+                        artifact_id: artifact.clone(),
+                        run_id: run.clone(),
+                        category: "review".into(),
+                        summary: format!("Retained history from {flow}"),
+                        evidence: vec![],
+                    },
+                },
+                at + 7,
+            )
+            .unwrap();
+        let native = format!("test-{flow}-{job}");
+        let mut paths = Vec::new();
+        for run in [&run, &native] {
+            let video = host.directory.join("runs").join(run).join("video");
+            fs::create_dir_all(&video).unwrap();
+            let sidecar = video.join("proof.json");
+            let metadata = json::obj(vec![
+                ("kind", s("studio_recording")),
+                ("flow", s(flow)),
+                ("run", s(run)),
+                ("artifact", s(&artifact)),
+                ("commit", s(&commit)),
+                ("pid", Value::Int(123)),
+                ("window", Value::Int(0)),
+                ("fps", Value::Int(30)),
+                ("width", Value::Int(1)),
+                ("height", Value::Int(1)),
+                ("original_width", Value::Int(1)),
+                ("original_height", Value::Int(1)),
+                ("active", Value::Bool(false)),
+                ("complete", Value::Bool(true)),
+                ("frames", Value::Int(1)),
+                ("elapsed_ms", Value::Int(33)),
+                ("video", s("proof.mp4")),
+            ]);
+            fs::write(&sidecar, metadata.to_json()).unwrap();
+            fs::write(video.join("proof.mp4"), b"recording bytes fixture").unwrap();
+            paths.push(sidecar);
+        }
+        host.reports.insert(
+            format!("build:{flow}:{job}"),
+            json::obj(vec![
+                ("kind", s("build")),
+                ("flow", s(flow)),
+                ("job", s(&job)),
+                ("test_run", s(&native)),
+                (
+                    "test_video",
+                    s(paths[1].parent().unwrap().to_string_lossy()),
+                ),
+                ("artifact", s(&artifact)),
+                ("commit", s(&commit)),
+            ]),
+        );
+        (artifact, paths)
+    }
+
+    fn split_recorded_lane(host: &mut Host, flow: &str, item: &str) -> String {
+        let history = host.split_history(flow).unwrap();
+        host.engine
+            .observe(
+                Observation::LaneSplit {
+                    flow: flow.into(),
+                    title: "Split proof".into(),
+                    item: item.into(),
+                    history,
+                },
+                now(),
+            )
+            .unwrap();
+        host.engine.resolve_active_flow(flow).unwrap().to_owned()
+    }
+
+    fn delete_and_dispatch(host: &mut Host, flow: &str) {
+        host.request(Request::Flow(FlowCommand::Delete { flow: flow.into() }))
+            .unwrap();
+        while let Some(effect) = host.effects.pop_front() {
+            host.effect(effect);
+        }
+        assert!(!host.engine.flows.contains_key(flow), "{}", host.note);
+    }
+
+    #[test]
+    fn delete_middle_split_lane_preserves_lineage_and_recordings_until_last_reference() {
+        let (mut host, first) = host();
+        let (first_artifact, first_media) = recorded_build(&mut host, &first, 10);
+        let middle = split_recorded_lane(&mut host, &first, &format!("artifact/{first_artifact}"));
+        let (middle_artifact, middle_media) = recorded_build(&mut host, &middle, 100);
+        let attachment_path = host.directory.join("attachments").join("shared.png");
+        fs::create_dir_all(attachment_path.parent().unwrap()).unwrap();
+        fs::write(&attachment_path, b"attachment fixture").unwrap();
+        host.attachments.push(Attachment {
+            id: "attachment-105-proof".into(),
+            flow: middle.clone(),
+            path: attachment_path.clone(),
+            delivered: true,
+            submitted: true,
+        });
+        let last = split_recorded_lane(&mut host, &middle, &format!("artifact/{middle_artifact}"));
+        let before = host.engine.history_projection(&last).unwrap();
+        let history = host.split_history(&last).unwrap();
+        let origin_control = host.directory.join("control").join(&first);
+        fs::create_dir_all(&origin_control).unwrap();
+        fs::write(origin_control.join("identity"), b"same terminal").unwrap();
+        assert!(host
+            .engine
+            .delete_confirmation(&middle)
+            .unwrap()
+            .contains("also detaches 2 split lanes"));
+        assert!(host
+            .engine
+            .delete_confirmation(&middle)
+            .unwrap()
+            .contains("shared terminal continues"));
+        assert!(host
+            .engine
+            .delete_confirmation(&last)
+            .unwrap()
+            .contains("Its terminal is stopped"));
+        delete_and_dispatch(&mut host, &middle);
+        assert_eq!(
+            host.engine.flows[&first].successor.as_deref(),
+            Some(last.as_str())
+        );
+        assert_eq!(
+            host.engine.flows[&last].predecessor.as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(host.engine.terminal_origin(&last).unwrap(), first);
+        assert_eq!(
+            host.engine.evidence_origin("artifact", &middle_artifact),
+            Some(middle.as_str())
+        );
+        assert_eq!(
+            host.engine.history_projection(&last).unwrap().artifacts,
+            before.artifacts
+        );
+        assert_eq!(
+            host.engine.history_projection(&last).unwrap().feedback,
+            before.feedback
+        );
+        assert_eq!(before.feedback.len(), 1);
+        assert!(!host
+            .engine
+            .history_visible(&last, &format!("artifact/{first_artifact}")));
+        assert_eq!(host.split_history(&last).unwrap(), history);
+        assert_eq!(host.known_recording_runs().len(), 4);
+        assert!(attachment_path.exists());
+        assert_eq!(host.projected_attachments()[0].flow, last);
+        for path in first_media.iter().chain(&middle_media) {
+            assert!(path.exists());
+        }
+        assert!(origin_control.join("identity").exists());
+        assert!(host.reports.contains_key(&format!("delete:{middle}")));
+        // Exercise the independent native recording index past the display-report cap.
+        for index in 0..140 {
+            host.reports
+                .insert(format!("a-display-{index}"), json::obj(vec![]));
+        }
+        host.persist().unwrap();
+        let mut restarted = Host::for_tests(Engine::default());
+        restarted.directory = host.directory.clone();
+        restarted.restore().unwrap();
+        assert!(!restarted.engine.flows.contains_key(&middle));
+        assert_eq!(restarted.engine.terminal_origin(&last).unwrap(), first);
+        assert_eq!(restarted.split_history(&last).unwrap(), history);
+        assert_eq!(restarted.known_recording_runs().len(), 4);
+        restarted.load_recordings();
+        assert!(restarted
+            .projected_recordings()
+            .iter()
+            .any(|tile| tile.flow == last && tile.artifact == middle_artifact));
+        // Removing the original terminal lane must not rename the surviving PTY
+        // or make predecessor-created sidecars undiscoverable after restart.
+        delete_and_dispatch(&mut restarted, &first);
+        assert_eq!(restarted.engine.terminal_origin(&last).unwrap(), first);
+        assert_eq!(restarted.engine.flows[&last].predecessor, None);
+        assert_eq!(restarted.split_history(&last).unwrap(), history);
+        assert!(origin_control.exists());
+        let mut final_host = Host::for_tests(Engine::default());
+        final_host.directory = restarted.directory.clone();
+        final_host.restore().unwrap();
+        assert_eq!(final_host.engine.terminal_origin(&last).unwrap(), first);
+        assert_eq!(final_host.known_recording_runs().len(), 4);
+        assert_eq!(final_host.split_history(&last).unwrap(), history);
+        assert!(attachment_path.exists());
+        assert_eq!(final_host.projected_attachments()[0].flow, last);
+        // A subsequent split still inherits the frozen origin and missing ancestry.
+        let mut continued = final_host.engine.clone();
+        continued
+            .observe(
+                Observation::LaneSplit {
+                    flow: last.clone(),
+                    title: "Continue after deletion".into(),
+                    item: format!("artifact/{middle_artifact}"),
+                    history: history.clone(),
+                },
+                now(),
+            )
+            .unwrap();
+        let next = continued.resolve_active_flow(&last).unwrap().to_owned();
+        let continued = Engine::decode(&continued.encode()).unwrap();
+        assert_eq!(continued.terminal_origin(&next).unwrap(), first);
+        assert!(continued.events(&next).any(|event| event.flow == middle));
+        delete_and_dispatch(&mut final_host, &last);
+        assert!(!attachment_path.exists());
+        for path in first_media.iter().chain(&middle_media) {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for flow in [&first, &middle, &last] {
+            for kind in ["artifacts", "builds", "control"] {
+                assert!(!final_host.directory.join(kind).join(flow).exists());
+            }
+        }
+        assert!(final_host.known_recording_runs().is_empty());
+        assert!(!final_host
+            .reports
+            .keys()
+            .any(|key| key.starts_with("delete:")));
+        let mut empty = Host::for_tests(Engine::default());
+        empty.directory = final_host.directory.clone();
+        empty.restore().unwrap();
+        assert!(empty.engine.flows.is_empty());
+        assert!(empty.known_recording_runs().is_empty());
+        fs::remove_dir_all(host.directory.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn delete_lane_removes_files_and_round_trips_state() {
         let (mut host, flow) = host();
@@ -2247,6 +2684,23 @@ mod delete_lane_tests {
             fs::create_dir_all(&path).unwrap();
             fs::write(path.join("history.txt"), "private lane history").unwrap();
         }
+        let video = host
+            .directory
+            .join("runs")
+            .join(format!("test-{flow}-job-2"))
+            .join("video");
+        fs::create_dir_all(&video).unwrap();
+        fs::write(video.join("proof.mp4"), "recording").unwrap();
+        let attachment = host.directory.join("attachments").join("proof.png");
+        fs::create_dir_all(attachment.parent().unwrap()).unwrap();
+        fs::write(&attachment, "image").unwrap();
+        host.attachments.push(Attachment {
+            id: "proof".into(),
+            flow: flow.clone(),
+            path: attachment.clone(),
+            delivered: true,
+            submitted: true,
+        });
         let keep = host.directory.join("keep.txt");
         fs::write(&keep, "keep").unwrap();
         host.request(Request::Flow(FlowCommand::Delete { flow: flow.clone() }))
@@ -2259,6 +2713,9 @@ mod delete_lane_tests {
             assert!(!host.directory.join(kind).join(&flow).exists());
         }
         assert!(keep.exists());
+        assert!(!video.exists());
+        assert!(!attachment.exists());
+        assert!(host.attachments.is_empty());
         let mut restarted = Host::for_tests(Engine::default());
         restarted.directory = host.directory.clone();
         restarted.restore().unwrap();
@@ -2267,6 +2724,41 @@ mod delete_lane_tests {
             .unwrap()
             .contains("Delete proof"));
         fs::remove_dir_all(&host.directory).unwrap();
+    }
+
+    #[test]
+    fn delete_archived_lane_and_retry_interrupted_intent() {
+        let (mut host, flow) = host();
+        host.observe(Observation::LifecycleChanged {
+            flow: flow.clone(),
+            state: iteration::FlowLifecycle::Archived,
+        })
+        .unwrap();
+        host.request(Request::Flow(FlowCommand::Delete { flow: flow.clone() }))
+            .unwrap();
+        // Restart between accepted intent and effect dispatch.
+        let mut restarted = Host::for_tests(Engine::default());
+        restarted.directory = host.directory.clone();
+        restarted.restore().unwrap();
+        assert!(restarted.engine.flows.contains_key(&flow));
+        while let Some(effect) = restarted.effects.pop_front() {
+            restarted.effect(effect);
+        }
+        assert!(
+            !restarted.engine.flows.contains_key(&flow),
+            "{}",
+            restarted.note
+        );
+        let saved =
+            bounded_read(&restarted.directory.join("state.json"), 12 * 1024 * 1024).unwrap();
+        let value = json::parse(saved.as_bytes()).unwrap();
+        assert!(
+            Engine::decode(value.get("engine").unwrap().as_str().unwrap())
+                .unwrap()
+                .flows
+                .is_empty()
+        );
+        fs::remove_dir_all(host.directory.parent().unwrap()).unwrap();
     }
 
     #[cfg(unix)]

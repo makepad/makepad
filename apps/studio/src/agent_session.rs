@@ -1873,7 +1873,9 @@ mod native {
                 if studio {
                     command.arg("--state-dir").arg(&self.records);
                 } else {
-                    command.arg("--cwd").arg(repo);
+                    // list resolves the same inherited/workspace scope as
+                    // tools/agents from its process working directory.
+                    command.current_dir(repo);
                 }
                 let (status, output) = self.run_command(&mut command, stop)?;
                 if !status.success() {

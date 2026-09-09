@@ -1,5 +1,7 @@
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn main() {
+    #[cfg(target_os = "macos")]
+    makepad_screen::pty_spawn::exec_helper();
     if let Err(error) = native_main() {
         eprintln!("makepad-screen: {error}");
         std::process::exit(1);
@@ -20,7 +22,7 @@ fn native_main() -> Result<(), String> {
     use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>().into_iter();
     let operation = args.next().unwrap_or_else(|| "agents".into());
-    // tools/agents forwards through the browser operation; allow its name subcommand.
+    // Retain the older browser-prefixed name spelling for existing callers.
     let operation = if operation == "agents" {
         let mut remaining = args.clone();
         if remaining.next().as_deref() == Some(std::ffi::OsStr::new("name")) {
@@ -154,7 +156,10 @@ fn native_main() -> Result<(), String> {
         }
         return makepad_screen::launcher::run(state_dir, cwd);
     }
-    let state_dir = if operation == "list" {
+    if operation == "start" && cwd.is_none() {
+        cwd = Some(std::env::current_dir().map_err(|e| e.to_string())?);
+    }
+    let state_dir = if matches!(operation, "list" | "start") {
         Some(makepad_screen::launcher::resolve_state_dir(
             state_dir,
             &cwd.clone()

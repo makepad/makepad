@@ -66,6 +66,7 @@ impl App {
             .engine
             .flows
             .values()
+            .filter(|flow| !self.iterations.deleting.contains(&flow.id))
             .map(|flow| (flow.id.clone(), flow.title.clone()))
             .collect();
         for (flow, old_title) in flows {

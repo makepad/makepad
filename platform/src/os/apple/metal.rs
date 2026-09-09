@@ -139,6 +139,44 @@ impl Cx {
         crate::makepad_error_log::trace_enabled("gpu.drawcalls")
     }
 
+    fn upload_instance_buffers(&mut self, root: DrawListId, metal_cx: &MetalCx) -> bool {
+        let requests = self.pending_instance_uploads(root);
+        let mut budget = std::mem::take(&mut self.draw_lists.1);
+        budget.begin_frame(self.repaint_id);
+        let mut pending = self.instance_upload_collection_deferred(root);
+        for request in &requests {
+            let item = &mut self.draw_lists[request.list].draw_items[request.item];
+            let Some(call) = item.kind.draw_call_mut() else { continue };
+            let publication = item.retained_instances.as_ref();
+            let data = publication.map_or_else(|| item.instances.as_deref().unwrap_or(&[]), |p| p.data());
+            let target = publication.map_or(0, |p| p.id());
+            let range = publication.map_or(0..data.len(), |_| item.retained_upload_range.clone());
+            let before = budget.stats.bytes;
+            let remaining = item.os.instance_buffer.update_retained(
+                metal_cx, data, range, target, publication.is_none() && call.instance_dirty,
+                call.total_instance_slots, request.category, &mut budget,
+            );
+            let bytes = budget.stats.bytes - before;
+            self.os.bytes_written = self.os.bytes_written.saturating_add(bytes);
+            self.os.instance_bytes_uploaded = self.os.instance_bytes_uploaded.saturating_add(bytes as u64);
+            item.instance_upload_pending = remaining != 0;
+            call.instance_dirty = false;
+            if remaining == 0 {
+                item.retained_instance_id = target;
+            }
+            pending += remaining;
+        }
+        self.recycle_instance_uploads(root, requests);
+        budget.pending_bytes += pending;
+        if crate::thread::ui_hang::hashing::enabled() && (budget.stats.bytes != 0 || pending != 0) {
+            crate::log!("retained-upload frame={} bytes={} B={} instances_uploaded={} install_us={} pending={} named_bytes={:?}",
+                self.repaint_id, budget.stats.bytes, budget.limit, budget.stats.instances_uploaded,
+                budget.stats.install_us, budget.pending_bytes, budget.stats.category_bytes);
+        }
+        self.draw_lists.1 = budget;
+        pending != 0
+    }
+
     fn render_view(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -148,6 +186,7 @@ impl Cx {
         encoder: ObjcId,
         metal_cx: &MetalCx,
     ) {
+        let _phase = crate::thread::ui_hang::ui_phase_detail(crate::thread::UiPhase::DrawList, draw_list_id.index() as u32);
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z comes from the call's nesting depth instead
@@ -216,7 +255,7 @@ impl Cx {
                 }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
-                let draw_item = &mut draw_list.draw_items[draw_item_id];
+                let draw_item = draw_list.draw_items.binding_mut(draw_item_id);
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
                 } else {
@@ -250,52 +289,6 @@ impl Cx {
                     );
                 }
 
-                if draw_call.instance_dirty {
-                    draw_call.instance_dirty = false;
-                    draw_item.retained_instance_id =
-                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                    // update the instance buffer data
-                    let instance_bytes = (draw_item
-                        .retained_instances
-                        .as_ref()
-                        .map(|v| v.data())
-                        .unwrap_or_else(|| draw_item.instances.as_deref().unwrap())
-                        .len()
-                        * std::mem::size_of::<f32>())
-                        as u64;
-                    if instance_bytes > 524_288
-                        && crate::makepad_error_log::trace_enabled("present")
-                    {
-                        crate::trace!(
-                            "present",
-                            "MPUPLOAD list {:?} item {} — {:.1}MB re-uploaded",
-                            draw_list_id,
-                            draw_item_id,
-                            instance_bytes as f64 / 1048576.0
-                        );
-                    }
-                    self.os.bytes_written = self
-                        .os
-                        .bytes_written
-                        .saturating_add(instance_bytes as usize);
-                    self.os.instance_bytes_uploaded = self
-                        .os
-                        .instance_bytes_uploaded
-                        .saturating_add(instance_bytes);
-                    if let Some(retained) = &draw_item.retained_instances {
-                        draw_item.os.instance_buffer.update_retained(
-                            metal_cx,
-                            retained.data(),
-                            draw_item.retained_upload_range.clone(),
-                        );
-                    } else {
-                        draw_item
-                            .os
-                            .instance_buffer
-                            .update(metal_cx, draw_item.instances.as_deref().unwrap());
-                    }
-                }
-
                 // update the zbias uniform if we have it.
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
@@ -311,6 +304,11 @@ impl Cx {
                     (draw_item.instances.as_ref().map_or(0, Vec::len)
                         / sh.mapping.instances.total_slots) as u64
                 };
+
+                // Pending replacements keep the previous resident ink. Never
+                // issue a draw beyond the prefix actually published to Metal.
+                let instances = instances.min(draw_item.os.instance_buffer.inner.as_ref()
+                    .map_or(0, |inner| (inner.len / (sh.mapping.instances.total_slots * 4)) as u64));
 
                 if instances == 0 {
                     continue;
@@ -342,10 +340,20 @@ impl Cx {
                     let () = msg_send![encoder, setCullMode: cull_mode];
                 }
 
-                let render_pipeline_state = if draw_call.options.alpha_blend {
-                    shp.render_pipeline_state.as_id()
+                let pipeline = if draw_call.options.alpha_blend {
+                    &shp.pipelines.blend
                 } else {
-                    shp.render_pipeline_state_no_blend.as_id()
+                    &shp.pipelines.solid
+                };
+                let render_pipeline_state = match pipeline.get() {
+                    Some(Ok(pipeline)) => pipeline.as_id(),
+                    Some(Err(_)) => continue,
+                    None => {
+                        // Keep this pass live while the driver compiles. No wait,
+                        // no fallback synchronous compile on first use.
+                        self.passes[draw_pass_id].paint_dirty = true;
+                        continue;
+                    }
                 };
                 unsafe {
                     let () = msg_send![encoder, setRenderPipelineState: render_pipeline_state];
@@ -699,6 +707,22 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) -> bool {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Present);
+        if !metal_flush_submissions() { return false; }
+        if !metal_cx.render_setup_queued {
+            metal_cx.render_setup_queued = metal_buffer_allocator().try_send(MetalAllocationRequest::RenderSetup(
+                RcObjcId::from_unowned(NonNull::new(metal_cx.device).unwrap()), metal_cx.render_setup.clone(),
+            )).is_ok();
+        }
+        let render_setup = metal_cx.render_setup.clone();
+        let Some(Some(render_setup)) = render_setup.get() else { return false };
+        // A frame can contain many offscreen passes. The three-frame gate
+        // alone does not protect commandQueue.commandBuffer's finite pool.
+        // Leave headroom below Metal's queue capacity and drop this new pass
+        // instead of entering the driver's allocation wait.
+        if metal_cx.cb_seq.saturating_sub(METAL_CB_COMPLETED.load(Ordering::Acquire)) >= 32 {
+            return false;
+        }
         if metal_cx.cb_seq == 0 {
             metal_cx.lifetime_serials = self.textures.1.serials.clone();
             self.textures.1.metal_readbacks.queue =
@@ -733,12 +757,8 @@ impl Cx {
             }
             descriptor
         } else {
-            unsafe {
-                msg_send![
-                    class!(MTLRenderPassDescriptorInternal),
-                    renderPassDescriptor
-                ]
-            }
+            render_setup.reset_attachments();
+            render_setup.descriptor.as_id()
         };
 
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
@@ -909,40 +929,12 @@ impl Cx {
                     let () = unsafe { msg_send![depth_attachment, setClearDepth: depth as f64] };
                 }
             }
-            // create depth state
+            // Both immutable depth states arrived with the worker setup.
             if self.passes[draw_pass_id].os.mtl_depth_state_write.is_none() {
-                let desc = RcObjcId::from_owned(
-                    NonNull::new(unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] })
-                        .unwrap(),
-                );
-                let () = unsafe {
-                    msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
-                };
-                let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: true] };
-                let depth_stencil_state: ObjcId = unsafe {
-                    msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()]
-                };
-                self.passes[draw_pass_id].os.mtl_depth_state_write =
-                    NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
+                self.passes[draw_pass_id].os.mtl_depth_state_write = Some(render_setup.depth_write.clone());
             }
-            if self.passes[draw_pass_id]
-                .os
-                .mtl_depth_state_no_write
-                .is_none()
-            {
-                let desc = RcObjcId::from_owned(
-                    NonNull::new(unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] })
-                        .unwrap(),
-                );
-                let () = unsafe {
-                    msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
-                };
-                let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: false] };
-                let depth_stencil_state: ObjcId = unsafe {
-                    msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()]
-                };
-                self.passes[draw_pass_id].os.mtl_depth_state_no_write =
-                    NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
+            if self.passes[draw_pass_id].os.mtl_depth_state_no_write.is_none() {
+                self.passes[draw_pass_id].os.mtl_depth_state_no_write = Some(render_setup.depth_no_write.clone());
             }
         }
 
@@ -961,8 +953,7 @@ impl Cx {
             // Entering a present-bound pass: commit the batched offscreen
             // work NOW so the GPU pipelines it under this pass's CPU encode.
             if let Some(shared) = metal_cx.frame_command_buffer.take() {
-                metal_cb_committed(shared);
-                let () = unsafe { msg_send![shared, commit] };
+                metal_submit_command_buffer(shared, None);
                 let () = unsafe { msg_send![shared, release] };
             }
         }
@@ -1010,6 +1001,13 @@ impl Cx {
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
+
+        if self.upload_instance_buffers(draw_list_id, metal_cx) {
+            // Continue copying retained buffers without invalidating every
+            // widget in every window. Atlas separately samples pending bytes
+            // for its finite diagnostics/settle chain.
+            self.passes[draw_pass_id].paint_dirty = true;
+        }
 
         self.render_view(
             draw_pass_id,
@@ -1113,7 +1111,7 @@ impl Cx {
                 present_pulse();
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
+                #[cfg(target_os = "macos")]
                 crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
                     let now = app.time_now();
                     app.frame_trace.present(now);
@@ -1136,6 +1134,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
+                    Some((drawable, None)),
                 );
             }
             DrawPassMode::Texture => {
@@ -1148,6 +1147,7 @@ impl Cx {
                         gpu_counters,
                         gpu_profile_label.clone(),
                         command_buffer,
+                        None,
                     );
                 }
                 // Batched: encoder already ended; the shared buffer commits
@@ -1162,6 +1162,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
+                    None,
                 );
             }
             DrawPassMode::StdinMain(stdin_frame, kind_id) => {
@@ -1189,22 +1190,13 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
+                    None,
                 );
             }
             DrawPassMode::Drawable(drawable, target_presentation_time) => {
                 present_pulse();
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                if let Some(target_presentation_time) = target_presentation_time {
-                    let () = unsafe {
-                        msg_send![
-                            command_buffer,
-                            presentDrawable: drawable
-                            atTime: target_presentation_time
-                        ]
-                    };
-                } else {
-                    let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
-                }
+                #[cfg(target_os = "macos")]
                 crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
                     let now = app.time_now();
                     app.frame_trace.present(now);
@@ -1227,6 +1219,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
+                    Some((drawable, target_presentation_time)),
                 );
             }
             DrawPassMode::Resizing(drawable) => {
@@ -1249,9 +1242,8 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
+                    Some((drawable, None)),
                 );
-                let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
-                let () = unsafe { msg_send![drawable, present] };
             }
         }
         let () = unsafe { msg_send![pool, release] };
@@ -1374,6 +1366,7 @@ impl Cx {
         gpu_counters: GpuSampleCounters,
         gpu_profile_label: Option<String>,
         command_buffer: ObjcId,
+        drawable: Option<(ObjcId, Option<f64>)>,
     ) {
         let screenshot_info = Mutex::new(screenshot_info);
         //let present_index = Arc::clone(&self.os.present_index);
@@ -1536,8 +1529,7 @@ impl Cx {
                 })
             ]
         };
-        metal_cb_committed(command_buffer);
-        let () = unsafe { msg_send![command_buffer, commit] };
+        metal_submit_command_buffer(command_buffer, drawable);
     }
 
     pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
@@ -1720,6 +1712,8 @@ pub struct MetalCx {
     /// MTLTexture. Prevents Metal command-buffer aborts on iOS where sampling
     /// from nil is a GPU fault.
     fallback_texture: ObjcId,
+    render_setup: Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>,
+    render_setup_queued: bool,
     /// Frame-batched command buffer: offscreen texture passes append their
     /// encoders here instead of committing one buffer each — a 12-pass
     /// blur pyramid was paying ~1ms commit/schedule latency PER PASS. The
@@ -1742,7 +1736,9 @@ pub struct MetalCx {
     /// Free-list of Shared staging buffers for Vec-texture uploads
     /// (`VecUploadEncoder`), shared with the completion handlers that hand
     /// buffers back once their blit has executed.
-    staging_pool: Arc<Mutex<Vec<StagingBuffer>>>,
+    staging_pool: RefCell<Vec<StagingBuffer>>,
+    staging_returned: std::sync::mpsc::Receiver<StagingBuffer>,
+    staging_returner: Arc<StagingReturner>,
     /// Shaders drawn by the pass being encoded (`render_view` collects
     /// them, `draw_pass` hands them to the in-flight registry) — what the
     /// hang diagnostic and `gpu.trace` name.
@@ -1771,10 +1767,6 @@ static METAL_CB_COMPLETED: AtomicU64 = AtomicU64::new(0);
 struct InFlightCb {
     seq: u64,
     lifetime_serials: Arc<crate::texture::FrameSerials>,
-    /// The MTLCommandBuffer, compared only as an address (commit sites find
-    /// their entry by it; Metal retains the object until it completes, so
-    /// the address cannot be reused while the entry lives).
-    buffer: usize,
     committed_at: Option<Instant>,
     passes: Vec<InFlightPass>,
 }
@@ -1815,22 +1807,69 @@ fn describe_passes(passes: &[InFlightPass]) -> String {
     out
 }
 
-/// Commit-site hook: the watchdog's clock for a buffer starts here. The
-/// OLDEST uncompleted buffer has nothing queued ahead of it, so its age is
-/// what the GPU is actually spending on it.
-pub(crate) fn metal_cb_committed(buffer: ObjcId) {
-    let now = Instant::now();
-    if let Some(entry) = metal_in_flight()
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.buffer == buffer as usize)
-    {
-        entry.committed_at = Some(now);
-        entry
-            .lifetime_serials
-            .submitted
-            .fetch_max(entry.seq, Ordering::Release);
-    }
+// Encoding metadata belongs to the encoding thread until submission. Only
+// the submitter, completion callbacks and watchdog touch METAL_IN_FLIGHT.
+thread_local! {
+    static METAL_ENCODING: RefCell<std::collections::HashMap<usize, InFlightCb>> = RefCell::new(std::collections::HashMap::new());
+    static METAL_SUBMIT_RETRY: RefCell<VecDeque<MetalSubmission>> = RefCell::new(VecDeque::new());
+}
+struct MetalSubmission {
+    buffer: RcObjcId,
+    drawable: Option<(RcObjcId, Option<f64>)>,
+    entry: Option<InFlightCb>,
+}
+fn metal_submitter() -> &'static std::sync::mpsc::SyncSender<MetalSubmission> {
+    static SUBMITTER: std::sync::OnceLock<std::sync::mpsc::SyncSender<MetalSubmission>> = std::sync::OnceLock::new();
+    SUBMITTER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<MetalSubmission>(16);
+        std::thread::Builder::new().name("makepad-metal-submit".into()).spawn(move || {
+            while let Ok(mut submission) = rx.recv() {
+                let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+                if let Some(mut entry) = submission.entry.take() {
+                    entry.committed_at = Some(Instant::now());
+                    entry.lifetime_serials.submitted.fetch_max(entry.seq, Ordering::Release);
+                    metal_in_flight().push_back(entry);
+                }
+                let buffer = submission.buffer.as_id();
+                if let Some((drawable, time)) = &submission.drawable {
+                    if let Some(time) = time {
+                        let _: () = unsafe { msg_send![buffer, presentDrawable: drawable.as_id() atTime: *time] };
+                    } else {
+                        let _: () = unsafe { msg_send![buffer, presentDrawable: drawable.as_id()] };
+                    }
+                }
+                let _: () = unsafe { msg_send![buffer, commit] };
+                drop(submission);
+                let _: () = unsafe { msg_send![pool, release] };
+                crate::thread::SignalToUI::set_ui_signal();
+            }
+        }).expect("Metal submission worker");
+        tx
+    })
+}
+/// Retry encoded work in queue order. A saturated submitter drops NEW frames,
+/// never an encoded dependency. Neither presentDrawable nor commit runs on UI.
+pub(crate) fn metal_flush_submissions() -> bool {
+    METAL_SUBMIT_RETRY.with(|retry| {
+        let mut retry = retry.borrow_mut();
+        while let Some(submission) = retry.pop_front() {
+            if let Err(error) = metal_submitter().try_send(submission) {
+                retry.push_front(match error { std::sync::mpsc::TrySendError::Full(value) | std::sync::mpsc::TrySendError::Disconnected(value) => value });
+                return false;
+            }
+        }
+        true
+    })
+}
+pub(crate) fn metal_submit_command_buffer(buffer: ObjcId, drawable: Option<(ObjcId, Option<f64>)>) {
+    let entry = METAL_ENCODING.with(|entries| entries.borrow_mut().remove(&(buffer as usize)));
+    let submission = MetalSubmission {
+        buffer: RcObjcId::from_unowned(NonNull::new(buffer).unwrap()),
+        drawable: drawable.map(|(drawable, time)| (RcObjcId::from_unowned(NonNull::new(drawable).unwrap()), time)),
+        entry,
+    };
+    METAL_SUBMIT_RETRY.with(|retry| retry.borrow_mut().push_back(submission));
+    metal_flush_submissions();
 }
 
 /// `MAKEPAD_GPU_MAX_CB_MS`: a command buffer older than this without
@@ -1994,7 +2033,7 @@ struct StagingBuffer {
     len: usize,
 }
 // It travels main thread -> completion handler -> main thread only through
-// the pool mutex, and Metal objects are safe to use from any thread.
+// a bounded return mailbox; Metal objects are safe to use from any thread.
 unsafe impl Send for StagingBuffer {}
 
 static STAGING_LIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -2050,7 +2089,7 @@ impl UsedStagingBuffers {
         }
     }
 
-    fn return_to_pool(mut self, pool: &Mutex<Vec<StagingBuffer>>) {
+    fn return_to_pool(mut self, pool: &StagingReturner) {
         self.untrack();
         if let Some(buffers) = self.buffers.take() {
             staging_pool_return(pool, buffers);
@@ -2070,15 +2109,28 @@ impl Drop for UsedStagingBuffers {
 const STAGING_POOL_MAX_COUNT: usize = 32;
 const STAGING_POOL_MAX_BYTES: usize = 192 << 20;
 
-fn staging_pool_return(pool: &Mutex<Vec<StagingBuffer>>, used: Vec<StagingBuffer>) {
-    let mut pool = pool.lock().unwrap();
-    let mut bytes: usize = pool.iter().map(|b| b.len).sum();
+struct StagingReturner {
+    tx: std::sync::mpsc::SyncSender<StagingBuffer>,
+    bytes: AtomicUsize,
+    count: AtomicUsize,
+}
+fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
     for staging in used {
-        if pool.len() < STAGING_POOL_MAX_COUNT && bytes + staging.len <= STAGING_POOL_MAX_BYTES {
-            bytes += staging.len;
-            pool.push(staging);
-        } else {
-            drop(staging);
+        // Excess buffers are released on the completion thread. UI never
+        // contends with this callback, nor frees a rejected pool return.
+        if pool.count.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+            |count| (count < STAGING_POOL_MAX_COUNT).then_some(count + 1)).is_err() {
+            continue;
+        }
+        if pool.bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+            |bytes| bytes.checked_add(staging.len).filter(|bytes| *bytes <= STAGING_POOL_MAX_BYTES)).is_err() {
+            pool.count.fetch_sub(1, Ordering::AcqRel);
+            continue;
+        }
+        if let Err(error) = pool.tx.try_send(staging) {
+            let staging = match error { std::sync::mpsc::TrySendError::Full(value) | std::sync::mpsc::TrySendError::Disconnected(value) => value };
+            pool.bytes.fetch_sub(staging.len, Ordering::AcqRel);
+            pool.count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -2126,7 +2178,7 @@ impl VecUploadEncoder {
             let () = unsafe { msg_send![blit, endEncoding] };
         }
         if !self.used.is_empty() {
-            let pool = metal_cx.staging_pool.clone();
+            let pool = metal_cx.staging_returner.clone();
             let used = Mutex::new(Some(UsedStagingBuffers::new(self.used)));
             let () = unsafe {
                 msg_send![
@@ -2161,13 +2213,12 @@ impl MetalCx {
         let seq = self.cb_seq;
         self.lifetime_serials.encoded.store(seq, Ordering::Release);
         self.current_cb_seq = seq;
-        metal_in_flight().push_back(InFlightCb {
+        METAL_ENCODING.with(|entries| entries.borrow_mut().insert(buffer as usize, InFlightCb {
             seq,
             lifetime_serials: self.lifetime_serials.clone(),
-            buffer: buffer as usize,
             committed_at: None,
             passes: Vec::new(),
-        });
+        }));
         let serials = self.lifetime_serials.clone();
         let () = unsafe {
             msg_send![
@@ -2211,6 +2262,7 @@ impl MetalCx {
     /// has not finished.
     #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn begin_repaint(&mut self) {
+        metal_flush_submissions();
         if self.cb_seq > 0 && self.repaint_tail_seqs.back() != Some(&self.cb_seq) {
             self.repaint_tail_seqs.push_back(self.cb_seq);
             while self.repaint_tail_seqs.len() > 16 {
@@ -2240,22 +2292,14 @@ impl MetalCx {
             return;
         }
         self.memory_trace_at = Instant::now();
-        let (pool_count, pool_bytes) = {
-            let pool = self
-                .staging_pool
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (
-                pool.len(),
-                pool.iter().map(|buffer| buffer.len).sum::<usize>(),
-            )
-        };
+        let pool_count = self.staging_returner.count.load(Ordering::Acquire);
+        let pool_bytes = self.staging_returner.bytes.load(Ordering::Acquire);
         let live_count = STAGING_LIVE_COUNT.load(Ordering::Relaxed);
         let live_bytes = STAGING_LIVE_BYTES.load(Ordering::Relaxed);
         let used_count = STAGING_USED_COUNT.load(Ordering::Relaxed);
         let used_bytes = STAGING_USED_BYTES.load(Ordering::Relaxed);
         let encoding_count = live_count.saturating_sub(pool_count.saturating_add(used_count));
-        let command_buffers = metal_in_flight().len();
+        let command_buffers = self.cb_seq.saturating_sub(METAL_CB_COMPLETED.load(Ordering::Acquire));
         crate::trace!(
             "gpu.trace",
             "staging_live={} staging_used={} staging_pool={} staging_encoding={} total_bytes={} used_bytes={} pool_bytes={} command_buffers={} frames={} backpressure_skips={}",
@@ -2277,17 +2321,11 @@ impl MetalCx {
     fn register_pass(&self, pass_id: DrawPassId, name: &str) {
         let shaders = self.pass_shaders.take();
         let seq = self.current_cb_seq;
-        if let Some(entry) = metal_in_flight()
-            .iter_mut()
-            .rev()
-            .find(|entry| entry.seq == seq)
-        {
-            entry.passes.push(InFlightPass {
-                pass_id,
-                name: name.to_string(),
-                shaders,
-            });
-        }
+        METAL_ENCODING.with(|entries| {
+            if let Some(entry) = entries.borrow_mut().values_mut().find(|entry| entry.seq == seq) {
+                entry.passes.push(InFlightPass { pass_id, name: name.to_string(), shaders });
+            }
+        });
     }
 
     /// The smallest pooled staging buffer that fits `len`, or a fresh one.
@@ -2295,7 +2333,11 @@ impl MetalCx {
     /// buffer fits the next upload of the same texture.
     fn take_staging(&self, len: usize) -> Option<StagingBuffer> {
         {
-            let mut pool = self.staging_pool.lock().unwrap();
+            let mut pool = self.staging_pool.borrow_mut();
+            while pool.len() < STAGING_POOL_MAX_COUNT {
+                let Ok(staging) = self.staging_returned.try_recv() else { break };
+                pool.push(staging);
+            }
             let mut best: Option<usize> = None;
             for (index, staging) in pool.iter().enumerate() {
                 if staging.len >= len && best.map_or(true, |b| pool[b].len > staging.len) {
@@ -2303,7 +2345,10 @@ impl MetalCx {
                 }
             }
             if let Some(index) = best {
-                return Some(pool.swap_remove(index));
+                let staging = pool.swap_remove(index);
+                self.staging_returner.bytes.fetch_sub(staging.len, Ordering::AcqRel);
+                self.staging_returner.count.fetch_sub(1, Ordering::AcqRel);
+                return Some(staging);
             }
         }
         let alloc = (len + 0xffff) & !0xffff;
@@ -2389,7 +2434,13 @@ pub struct SlErr {
 
 impl MetalCx {
     pub(crate) fn new() -> MetalCx {
+        let _ = metal_submitter();
+        let _ = metal_buffer_allocator();
         let device = get_default_metal_device().expect("Cannot get default metal device");
+        let render_setup = Arc::new(std::sync::OnceLock::new());
+        let render_setup_queued = metal_buffer_allocator().try_send(MetalAllocationRequest::RenderSetup(
+            RcObjcId::from_unowned(NonNull::new(device).unwrap()), render_setup.clone(),
+        )).is_ok();
         let fallback_texture = unsafe {
             let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
             let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
@@ -2420,16 +2471,21 @@ impl MetalCx {
             ];
             tex
         };
+        let (staging_tx, staging_returned) = std::sync::mpsc::sync_channel(STAGING_POOL_MAX_COUNT);
         MetalCx {
             command_queue: unsafe { msg_send![device, newCommandQueue] },
             device,
             fallback_texture,
+            render_setup,
+            render_setup_queued,
             frame_command_buffer: None,
             frame_command_buffer_seq: 0,
             cb_seq: 0,
             lifetime_serials: Default::default(),
             current_cb_seq: 0,
-            staging_pool: Arc::new(Mutex::new(Vec::new())),
+            staging_pool: RefCell::new(Vec::with_capacity(STAGING_POOL_MAX_COUNT)),
+            staging_returned,
+            staging_returner: Arc::new(StagingReturner { tx: staging_tx, bytes: AtomicUsize::new(0), count: AtomicUsize::new(0) }),
             pass_shaders: RefCell::new(Vec::new()),
             repaint_tail_seqs: VecDeque::new(),
             backpressure_skips: 0,
@@ -2441,7 +2497,7 @@ impl MetalCx {
 impl Drop for MetalCx {
     fn drop(&mut self) {
         if let Some(buffer) = self.frame_command_buffer.take() {
-            metal_in_flight().retain(|entry| entry.buffer != buffer as usize);
+            METAL_ENCODING.with(|entries| entries.borrow_mut().remove(&(buffer as usize)));
             let () = unsafe { msg_send![buffer, release] };
         }
         unsafe {
@@ -2455,14 +2511,8 @@ impl Drop for MetalCx {
 /**************************************************************************************************/
 
 pub struct CxOsDrawShader {
-    _library: RcObjcId,
-    render_pipeline_state: RcObjcId,
-    /// The same pipeline with colour blending disabled: bound for draw calls
-    /// whose `CxDrawShaderOptions::alpha_blend` is false, so a fragment
-    /// replaces the destination instead of compositing over it. For the
-    /// data-pass colour formats blending is already off and this is the
-    /// same object as `render_pipeline_state`.
-    render_pipeline_state_no_blend: RcObjcId,
+    // get() never waits; the driver completion handlers publish immutable PSOs.
+    pipelines: Arc<MetalPipelines>,
     draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
@@ -2679,86 +2729,69 @@ impl DrawVars {
     }
 }
 
-impl CxOsDrawShader {
-    pub(crate) fn new(
-        metal_cx: &MetalCx,
-        mtlsl: String,
-        mapping: &CxDrawShaderMapping,
-        bindings: &UniformBufferBindings,
-    ) -> Option<Self> {
-        // Generated shader source is what an author — increasingly an AI —
-        // actually has to debug, and it is otherwise invisible. Dumping it is
-        // opt-in and costs nothing when the topic is disabled.
-        if crate::makepad_error_log::trace_enabled("shader.dump") {
-            let dir = crate::log::trace_log_dir("shader.dump");
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&mtlsl, &mut hasher);
-            let name = dir.join(format!(
-                "shader_{:016x}.metal",
-                std::hash::Hasher::finish(&hasher)
-            ));
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&name, mtlsl.as_bytes());
-        }
-        let _mp_t0 = std::time::Instant::now();
-        let _mp_src_len = mtlsl.len();
+#[derive(Default)]
+struct MetalPipelines {
+    blend: std::sync::OnceLock<Result<RcObjcId, String>>,
+    solid: std::sync::OnceLock<Result<RcObjcId, String>>,
+}
+
+impl MetalPipelines {
+    fn failure(&self, error: String) {
+        crate::shader_error::note(error.clone());
+        crate::error!("Metal shader: {}", error);
+        let _ = self.blend.set(Err(error.clone()));
+        let _ = self.solid.set(Err(error));
+        crate::thread::SignalToUI::set_ui_signal();
+    }
+
+    fn compile(device: ObjcId, source: String,
+        color_format: crate::draw_shader::DrawShaderColorFormat, ready: Arc<Self>) {
+        let device = RcObjcId::from_unowned(NonNull::new(device).unwrap());
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
-        unsafe {
-            let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
-        };
+        unsafe { let _: () = msg_send![options.as_id(), setFastMathEnabled: YES]; }
+        let started = Instant::now();
+        let callback_device = device.clone();
+        let callback_source = source.clone();
+        let completion = objc_block!(move |library: ObjcId, error: ObjcId| {
+            let library_ms = started.elapsed().as_secs_f64() * 1000.0;
+            crate::startup_acc("metal newLibraryWithSource", library_ms);
+            if crate::makepad_error_log::trace_enabled("shader.dump") {
+                let dir = crate::log::trace_log_dir("shader.dump");
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&callback_source, &mut hasher);
+                let name = dir.join(format!("shader_{:016x}.metal", std::hash::Hasher::finish(&hasher)));
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(name, callback_source.as_bytes());
+            }
 
-        let mut error: ObjcId = nil;
-        let library = RcObjcId::from_owned(
-            match NonNull::new(unsafe {
-                msg_send![
-                    metal_cx.device,
-                    newLibraryWithSource: str_to_nsstring(&mtlsl)
-                    options: options
-                    error: &mut error
-                ]
-            }) {
-                Some(library) => library,
-                None => {
-                    let description: ObjcId = unsafe { msg_send![error, localizedDescription] };
-                    let string = nsstring_to_string(description);
-                    crate::shader_error::note(string.clone());
-                    let mut out = format!("{}\n", string);
-                    for (index, line) in mtlsl.split("\n").enumerate() {
-                        out.push_str(&format!("{}: {}\n", index + 1, line));
-                    }
-                    crate::error!("{}", out);
-                    return None;
-                }
-            },
-        );
-
-        let _mp_lib_ms = _mp_t0.elapsed().as_secs_f64() * 1000.0;
-        let _mp_t1 = std::time::Instant::now();
-        let descriptor = RcObjcId::from_owned(
-            NonNull::new(unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] }).unwrap(),
-        );
-
-        let vertex_function = RcObjcId::from_owned(
-            NonNull::new(unsafe {
-                msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("vertex_main")]
-            })
-            .unwrap(),
-        );
-
-        let fragment_function = RcObjcId::from_owned(
-            NonNull::new(unsafe {
-                msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("fragment_main")]
-            })
-            .unwrap(),
-        );
-
-        let render_pipeline_state = RcObjcId::from_owned(NonNull::new(unsafe {
-            let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function];
-            let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function];
+            if library == nil {
+                let description = if error == nil { "Metal returned no library".into() } else {
+                    nsstring_to_string(unsafe { msg_send![error, localizedDescription] })
+                };
+                ready.failure(format!("{}\n{}", description, callback_source));
+                return;
+            }
+            let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+            let vertex_function = NonNull::new(unsafe {
+                msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")]
+            }).map(RcObjcId::from_owned);
+            let fragment_function = NonNull::new(unsafe {
+                msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")]
+            }).map(RcObjcId::from_owned);
+            if let (Some(vertex_function), Some(fragment_function)) = (vertex_function, fragment_function) {
+                // Independent descriptors: a driver may consume them after this
+                // call returns. Never mutate a submitted descriptor for a variant.
+                for blend in [true, false] {
+                    let descriptor = RcObjcId::from_owned(unsafe {
+                        msg_send![class!(MTLRenderPipelineDescriptor), new]
+                    });
+                    unsafe {
+            let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function.as_id()];
+            let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function.as_id()];
 
             let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
             let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];
-            match mapping.color_format {
+            match color_format {
                 crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => {
                     let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                     let () = msg_send![color_attachment, setBlendingEnabled: YES];
@@ -2799,56 +2832,64 @@ impl CxOsDrawShader {
 
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
 
-            let mut error: ObjcId = nil;
-            msg_send![
-                metal_cx.device,
-                newRenderPipelineStateWithDescriptor: descriptor.as_id()
-                error: &mut error
-            ]
-        }).unwrap());
 
-        // The per-call `alpha_blend: false` variant. Metal bakes blending
-        // into the pipeline state, so a shader carries two: the descriptor is
-        // copied at creation, so flipping the flag and creating again is the
-        // whole cost. Formats that never blend reuse the one object.
-        let render_pipeline_state_no_blend = match mapping.color_format {
-            crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => RcObjcId::from_owned(
-                NonNull::new(unsafe {
-                    let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
-                    let color_attachment: ObjcId =
-                        msg_send![color_attachments, objectAtIndexedSubscript: 0];
-                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
-                    let mut error: ObjcId = nil;
-                    msg_send![
-                        metal_cx.device,
-                        newRenderPipelineStateWithDescriptor: descriptor.as_id()
-                        error: &mut error
-                    ]
-                })
-                .unwrap(),
-            ),
-            _ => RcObjcId::from_owned(
-                NonNull::new(unsafe { msg_send![render_pipeline_state.as_id(), retain] }).unwrap(),
-            ),
-        };
+                        if !blend {
+                            let attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
+                            let attachment: ObjcId = msg_send![attachments, objectAtIndexedSubscript: 0];
+                            let _: () = msg_send![attachment, setBlendingEnabled: NO];
+                        }
+                    }
+                    let ready = ready.clone();
+                    let pipeline_started = Instant::now();
+                    let source_len = callback_source.len();
+                    let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
+                        let pipeline_ms = pipeline_started.elapsed().as_secs_f64() * 1000.0;
+                        crate::startup_acc("metal newRenderPipelineState", pipeline_ms);
+                        if crate::makepad_error_log::trace_enabled("shader.bench") {
+                            crate::trace!("shader.bench", "src={} bytes blend={} lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
+                                source_len, blend, library_ms, pipeline_ms, started.elapsed().as_secs_f64() * 1000.0);
+                        }
 
-        // Opt-in: shader compile timing is only interesting when someone is
-        // measuring it, and every boot compiles dozens of shaders.
-        if crate::makepad_error_log::trace_enabled("shader.bench") {
-            crate::trace!(
-                "shader.bench",
-                "src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
-                _mp_src_len,
-                _mp_lib_ms,
-                _mp_t1.elapsed().as_secs_f64() * 1000.0,
-                _mp_t0.elapsed().as_secs_f64() * 1000.0
-            );
+                        let result = if let Some(pipeline) = NonNull::new(pipeline) {
+                            Ok(RcObjcId::from_unowned(pipeline))
+                        } else {
+                            let message = if error == nil { "Metal returned no pipeline".into() } else {
+                                nsstring_to_string(unsafe { msg_send![error, localizedDescription] })
+                            };
+                            crate::shader_error::note(message.clone());
+                            crate::error!("Metal pipeline: {}", message);
+                            Err(message)
+                        };
+                        let _ = if blend { ready.blend.set(result) } else { ready.solid.set(result) };
+                        crate::thread::SignalToUI::set_ui_signal();
+                    });
+                    unsafe {
+                        let _: () = msg_send![callback_device.as_id(),
+                            newRenderPipelineStateWithDescriptor: descriptor.as_id()
+                            completionHandler: &completion];
+                    }
+                }
+            } else {
+                ready.failure("Metal library is missing vertex_main or fragment_main".into());
+            }
+            unsafe { let _: () = msg_send![pool, release]; }
+        });
+        unsafe {
+            let _: () = msg_send![device.as_id(), newLibraryWithSource: str_to_nsstring(&source)
+                options: options.as_id() completionHandler: &completion];
         }
-        crate::startup_acc("metal newLibraryWithSource", _mp_lib_ms);
-        crate::startup_acc(
-            "metal newRenderPipelineState",
-            _mp_t1.elapsed().as_secs_f64() * 1000.0,
-        );
+    }
+}
+
+impl CxOsDrawShader {
+    pub(crate) fn new(
+        metal_cx: &MetalCx,
+        mtlsl: String,
+        mapping: &CxDrawShaderMapping,
+        bindings: &UniformBufferBindings,
+    ) -> Option<Self> {
+        let pipelines = Arc::new(MetalPipelines::default());
+        MetalPipelines::compile(metal_cx.device, mtlsl.clone(), mapping.color_format, pipelines.clone());
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
             .get_by_type_name(id!(DrawCallUniforms))
@@ -2870,9 +2911,7 @@ impl CxOsDrawShader {
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
 
         return Some(Self {
-            _library: library,
-            render_pipeline_state,
-            render_pipeline_state_no_blend,
+            pipelines,
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
@@ -2910,63 +2949,214 @@ pub struct CxOsGeometry {
 #[derive(Default)]
 struct MetalBuffer {
     inner: Option<MetalBufferInner>,
+    pending: Option<MetalPendingInstances>,
+    allocation: Option<Arc<MetalInstanceAllocation>>,
+}
+
+struct MetalInstanceAllocation {
+    capacity: usize,
+    ready: std::sync::OnceLock<Option<RcObjcId>>,
+}
+
+// Published once; only the owning UI context mutates the descriptor after
+// publication. Encoders capture their pass state, so it is reused between
+// encodes. All attachment slots are materialized on the allocation worker.
+struct MetalRenderSetup {
+    descriptor: RcObjcId,
+    colors: Vec<RcObjcId>,
+    depth: RcObjcId,
+    depth_write: RcObjcId,
+    depth_no_write: RcObjcId,
+}
+impl MetalRenderSetup {
+    fn new(device: &RcObjcId) -> Option<Self> {
+        let descriptor = NonNull::new(unsafe {
+            msg_send![class!(MTLRenderPassDescriptor), new]
+        }).map(RcObjcId::from_owned)?;
+        let attachments: ObjcId = unsafe { msg_send![descriptor.as_id(), colorAttachments] };
+        let mut colors = Vec::with_capacity(8);
+        for index in 0..8u64 {
+            let attachment = NonNull::new(unsafe {
+                msg_send![attachments, objectAtIndexedSubscript:index]
+            }).map(RcObjcId::from_unowned)?;
+            colors.push(attachment);
+        }
+        let depth = NonNull::new(unsafe {
+            msg_send![descriptor.as_id(), depthAttachment]
+        }).map(RcObjcId::from_unowned)?;
+        let stencil: ObjcId = unsafe { msg_send![descriptor.as_id(), stencilAttachment] };
+        let _: () = unsafe { msg_send![stencil, setTexture:nil] };
+        let depth_desc = NonNull::new(unsafe {
+            msg_send![class!(MTLDepthStencilDescriptor), new]
+        }).map(RcObjcId::from_owned)?;
+        let _: () = unsafe {
+            msg_send![depth_desc.as_id(), setDepthCompareFunction:MTLCompareFunction::LessEqual]
+        };
+        let create_depth = |write: bool| {
+            let _: () = unsafe { msg_send![depth_desc.as_id(), setDepthWriteEnabled:write] };
+            NonNull::new(unsafe {
+                msg_send![device.as_id(), newDepthStencilStateWithDescriptor:depth_desc.as_id()]
+            }).map(RcObjcId::from_owned)
+        };
+        let depth_write = create_depth(true)?;
+        let depth_no_write = create_depth(false)?;
+        Some(Self { descriptor, colors, depth, depth_write, depth_no_write })
+    }
+
+    fn reset_attachments(&self) {
+        for color in &self.colors {
+            unsafe {
+                let _: () = msg_send![color.as_id(), setTexture:nil];
+                let _: () = msg_send![color.as_id(), setResolveTexture:nil];
+                let _: () = msg_send![color.as_id(), setLevel:0u64];
+                let _: () = msg_send![color.as_id(), setSlice:0u64];
+                let _: () = msg_send![color.as_id(), setLoadAction:MTLLoadAction::DontCare];
+                let _: () = msg_send![color.as_id(), setStoreAction:MTLStoreAction::Store];
+            }
+        }
+        let _: () = unsafe { msg_send![self.depth.as_id(), setTexture:nil] };
+    }
+}
+
+enum MetalAllocationRequest {
+    Instances(RcObjcId, Arc<MetalInstanceAllocation>),
+    RenderSetup(RcObjcId, Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>),
+}
+
+// Driver buffer allocation can enter VM/IOSurface accounting too. Keep it
+// off the presenting thread; a cold draw retains its old resident prefix.
+fn metal_buffer_allocator() -> &'static std::sync::mpsc::SyncSender<MetalAllocationRequest> {
+    static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<MetalAllocationRequest>> = std::sync::OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<MetalAllocationRequest>(64);
+        std::thread::Builder::new().name("makepad-metal-buffer".into()).spawn(move || {
+            while let Ok(request) = rx.recv() {
+                let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+                match request {
+                    MetalAllocationRequest::Instances(device, allocation) => {
+                        if Arc::strong_count(&allocation) > 1 {
+                            let buffer = NonNull::new(unsafe {
+                                msg_send![device.as_id(), newBufferWithLength: allocation.capacity as u64 options:nil]
+                            }).map(RcObjcId::from_owned);
+                            let _ = allocation.ready.set(buffer);
+                        }
+                    }
+                    MetalAllocationRequest::RenderSetup(device, ready) => {
+                        if Arc::strong_count(&ready) > 1 {
+                            let setup = MetalRenderSetup::new(&device);
+                            if setup.is_none() { crate::error!("Metal render setup allocation failed"); }
+                            let _ = ready.set(setup);
+                        }
+                    }
+                }
+                let _: () = unsafe { msg_send![pool, release] };
+                crate::thread::SignalToUI::set_ui_signal();
+            }
+        }).expect("Metal instance allocation worker");
+        tx
+    })
+}
+
+struct MetalPendingInstances {
+    inner: MetalBufferInner,
+    publication: u64,
+    copied: usize,
+    end: usize,
 }
 
 impl MetalBuffer {
     /// Append-only uploads can use unconsumed capacity even while earlier
     /// records have GPU readers. Replacements use fresh storage until actual
     /// command-buffer completion, like ordinary MetalBuffer::update.
-    fn update_retained(&mut self, metal_cx: &MetalCx, data: &[f32], range: std::ops::Range<usize>) {
-        let len = std::mem::size_of_val(data);
-        if len == 0 {
-            return;
+    fn update_retained(
+        &mut self,
+        metal_cx: &MetalCx,
+        data: &[f32],
+        range: std::ops::Range<usize>,
+        publication: u64,
+        changed: bool,
+        slots: usize,
+        category: crate::retained_instances::UploadCategory,
+        budget: &mut crate::retained_instances::RetainedUploadBudget,
+    ) -> usize {
+        let end = range.end.min(data.len()) * 4;
+        if end == 0 {
+            self.pending = None;
+            self.inner = None;
+            return 0;
         }
-        let start = range.start * 4;
-        let reusable = self.inner.as_ref().is_some_and(|inner| {
-            len <= inner.capacity
-                && (start >= inner.len
-                    || inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire))
-        });
-        let upload_start = if reusable { start } else { 0 };
-        if !reusable {
-            let capacity = len.next_power_of_two().max(256);
-            self.inner = Some(MetalBufferInner {
-                buffer: RcObjcId::from_owned(
-                    NonNull::new(unsafe {
-                        msg_send![metal_cx.device,newBufferWithLength:capacity as u64 options:nil]
-                    })
-                    .unwrap(),
-                ),
-                len: 0,
-                capacity,
-                last_bound_seq: 0,
+        if changed || self.pending.as_ref().is_some_and(|p| p.publication != publication || p.end != end) {
+            self.pending = None;
+        }
+        if budget.range(0..end, slots * 4).is_empty() {
+            return self.pending.as_ref().map_or(end, |p| end - p.copied);
+        }
+        let start_time = std::time::Instant::now();
+        if self.pending.is_none() {
+            let start = range.start.min(range.end) * 4;
+            // Append only beyond the resident prefix: earlier command buffers
+            // may still read that prefix. Replacements use separate storage.
+            let append = self.inner.as_ref().filter(|inner| {
+                publication != 0 && start == inner.len && end <= inner.capacity
             });
+            let (inner, copied) = if let Some(inner) = append {
+                (MetalBufferInner {
+                    buffer: inner.buffer.clone(), len: inner.len,
+                    capacity: inner.capacity, last_bound_seq: inner.last_bound_seq,
+                }, start)
+            } else {
+                let capacity = end.next_power_of_two().max(256);
+                if self.allocation.as_ref().is_some_and(|a| a.capacity < capacity) {
+                    self.allocation = None;
+                }
+                if self.allocation.is_none() {
+                    let allocation = Arc::new(MetalInstanceAllocation {
+                        capacity, ready: std::sync::OnceLock::new(),
+                    });
+                    let device = RcObjcId::from_unowned(NonNull::new(metal_cx.device).unwrap());
+                    if metal_buffer_allocator().try_send(MetalAllocationRequest::Instances(device, allocation.clone())).is_ok() {
+                        self.allocation = Some(allocation);
+                    }
+                    return end;
+                }
+                let allocation = self.allocation.as_ref().unwrap();
+                let Some(buffer) = allocation.ready.get() else { return end };
+                let Some(buffer) = buffer.clone() else {
+                    self.allocation = None;
+                    return end;
+                };
+                let capacity = allocation.capacity;
+                self.allocation = None;
+                (MetalBufferInner { buffer, len: 0, capacity, last_bound_seq: 0 }, 0)
+            };
+            self.pending = Some(MetalPendingInstances { inner, publication, copied, end });
         }
-        let inner = self.inner.as_mut().unwrap();
-        let dst: *mut std::ffi::c_void = unsafe { msg_send![inner.buffer.as_id(), contents] };
-        if dst.is_null() {
-            return;
-        }
-        // Every submission range is bounded, including the first admission.
-        for offset in (upload_start..len).step_by(256 * 1024) {
-            let bytes = (len - offset).min(256 * 1024);
+        let pending = self.pending.as_mut().unwrap();
+        let copy = budget.range(pending.copied..pending.end, slots * 4);
+        let dst: *mut std::ffi::c_void = unsafe { msg_send![pending.inner.buffer.as_id(), contents] };
+        if dst.is_null() { return pending.end - pending.copied; }
+        if !copy.is_empty() {
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    (data.as_ptr() as *const u8).add(offset),
-                    (dst as *mut u8).add(offset),
-                    bytes,
+                    (data.as_ptr() as *const u8).add(copy.start),
+                    (dst as *mut u8).add(copy.start), copy.len(),
                 );
             }
             #[cfg(target_os = "macos")]
             unsafe {
-                let range = NSRange {
-                    location: offset as u64,
-                    length: bytes as u64,
-                };
-                let _: () = msg_send![inner.buffer.as_id(),didModifyRange:range];
+                let range = NSRange { location: copy.start as u64, length: copy.len() as u64 };
+                let _: () = msg_send![pending.inner.buffer.as_id(),didModifyRange:range];
             }
         }
-        inner.len = len;
+        budget.copied(copy.len(), slots * 4, category, start_time.elapsed());
+        pending.copied = copy.end;
+        let remaining = pending.end - pending.copied;
+        if remaining == 0 {
+            let mut complete = self.pending.take().unwrap().inner;
+            complete.len = end;
+            self.inner = Some(complete);
+        }
+        remaining
     }
     /// Bind-time stamp: until the command buffer being encoded completes,
     /// the GPU may be reading this buffer.
@@ -3113,7 +3303,10 @@ impl Cx {
             let () = msg_send![blit, copyFromTexture: mtl_tex toTexture: staging];
             let () = msg_send![blit, endEncoding];
             let () = msg_send![command_buffer, commit];
-            let () = msg_send![command_buffer, waitUntilCompleted];
+            {
+                let _phase = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
+                let () = msg_send![command_buffer, waitUntilCompleted];
+            }
             // Bytes per pixel from the ALLOCATED format — this reader
             // serves float debug targets too, not just BGRA8.
             let bpp = match &pixel {
@@ -4671,7 +4864,10 @@ mod vec_upload_tests {
         enc.finish(metal_cx);
         unsafe {
             let () = msg_send![command_buffer, commit];
-            let () = msg_send![command_buffer, waitUntilCompleted];
+            {
+                let _phase = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
+                let () = msg_send![command_buffer, waitUntilCompleted];
+            }
         }
         bytes
     }

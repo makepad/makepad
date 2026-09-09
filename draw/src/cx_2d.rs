@@ -42,6 +42,43 @@ pub struct Cx2d<'a, 'b> {
     pub sploded_scene: Option<DrawPassId>,
 }
 
+// Owned by the drawing context, so separate contexts and nested Cx2d draws
+// cannot alias scratch storage. A finished draw returns its high-water capacity.
+#[derive(Default)]
+struct Cx2dScratch {
+    turtles: Vec<Turtle>,
+    finished_rows: Vec<usize>,
+    finished_walks: Vec<FinishedWalk>,
+    turtle_clips: Vec<(Vec2d, Vec2d)>,
+    align_list: Vec<AlignEntry>,
+    draw_call_parent_stack: Vec<u64>,
+    sploded_hairline_seen: Vec<Rect>,
+}
+
+#[derive(Default)]
+struct Cx2dScratchPool(Vec<Cx2dScratch>);
+
+impl Drop for Cx2d<'_, '_> {
+    fn drop(&mut self) {
+        self.turtles.clear();
+        self.finished_rows.clear();
+        self.finished_walks.clear();
+        self.turtle_clips.clear();
+        self.align_list.clear();
+        self.draw_call_parent_stack.clear();
+        self.sploded_hairline_seen.clear();
+        self.cx.global::<Cx2dScratchPool>().0.push(Cx2dScratch {
+            turtles: std::mem::take(&mut self.turtles),
+            finished_rows: std::mem::take(&mut self.finished_rows),
+            finished_walks: std::mem::take(&mut self.finished_walks),
+            turtle_clips: std::mem::take(&mut self.turtle_clips),
+            align_list: std::mem::take(&mut self.align_list),
+            draw_call_parent_stack: std::mem::take(&mut self.draw_call_parent_stack),
+            sploded_hairline_seen: std::mem::take(&mut self.sploded_hairline_seen),
+        });
+    }
+}
+
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
     type Target = CxDraw<'a>;
     fn deref(&self) -> &Self::Target {
@@ -56,7 +93,14 @@ impl<'a, 'b> DerefMut for Cx2d<'a, 'b> {
 
 impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn new(cx: &'b mut CxDraw<'a>) -> Self {
-        let mut draw_call_parent_stack = Vec::with_capacity(256);
+        let mut scratch = cx.global::<Cx2dScratchPool>().0.pop().unwrap_or_default();
+        scratch.turtle_clips.reserve(1024usize.saturating_sub(scratch.turtle_clips.len()));
+        scratch.finished_rows.reserve(1024usize.saturating_sub(scratch.finished_rows.len()));
+        scratch.finished_walks.reserve(1024usize.saturating_sub(scratch.finished_walks.len()));
+        scratch.turtles.reserve(64usize.saturating_sub(scratch.turtles.len()));
+        scratch.align_list.reserve(65536usize.saturating_sub(scratch.align_list.len()));
+        scratch.draw_call_parent_stack.reserve(256);
+        let mut draw_call_parent_stack = scratch.draw_call_parent_stack;
         // Root scope id.
         draw_call_parent_stack.push(1);
         Self {
@@ -65,15 +109,15 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             overlay_draw_depth: 0,
             overlay_seq: 0,
             cx,
-            turtle_clips: Vec::with_capacity(1024),
-            finished_rows: Vec::with_capacity(1024),
-            finished_walks: Vec::with_capacity(1024),
-            turtles: Vec::with_capacity(64),
-            align_list: Vec::with_capacity(4096),
+            turtle_clips: scratch.turtle_clips,
+            finished_rows: scratch.finished_rows,
+            finished_walks: scratch.finished_walks,
+            turtles: scratch.turtles,
+            align_list: scratch.align_list,
             draw_call_parent_stack,
             draw_call_parent_next: 2,
             sploded_hairline: None,
-            sploded_hairline_seen: Vec::new(),
+            sploded_hairline_seen: scratch.sploded_hairline_seen,
             sploded_scene: None,
         }
     }

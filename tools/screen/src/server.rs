@@ -14,7 +14,6 @@ use std::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
-        process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -446,9 +445,8 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
-    unsafe {
-        command.pre_exec(unix::detach_session);
-    }
+    // Detach in the new helper at serve entry, keeping this launch on the
+    // standard library's posix_spawn path (no pre_exec/fork).
     let spawned = command.spawn();
     lock.inherit(false)?;
     let mut child = match spawned {
@@ -496,6 +494,7 @@ fn finish_claim(
 }
 include!("host.rs");
 pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<(), String> {
+    unix::detach_session().map_err(error)?;
     options.validate()?;
     let location = SessionLocation::open(&options.state_dir, &options.session_id, false)?;
     let _lock = unsafe { SessionLock::from_inherited(&location, lock_fd)? };
