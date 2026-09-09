@@ -3401,15 +3401,18 @@ impl AnalysisPool {
 // local files
 // ---------------------------------------------------------------------------
 
-/// Audio extensions the local explorer lane will offer.
-pub const LOCAL_AUDIO_EXTENSIONS: [&str; 9] =
-    ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "aiff", "mp4"];
+/// Audio extensions the local explorer lane will offer. Both spellings of
+/// an AIFF: the four-letter one has been listed all along and could not be
+/// loaded, and the three-letter one is what the desktop tools write.
+pub const LOCAL_AUDIO_EXTENSIONS: [&str; 10] =
+    ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "aiff", "aif", "mp4"];
 
 /// Decode a local audio file. WAV, MP3 and Ogg Vorbis parse in-process
 /// (`makepad-audio-decode`); everything else goes to `decode_audio_clip`,
 /// which looks at the file own first bytes before handing it to the
 /// platform decoder. That is how a `.flac` reaches the FLAC decoder this
-/// repo already has: there is no `MediaType` that names one.
+/// repo already has, and how an `.aiff` reaches the parser next to the WAV
+/// one: there is no `MediaType` that names either.
 pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
     let media = crate::media::local_media_type(path);
     crate::media::decode_audio_clip(&path.to_path_buf(), media, MAX_LOCAL_TRACK_FRAMES)
@@ -3443,6 +3446,31 @@ pub fn list_local_audio(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both spellings of an AIFF are offered now. The four-letter one was
+    /// listed all along and could not be loaded; the three-letter one is
+    /// what the desktop tools write and was never offered at all.
+    #[test]
+    fn the_local_lane_offers_both_spellings_of_an_aiff() {
+        assert!(LOCAL_AUDIO_EXTENSIONS.contains(&"aiff"));
+        assert!(LOCAL_AUDIO_EXTENSIONS.contains(&"aif"));
+        for kept in ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "mp4"] {
+            assert!(LOCAL_AUDIO_EXTENSIONS.contains(&kept), "{kept} was dropped");
+        }
+        let dir = std::env::temp_dir()
+            .join(format!("makepad-vj-local-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("make dir");
+        for name in ["a.aif", "b.aiff", "c.wav", "d.txt"] {
+            std::fs::write(dir.join(name), b"stand in").expect("write");
+        }
+        let listed: Vec<String> = list_local_audio(&dir)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(listed, vec!["a.aif", "b.aiff", "c.wav"], "and a text file is not audio");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn synthetic_beats(bpm: f64, first: f64, count: usize) -> Vec<f64> {
         let period = 60.0 / bpm;

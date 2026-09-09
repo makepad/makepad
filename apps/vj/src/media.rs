@@ -12,8 +12,9 @@
 //! the UI thread.
 //!
 //! Audio tracks (music decks) and SFX pads decode fully to memory on a small
-//! worker pool: WAV through a bounded RIFF parser, MP4/M4A audio through the
-//! platform decoder. Everything is budgeted.
+//! worker pool: WAV through a bounded RIFF parser, AIFF through its
+//! big-endian sibling, and everything else through this repo's own decoders
+//! or the platform's, for its sound alone. Everything is budgeted.
 
 use crate::cue::SlotId;
 use crate::decks::DeckId;
@@ -1976,6 +1977,174 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
     Ok(TrackPcm { frames, sample_rate })
 }
 
+/// The rate an AIFF writes: eighty bits of extended floating point, which
+/// nothing in the language reads.
+///
+/// A sign bit, a fifteen-bit exponent biased by 16383, and a sixty-four bit
+/// mantissa whose leading one is written out rather than implied. Decoded by
+/// shifting rather than through a float, because every rate in use is a
+/// whole number and a round trip through an f64 is one more place for
+/// 44099.999 to come from. `None` for zero, for a negative, for a full
+/// exponent, and for anything that will not fit.
+fn extended80_rate(field: &[u8; 10]) -> Option<u32> {
+    let exponent = u16::from_be_bytes([field[0], field[1]]);
+    if exponent & 0x8000 != 0 || exponent == 0 || exponent == 0x7FFF {
+        return None;
+    }
+    let mantissa = u64::from_be_bytes(field[2..10].try_into().ok()?);
+    if mantissa == 0 {
+        return None;
+    }
+    // The mantissa's top bit stands for two to the exponent, so the value is
+    // the mantissa shifted by however far bit sixty-three is from bit zero.
+    let shift = exponent as i32 - 16383 - 63;
+    let value = match shift {
+        0 => mantissa,
+        s if s > 0 => mantissa.checked_shl(s as u32)?,
+        s => {
+            let s = (-s) as u32;
+            if s >= 64 {
+                return None;
+            }
+            // To nearest, so a rate written one bit under still lands on it.
+            (mantissa >> s) + ((mantissa >> (s - 1)) & 1)
+        }
+    };
+    u32::try_from(value).ok().filter(|rate| *rate > 0)
+}
+
+/// A FORM wrapper with an AIFF or AIFC form type. Matched at offset zero
+/// only: an AIFF keeps its tags in a chunk INSIDE the FORM, never in front
+/// of it, so unlike the FLAC marker there is no tag to read past.
+fn looks_like_aiff(magic: &[u8]) -> bool {
+    magic.len() >= 12 && &magic[0..4] == b"FORM" && matches!(&magic[8..12], b"AIFF" | b"AIFC")
+}
+
+/// Bounded FORM/AIFF (and AIFC) parse, emitting interleaved stereo i16 --
+/// the big-endian sibling of `parse_wav`, shaped the same way.
+///
+/// It parts company in exactly two places, both deliberate: eight-bit
+/// samples are SIGNED here where a RIFF file's are unsigned around 128, and
+/// an AIFF declares its own frame count, so sound that ends early is damage
+/// rather than a shorter track.
+fn parse_aiff(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"FORM" {
+        return Err("not a FORM/AIFF file".into());
+    }
+    let aifc = match &bytes[8..12] {
+        b"AIFF" => false,
+        b"AIFC" => true,
+        _ => return Err("not a FORM/AIFF file".into()),
+    };
+    let mut channels = 0usize;
+    let mut declared_frames = 0usize;
+    let mut bits = 0u16;
+    let mut sample_rate = 0u32;
+    let mut little_endian = false;
+    let mut sound: Option<&[u8]> = None;
+    let mut at = 12usize;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_be_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        // A size out of the file is not to be trusted into an add.
+        let body_end = (at + 8).saturating_add(size).min(bytes.len());
+        let body = &bytes[at + 8..body_end];
+        match id {
+            b"COMM" => {
+                if body.len() < 18 {
+                    return Err("aiff: short COMM chunk".into());
+                }
+                channels = u16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+                declared_frames = u32::from_be_bytes(body[2..6].try_into().unwrap()) as usize;
+                bits = u16::from_be_bytes(body[6..8].try_into().unwrap());
+                sample_rate = extended80_rate(body[8..18].try_into().unwrap())
+                    .ok_or("aiff: no sample rate")?;
+                if aifc {
+                    if body.len() < 22 {
+                        return Err("aiff: short COMM chunk".into());
+                    }
+                    match &body[18..22] {
+                        // Big-endian PCM, which is what this parser reads.
+                        b"NONE" => {}
+                        // The same samples with their bytes the other way.
+                        b"sowt" => little_endian = true,
+                        id => {
+                            let name: String = id
+                                .iter()
+                                .map(|b| if b.is_ascii_graphic() { *b as char } else { '?' })
+                                .collect();
+                            return Err(format!("aiff: unsupported compression {name}"));
+                        }
+                    }
+                }
+            }
+            b"SSND" => {
+                if body.len() < 8 {
+                    return Err("aiff: short SSND chunk".into());
+                }
+                let offset = u32::from_be_bytes(body[0..4].try_into().unwrap()) as usize;
+                // The block size at 4..8 is for a writer aligning its own
+                // chunks and is read by nobody; it is not read here either.
+                sound = Some(body.get(8usize.saturating_add(offset)..).unwrap_or_default());
+            }
+            _ => {}
+        }
+        at = body_end + (size & 1);
+    }
+    let sound = sound.ok_or("aiff: no SSND chunk")?;
+    if channels == 0 || sample_rate == 0 {
+        return Err("aiff: no COMM chunk".into());
+    }
+    let [left, right] =
+        crate::dsp_math::stereo_pair_indices(channels).ok_or("aiff: no channels")?;
+    // Two's complement, most significant byte first, in whole bytes. EIGHT
+    // bits are SIGNED here, which is the one place this parser parts company
+    // with parse_wav: a RIFF file's eight-bit samples are unsigned around
+    // 128 and an AIFF's are signed around zero, and reading one law with the
+    // other inverts every sample's top bit.
+    let bytes_per_sample = match bits {
+        8 | 16 | 24 | 32 => (bits / 8) as usize,
+        other => return Err(format!("aiff: unsupported sample size {other}")),
+    };
+    let sample_at = |frame: &[u8], i: usize| -> i16 {
+        let s = &frame[i * bytes_per_sample..(i + 1) * bytes_per_sample];
+        let byte = |n: usize| if little_endian { s[bytes_per_sample - 1 - n] } else { s[n] };
+        match bytes_per_sample {
+            1 => (byte(0) as i8 as i16) << 8,
+            2 => i16::from_be_bytes([byte(0), byte(1)]),
+            3 => (i32::from_be_bytes([byte(0), byte(1), byte(2), 0]) >> 16) as i16,
+            _ => (i32::from_be_bytes([byte(0), byte(1), byte(2), byte(3)]) >> 16) as i16,
+        }
+    };
+    let block = bytes_per_sample * channels;
+    let available = sound.len() / block.max(1);
+    if declared_frames == 0 {
+        return Err("aiff: empty sound data".into());
+    }
+    // The frame count is DECLARED here, unlike a RIFF file where the data
+    // chunk's own length IS the count. So a file whose sound ends before its
+    // header promised is damaged rather than short, and is refused as one:
+    // playing the part that survived would hide the damage behind a deck
+    // that looks like it worked.
+    if available < declared_frames {
+        return Err(format!(
+            "aiff: sound data ends {} frames early",
+            declared_frames - available
+        ));
+    }
+    // Checked BEFORE the reserve, which parse_wav cannot do because it has
+    // no count to check. Same wording and same boundary: a clip of exactly
+    // the budget loads, one frame more does not.
+    if declared_frames > max_frames {
+        return Err("audio clip exceeds the decode budget".into());
+    }
+    let mut frames: Vec<[i16; 2]> = Vec::with_capacity(declared_frames);
+    for frame in sound.chunks_exact(block).take(declared_frames) {
+        frames.push([sample_at(frame, left), sample_at(frame, right)]);
+    }
+    Ok(TrackPcm { frames, sample_rate })
+}
+
 /// What a local file's NAME says its container is -- the one table.
 ///
 /// `None` is not "an MP4": it means the name names no decoder this app
@@ -2010,9 +2179,10 @@ pub fn local_media_type(path: &Path) -> MediaType {
         .unwrap_or(MediaType::Mp4)
 }
 
-/// Decode an audio clip fully to memory. WAV parses directly, MP3 and Ogg
-/// Vorbis go through this repo's own decoders, and MP4/M4A pulls the platform
-/// decoder's audio track.
+/// Decode an audio clip fully to memory. WAV and AIFF both parse directly
+/// here, MP3 and Ogg Vorbis go through this repo's own decoders, and
+/// anything else has its own first bytes looked at before it is handed to
+/// the platform decoder for its sound.
 pub fn decode_audio_clip(
     path: &PathBuf,
     media: MediaType,
@@ -2033,7 +2203,18 @@ pub fn decode_audio_clip(
             // offered by the explorer all along and failed here with
             // "no video stream", which is the platform decoder being
             // asked for something it was never given.
-            if let Some(format) = repo_audio_format(&audio_magic(path).unwrap_or_default()) {
+            let magic = audio_magic(path).unwrap_or_default();
+            // An AIFF is the same story one step further on: a wrapper
+            // around PCM that the platform will not open for want of a
+            // picture, and that the decode library has no seat for either
+            // -- so it is read here, next door to the other PCM wrapper.
+            // Ahead of the marker sniff, because that sniff only names
+            // decoders the library HAS.
+            if looks_like_aiff(&magic) {
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                return parse_aiff(&bytes, max_frames);
+            }
+            if let Some(format) = repo_audio_format(&magic) {
                 return decode_repo_audio(path, format, max_frames);
             }
             // A cache object's name is a digest and the platform demuxers
@@ -2140,7 +2321,7 @@ const MAX_TAG_SKIP: usize = 4 << 20;
 fn audio_magic(path: &PathBuf) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
-    let mut head = [0u8; 10];
+    let mut head = [0u8; 12];
     file.read_exact(&mut head).ok()?;
     let skip = makepad_audio_decode::flac::metadata::skip_id3(&head);
     if skip == 0 {
@@ -3788,14 +3969,353 @@ mod tests {
         // the point being that a corrupt length cannot turn a sniff into
         // a whole-file read of something that was never audio.
         let silly = dir.join("silly.bin");
-        std::fs::write(&silly, id3_header(MAX_TAG_SKIP + 1)).expect("write");
+        let mut bytes = id3_header(MAX_TAG_SKIP + 1);
+        // Past the head the sniff reads, so what refuses this file is the
+        // CAP and not its length: a bare header is exactly ten bytes and
+        // the head is twelve.
+        bytes.extend(std::iter::repeat_n(0u8, 8));
+        std::fs::write(&silly, &bytes).expect("write");
         assert!(audio_magic(&silly).is_none());
 
         // Shorter than a header at all: not audio, and not a panic.
         let stub = dir.join("stub.bin");
         std::fs::write(&stub, b"fLa").expect("write");
         assert!(audio_magic(&stub).is_none());
+
+        // Twelve bytes, because a wrapper's form type sits at bytes eight
+        // to twelve and a ten-byte window cuts it in half.
+        let form = dir.join("form.aiff");
+        std::fs::write(&form, aiff_bytes(1, 16, 44_100, None, None, &[0; 8])).expect("write");
+        let magic = audio_magic(&form).expect("a magic");
+        assert!(magic.len() >= 12, "the head reaches the form type: {}", magic.len());
+        assert!(looks_like_aiff(&magic));
+
+        // The head's width is a rule, so a file shorter than it says so.
+        // Outcome-neutral: ten bytes was never a container either way.
+        let ten = dir.join("ten.bin");
+        std::fs::write(&ten, id3_header(0)).expect("write");
+        assert!(audio_magic(&ten).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole arm end to end: an AIFF on disk reaches the parser next
+    /// to the WAV one and never the platform, whatever it is called.
+    #[test]
+    fn an_aiff_on_disk_reaches_the_aiff_parser_and_not_the_platform() {
+        let dir = test_dir("aiff-route");
+        std::fs::create_dir_all(&dir).expect("make dir");
+        let data: Vec<u8> = (0..400i16).flat_map(|v| (v * 80).to_be_bytes()).collect();
+        let bytes = aiff_bytes(2, 16, 44_100, None, None, &data);
+
+        let named = dir.join("tone.aiff");
+        std::fs::write(&named, &bytes).expect("write");
+        let pcm = decode_audio_clip(&named, MediaType::Mp4, 10_000).expect("an aiff decodes");
+        assert_eq!(pcm.sample_rate, 44_100);
+        assert_eq!(pcm.frames.len(), 200);
+
+        // By its bytes, not by its name.
+        let lying = dir.join("tone.m4a");
+        std::fs::write(&lying, &bytes).expect("write");
+        assert!(decode_audio_clip(&lying, MediaType::Mp4, 10_000).is_ok());
+
+        // And through the lane the explorer and the analysis use, which
+        // is what puts the name table, the fallback and this branch in
+        // one call.
+        for name in ["a.aif", "b.aiff"] {
+            let path = dir.join(name);
+            std::fs::write(&path, &bytes).expect("write");
+            assert!(
+                crate::wave_analysis::decode_audio_file(&path).is_ok(),
+                "{name} decodes through the local lane",
+            );
+        }
+        // The name table is deliberately unmoved: both spellings still
+        // fall to the arm that looks at the bytes.
+        assert_eq!(local_media_type(Path::new("a.aif")), MediaType::Mp4);
+        assert_eq!(local_media_type(Path::new("a.aiff")), MediaType::Mp4);
+
+        // A refusal from this parser is told apart from the platform's.
+        let compressed = dir.join("packed.aiff");
+        std::fs::write(&compressed, aiff_bytes(1, 16, 44_100, Some(b"ima4"), None, &[0; 8]))
+            .expect("write");
+        let error = match decode_audio_clip(&compressed, MediaType::Mp4, 10_000) {
+            Err(error) => error,
+            Ok(_) => panic!("a compressed aiff was decoded as if it were not"),
+        };
+        assert!(error.contains("ima4"), "{error}");
+        assert!(!error.contains("stream in file"), "the platform never saw it: {error}");
+
+        // And nothing was hard-linked on the way: this never reaches the
+        // typed-link path at all.
+        assert!(!dir.join(".makepad-decoder-input").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The eighty-bit extended form of a whole-number rate: the exponent
+    /// that puts the rate's top set bit at bit sixty-three, and the rate
+    /// shifted up to meet it. Shifts UP where `extended80_rate` shifts
+    /// DOWN, so a round trip is a real check rather than a shared mistake.
+    fn extended80(rate: u32) -> [u8; 10] {
+        let top = 31 - rate.leading_zeros();
+        let exponent = (16383 + top) as u16;
+        let mantissa = (rate as u64) << (63 - top);
+        let mut out = [0u8; 10];
+        out[0..2].copy_from_slice(&exponent.to_be_bytes());
+        out[2..10].copy_from_slice(&mantissa.to_be_bytes());
+        out
+    }
+
+    /// A raw FORM around whatever chunks are given -- the builder the
+    /// damage cases need, because `aiff_bytes` below always writes a
+    /// well-formed COMM and a full SSND prologue.
+    fn aiff_form(kind: &[u8; 4], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = kind.to_vec();
+        for (id, chunk) in chunks {
+            body.extend_from_slice(*id);
+            body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            body.extend_from_slice(chunk);
+            if chunk.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut out = b"FORM".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A FORM/AIFF around `data` -- or a FORM/AIFC when `compression` is
+    /// given, which also writes the empty name that follows it. `declared`
+    /// overrides the frame count computed from the data, so a file that
+    /// promises more sound than it holds can be built.
+    fn aiff_bytes(
+        channels: u16,
+        bits: u16,
+        rate: u32,
+        compression: Option<&[u8; 4]>,
+        declared: Option<u32>,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let block = channels as usize * (bits / 8) as usize;
+        let frames = declared.unwrap_or((data.len() / block.max(1)) as u32);
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&channels.to_be_bytes());
+        comm.extend_from_slice(&frames.to_be_bytes());
+        comm.extend_from_slice(&bits.to_be_bytes());
+        comm.extend_from_slice(&extended80(rate));
+        if let Some(id) = compression {
+            comm.extend_from_slice(id);
+            // The compression name, as an empty Pascal string.
+            comm.extend_from_slice(&[0, 0]);
+        }
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes());
+        ssnd.extend_from_slice(&0u32.to_be_bytes());
+        ssnd.extend_from_slice(data);
+        let kind: &[u8; 4] = if compression.is_some() { b"AIFC" } else { b"AIFF" };
+        aiff_form(kind, &[(b"COMM", comm), (b"SSND", ssnd)])
+    }
+
+    /// Every depth big-endian, and the one place this parser deliberately
+    /// disagrees with the RIFF one: eight-bit samples are signed here and
+    /// unsigned there, so reading either law with the other inverts every
+    /// sample's top bit.
+    #[test]
+    fn an_aiff_round_trips_at_each_depth_and_eight_bits_are_signed() {
+        let pcm = |bits: u16, data: &[u8]| parse_aiff(&aiff_bytes(1, bits, 44_100, None, None, data), 100).unwrap().frames;
+        assert_eq!(pcm(16, &[0x7F, 0xFF, 0x80, 0x00]), vec![[32767, 32767], [-32768, -32768]]);
+        assert_eq!(
+            pcm(24, &[0x7F, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00]),
+            vec![[32767, 32767], [-32768, -32768], [1, 1]],
+        );
+        assert_eq!(
+            pcm(32, &[0x7F, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x00, 0x00]),
+            vec![[32767, 32767], [1, 1]],
+        );
+        // The same byte, read by each parser's own law.
+        assert_eq!(pcm(8, &[0x80]), vec![[-32768, -32768]], "an AIFF's eight bits are signed");
+        assert_eq!(pcm(8, &[0x00]), vec![[0, 0]]);
+        let wav = |byte: u8| {
+            parse_wav(&wav_bytes(1, 1, 8, 44_100, &[byte]), 10).unwrap().frames
+        };
+        assert_eq!(wav(0x80), vec![[0, 0]], "a RIFF file's eight bits are not");
+        assert_eq!(wav(0x00), vec![[-32768, -32768]]);
+    }
+
+    /// The rate a header wrote, out of the one field nothing in the
+    /// language reads.
+    #[test]
+    fn an_aiff_names_the_rate_its_header_wrote() {
+        let field = |bytes: [u8; 10]| extended80_rate(&bytes);
+        assert_eq!(field([0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]), Some(44_100));
+        assert_eq!(field([0x40, 0x0E, 0xBB, 0x80, 0, 0, 0, 0, 0, 0]), Some(48_000));
+        assert_eq!(field([0x40, 0x0D, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]), Some(22_050));
+        assert_eq!(field([0x40, 0x0B, 0xFA, 0x00, 0, 0, 0, 0, 0, 0]), Some(8_000));
+        for rate in [8_000u32, 22_050, 44_100, 48_000, 96_000, 192_000] {
+            assert_eq!(extended80_rate(&extended80(rate)), Some(rate), "{rate}");
+        }
+        // Nothing a rate can be.
+        assert_eq!(field([0; 10]), None, "zero");
+        assert_eq!(field([0x7F, 0xFF, 0x80, 0, 0, 0, 0, 0, 0, 0]), None, "a full exponent");
+        assert_eq!(field([0xC0, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]), None, "a negative");
+        assert_eq!(field([0x40, 0x40, 0x80, 0, 0, 0, 0, 0, 0, 0]), None, "past a u32");
+        // And through the parser.
+        let at = |rate| parse_aiff(&aiff_bytes(2, 16, rate, None, None, &[0; 8]), 10).unwrap().sample_rate;
+        assert_eq!(at(44_100), 44_100);
+        assert_eq!(at(96_000), 96_000);
+    }
+
+    /// The same signal three ways: plain, declared uncompressed, and with
+    /// every sample's bytes the other way round.
+    #[test]
+    fn a_byte_swapped_aiff_reads_the_same_samples_as_a_plain_one() {
+        let big: Vec<u8> = vec![0x12, 0x34, 0xF0, 0x0D, 0x7F, 0xFF, 0x80, 0x00];
+        let swapped: Vec<u8> = big.chunks(2).flat_map(|p| [p[1], p[0]]).collect();
+        let plain = parse_aiff(&aiff_bytes(1, 16, 44_100, None, None, &big), 100).unwrap();
+        let none = parse_aiff(&aiff_bytes(1, 16, 44_100, Some(b"NONE"), None, &big), 100).unwrap();
+        let sowt =
+            parse_aiff(&aiff_bytes(1, 16, 44_100, Some(b"sowt"), None, &swapped), 100).unwrap();
+        assert_eq!(plain.frames, none.frames);
+        assert_eq!(plain.frames, sowt.frames, "a byte-swapped file is the same sound");
+        assert_eq!(plain.sample_rate, sowt.sample_rate);
+        // At a width other than two, so the reversal is not pinned by luck.
+        let wide: Vec<u8> = vec![0x12, 0x34, 0x56, 0x80, 0x00, 0x01];
+        let wide_swapped: Vec<u8> = wide.chunks(3).flat_map(|p| [p[2], p[1], p[0]]).collect();
+        let plain = parse_aiff(&aiff_bytes(1, 24, 44_100, None, None, &wide), 100).unwrap();
+        let sowt =
+            parse_aiff(&aiff_bytes(1, 24, 44_100, Some(b"sowt"), None, &wide_swapped), 100).unwrap();
+        assert_eq!(plain.frames, sowt.frames, "and at three bytes a sample");
+    }
+
+    /// The front pair, mono to both ears -- the law every decode path in
+    /// this app follows.
+    #[test]
+    fn an_aiff_gives_its_front_pair_and_mono_to_both_ears() {
+        let frame = |channels: u16, samples: &[i16]| {
+            let data: Vec<u8> = samples.iter().flat_map(|s| s.to_be_bytes()).collect();
+            parse_aiff(&aiff_bytes(channels, 16, 44_100, None, None, &data), 10).unwrap().frames
+        };
+        assert_eq!(frame(6, &[10, 20, 30, 40, 50, 60]), vec![[10, 20]], "six channels");
+        assert_eq!(frame(1, &[7]), vec![[7, 7]], "mono to both ears");
+        assert_eq!(frame(2, &[1, 2]), vec![[1, 2]], "stereo is what it is");
+    }
+
+    /// Every refusal by its own words, so a file this parser cannot read is
+    /// told apart from one the platform could not open.
+    #[test]
+    fn an_aiff_refuses_a_compressor_by_name_and_a_short_chunk_by_what_is_short() {
+        let refusal = |bytes: Vec<u8>| match parse_aiff(&bytes, 1000) {
+            Err(error) => error,
+            Ok(_) => panic!("a file that cannot be read was read"),
+        };
+        for id in [b"ima4", b"fl32"] {
+            let error = refusal(aiff_bytes(1, 16, 44_100, Some(id), None, &[0; 4]));
+            let name = std::str::from_utf8(id).unwrap();
+            assert!(error.contains(name), "the compressor is named: {error}");
+            assert!(!error.contains("no video stream"), "{error}");
+        }
+        // A COMM cut short, and an AIFC COMM cut before its compression id.
+        let short_comm = aiff_form(b"AIFF", &[(b"COMM", vec![0; 12])]);
+        assert!(refusal(short_comm).contains("short COMM chunk"));
+        let cut_aifc = aiff_form(b"AIFC", &[(b"COMM", {
+            let mut body = vec![0u8, 1, 0, 0, 0, 4, 0, 16];
+            body.extend_from_slice(&extended80(44_100));
+            body.truncate(20);
+            body
+        })]);
+        assert!(refusal(cut_aifc).contains("short COMM chunk"), "an AIFC COMM needs its id");
+        // An SSND with no room for its own prologue.
+        let short_ssnd = aiff_form(b"AIFF", &[(b"SSND", vec![0; 4])]);
+        assert!(refusal(short_ssnd).contains("short SSND chunk"));
+        // Sound that ends before the header promised.
+        let data: Vec<u8> = vec![0; 100 * 2];
+        let early = refusal(aiff_bytes(1, 16, 44_100, None, Some(200), &data));
+        assert!(early.contains("ends 100 frames early"), "{early}");
+        // Wrappers that are not this one, and nothing panics on any.
+        assert!(refusal(wav_bytes(1, 2, 16, 44_100, &[0; 8])).contains("not a FORM/AIFF"));
+        assert!(refusal(b"fLaC\0\0\0\x22\0\0\0\0".to_vec()).contains("not a FORM/AIFF"));
+        assert!(refusal(aiff_form(b"AIFZ", &[])).contains("not a FORM/AIFF"));
+        assert!(refusal(b"FORM\0\0\0\x04AIF".to_vec()).contains("not a FORM/AIFF"));
+        assert!(refusal(b"garbage".to_vec()).contains("not a FORM/AIFF"));
+        // A depth no law here reads.
+        let odd = refusal(aiff_bytes(1, 12, 44_100, None, None, &[0; 8]));
+        assert!(odd.contains("unsupported sample size 12"), "{odd}");
+    }
+
+    /// The budget's boundary is the same one a RIFF file gets, and a
+    /// header claiming a hundred million frames is refused for what it
+    /// actually is -- damage -- rather than reserving for it first.
+    #[test]
+    fn an_aiff_over_the_budget_is_refused_before_it_is_read() {
+        let data: Vec<u8> = vec![0; 100 * 2];
+        let at = |budget| parse_aiff(&aiff_bytes(1, 16, 44_100, None, None, &data), budget);
+        assert!(at(50).is_err(), "over the budget");
+        assert!(at(99).is_err(), "one frame over");
+        assert_eq!(at(100).unwrap().frames.len(), 100, "exactly the budget loads");
+        let over = match at(50) {
+            Err(error) => error,
+            Ok(_) => panic!("the budget was not enforced"),
+        };
+        assert!(over.contains("exceeds the decode budget"), "{over}");
+        // A header promising a hundred million frames over four bytes of
+        // sound: refused as damage, and never reserved for.
+        let huge = match parse_aiff(
+            &aiff_bytes(1, 16, 44_100, None, Some(100_000_000), &[0, 0, 0, 0]),
+            1000,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a header that promised the earth was believed"),
+        };
+        assert!(huge.contains("frames early"), "{huge}");
+    }
+
+    /// One signal written both ways decodes the same, which catches an
+    /// endian slip or a shift off by eight that every per-depth assertion
+    /// above could still pass if the fixture and the parser shared it.
+    #[test]
+    fn an_aiff_and_a_wav_of_one_signal_decode_to_the_same_samples() {
+        let signal: Vec<i32> = (0..1000)
+            .map(|i| match i {
+                0 => i32::MAX / 2,
+                1 => i32::MIN / 2,
+                n => ((n as i32 - 500) * 4_000_000).clamp(i32::MIN / 2, i32::MAX / 2),
+            })
+            .collect();
+        let big16: Vec<u8> = signal.iter().flat_map(|v| ((v >> 16) as i16).to_be_bytes()).collect();
+        let little16: Vec<u8> =
+            signal.iter().flat_map(|v| ((v >> 16) as i16).to_le_bytes()).collect();
+        let aiff = parse_aiff(&aiff_bytes(1, 16, 44_100, None, None, &big16), 2000).unwrap();
+        let wav = parse_wav(&wav_bytes(1, 1, 16, 44_100, &little16), 2000).unwrap();
+        assert_eq!(aiff.sample_rate, wav.sample_rate);
+        assert_eq!(aiff.frames, wav.frames, "sixteen bits, byte for byte");
+
+        let big24: Vec<u8> =
+            signal.iter().flat_map(|v| [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8]).collect();
+        let little24: Vec<u8> =
+            signal.iter().flat_map(|v| [(v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8]).collect();
+        let aiff = parse_aiff(&aiff_bytes(1, 24, 44_100, None, None, &big24), 2000).unwrap();
+        let wav = parse_wav(&wav_bytes(1, 1, 24, 44_100, &little24), 2000).unwrap();
+        assert_eq!(aiff.frames.len(), wav.frames.len());
+        for (index, (a, w)) in aiff.frames.iter().zip(wav.frames.iter()).enumerate() {
+            assert!(
+                (a[0] as i32 - w[0] as i32).abs() <= 1,
+                "twenty-four bits differ at {index}: {a:?} against {w:?}",
+            );
+        }
+    }
+
+    /// The wrapper is recognised by its own head and nothing else is.
+    #[test]
+    fn an_aiff_is_recognised_by_its_wrapper_and_nothing_else_is() {
+        assert!(looks_like_aiff(b"FORM\0\0\x10\0AIFF"));
+        assert!(looks_like_aiff(b"FORM\0\0\x10\0AIFC"));
+        assert!(!looks_like_aiff(b"RIFF\0\0\x10\0WAVE"));
+        assert!(!looks_like_aiff(b"fLaC\0\0\0\x22\0\0\0\0"));
+        assert!(!looks_like_aiff(b"\0\0\0\x18ftypmp42"));
+        assert!(!looks_like_aiff(b"FORM\0\0\x10\0AIF"), "eleven bytes is not enough");
+        assert!(!looks_like_aiff(b""));
+        // And the marker sniff still answers exactly as it did.
+        assert_eq!(repo_audio_format(b"FORM\0\0\x10\0AIFF"), None);
     }
 
     /// One table, and it knows both spellings of a RIFF file. The deck

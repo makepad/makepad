@@ -6774,19 +6774,19 @@ mod name_table_tests {
         );
     }
 
-    /// The set of names a drop accepts is what it always was, now built
-    /// from the table plus the offered list rather than a hard-coded word.
-    /// `a.aif` is deliberately false: making it true is its own change,
-    /// on three surfaces at once.
+    /// The set of names a drop accepts, built from the table plus the
+    /// offered list rather than a hard-coded word. `a.aif` joined it when
+    /// the AIFF parser landed: that array feeds three surfaces at once --
+    /// this filter, the explorer's listing and the command line.
     #[test]
     fn the_drop_filter_admits_what_it_always_did() {
         for name in [
             "a.wav", "a.wave", "a.WAVE", "a.mp3", "a.ogg", "a.oga", "a.m4a", "a.aac", "a.flac",
-            "a.aiff", "a.mp4",
+            "a.aiff", "a.aif", "a.mp4",
         ] {
             assert!(App::is_playable_audio(Path::new(name)), "{name} must be playable");
         }
-        for name in ["a.aif", "a.txt", "a.mov", "a"] {
+        for name in ["a.txt", "a.mov", "a"] {
             assert!(!App::is_playable_audio(Path::new(name)), "{name} must not be");
         }
     }
