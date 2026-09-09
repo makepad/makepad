@@ -6222,6 +6222,23 @@ impl FxTarget {
             Self::Both => ChainTarget::DeckA,
         }
     }
+
+    /// The word the levels file holds for the row: a target's own word,
+    /// or `both`. Self-describing, so a build that gains a target does not
+    /// renumber the ones an older file already names.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::One(target) => target.tag(),
+            Self::Both => "both",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<FxTarget> {
+        if tag.trim() == "both" {
+            return Some(Self::Both);
+        }
+        ChainTarget::ALL.into_iter().find(|target| target.tag() == tag.trim()).map(Self::One)
+    }
 }
 
 #[cfg(test)]
@@ -6240,6 +6257,20 @@ mod fx_target_tests {
             assert_eq!(FxTarget::One(target).shown(), target);
         }
         assert_eq!(FxTarget::default(), FxTarget::Both, "as the old MIX chip was");
+    }
+
+    /// The row's word round-trips, and a word this build does not know
+    /// leaves the default standing rather than landing on a neighbour.
+    #[test]
+    fn fx_target_tag_round_trips_and_a_stranger_reads_as_nothing() {
+        assert_eq!(FxTarget::from_tag(FxTarget::Both.tag()), Some(FxTarget::Both));
+        for target in ChainTarget::ALL {
+            let row = FxTarget::One(target);
+            assert_eq!(FxTarget::from_tag(row.tag()), Some(row));
+            assert_eq!(FxTarget::from_tag(&format!(" {}\n", row.tag())), Some(row));
+        }
+        assert_eq!(FxTarget::from_tag("mix"), None, "the old chip's label was never a word");
+        assert_eq!(FxTarget::from_tag(""), None);
     }
 }
 
@@ -22826,190 +22857,38 @@ p2 {}
         service::session_config_from_env().cache_parent.join("fx-levels.txt")
     }
 
-    /// Both decks' level policies. Written whenever one changes: the panel
-    /// is a settings surface, and a setting that does not survive the app
-    /// is not a setting.
+    /// Every target's level policies, and which target the rack is on.
+    /// Written whenever one changes: the panel is a settings surface, and
+    /// a setting that does not survive the app is not a setting.
     fn save_fx_levels_settings(&self) {
         let path = Self::fx_levels_settings_path();
         let mut store = crate::settings::Settings::new();
-        for (tag, id) in [("a", DeckId::A), ("b", DeckId::B)] {
-            let chain = self.decks.chain(id);
-            store.set_usize(
-                &format!("fxlevel.{tag}.all.mode"),
-                chain.level_default.as_row() as usize,
-            );
-        store.set_usize(
-            &format!("fxlevel.{tag}.echo.mode"),
-            chain.echo_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.echo.mix"), chain.echo_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.echo.cap"), chain.echo_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.flanger.mode"),
-            chain.flanger_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.flanger.mix"), chain.flanger_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.flanger.cap"), chain.flanger_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.bitcrusher.mode"),
-            chain.bitcrusher_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.mix"), chain.bitcrusher_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.cap"), chain.bitcrusher_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.tremolo.mode"),
-            chain.tremolo_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.tremolo.mix"), chain.tremolo_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.tremolo.cap"), chain.tremolo_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.distortion.mode"),
-            chain.distortion_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.distortion.mix"), chain.distortion_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.distortion.cap"), chain.distortion_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.phaser.mode"),
-            chain.phaser_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.phaser.mix"), chain.phaser_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.phaser.cap"), chain.phaser_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.autopan.mode"),
-            chain.autopan_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.autopan.mix"), chain.autopan_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.autopan.cap"), chain.autopan_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.stereo_width.mode"),
-            chain.stereo_width_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.stereo_width.mix"), chain.stereo_width_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.stereo_width.cap"), chain.stereo_width_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.plate_reverb.mode"),
-            chain.plate_reverb_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.mix"), chain.plate_reverb_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.cap"), chain.plate_reverb_ceiling as f64);
-        store.set_usize(
-            &format!("fxlevel.{tag}.moog_ladder.mode"),
-            chain.moog_ladder_level_mode.as_row() as usize,
-        );
-        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.mix"), chain.moog_ladder_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.cap"), chain.moog_ladder_ceiling as f64);
+        for target in ChainTarget::ALL {
+            self.chain_state(target).write_levels(&mut store, target.tag());
         }
+        store.set_text("fx.target", self.sfx_fx_target.tag());
         let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     /// Read them back and push them at the engine. A missing key is the
-    /// default, so a file written by an older build simply carries fewer
-    /// answers rather than failing.
+    /// default, so a file written by an older build -- one that knew only
+    /// the two decks -- simply carries fewer answers rather than failing.
     fn load_fx_levels_settings(&mut self, cx: &mut Cx) {
         let Ok(body) = std::fs::read_to_string(Self::fx_levels_settings_path()) else {
             return;
         };
         let store = crate::settings::Settings::from_text(&body);
-        for (tag, deck) in [("a", DeckId::A), ("b", DeckId::B)] {
-            let chain = self.decks.chain_mut(deck);
-            let mut params = Vec::new();
-            let all = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.all.mode"),
-                1,
-            ) as u32);
-            params.extend(chain.set_level_default(all));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.echo.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_echo_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.echo.mix"), 1.0) as f32;
-            params.extend(chain.set_echo_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.echo.cap"), 1.0) as f32;
-            params.extend(chain.set_echo_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.flanger.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_flanger_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.flanger.mix"), 1.0) as f32;
-            params.extend(chain.set_flanger_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.flanger.cap"), 1.0) as f32;
-            params.extend(chain.set_flanger_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.bitcrusher.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_bitcrusher_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.bitcrusher.mix"), 1.0) as f32;
-            params.extend(chain.set_bitcrusher_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.bitcrusher.cap"), 1.0) as f32;
-            params.extend(chain.set_bitcrusher_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.tremolo.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_tremolo_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.tremolo.mix"), 1.0) as f32;
-            params.extend(chain.set_tremolo_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.tremolo.cap"), 1.0) as f32;
-            params.extend(chain.set_tremolo_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.distortion.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_distortion_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.distortion.mix"), 1.0) as f32;
-            params.extend(chain.set_distortion_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.distortion.cap"), 1.0) as f32;
-            params.extend(chain.set_distortion_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.phaser.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_phaser_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.phaser.mix"), 1.0) as f32;
-            params.extend(chain.set_phaser_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.phaser.cap"), 1.0) as f32;
-            params.extend(chain.set_phaser_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.autopan.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_autopan_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.autopan.mix"), 1.0) as f32;
-            params.extend(chain.set_autopan_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.autopan.cap"), 1.0) as f32;
-            params.extend(chain.set_autopan_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.stereo_width.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_stereo_width_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.stereo_width.mix"), 1.0) as f32;
-            params.extend(chain.set_stereo_width_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.stereo_width.cap"), 1.0) as f32;
-            params.extend(chain.set_stereo_width_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.plate_reverb.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_plate_reverb_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.plate_reverb.mix"), 1.0) as f32;
-            params.extend(chain.set_plate_reverb_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.plate_reverb.cap"), 1.0) as f32;
-            params.extend(chain.set_plate_reverb_ceiling(cap));
-            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
-                &format!("fxlevel.{tag}.moog_ladder.mode"),
-                0,
-            ) as u32);
-            params.extend(chain.set_moog_ladder_level_mode(mode));
-            let mix = store.f64(&format!("fxlevel.{tag}.moog_ladder.mix"), 1.0) as f32;
-            params.extend(chain.set_moog_ladder_mix(mix));
-            let cap = store.f64(&format!("fxlevel.{tag}.moog_ladder.cap"), 1.0) as f32;
-            params.extend(chain.set_moog_ladder_ceiling(cap));
-            self.send_deck_effects(cx, deck, params);
+        for target in ChainTarget::ALL {
+            let params = self.chain_state_mut(target).read_levels(&store, target.tag());
+            for param in params {
+                self.mixer.set_chain_effect(target, param);
+            }
         }
+        self.sfx_fx_target =
+            FxTarget::from_tag(&store.text("fx.target", "both")).unwrap_or_default();
+        // The chips repaint here rather than on the next sync: at boot the
+        // rack is painted before its file is read.
+        self.sync_sfx_fx_ui(cx);
     }
 
     fn save_phones_settings(&self) {
@@ -33630,6 +33509,9 @@ impl MatchEvent for App {
             if self.ui.button(cx, chip).clicked(actions) {
                 self.sfx_fx_target = target;
                 self.sync_sfx_fx_ui(cx);
+                // The row is a setting too: the rack comes back on the
+                // source it was left on.
+                self.save_fx_levels_settings();
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_feedback)).slided(actions) {

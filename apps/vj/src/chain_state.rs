@@ -10,6 +10,8 @@
 //! to be told about; the caller decides which chain they go to.
 
 use crate::mixer::EffectParam;
+use crate::music_dsp::LevelMode;
+use crate::settings::Settings;
 
 #[derive(Clone, Debug)]
 pub struct ChainState {
@@ -999,6 +1001,188 @@ impl ChainState {
             crate::music_dsp::MOOG_LADDER_RESONANCE_MAX,
         );
         vec![EffectParam::MoogLadderResonance(self.moog_ladder_resonance)]
+    }
+}
+
+/// The slots the levels file names, in the order the rack shows them.
+/// The words are the file's keys, frozen the way a settings slug is.
+pub const LEVEL_SLOTS: [&str; 10] = [
+    "echo", "flanger", "bitcrusher", "tremolo", "distortion", "phaser", "autopan",
+    "stereo_width", "plate_reverb", "moog_ladder",
+];
+
+impl ChainState {
+    /// One slot's level policy -- mode, mix, ceiling -- by the file's word
+    /// for it. None for a word that is not a slot.
+    fn level_trio(&self, slot: &str) -> Option<(LevelMode, f32, f32)> {
+        match slot {
+            "echo" => Some((self.echo_level_mode, self.echo_mix, self.echo_ceiling)),
+            "flanger" => Some((self.flanger_level_mode, self.flanger_mix, self.flanger_ceiling)),
+            "bitcrusher" => Some((self.bitcrusher_level_mode, self.bitcrusher_mix, self.bitcrusher_ceiling)),
+            "tremolo" => Some((self.tremolo_level_mode, self.tremolo_mix, self.tremolo_ceiling)),
+            "distortion" => Some((self.distortion_level_mode, self.distortion_mix, self.distortion_ceiling)),
+            "phaser" => Some((self.phaser_level_mode, self.phaser_mix, self.phaser_ceiling)),
+            "autopan" => Some((self.autopan_level_mode, self.autopan_mix, self.autopan_ceiling)),
+            "stereo_width" => Some((self.stereo_width_level_mode, self.stereo_width_mix, self.stereo_width_ceiling)),
+            "plate_reverb" => Some((self.plate_reverb_level_mode, self.plate_reverb_mix, self.plate_reverb_ceiling)),
+            "moog_ladder" => Some((self.moog_ladder_level_mode, self.moog_ladder_mix, self.moog_ladder_ceiling)),
+            _ => None,
+        }
+    }
+
+    /// Set one slot's level policy by the file's word for it, and return
+    /// what the engine has to be told. A word that is not a slot sets
+    /// nothing.
+    fn set_level_trio(&mut self, slot: &str, mode: LevelMode, mix: f32, ceiling: f32) -> Vec<EffectParam> {
+        let mut params = Vec::new();
+        match slot {
+            "echo" => {
+                params.extend(self.set_echo_level_mode(mode));
+                params.extend(self.set_echo_mix(mix));
+                params.extend(self.set_echo_ceiling(ceiling));
+            }
+            "flanger" => {
+                params.extend(self.set_flanger_level_mode(mode));
+                params.extend(self.set_flanger_mix(mix));
+                params.extend(self.set_flanger_ceiling(ceiling));
+            }
+            "bitcrusher" => {
+                params.extend(self.set_bitcrusher_level_mode(mode));
+                params.extend(self.set_bitcrusher_mix(mix));
+                params.extend(self.set_bitcrusher_ceiling(ceiling));
+            }
+            "tremolo" => {
+                params.extend(self.set_tremolo_level_mode(mode));
+                params.extend(self.set_tremolo_mix(mix));
+                params.extend(self.set_tremolo_ceiling(ceiling));
+            }
+            "distortion" => {
+                params.extend(self.set_distortion_level_mode(mode));
+                params.extend(self.set_distortion_mix(mix));
+                params.extend(self.set_distortion_ceiling(ceiling));
+            }
+            "phaser" => {
+                params.extend(self.set_phaser_level_mode(mode));
+                params.extend(self.set_phaser_mix(mix));
+                params.extend(self.set_phaser_ceiling(ceiling));
+            }
+            "autopan" => {
+                params.extend(self.set_autopan_level_mode(mode));
+                params.extend(self.set_autopan_mix(mix));
+                params.extend(self.set_autopan_ceiling(ceiling));
+            }
+            "stereo_width" => {
+                params.extend(self.set_stereo_width_level_mode(mode));
+                params.extend(self.set_stereo_width_mix(mix));
+                params.extend(self.set_stereo_width_ceiling(ceiling));
+            }
+            "plate_reverb" => {
+                params.extend(self.set_plate_reverb_level_mode(mode));
+                params.extend(self.set_plate_reverb_mix(mix));
+                params.extend(self.set_plate_reverb_ceiling(ceiling));
+            }
+            "moog_ladder" => {
+                params.extend(self.set_moog_ladder_level_mode(mode));
+                params.extend(self.set_moog_ladder_mix(mix));
+                params.extend(self.set_moog_ladder_ceiling(ceiling));
+            }
+            _ => {}
+        }
+        params
+    }
+
+    /// This chain's level policies, written under `fxlevel.<tag>.<slot>.<field>`
+    /// -- the shape the file has always had, with the deck tags `a` and `b`
+    /// and now a tag per target. The panel is a settings surface, and a
+    /// setting that does not survive the app is not a setting.
+    pub fn write_levels(&self, store: &mut Settings, tag: &str) {
+        store.set_usize(&format!("fxlevel.{tag}.all.mode"), self.level_default.as_row() as usize);
+        for slot in LEVEL_SLOTS {
+            let Some((mode, mix, ceiling)) = self.level_trio(slot) else { continue };
+            store.set_usize(&format!("fxlevel.{tag}.{slot}.mode"), mode.as_row() as usize);
+            store.set_f64(&format!("fxlevel.{tag}.{slot}.mix"), mix as f64);
+            store.set_f64(&format!("fxlevel.{tag}.{slot}.cap"), ceiling as f64);
+        }
+    }
+
+    /// Read them back. A missing key is the default -- so a file written
+    /// when only the decks had a rack carries no answers for the six other
+    /// targets and they come up as they always have. Returns what the
+    /// engine has to be told.
+    pub fn read_levels(&mut self, store: &Settings, tag: &str) -> Vec<EffectParam> {
+        let mut params = Vec::new();
+        let all = LevelMode::from_row(store.usize(&format!("fxlevel.{tag}.all.mode"), 1) as u32);
+        params.extend(self.set_level_default(all));
+        for slot in LEVEL_SLOTS {
+            let mode = LevelMode::from_row(store.usize(&format!("fxlevel.{tag}.{slot}.mode"), 0) as u32);
+            let mix = store.f64(&format!("fxlevel.{tag}.{slot}.mix"), 1.0) as f32;
+            let ceiling = store.f64(&format!("fxlevel.{tag}.{slot}.cap"), 1.0) as f32;
+            params.extend(self.set_level_trio(slot, mode, mix, ceiling));
+        }
+        params
+    }
+}
+
+#[cfg(test)]
+mod levels_file_tests {
+    use super::*;
+
+    fn edited() -> ChainState {
+        let mut chain = ChainState::default();
+        chain.set_level_default(LevelMode::MatchInput);
+        chain.set_flanger_level_mode(LevelMode::Ceiling);
+        chain.set_flanger_mix(0.4);
+        chain.set_flanger_ceiling(0.6);
+        chain.set_moog_ladder_mix(0.25);
+        chain
+    }
+
+    #[test]
+    fn write_then_read_levels_is_the_same_chain() {
+        let before = edited();
+        let mut store = Settings::new();
+        before.write_levels(&mut store, "master");
+        let text = store.to_text();
+        let mut after = ChainState::default();
+        let params = after.read_levels(&Settings::from_text(&text), "master");
+        assert_eq!(after.level_default, LevelMode::MatchInput);
+        assert_eq!(after.flanger_level_mode, LevelMode::Ceiling);
+        assert!((after.flanger_mix - 0.4).abs() < 1e-6);
+        assert!((after.flanger_ceiling - 0.6).abs() < 1e-6);
+        assert!((after.moog_ladder_mix - 0.25).abs() < 1e-6);
+        assert_eq!(after.echo_level_mode, LevelMode::Follow, "untouched slots stay put");
+        // Everything read is also something the engine was told.
+        assert_eq!(params.len(), 1 + 3 * LEVEL_SLOTS.len());
+    }
+
+    /// A file written when only the decks had a rack.
+    #[test]
+    fn a_file_that_knows_only_the_decks_leaves_the_other_six_at_defaults() {
+        let mut store = Settings::new();
+        edited().write_levels(&mut store, "a");
+        edited().write_levels(&mut store, "b");
+        let store = Settings::from_text(&store.to_text());
+        let mut deck = ChainState::default();
+        deck.read_levels(&store, "a");
+        assert_eq!(deck.level_default, LevelMode::MatchInput, "the deck reads its own");
+        for tag in ["video", "sfx", "piano", "ironfish", "drums", "master"] {
+            let mut chain = ChainState::default();
+            chain.read_levels(&store, tag);
+            let fresh = ChainState::default();
+            assert_eq!(chain.level_default, fresh.level_default, "{tag}");
+            assert_eq!(chain.flanger_level_mode, fresh.flanger_level_mode, "{tag}");
+            assert!((chain.flanger_mix - fresh.flanger_mix).abs() < 1e-6, "{tag}");
+        }
+    }
+
+    /// Every word the file uses names a slot the chain has.
+    #[test]
+    fn every_level_slot_word_names_a_slot() {
+        let chain = ChainState::default();
+        for slot in LEVEL_SLOTS {
+            assert!(chain.level_trio(slot).is_some(), "{slot}");
+        }
+        assert!(chain.level_trio("freeze").is_none(), "the freeze has no level row");
     }
 }
 
