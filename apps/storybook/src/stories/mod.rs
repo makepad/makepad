@@ -38,7 +38,10 @@ pub mod radiobutton;
 pub mod view;
 pub mod breadcrumb;
 pub mod field;
+pub mod animated_gif;
 pub mod chart;
+pub mod splash;
+pub mod surfaces;
 pub mod lists;
 pub mod value_input;
 pub mod window_chrome;
@@ -97,7 +100,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
+    animated_gif::script_mod(vm);
     chart::script_mod(vm);
+    splash::script_mod(vm);
+    surfaces::script_mod(vm);
     lists::script_mod(vm);
     value_input::script_mod(vm);
     window_chrome::script_mod(vm);
@@ -178,7 +184,10 @@ pub fn tables() -> &'static [&'static [Story]] {
         view::STORIES,
         breadcrumb::STORIES,
         field::STORIES,
+        animated_gif::STORIES,
         chart::STORIES,
+        splash::STORIES,
+        surfaces::STORIES,
         lists::STORIES,
         value_input::STORIES,
         window_chrome::STORIES,
