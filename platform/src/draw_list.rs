@@ -30,7 +30,139 @@ fn texture_slots_neq(a: &Option<Texture>, b: &Option<Texture>) -> bool {
 #[derive(Debug)]
 pub struct DrawList(PoolId);
 
+// Only uninitialized allocation storage crosses threads. T is constructed
+// after handoff; a dropped spare never runs T's destructor on a worker.
+struct PreparedDrawBox<T>(Box<std::mem::MaybeUninit<T>>);
+unsafe impl<T> Send for PreparedDrawBox<T> {}
+impl<T> PreparedDrawBox<T> {
+    fn new() -> Self {
+        let mut value = Box::<T>::new_uninit();
+        // Touch every page on the allocating worker without constructing T.
+        unsafe { value.as_mut_ptr().cast::<u8>().write_bytes(0, std::mem::size_of::<T>()); }
+        std::hint::black_box(&value);
+        Self(value)
+    }
+    fn initialize(mut self, value: T) -> Box<T> {
+        self.0.write(value);
+        // Exactly one fully initialized T was written above; ownership now
+        // belongs to the UI's ordinary typed Box.
+        unsafe { self.0.assume_init() }
+    }
+}
+
+/// Worker-prepared allocation for a retained child and its parent link.
+/// Live drawing resources never enter this package. Return unused storage
+/// to a worker when the caller no longer needs it.
+pub struct DrawListRecordingStorage {
+    list: Option<PreparedDrawBox<CxDrawList>>,
+    items: Vec<(PreparedDrawBox<CxDrawItem>, Vec<f32>)>,
+    pointers: Vec<Box<CxDrawItem>>,
+    shader_checks: Vec<u64>,
+    child_ids: Vec<DrawListId>,
+    count: usize,
+}
+// `pointers` is always empty outside new_prepared's exclusive borrow. Its
+// capacity may be exchanged with an emptied UI inventory, never live items.
+// All other fields contain scalars, float storage or uninitialized boxes.
+unsafe impl Send for DrawListRecordingStorage {}
+impl DrawListRecordingStorage {
+    pub fn new(draw_items: usize) -> Self {
+        Self::with_instance_capacity(draw_items, 256)
+    }
+    pub fn with_instance_capacity(draw_items: usize, floats: usize) -> Self {
+        let mut items = Vec::with_capacity(draw_items + 1);
+        // The extra parent link has no instance stream and is consumed last.
+        items.push((PreparedDrawBox::new(), Vec::new()));
+        for _ in 0..draw_items {
+            let mut instances = vec![1.0; floats];
+            std::hint::black_box(instances.as_slice());
+            instances.clear();
+            items.push((PreparedDrawBox::new(), instances));
+        }
+        let mut shader_checks = vec![u64::MAX; draw_items];
+        std::hint::black_box(shader_checks.as_slice());
+        shader_checks.clear();
+        let mut child_ids = vec![DrawListId(usize::MAX, u64::MAX); draw_items];
+        std::hint::black_box(child_ids.as_slice());
+        child_ids.clear();
+        Self { list: Some(PreparedDrawBox::new()), items,
+            pointers: Vec::with_capacity(draw_items), shader_checks, child_ids, count: draw_items }
+    }
+
+    fn install_pointer_capacity(&mut self, items: &mut CxDrawItems) {
+        if items.buffer.capacity() < self.pointers.capacity() {
+            self.pointers.extend(items.buffer.drain(..));
+            std::mem::swap(&mut items.buffer, &mut self.pointers);
+        }
+    }
+
+    fn install_inventory_capacity(&mut self, list: &mut CxDrawList) {
+        self.install_pointer_capacity(&mut list.draw_items);
+        if list.find_appendable_draw_shader_check.capacity() < self.shader_checks.capacity() {
+            self.shader_checks.extend(list.find_appendable_draw_shader_check.drain(..));
+            std::mem::swap(&mut self.shader_checks, &mut list.find_appendable_draw_shader_check);
+        }
+        if list.draw_items.child_inventory.capacity() < self.child_ids.capacity() {
+            self.child_ids.extend(list.draw_items.child_inventory.drain(..));
+            std::mem::swap(&mut self.child_ids, &mut list.draw_items.child_inventory);
+        }
+    }
+
+    /// Supplies only the next recording slot. A parent's inventory can be
+    /// prepared on a worker without initializing all its items on one frame.
+    pub fn prepare_next_item(&mut self, list: &mut CxDrawList) -> bool {
+        self.install_inventory_capacity(list);
+        let count = list.draw_items.used + 1;
+        if list.draw_items.buffer.capacity() < count
+            || self.items.len() < count.saturating_sub(list.draw_items.buffer.len()) {
+            return false;
+        }
+        list.draw_items.install_prepared_items(count, self);
+        true
+    }
+}
+
 impl DrawList {
+    /// The caller reserves the parent's known pointer inventory once. No
+    /// allocation waits occur here; an unavailable package leaves it untouched.
+    pub fn new_prepared(cx: &mut Cx, parent: DrawListId, storage: &mut DrawListRecordingStorage) -> Option<Self> {
+        let parent_items = &cx.draw_lists[parent].draw_items;
+        let parent_count = parent_items.used + 1;
+        let extra_parent = parent_count.saturating_sub(parent_items.buffer.len());
+        if parent_items.buffer.capacity() < parent_count
+            || storage.items.len() < storage.count + extra_parent
+            || (cx.draw_lists.0.free_count() == 0 && storage.list.is_none()) {
+            return None;
+        }
+        let draw_list = Self::new_detached_prepared(cx, storage)?;
+        cx.draw_lists[parent].draw_items.install_prepared_items(parent_count, storage);
+        Some(draw_list)
+    }
+
+    /// Creates a retained list before its future painter parent is known.
+    pub fn new_detached_prepared(cx: &mut Cx, storage: &mut DrawListRecordingStorage) -> Option<Self> {
+        if storage.items.len() < storage.count
+            || (cx.draw_lists.0.free_count() == 0 && storage.list.is_none()) {
+            return None;
+        }
+        let draw_list = if cx.draw_lists.0.free_count() != 0 {
+            cx.draw_lists.alloc()
+        } else {
+            let list = storage.list.take().unwrap().initialize(CxDrawList::default());
+            let list = DrawList(cx.draw_lists.0.alloc_new(Some(list)));
+            cx.draw_lists.reset_allocated(list.id());
+            list
+        };
+        let list = &mut cx.draw_lists[draw_list.id()];
+        storage.install_inventory_capacity(list);
+        list.draw_items.install_prepared_items(storage.count, storage);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        let list = &mut cx.draw_lists[draw_list.id()];
+        list.recording_gen = recording_gen;
+        list.uniforms_gen = uniforms_gen;
+        Some(draw_list)
+    }
     pub fn new(cx: &mut Cx) -> Self {
         let recording_gen = cx.next_uniform_gen();
         let uniforms_gen = cx.next_uniform_gen();
@@ -73,6 +205,117 @@ pub struct GpuPassMetrics {
 }
 
 impl Cx {
+    /// A single inventory traversal feeds three bounded priority buckets.
+    /// Only one frame's byte allowance and at most256 requests leave here.
+    pub fn pending_instance_uploads(&self, root: DrawListId) -> Vec<InstanceUploadRequest> {
+        let mut scan = self.draw_lists[root].upload_collection.borrow_mut();
+        scan.best.resize(self.draw_lists.0.slot_count(), 3);
+        scan.best.fill(3);
+        scan.requests.clear();
+        scan.requests.reserve(256);
+        for candidates in &mut scan.candidates { candidates.clear(); candidates.reserve(256); }
+        scan.allowance = [self.draw_lists.1.limit; 3];
+        scan.deferred_bytes = 0;
+        scan.examined = 0;
+        self.collect_instance_uploads(root, crate::retained_instances::UploadCategory::Other, 2, &mut scan);
+        let mut available = self.draw_lists.1.limit;
+        for priority in 0..3 {
+            for index in 0..scan.candidates[priority].len() {
+                let (mut request, bytes, stride) = scan.candidates[priority][index];
+                // An alias later reached this list through a more urgent
+                // ancestor. Its new bucket owns admission, never this old one.
+                if scan.best[request.list.index()] != request.priority { continue; }
+                if scan.requests.len() == 256 || (bytes != 0 && available < stride) {
+                    scan.deferred_bytes = scan.deferred_bytes.saturating_add(bytes.max(1));
+                    continue;
+                }
+                available = available.saturating_sub(bytes.min(available) / stride * stride);
+                if request.category == crate::retained_instances::UploadCategory::Other {
+                    use crate::retained_instances::UploadCategory as Category;
+                    let call = self.draw_lists[request.list].draw_items[request.item].draw_call().unwrap();
+                    let inputs = &self.draw_shaders[call.draw_shader_id.index].mapping.instances.inputs;
+                    let has = |name| inputs.iter().any(|input| input.id == name);
+                    request.category = if has(crate::id!(roof_height)) && has(crate::id!(start)) { Category::Outlines }
+                        else if has(crate::id!(height)) && has(crate::id!(tint)) { Category::Walls }
+                        else if has(crate::id!(stripe_side)) { Category::Roofs }
+                        else if has(crate::id!(glyph_depth)) { Category::Labels }
+                        else { Category::Other };
+                }
+                scan.requests.push(request);
+            }
+        }
+        std::mem::take(&mut scan.requests)
+    }
+
+    pub fn instance_upload_collection_deferred(&self, root: DrawListId) -> usize {
+        self.draw_lists[root].upload_collection.borrow().deferred_bytes
+    }
+
+    pub fn instance_upload_collection_examined(&self, root: DrawListId) -> usize {
+        self.draw_lists[root].upload_collection.borrow().examined
+    }
+
+    pub fn recycle_instance_uploads(&self, root: DrawListId, mut requests: Vec<InstanceUploadRequest>) {
+        requests.clear();
+        self.draw_lists[root].upload_collection.borrow_mut().requests = requests;
+    }
+
+    fn collect_instance_uploads(
+        &self, id: DrawListId, inherited: crate::retained_instances::UploadCategory,
+        priority: u8, scan: &mut InstanceUploadCollection,
+    ) {
+        use crate::retained_instances::UploadCategory as Category;
+        if self.draw_lists.is_id_freed(id) { return; }
+        let list = &self.draw_lists[id];
+        let priority = priority.min(list.upload_priority.min(2));
+        if scan.best[id.index()] <= priority { return; }
+        scan.best[id.index()] = priority;
+        if list.draw_items.clean_leaf.get() { return; }
+        let category = match list.debug_id {
+            id if id == crate::id!(atlas_labels) || id == crate::id!(atlas_label) => Category::Labels,
+            id if id == crate::id!(atlas_scene) => Category::Roofs,
+            id if id == crate::id!(atlas_walls) => Category::Walls,
+            id if id == crate::id!(atlas_overlay) => Category::Outlines,
+            id if id == crate::id!(atlas_background) => Category::Background,
+            id if id == crate::id!(atlas_structure_batch) => Category::Structure,
+            id if id == crate::id!(atlas_code_file) => Category::Code,
+            _ => inherited,
+        };
+        if list.draw_items.child_inventory_valid {
+            // Pure parent inventories are contiguous IDs. Avoid a cache miss
+            // through each large boxed draw item just to retrieve its child.
+            scan.examined += list.draw_items.len();
+            for &child in &list.draw_items.child_inventory {
+                self.collect_instance_uploads(child, category, priority, scan);
+            }
+            return;
+        }
+        let mut clean_leaf = true;
+        for item_id in 0..list.draw_items.len() {
+            scan.examined += 1;
+            let item = &list.draw_items[item_id];
+            if let Some(child) = item.sub_list() {
+                clean_leaf = false;
+                self.collect_instance_uploads(child, category, priority, scan);
+                continue;
+            }
+            let Some(call) = item.draw_call() else { continue };
+            if (!call.instance_dirty && !item.instance_upload_pending) || call.total_instance_slots == 0 { continue; }
+            clean_leaf = false;
+            let bytes = item.retained_instances.as_ref().map_or_else(
+                || item.instances.as_ref().map_or(0, |v| v.len() * 4), |p| p.byte_len());
+            let stride = call.total_instance_slots * 4;
+            let p = priority as usize;
+            if scan.candidates[p].len() == 256 || (bytes != 0 && scan.allowance[p] < stride) {
+                scan.deferred_bytes = scan.deferred_bytes.saturating_add(bytes.max(1));
+                continue;
+            }
+            scan.allowance[p] = scan.allowance[p].saturating_sub(bytes.min(scan.allowance[p]) / stride * stride);
+            scan.candidates[p].push((InstanceUploadRequest { list: id, item: item_id, category, priority }, bytes, stride));
+        }
+        list.draw_items.clean_leaf.set(clean_leaf);
+    }
+
     pub fn collect_gpu_pass_metrics(&self, draw_pass_id: DrawPassId) -> GpuPassMetrics {
         let mut metrics = GpuPassMetrics::default();
         let mut uploaded_geometries = HashSet::new();
@@ -317,6 +560,24 @@ impl Cx {
     }
 }
 
+#[derive(Default)]
+struct InstanceUploadCollection {
+    best: Vec<u8>,
+    candidates: [Vec<(InstanceUploadRequest, usize, usize)>; 3],
+    allowance: [usize; 3],
+    requests: Vec<InstanceUploadRequest>,
+    deferred_bytes: usize,
+    examined: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceUploadRequest {
+    pub list: DrawListId,
+    pub item: usize,
+    pub category: crate::retained_instances::UploadCategory,
+    pub priority: u8,
+}
+
 impl DrawListId {
     pub fn index(&self) -> usize {
         self.0
@@ -333,19 +594,28 @@ impl DrawList {
 }
 
 #[derive(Default)]
-pub struct CxDrawListPool(pub(crate) IdPool<CxDrawList>);
+pub struct CxDrawListPool(
+    // Keep uniforms, backend state and inventory scratch at stable addresses.
+    // Growing the pool then moves only handles, not every live draw list.
+    pub(crate) IdPool<Box<CxDrawList>>,
+    pub crate::retained_instances::RetainedUploadBudget,
+);
 impl CxDrawListPool {
     pub fn alloc(&mut self) -> DrawList {
         let draw_list = DrawList(self.0.alloc());
-        let id = draw_list.id();
+        self.reset_allocated(draw_list.id());
+        draw_list
+    }
+
+    fn reset_allocated(&mut self, id: DrawListId) {
         // A recycled slot keeps the GPU resources of its draw items, never
         // the previous owner's list uniforms: a stale view_clip from a
         // dropped list would clip the new owner's instances.
         self[id].draw_list_uniforms = Default::default();
         self[id].zbias_hold = None;
         self[id].reset_zbias = false;
+        self[id].upload_priority = 2;
         self[id].reset_draw_item_uniform_caches();
-        draw_list
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -466,13 +736,19 @@ impl DrawCallUniforms {
     }*/
 }
 
+#[repr(C)]
 pub enum CxDrawKind {
     SubList(DrawListId),
     DrawCall(CxDrawCall),
     Empty,
 }
 
+// Collection reads only this header for clean calls/child links. Keep it
+// together instead of faulting pages containing the large uniform payload.
+#[repr(C)]
 pub struct CxDrawItem {
+    /// A partial backend copy owes another frame even after recording stops.
+    pub instance_upload_pending: bool,
     pub redraw_id: u64,
     pub kind: CxDrawKind,
     // these values stick around to reduce buffer churn
@@ -522,18 +798,19 @@ impl CxDrawKind {
     }
 }
 
+#[repr(C)]
 pub struct CxDrawCall {
+    pub instance_dirty: bool,
+    pub uniforms_dirty: bool,
+    pub total_instance_slots: usize,
     pub draw_shader_id: DrawShaderId, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub append_group_id: u64,
-    pub total_instance_slots: usize,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
     pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
-    pub instance_dirty: bool,
-    pub uniforms_dirty: bool,
     /// Replaced with a process-wide generation whenever either uniform block
     /// owned by this draw call changes.
     pub uniforms_gen: u64,
@@ -641,8 +918,18 @@ impl DrawListUniforms {
 
 #[derive(Default)]
 pub struct CxDrawItems {
-    pub(crate) buffer: Vec<CxDrawItem>,
+    // A leaf proven clean by the collector needs no draw-call metadata walk.
+    // Every mutable public item access invalidates this proof, including
+    // patches that bypass ordinary recording. Parent lists always recurse.
+    clean_leaf: std::cell::Cell<bool>,
+    // Stable records: growing a parent's inventory moves only pointers, never
+    // the large uniform/texture/backend payload of every preceding child.
+    pub(crate) buffer: Vec<Box<CxDrawItem>>,
     used: usize,
+    instance_capacity_hint: usize,
+    first_instance_spare: Vec<f32>,
+    child_inventory: Vec<DrawListId>,
+    child_inventory_valid: bool,
 }
 
 impl std::ops::Index<usize> for CxDrawItems {
@@ -654,31 +941,80 @@ impl std::ops::Index<usize> for CxDrawItems {
 
 impl std::ops::IndexMut<usize> for CxDrawItems {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.clean_leaf.set(false);
+        self.child_inventory_valid = false;
         &mut self.buffer[index]
     }
 }
 
 impl CxDrawItems {
+    fn install_prepared_items(&mut self, count: usize, storage: &mut DrawListRecordingStorage) {
+        assert!(self.buffer.capacity() >= count);
+        while self.buffer.len() < count {
+            let (allocation, instances) = storage.items.pop().unwrap();
+            self.buffer.push(allocation.initialize(CxDrawItem {
+                instance_upload_pending: false, redraw_id: 0, kind: CxDrawKind::Empty,
+                draw_item_id: self.buffer.len(), instances: Some(instances),
+                retained_instances: None, retained_instance_id: 0,
+                retained_instance_count: 0, retained_upload_range: 0..0,
+                os: CxOsDrawCall::default(),
+            }));
+        }
+    }
+    /// Storage may be prepared by a worker before this list records its first
+    /// draw. These helpers are for single-stream retained lists; the caller
+    /// re-records immediately after swapping and owns retirement of the spare.
+    pub fn first_instance_buffer_capacity(&self) -> usize {
+        self.buffer.first().and_then(|item| item.instances.as_ref())
+            .map_or(self.first_instance_spare.capacity(), Vec::capacity)
+    }
+    pub fn swap_first_instance_buffer(&mut self, spare: &mut Vec<f32>) {
+        if let Some(item) = self.buffer.first_mut() {
+            std::mem::swap(item.instances.as_mut().unwrap(), spare);
+        } else {
+            std::mem::swap(&mut self.first_instance_spare, spare);
+        }
+        self.clean_leaf.set(false);
+    }
     pub fn len(&self) -> usize {
         self.used
     }
     pub fn clear(&mut self) {
+        self.clean_leaf.set(false);
+        self.child_inventory.clear();
+        self.child_inventory_valid = true;
         self.used = 0
     }
+    /// Binding changes backend residency/uniform stamps, never instance
+    /// dirtiness or child topology. Upload/recording mutations use IndexMut.
+    #[cfg(all(not(headless), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    pub(crate) fn binding_mut(&mut self, index: usize) -> &mut CxDrawItem {
+        &mut self.buffer[index]
+    }
     pub fn push_item(&mut self, redraw_id: u64, kind: CxDrawKind) -> &mut CxDrawItem {
+        self.clean_leaf.set(false);
+        // The returned mutable item may have its kind replaced by the caller.
+        self.child_inventory_valid = false;
         let draw_item_id = self.used;
         if self.used >= self.buffer.len() {
-            self.buffer.push(CxDrawItem {
+            let capacity = kind.draw_call().map_or(0, |call|
+                call.total_instance_slots.saturating_mul(self.instance_capacity_hint));
+            let mut instances = if draw_item_id == 0 {
+                std::mem::take(&mut self.first_instance_spare)
+            } else { Vec::new() };
+            instances.reserve(capacity);
+            self.buffer.push(Box::new(CxDrawItem {
                 draw_item_id,
                 redraw_id,
-                instances: Some(Vec::new()),
+                instances: Some(instances),
                 retained_instances: None,
                 retained_instance_id: 0,
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
+                instance_upload_pending: false,
                 os: CxOsDrawCall::default(),
                 kind: kind,
-            });
+            }));
         } else {
             // reuse an older one, keeping all GPU resources attached
             let draw_item = &mut self.buffer[draw_item_id];
@@ -697,9 +1033,13 @@ impl CxDrawItems {
 
 #[derive(Default)]
 pub struct CxDrawList {
+    upload_collection: std::cell::RefCell<InstanceUploadCollection>,
     pub debug_id: LiveId,
     pub debug_dump: bool,
     pub debug_dump_count: u32,
+    /// Copy admission order, independent of painter order: pointer, visible,
+    /// then background. Zero is the pointer owner's highest priority.
+    pub upload_priority: u8,
     pub reset_zbias: bool,
 
     /// Depth floor for this draw list and everything drawn under it, in
@@ -731,6 +1071,7 @@ pub struct CxDrawList {
 
     pub draw_items: CxDrawItems,
     pub draw_item_reorder: Option<Vec<usize>>,
+    draw_item_reorder_spare: Vec<usize>,
 
     /// For a draw list registered as a sub-list of the window Overlay: the
     /// position in which it was BEGUN this frame. Overlay slots are handed out
@@ -774,6 +1115,29 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
+    /// Parent inventories retain one stable pointer per known child.
+    pub fn reserve_sub_list_inventory(&mut self, count: usize) {
+        self.draw_items.buffer.reserve(count.saturating_sub(self.draw_items.buffer.len()));
+        self.draw_items.child_inventory.reserve(count.saturating_sub(self.draw_items.child_inventory.len()));
+        self.find_appendable_draw_shader_check.reserve(count.saturating_sub(self.find_appendable_draw_shader_check.len()));
+    }
+
+    /// A retained scene knows its inventory before the first quad. Reserve
+    /// once at publication so aligned-instance pushes never repeatedly move a
+    /// growing multi-megabyte stream during a camera/fit frame.
+    pub fn reserve_instance_inventory(&mut self, count: usize) {
+        if count <= self.draw_items.instance_capacity_hint { return; }
+        self.draw_items.instance_capacity_hint = count;
+        for item in &mut self.draw_items.buffer {
+            let Some(call) = item.kind.draw_call() else { continue };
+            let capacity = count.saturating_mul(call.total_instance_slots);
+            if let Some(instances) = &mut item.instances {
+                instances.reserve(capacity.saturating_sub(instances.len()));
+            }
+        }
+        self.find_appendable_draw_shader_check.reserve(16);
+    }
+
     #[inline]
     pub fn set_uniform_view_transform(&mut self, transform: &Mat4f, uniforms_gen: u64) {
         debug_assert_ne!(uniforms_gen, 0);
@@ -812,14 +1176,14 @@ impl CxDrawList {
         false
     }
 
-    fn append_trace_log(message: String) {
+    fn append_trace_log(message: impl FnOnce() -> String) {
         static COUNT: AtomicUsize = AtomicUsize::new(0);
         if !Self::append_trace_enabled() {
             return;
         }
         let n = COUNT.fetch_add(1, Ordering::Relaxed);
         if n < 200 {
-            log!("{}", message);
+            log!("{}", message());
         } else if n == 200 {
             log!("append_trace: log limit reached, suppressing further output");
         }
@@ -915,7 +1279,7 @@ impl CxDrawList {
             if self.find_appendable_draw_shader_check[i] == draw_shader_check {
                 // TODO! figure out why this can happen
                 if draw_call.draw_shader_id != draw_vars.draw_shader_id.unwrap() {
-                    Self::append_trace_log(format!(
+                    Self::append_trace_log(|| format!(
                         "append_miss shader_mismatch call_shader={} vars_shader={}",
                         draw_call.draw_shader_id.index,
                         draw_vars.draw_shader_id.unwrap().index
@@ -924,7 +1288,7 @@ impl CxDrawList {
                     // lets compare uniforms and textures..
                     if !sh.mapping.flags.draw_call_nocompare {
                         if draw_call.geometry_id != draw_vars.geometry_id {
-                            Self::append_trace_log(format!(
+                            Self::append_trace_log(|| format!(
                                 "append_miss geom_mismatch shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
@@ -941,7 +1305,7 @@ impl CxDrawList {
                             }
                         }
                         if diff {
-                            Self::append_trace_log(format!(
+                            Self::append_trace_log(|| format!(
                                 "append_barrier uniform_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
@@ -961,7 +1325,7 @@ impl CxDrawList {
                             }
                         }
                         if diff {
-                            Self::append_trace_log(format!(
+                            Self::append_trace_log(|| format!(
                                 "append_barrier texture_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
@@ -990,7 +1354,7 @@ impl CxDrawList {
                             }
                         }
                         if diff {
-                            Self::append_trace_log(format!(
+                            Self::append_trace_log(|| format!(
                                 "append_barrier uniform_buffer_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
@@ -1001,7 +1365,7 @@ impl CxDrawList {
                         }
                     }
                     if !draw_call.options._appendable_drawcall(&draw_vars.options) {
-                        Self::append_trace_log(format!(
+                        Self::append_trace_log(|| format!(
                             "append_barrier options_diff shader={} at_draw_item={}",
                             draw_call.draw_shader_id.index, i
                         ));
@@ -1010,7 +1374,7 @@ impl CxDrawList {
                         }
                         break;
                     }
-                    Self::append_trace_log(format!(
+                    Self::append_trace_log(|| format!(
                         "append_hit shader={} draw_item={} group={} draw_call_group={}",
                         draw_call.draw_shader_id.index,
                         i,
@@ -1022,7 +1386,7 @@ impl CxDrawList {
             }
 
             if !can_cross {
-                Self::append_trace_log(format!(
+                Self::append_trace_log(|| format!(
                     "append_barrier group target={} target_draw_call_group={} barrier={} barrier_draw_call_group={} at_draw_item={}",
                     target_group,
                     target_draw_call_group,
@@ -1044,7 +1408,7 @@ impl CxDrawList {
         turtle_depth: f32,
         uniforms_gen: u64,
     ) -> &mut CxDrawItem {
-        Self::append_trace_log(format!(
+        Self::append_trace_log(|| format!(
             "append_new shader={} group={} draw_call_group={} items_before={}",
             draw_vars
                 .draw_shader_id
@@ -1078,6 +1442,12 @@ impl CxDrawList {
             .unwrap_or_else(|| self.draw_items.len())
     }
 
+    /// Keep painter-order capacity across both presentation and re-recording.
+    pub fn take_draw_item_reorder(&mut self) -> Vec<usize> {
+        self.draw_item_reorder.take()
+            .unwrap_or_else(|| std::mem::take(&mut self.draw_item_reorder_spare))
+    }
+
     pub fn draw_item_id_at_order_index(&self, order_index: usize) -> Option<usize> {
         let draw_item_id = if let Some(reorder) = self.draw_item_reorder.as_ref() {
             *reorder.get(order_index)?
@@ -1102,15 +1472,23 @@ impl CxDrawList {
         self.uniforms_gen = uniforms_gen;
         self.reset_draw_item_uniform_caches();
         self.draw_items.clear();
-        self.draw_item_reorder = None;
+        if let Some(mut order) = self.draw_item_reorder.take() {
+            order.clear();
+            self.draw_item_reorder_spare = order;
+        }
         self.rect_areas.clear();
         self.find_appendable_draw_shader_check.clear();
     }
 
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
+        let children_only = self.draw_items.child_inventory_valid;
         self.draw_items
             .push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
+        if children_only {
+            self.draw_items.child_inventory.push(sub_list_id);
+            self.draw_items.child_inventory_valid = true;
+        }
         self.find_appendable_draw_shader_check.push(0);
     }
 

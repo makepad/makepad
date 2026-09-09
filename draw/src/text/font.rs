@@ -52,6 +52,24 @@ pub struct Font {
 }
 
 impl Font {
+    pub(super) fn worker_definition(&self) -> super::async_labels::FontSnapshot {
+        let (data, index, variations) = self.face.worker_source();
+        let (ascender, descender) = self.face.with_ttf_parser_face(|f| {
+            (
+                f.ascender() as f32 / self.units_per_em,
+                f.descender() as f32 / self.units_per_em,
+            )
+        });
+        super::async_labels::FontSnapshot {
+            id: self.id,
+            data,
+            index,
+            variations,
+            ascender_fudge: self.ascender_in_ems - ascender,
+            descender_fudge: self.descender_in_ems - descender,
+        }
+    }
+
     pub fn new(
         id: FontId,
         rasterizer: Rc<RefCell<Rasterizer>>,

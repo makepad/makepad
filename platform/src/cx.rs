@@ -763,6 +763,7 @@ impl Cx {
     }
 
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
 

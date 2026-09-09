@@ -44,6 +44,8 @@ pub enum OpenUrlInPlace {
 pub enum CxThreadPriority {
     #[default]
     Normal,
+    UserInteractive,
+    UserInitiated,
     Utility,
     Background,
     Idle,
@@ -725,12 +727,106 @@ impl Cx {
         self.textures.0.live_count()
     }
 
-    pub fn set_thread_priority(priority: CxThreadPriority) {
-        #[cfg(target_os = "android")]
-        crate::os::linux::android::android::set_current_thread_priority(priority);
-
-        #[cfg(not(target_os = "android"))]
-        let _ = priority;
+    /// Apply to the calling thread and read the OS setting back. `Applied`
+    /// confirms the requested class/nice value, not a scheduling guarantee.
+    pub fn set_thread_priority(priority: CxThreadPriority) -> crate::thread::PriorityStatus {
+        use crate::thread::PriorityStatus;
+        #[cfg(target_vendor = "apple")]
+        {
+            unsafe extern "C" {
+                fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+                fn pthread_self() -> *mut std::ffi::c_void;
+                fn pthread_get_qos_class_np(
+                    thread: *mut std::ffi::c_void,
+                    class: *mut u32,
+                    relative: *mut i32,
+                ) -> i32;
+            }
+            let (class, relative) = match priority {
+                CxThreadPriority::UserInteractive => (0x21, 0),
+                CxThreadPriority::UserInitiated => (0x19, 0),
+                CxThreadPriority::Normal => (0x15, 0),
+                CxThreadPriority::Utility => (0x11, 0),
+                CxThreadPriority::Background => (0x09, 0),
+                CxThreadPriority::Idle => (0x09, -15),
+            };
+            let mut actual_class = 0;
+            let mut actual_relative = 0;
+            let applied = unsafe {
+                pthread_set_qos_class_self_np(class, relative) == 0
+                    && pthread_get_qos_class_np(
+                        pthread_self(),
+                        &mut actual_class,
+                        &mut actual_relative,
+                    ) == 0
+                    && actual_class == class
+                    && actual_relative == relative
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            unsafe extern "C" {
+                fn setpriority(which: i32, who: u32, priority: i32) -> i32;
+                fn getpriority(which: i32, who: u32) -> i32;
+            }
+            // Linux PRIO_PROCESS, who=0 addresses the current task/thread,
+            // not the whole process. Keep SCHED_OTHER; no realtime privilege.
+            // Interactive uses nice 0 (unprivileged), light 1 and utility 5.
+            let nice = match priority {
+                CxThreadPriority::Normal | CxThreadPriority::UserInteractive => 0,
+                CxThreadPriority::UserInitiated => 1,
+                CxThreadPriority::Utility => 5,
+                CxThreadPriority::Background => 10,
+                CxThreadPriority::Idle => 15,
+            };
+            let applied = unsafe { setpriority(0, 0, nice) == 0 && getpriority(0, 0) == nice };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentThread() -> *mut std::ffi::c_void;
+                fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+                fn GetThreadPriority(thread: *mut std::ffi::c_void) -> i32;
+            }
+            let value = match priority {
+                CxThreadPriority::UserInteractive => 2, // HIGHEST, not realtime
+                CxThreadPriority::UserInitiated => 1,   // ABOVE_NORMAL
+                CxThreadPriority::Normal => 0,
+                CxThreadPriority::Utility => -1,
+                CxThreadPriority::Background => -2,
+                CxThreadPriority::Idle => -15,
+            };
+            let applied = unsafe {
+                let thread = GetCurrentThread();
+                SetThreadPriority(thread, value) != 0 && GetThreadPriority(thread) == value
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "windows"
+        )))]
+        {
+            let _ = priority;
+            PriorityStatus::BestEffortUnsupported
+        }
     }
 
     pub fn get_ref(&self) -> CxRef {

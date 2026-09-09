@@ -1132,7 +1132,11 @@ impl App {
             return;
         };
         let message = if matches!(action, IterationViewAction::DeleteFlow { .. }) {
-            format!("Delete lane {}? {}", lane.title, explanation)
+            self.iterations
+                .snapshot
+                .engine
+                .delete_confirmation(flow)
+                .unwrap_or_default()
         } else {
             format!("{}\n\n{}", lane.title, explanation)
         };
@@ -1673,18 +1677,19 @@ impl App {
             .flows
             .get(&flow)
             .ok_or("Unknown lane")?;
-        if lane.predecessor.is_some() || lane.successor.is_some() {
-            return Err(
-                "Deleting split history is pending the terminal-lineage integration".into(),
-            );
-        }
         if self.iterations.deleting.contains(&flow) {
             return Ok(());
         }
         if lane.successor.is_none() {
             self.stop_flow_terminal(cx, &flow)?;
+            self.iterations.delete_after_stop.insert(flow.clone());
+        } else {
+            self.submit_iteration(
+                cx,
+                IterationRequest::Flow(FlowCommand::Delete { flow: flow.clone() }),
+                &format!("delete_lane:{flow}"),
+            )?;
         }
-        self.iterations.delete_after_stop.insert(flow.clone());
         self.iterations.deleting.insert(flow);
         self.refresh_deleting_lanes(cx);
         Ok(())

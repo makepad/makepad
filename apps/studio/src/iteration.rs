@@ -542,6 +542,7 @@ pub struct Engine {
     cleared_history: std::collections::BTreeSet<String>,
     compacted: bool,
     terminal_origins: BTreeMap<String, String>,
+    history_lineage: BTreeMap<String, Vec<String>>,
 }
 
 include!("iteration_split_model.rs");
@@ -676,12 +677,7 @@ impl Engine {
     fn apply_inner(&mut self, command: Command) -> Result<(String, Vec<Effect>), String> {
         let sequence = self.revision + 1;
         if let Command::Delete { flow } = command {
-            let lane = self.flows.get(&flow).ok_or("Unknown lane")?;
-            if lane.predecessor.is_some() || lane.successor.is_some() {
-                return Err(
-                    "Deleting split history is pending the terminal-lineage integration".into(),
-                );
-            }
+            self.flows.get(&flow).ok_or("Unknown lane")?;
             return Ok((flow.clone(), vec![Effect::Delete { flow }]));
         }
         if let Command::Create { title, config } = command {
@@ -951,18 +947,22 @@ impl Engine {
             {
                 return Err("Stop the lane’s owned processes before removing it".into());
             }
-            // Retain stable PTY identities for surviving split descendants.
-            let origins: Vec<_> = self
+            // Freeze identity and ancestry before removing presentation links.
+            let lineage: Vec<_> = self
                 .flows
                 .keys()
-                .filter_map(|id| {
-                    self.terminal_origin(id)
-                        .ok()
-                        .map(|origin| (id.clone(), origin.to_owned()))
+                .filter(|id| *id != &flow)
+                .map(|id| {
+                    Ok((
+                        id.clone(),
+                        self.terminal_origin(id)?.to_owned(),
+                        self.history_lineage(id),
+                    ))
                 })
-                .collect();
-            for (id, origin) in origins {
-                self.terminal_origins.entry(id).or_insert(origin);
+                .collect::<Result<_, String>>()?;
+            for (id, origin, ancestors) in lineage {
+                self.terminal_origins.insert(id.clone(), origin);
+                self.history_lineage.insert(id, ancestors);
             }
             let lane = self.flows.remove(&flow).unwrap();
             for survivor in self.flows.values_mut() {
@@ -974,8 +974,23 @@ impl Engine {
                 }
             }
             self.terminal_origins.remove(&flow);
-            self.events.retain(|event| event.flow != flow);
+            self.history_lineage.remove(&flow);
+            // Cloned dependencies remain usable, but deleted timeline entries
+            // must not become visible when their ownership overlay disappears.
+            self.cleared_history.extend(
+                self.history_owners
+                    .iter()
+                    .filter(|(_, owner)| *owner == &flow)
+                    .map(|(key, _)| key.clone()),
+            );
             self.history_owners.retain(|_, owner| owner != &flow);
+            let retained: std::collections::BTreeSet<_> = self
+                .flows
+                .keys()
+                .cloned()
+                .chain(self.history_lineage.values().flatten().cloned())
+                .collect();
+            self.events.retain(|event| retained.contains(&event.flow));
             self.compacted = true;
             return Ok((flow, vec![]));
         }
@@ -1645,6 +1660,20 @@ impl Engine {
                 ("revision", n(self.revision)),
                 ("snapshot", json::s(hex)),
                 (
+                    "lineage",
+                    Value::Obj(
+                        self.history_lineage
+                            .iter()
+                            .map(|(id, ancestors)| {
+                                (
+                                    id.clone(),
+                                    Value::Arr(ancestors.iter().map(json::s).collect()),
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
                     "events",
                     Value::Arr(self.events.iter().map(FlowEvent::json).collect()),
                 ),
@@ -1669,7 +1698,7 @@ impl Engine {
         if value.get("version").and_then(Value::as_u64) == Some(2) {
             fields(
                 &value,
-                &["version", "revision", "snapshot", "events"],
+                &["version", "revision", "snapshot", "events", "lineage"],
                 &["version", "revision", "snapshot", "events"],
             )?;
             let hex = text(&value, "snapshot", MAX_STATE_BYTES)?;
@@ -1686,8 +1715,12 @@ impl Engine {
                 Vec<String>,
                 Vec<(String, String)>,
             );
-            let (flows, owners, cleared, origins) = Snapshot::deserialize_bin(&bytes)
+            let mut offset = 0;
+            let (flows, owners, cleared, origins) = Snapshot::de_bin(&mut offset, &bytes)
                 .map_err(|e| format!("Invalid iteration snapshot: {e:?}"))?;
+            if offset != bytes.len() {
+                return Err("Trailing data in iteration snapshot".into());
+            }
             if flows.len() > MAX_STORED_FLOWS {
                 return Err("Too many stored lanes".into());
             }
@@ -1700,9 +1733,31 @@ impl Engine {
                 history_owners: owners.into_iter().collect(),
                 cleared_history: cleared.into_iter().collect(),
                 terminal_origins: origins.into_iter().collect(),
+                history_lineage: BTreeMap::new(),
                 compacted: true,
                 events: vec![],
             };
+            if let Some(value) = value.get("lineage") {
+                let Value::Obj(lineages) = value else {
+                    return Err("Invalid history lineage".into());
+                };
+                for (id, ancestors) in lineages {
+                    if !engine.flows.contains_key(id) {
+                        return Err("Unknown history lineage owner".into());
+                    }
+                    let ancestors = ancestors
+                        .as_arr()
+                        .ok_or("Invalid history lineage ancestors")?;
+                    let ancestors = ancestors
+                        .iter()
+                        .map(|ancestor| {
+                            let id = ancestor.as_str().ok_or("Invalid history ancestor")?;
+                            identifier(&json::obj(vec![("flow", json::s(id))]), "flow")
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    engine.history_lineage.insert(id.clone(), ancestors);
+                }
+            }
             let mut previous = 0;
             for event in array(
                 &value,
@@ -3302,6 +3357,14 @@ mod tests {
         assert!(!engine.flows.contains_key(&deleted));
         let saved = engine.encode();
         assert!(!saved.contains("secret deleted history"));
+        let mut legacy = json::parse(saved.as_bytes()).unwrap();
+        if let Value::Obj(fields) = &mut legacy {
+            fields.retain(|(key, _)| key != "lineage");
+        }
+        assert_eq!(
+            Engine::decode(&legacy.to_json()).unwrap().flows[&kept],
+            engine.flows[&kept]
+        );
         let mut restored = Engine::decode(&saved).unwrap();
         assert!(!restored.flows.contains_key(&deleted));
         assert_eq!(restored.flows[&kept], engine.flows[&kept]);

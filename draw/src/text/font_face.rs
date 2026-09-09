@@ -79,6 +79,14 @@ impl fmt::Debug for FontFace {
 }
 
 impl FontFace {
+    pub(super) fn worker_source(&self) -> (Vec<u8>, u32, Vec<(u32, f32)>) {
+        (
+            self.parsed.data.as_slice().to_vec(),
+            self.parsed.index,
+            self.variations.iter().map(|v| (v.tag.0, v.value)).collect(),
+        )
+    }
+
     pub fn from_data_and_index(data: FontData, index: u32) -> Option<Self> {
         let parsed_data = data.clone();
         let face = ttf_parser::Face::parse(parsed_data.as_slice(), index).ok()?;

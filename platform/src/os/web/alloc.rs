@@ -48,9 +48,11 @@ const BIG_RING_LEN: usize = 32;
 static BIG_RING: [[AtomicUsize; 2]; BIG_RING_LEN] =
     [const { [AtomicUsize::new(0), AtomicUsize::new(0)] }; BIG_RING_LEN];
 static BIG_RING_NEXT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "wasm32")]
 static BIG_RING_READ: AtomicUsize = AtomicUsize::new(0);
 
 /// Bytes the allocator currently holds from the system heap, by kind.
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WebAllocStats {
     /// Live direct allocations (above the largest size class).
@@ -60,6 +62,7 @@ pub struct WebAllocStats {
     pub chunk_bytes: usize,
 }
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn stats() -> WebAllocStats {
     WebAllocStats {
         large_bytes: LARGE_LIVE_BYTES.load(Ordering::Relaxed),
@@ -89,6 +92,7 @@ fn record_big_event(size: usize) {
 /// Direct allocations of `BIG_EVENT_BYTES` or more since the previous call,
 /// oldest first, as `(bytes, linear memory bytes at that moment)`. At most
 /// the last `BIG_RING_LEN` are kept between calls.
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn take_big_events() -> Vec<(usize, usize)> {
     let next = BIG_RING_NEXT.load(Ordering::Relaxed);
     let read = BIG_RING_READ.swap(next, Ordering::Relaxed);

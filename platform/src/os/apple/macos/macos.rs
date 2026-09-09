@@ -36,7 +36,7 @@ use {
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
-            metal::{metal_cb_committed, DrawPassMode, MetalCx},
+            metal::{metal_submit_command_buffer, DrawPassMode, MetalCx},
         },
         permission::Permission,
         shared_framebuf::PollTimers,
@@ -98,6 +98,45 @@ fn set_metal_layer_background_color(layer: ObjcId, alpha: f64) {
     }
 }
 
+// The legacy display-link path has no nonblocking nextDrawable API.
+// One long-lived worker owns acquisition; the UI consumes a ready retained
+// drawable or leaves the pass dirty. At most one acquisition is outstanding.
+struct DrawableWorker {
+    request: std::sync::mpsc::SyncSender<()>,
+    ready: std::sync::mpsc::Receiver<Option<RcObjcId>>,
+    pending: bool,
+}
+
+impl DrawableWorker {
+    fn new(layer: ObjcId) -> Self {
+        let layer = RcObjcId::from_unowned(NonNull::new(layer).unwrap());
+        let (request, requests) = std::sync::mpsc::sync_channel(1);
+        let (ready, replies) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new().name("makepad-drawable".into()).spawn(move || {
+            while requests.recv().is_ok() {
+                let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+                let drawable: ObjcId = unsafe { msg_send![layer.as_id(), nextDrawable] };
+                let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
+                unsafe { let _: () = msg_send![pool, release]; }
+                if ready.try_send(drawable).is_err() { break; }
+                SignalToUI::set_ui_signal();
+            }
+        }).expect("drawable acquisition worker");
+        Self { request, ready: replies, pending: false }
+    }
+
+    fn take(&mut self) -> Option<RcObjcId> {
+        let result = if self.pending {
+            match self.ready.try_recv() {
+                Ok(drawable) => { self.pending = false; drawable }
+                Err(_) => None,
+            }
+        } else { None };
+        if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; }
+        result
+    }
+}
+
 #[derive(Clone)]
 pub struct MetalWindow {
     pub window_id: WindowId,
@@ -117,6 +156,7 @@ pub struct MetalWindow {
     /// must use the drawable its update hands over; `nextDrawable` meanwhile
     /// raises CAMetalLayerInvalidOperation (took visible windows down at launch).
     pub link_is_metal: bool,
+    drawable_worker: std::rc::Rc<std::cell::RefCell<Option<DrawableWorker>>>,
     /// When the present gate started skipping beats, so a gate whose
     /// handlers were lost can be forced back open instead of wedging.
     gate_closed_since: Option<Instant>,
@@ -153,7 +193,7 @@ impl MetalWindow {
                 if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
+            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: YES];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
             set_metal_layer_background_color(ca_layer, 1.0);
 
@@ -169,6 +209,7 @@ impl MetalWindow {
         MetalWindow {
             is_resizing: false,
             link_is_metal: false,
+            drawable_worker: Default::default(),
             window_id,
             cal_size: Vec2d::default(),
             ca_layer,
@@ -205,7 +246,7 @@ impl MetalWindow {
                 if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
+            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: YES];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
             set_metal_layer_background_color(ca_layer, 1.0);
 
@@ -221,6 +262,7 @@ impl MetalWindow {
         MetalWindow {
             is_resizing: false,
             link_is_metal: false,
+            drawable_worker: Default::default(),
             window_id,
             cal_size: Vec2d::default(),
             ca_layer,
@@ -234,7 +276,7 @@ impl MetalWindow {
 
     pub(crate) fn start_resize(&mut self) {
         self.is_resizing = true;
-        let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: YES] };
+        let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: NO] };
     }
 
     pub(crate) fn stop_resize(&mut self) {
@@ -626,8 +668,7 @@ impl Cx {
         // no window pass followed (texture-only frame), commit that work
         // now so it is never stranded.
         if let Some(shared) = metal_cx.frame_command_buffer.take() {
-            metal_cb_committed(shared);
-            let () = unsafe { msg_send![shared, commit] };
+            metal_submit_command_buffer(shared, None);
             let () = unsafe { msg_send![shared, release] };
         }
         // Some(drawable), including Some(nil), means this beat came from a
@@ -785,18 +826,12 @@ impl Cx {
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
-                        let drawable = if let Some(drawable) = link_drawable {
-                            drawable
-                        } else {
-                            let wait_t0 = std::time::Instant::now();
-                            let drawable: ObjcId =
-                                unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
-                            self.perf_monitor.add(
-                                crate::perf_monitor::PERF_CHANNEL_DRAWABLE_WAIT,
-                                wait_t0.elapsed().as_micros() as u64,
-                            );
-                            drawable
-                        };
+                        let acquired = if link_drawable.is_none() {
+                            let mut worker = metal_window.drawable_worker.borrow_mut();
+                            worker.get_or_insert_with(|| DrawableWorker::new(metal_window.ca_layer)).take()
+                        } else { None };
+                        let drawable = link_drawable.unwrap_or_else(||
+                            acquired.as_ref().map_or(nil, RcObjcId::as_id));
                         if drawable == nil {
                             self.repaint_pass(*draw_pass_id);
                             return;
@@ -1007,6 +1042,7 @@ impl Cx {
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>,
     ) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         // Poll with the renderer available, before native input/signal/timer
         // handlers can change the state being grabbed. Link callbacks retain
         // exclusive ownership of their supplied drawable; remote wakes and

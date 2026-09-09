@@ -637,7 +637,9 @@ impl App {
     fn drain_agent_sessions(&mut self, cx: &mut Cx) {
         self.sync_terminal_busy();
         if cx.seconds_since_app_start() >= self.agent_sessions.next_inventory_probe {
-            self.agent_sessions.next_inventory_probe = cx.seconds_since_app_start() + 1.0;
+            // Inventory invokes the helper. Explicit connect/refresh actions
+            // remain immediate; background discovery needs no one-second poll.
+            self.agent_sessions.next_inventory_probe = cx.seconds_since_app_start() + 30.0;
             let _ = self.refresh_terminal_inventory();
         }
         self.restore_terminal_views(cx);

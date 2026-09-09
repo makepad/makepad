@@ -30,6 +30,18 @@ pub struct CxDraw<'a> {
     pub rustybuzz_buffer: Option<UnicodeBuffer>,
 }
 
+#[derive(Default)]
+struct CxDrawScratch {
+    pass_stack: Vec<PassStackItem>,
+    draw_list_stack: Vec<DrawListId>,
+    rustybuzz_buffer: Option<UnicodeBuffer>,
+}
+
+// Each nested context checks out its own storage. Capacity survives the
+// frame, including the pool inventory once its nesting high-water is known.
+#[derive(Default)]
+struct CxDrawScratchPool(Vec<CxDrawScratch>);
+
 impl<'a> Deref for CxDraw<'a> {
     type Target = Cx;
     fn deref(&self) -> &Self::Target {
@@ -47,6 +59,13 @@ impl<'a> Drop for CxDraw<'a> {
         if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
+        self.pass_stack.clear();
+        self.draw_list_stack.clear();
+        self.cx.global::<CxDrawScratchPool>().0.push(CxDrawScratch {
+            pass_stack: std::mem::take(&mut self.pass_stack),
+            draw_list_stack: std::mem::take(&mut self.draw_list_stack),
+            rustybuzz_buffer: self.rustybuzz_buffer.take(),
+        });
     }
 }
 
@@ -58,14 +77,18 @@ impl<'a> CxDraw<'a> {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
+        let mut scratch = cx.global::<CxDrawScratchPool>().0.pop().unwrap_or_default();
+        scratch.pass_stack.reserve(16);
+        scratch.draw_list_stack.reserve(64);
+        let rustybuzz_buffer = scratch.rustybuzz_buffer.take().or_else(|| Some(UnicodeBuffer::new()));
         Self {
             fonts,
             cx,
             draw_event,
-            pass_stack: Vec::new(),
-            draw_list_stack: Vec::with_capacity(64),
+            pass_stack: scratch.pass_stack,
+            draw_list_stack: scratch.draw_list_stack,
             nav_tree_rc,
-            rustybuzz_buffer: Some(UnicodeBuffer::new()),
+            rustybuzz_buffer,
         }
     }
 }

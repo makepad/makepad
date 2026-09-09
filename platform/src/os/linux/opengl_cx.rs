@@ -519,8 +519,10 @@ impl Cx {
 
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            let swap_ok =
-                (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
+            let swap_ok = {
+                let _phase = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
+                (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface)
+            };
             if swap_ok == 0 {
                 // `eglGetError` is called outside the latch: it clears EGL's per-thread
                 // error, and skipping it would leak a stale code into the next report.

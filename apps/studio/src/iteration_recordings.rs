@@ -105,7 +105,9 @@ impl Host {
         let mut known = BTreeMap::new();
         for flow in self.engine.flows.values() {
             for run in &flow.runs {
-                if self.engine.evidence_origin("run", &run.id) != Some(flow.id.as_str()) { continue; }
+                let Some(origin) = self.engine.evidence_origin("run", &run.id) else {
+                    continue;
+                };
                 let Some(artifact) = flow
                     .artifacts
                     .iter()
@@ -113,7 +115,7 @@ impl Host {
                 else {
                     continue;
                 };
-                if !recording_identifier(&flow.id)
+                if !recording_identifier(origin)
                     || !recording_identifier(&run.id)
                     || !recording_commit(&artifact.commit)
                 {
@@ -122,7 +124,7 @@ impl Host {
                 known.insert(
                     run.id.clone(),
                     KnownRecordingRun {
-                        flow: flow.id.clone(),
+                        flow: origin.to_owned(),
                         run: run.id.clone(),
                         artifact: artifact.id.clone(),
                         commit: artifact.commit.clone(),
@@ -149,7 +151,7 @@ impl Host {
             ) else {
                 continue;
             };
-            if !self.engine.flows.contains_key(flow)
+            if !Self::retained_lane_report(&self.engine, report)
                 || !recording_identifier(flow)
                 || !recording_identifier(job)
                 || !recording_identifier(run)
@@ -167,15 +169,16 @@ impl Host {
             }
             // A private report must refer back to an observed checkpoint. A
             // caller cannot extend scanning merely by naming another folder.
-            let checkpointed = self.engine.events(flow).any(|event| {
-                event
-                    .operation
-                    .get("observation")
-                    .is_some_and(|observation| {
-                        observation.get("kind").and_then(Value::as_str) == Some("checkpointed")
-                            && observation.get("job_id").and_then(Value::as_str) == Some(job)
-                            && observation.get("commit").and_then(Value::as_str) == Some(commit)
-                    })
+            let checkpointed = self.engine.retained_events().any(|event| {
+                event.flow == flow
+                    && event
+                        .operation
+                        .get("observation")
+                        .is_some_and(|observation| {
+                            observation.get("kind").and_then(Value::as_str) == Some("checkpointed")
+                                && observation.get("job_id").and_then(Value::as_str) == Some(job)
+                                && observation.get("commit").and_then(Value::as_str) == Some(commit)
+                        })
             });
             if !checkpointed {
                 continue;
@@ -385,13 +388,19 @@ impl Host {
         let known: Vec<_> = self
             .known_recording_runs()
             .into_iter()
-            .filter(|run| self.engine.terminal_origin(&run.flow).ok() == self.engine.terminal_origin(flow).ok())
+            .filter(|run| self.engine.has_history_ancestor(flow, &run.flow))
             .collect();
         let mut paths = BTreeMap::new();
         for run in &known {
             for sidecar in recording_sidecars(&self.directory, run)? {
                 let tile = recording_tile(&self.directory, run, &sidecar)?;
-                if self.engine.history_owner(&tile.flow, &format!("recording/{}", tile.id)) != flow { continue; }
+                if self
+                    .engine
+                    .history_owner(&tile.flow, &format!("recording/{}", tile.id))
+                    != flow
+                {
+                    continue;
+                }
                 if tile.active {
                     return Err(format!(
                         "Recording {} is still active; no videos were deleted",

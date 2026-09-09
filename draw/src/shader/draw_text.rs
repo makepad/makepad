@@ -1287,7 +1287,7 @@ pub enum TextOverflow {
 }
 
 #[derive(Script)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct DrawText {
     #[rust]
     pub many_instances: Option<ManyInstances>,
@@ -2095,12 +2095,21 @@ impl DrawText {
         glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
         color: Vec4f,
     ) {
+        self.draw_rasterized_glyphs_abs_with_storage(cx, glyphs, color, None);
+    }
+
+    pub fn draw_rasterized_glyphs_abs_with_storage(
+        &mut self, cx: &mut Cx2d, glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
+        color: Vec4f, storage: Option<&mut Vec<f32>>,
+    ) {
         if glyphs.is_empty() {
             return;
         }
         // An already-open batch ran update_draw_vars when it began; running it
         // again per call dominates CPU when thousands of glyphs share a batch.
         if let Some(mut instances) = self.many_instances.take() {
+            Self::reserve_glyph_storage(&mut instances.instances,
+                glyphs.len() * self.draw_vars.as_slice().len(), storage);
             self.glyph_depth = self.draw_depth;
             self.color = color;
             for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
@@ -2121,6 +2130,9 @@ impl DrawText {
             return;
         };
 
+        Self::reserve_glyph_storage(&mut instances.instances,
+            glyphs.len() * self.draw_vars.as_slice().len(), storage);
+
         self.glyph_depth = self.draw_depth;
         self.color = color;
         for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
@@ -2134,6 +2146,16 @@ impl DrawText {
         }
 
         self.finish_many_instances(cx, instances);
+    }
+
+    fn reserve_glyph_storage(instances: &mut Vec<f32>, additional: usize, storage: Option<&mut Vec<f32>>) {
+        if instances.is_empty() {
+            if let Some(storage) = storage.filter(|storage| storage.capacity() >= additional) {
+                std::mem::swap(instances, storage);
+                instances.clear();
+            }
+        }
+        instances.reserve(additional);
     }
 
     pub fn draw_rasterized_glyph_abs(

@@ -692,7 +692,7 @@ script_mod! {
                             }
                             View{width: Fill height: 1}
                             filter_status := StatusText{
-                                width: Fit{max: FitBound.Abs(250)} margin: Inset{right: 8} text: ""
+                                width: 250 margin: Inset{right: 8} text: ""
                                 draw_text +: {max_lines: 1 text_overflow: TextOverflow.Ellipsis}
                             }
                             Tip{text: "Filter · type a kind (enum, fn), a name or a word; Enter steps through the hits · /"

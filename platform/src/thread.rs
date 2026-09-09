@@ -17,6 +17,9 @@
 //! Deadlines are Makepad monotonic seconds; no `Instant` crosses the wasm
 //! boundary.
 
+pub mod ui_hang;
+pub use ui_hang::{ui_event_phase, ui_phase, UiPhase, UiPhaseGuard};
+
 use {
     crate::{
         cx::Cx,
@@ -30,7 +33,9 @@ use {
         num::NonZeroUsize,
         panic::{catch_unwind, AssertUnwindSafe},
         sync::{
-            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+            atomic::{
+                AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+            },
             mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
             Arc, Condvar, Mutex, MutexGuard, OnceLock,
         },
@@ -40,9 +45,8 @@ use {
 };
 
 pub use makepad_network::{
-    to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender, ReceiverAlreadyTaken,
-    SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender,
-    UiWaker,
+    to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender, ReceiverAlreadyTaken, SignalFromUI,
+    SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender, UiWaker,
 };
 
 fn lock_without_wasm_wait<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -123,7 +127,9 @@ impl fmt::Display for SpawnError {
             Self::Unsupported => write!(f, "thread spawning is unsupported on this target"),
             Self::RuntimeClosed => write!(f, "thread runtime is closed"),
             Self::ResourceLimit => write!(f, "thread resource limit reached"),
-            Self::InvalidStackSize { requested } => write!(f, "invalid thread stack size {requested}"),
+            Self::InvalidStackSize { requested } => {
+                write!(f, "invalid thread stack size {requested}")
+            }
             Self::Backend(message) => write!(f, "thread backend error: {message}"),
         }
     }
@@ -160,9 +166,27 @@ impl fmt::Display for TaskError {
 impl std::error::Error for TaskError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PriorityStatus {
+    Pending,
     Applied,
     BestEffortUnsupported,
+    Failed,
+}
+
+impl PriorityStatus {
+    fn load(state: &AtomicU8) -> Self {
+        match state.load(Ordering::Acquire) {
+            0 => Self::Pending,
+            1 => Self::Applied,
+            2 => Self::BestEffortUnsupported,
+            _ => Self::Failed,
+        }
+    }
+}
+
+fn priority_state(status: PriorityStatus) -> Arc<AtomicU8> {
+    Arc::new(AtomicU8::new(status as u8))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,8 +203,23 @@ pub struct CancellationToken {
 #[derive(Default)]
 struct CancellationInner {
     cancelled: AtomicBool,
-    generation: Mutex<u64>,
-    wake: Condvar,
+    waiters: AtomicPtr<CancellationWaiter>,
+}
+
+struct CancellationWaiter {
+    thread: std::thread::Thread,
+    next: *mut CancellationWaiter,
+}
+
+impl Drop for CancellationInner {
+    fn drop(&mut self) {
+        let mut next = *self.waiters.get_mut();
+        while !next.is_null() {
+            // The last token is gone: no caller can traverse or register.
+            let waiter = unsafe { Box::from_raw(next) };
+            next = waiter.next;
+        }
+    }
 }
 
 impl fmt::Debug for CancellationToken {
@@ -197,10 +236,14 @@ impl CancellationToken {
     }
 
     pub fn cancel(&self) {
-        if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
-            let mut generation = lock_from_ui(&self.inner.generation);
-            *generation = generation.wrapping_add(1);
-            self.inner.wake.notify_all();
+        if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
+            let mut next = self.inner.waiters.load(Ordering::SeqCst);
+            while !next.is_null() {
+                // Nodes are immutable and live as long as this token's Arc.
+                let waiter = unsafe { &*next };
+                waiter.thread.unpark();
+                next = waiter.next;
+            }
         }
     }
 
@@ -225,32 +268,50 @@ impl CancellationToken {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-        if self.is_cancelled() {
-            return WaitOutcome::Cancelled;
-        }
-        let mut generation = self.inner.generation.lock().unwrap();
-        loop {
             if self.is_cancelled() {
                 return WaitOutcome::Cancelled;
             }
-            let remaining = deadline - Cx::monotonic_now();
-            if remaining <= 0.0 {
-                return WaitOutcome::DeadlineReached;
+            let thread = std::thread::current();
+            let mut head = self.inner.waiters.load(Ordering::SeqCst);
+            let mut next = head;
+            let mut registered = false;
+            while !next.is_null() {
+                let waiter = unsafe { &*next };
+                if waiter.thread.id() == thread.id() {
+                    registered = true;
+                    break;
+                }
+                next = waiter.next;
             }
-            let (next_generation, wait_result) = self
-                .inner
-                .wake
-                .wait_timeout(generation, Duration::from_secs_f64(remaining))
-                .unwrap();
-            generation = next_generation;
-            if wait_result.timed_out() {
-                return if self.is_cancelled() {
-                    WaitOutcome::Cancelled
-                } else {
-                    WaitOutcome::DeadlineReached
-                };
+            if !registered {
+                let node = Box::into_raw(Box::new(CancellationWaiter { thread, next: head }));
+                loop {
+                    unsafe {
+                        (*node).next = head;
+                    }
+                    match self.inner.waiters.compare_exchange(
+                        head,
+                        node,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(current) => head = current,
+                    }
+                }
             }
-        }
+            // SeqCst registration/flag pairs with cancel's flag/list loads:
+            // cancellation either sees this waiter or we see cancellation.
+            loop {
+                if self.inner.cancelled.load(Ordering::SeqCst) {
+                    return WaitOutcome::Cancelled;
+                }
+                let remaining = deadline - Cx::monotonic_now();
+                if remaining <= 0.0 {
+                    return WaitOutcome::DeadlineReached;
+                }
+                std::thread::park_timeout(Duration::from_secs_f64(remaining));
+            }
         }
     }
 }
@@ -299,7 +360,7 @@ pub struct TaskHandle<T> {
     state: Arc<TaskState<T>>,
     token: CancellationToken,
     ui_thread: ThreadId,
-    priority_status: PriorityStatus,
+    priority_status: Arc<AtomicU8>,
     #[cfg(not(target_arch = "wasm32"))]
     native_join: Option<std::thread::JoinHandle<()>>,
 }
@@ -309,7 +370,7 @@ impl<T> fmt::Debug for TaskHandle<T> {
         f.debug_struct("TaskHandle")
             .field("finished", &self.is_finished())
             .field("cancelled", &self.token.is_cancelled())
-            .field("priority_status", &self.priority_status)
+            .field("priority_status", &self.priority_status())
             .finish()
     }
 }
@@ -333,9 +394,10 @@ impl<T> TaskHandle<T> {
         };
         #[cfg(not(target_arch = "wasm32"))]
         if result.is_some() {
-            if let Some(join) = self.native_join.take() {
-                let _ = join.join();
-            }
+            // Payload publication precedes actual thread exit, including TLS
+            // destructors. Polling never joins, even an apparently finished
+            // native thread; an explicit worker-side join owns that wait.
+            self.native_join.take();
         }
         result
     }
@@ -372,7 +434,7 @@ impl<T> TaskHandle<T> {
     }
 
     pub fn priority_status(&self) -> PriorityStatus {
-        self.priority_status
+        PriorityStatus::load(&self.priority_status)
     }
 
     #[allow(dead_code)]
@@ -383,7 +445,7 @@ impl<T> TaskHandle<T> {
             state,
             token: CancellationToken::new(),
             ui_thread,
-            priority_status: PriorityStatus::BestEffortUnsupported,
+            priority_status: priority_state(PriorityStatus::BestEffortUnsupported),
             #[cfg(not(target_arch = "wasm32"))]
             native_join: None,
         }
@@ -446,7 +508,11 @@ impl ThreadSpawner {
     /// loop that is fed over a channel; never per job — jobs go to
     /// [`TaskPool::submit`]. The handle reports the thread's terminal result;
     /// `detach()` it when nobody waits for that.
-    pub fn spawn_worker<F, T>(&self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
+    pub fn spawn_worker<F, T>(
+        &self,
+        options: ThreadOptions,
+        f: F,
+    ) -> Result<TaskHandle<T>, SpawnError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -479,10 +545,12 @@ impl ThreadSpawner {
                 builder = builder.stack_size(stack_size);
             }
             let priority = options.priority;
-            let priority_status = priority_status(priority);
+            let priority_status = priority_state(PriorityStatus::Pending);
+            let applied_status = priority_status.clone();
             let native_join = builder
                 .spawn(move || {
-                    Cx::set_thread_priority(priority);
+                    applied_status
+                        .store(Cx::set_thread_priority(priority) as u8, Ordering::Release);
                     run();
                 })
                 .map_err(map_spawn_io_error)?;
@@ -526,7 +594,9 @@ impl ThreadSpawner {
 
 fn validate_stack_size(stack_size: Option<usize>) -> Result<(), SpawnError> {
     if let Some(requested) = stack_size {
-        if !(MIN_THREAD_STACK_SIZE..=MAX_THREAD_STACK_SIZE).contains(&requested) || requested % 16 != 0 {
+        if !(MIN_THREAD_STACK_SIZE..=MAX_THREAD_STACK_SIZE).contains(&requested)
+            || requested % 16 != 0
+        {
             return Err(SpawnError::InvalidStackSize { requested });
         }
     }
@@ -539,15 +609,6 @@ fn map_spawn_io_error(error: std::io::Error) -> SpawnError {
     match error.kind() {
         ErrorKind::WouldBlock | ErrorKind::OutOfMemory => SpawnError::ResourceLimit,
         _ => SpawnError::Backend(error.to_string().into()),
-    }
-}
-
-#[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
-fn priority_status(priority: CxThreadPriority) -> PriorityStatus {
-    if priority == CxThreadPriority::Normal || cfg!(target_os = "android") {
-        PriorityStatus::Applied
-    } else {
-        PriorityStatus::BestEffortUnsupported
     }
 }
 
@@ -566,11 +627,215 @@ pub fn worker_count(reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
     worker_count_from(available_parallelism(), reserve_for_ui, cap)
 }
 
-/// Heavy lane = `cores − 2`, light lane = 2, each at least 1.
-pub fn machine_lane_counts(cores: usize) -> (usize, usize) {
-    let light = 2;
-    let heavy = cores.saturating_sub(2).max(1);
-    (heavy, light)
+/// Physical topology available to this process, detected once at startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MachineTopology {
+    pub logical: usize,
+    pub physical: usize,
+    pub performance: usize,
+    pub efficiency: usize,
+    pub source: &'static str,
+}
+
+impl MachineTopology {
+    pub fn homogeneous(physical: usize) -> Self {
+        let physical = physical.max(1);
+        Self {
+            logical: physical,
+            physical,
+            performance: physical,
+            efficiency: 0,
+            source: "homogeneous",
+        }
+    }
+
+    /// Reserve two performance cores for UI and rendering. Tiny machines
+    /// share a single light worker; the lanes still each make progress.
+    pub fn lane_counts(self) -> (usize, usize) {
+        let light = if self.physical <= 4 { 1 } else { 2 };
+        (self.performance.saturating_sub(2).max(1), light)
+    }
+
+    fn limited_to(mut self, logical: usize) -> Self {
+        self.logical = self.logical.min(logical.max(1));
+        self.physical = self.physical.min(self.logical).max(1);
+        self.performance = self.performance.min(self.physical).max(1);
+        self.efficiency = self.efficiency.min(self.physical - self.performance);
+        self
+    }
+}
+
+/// Sizing for a known homogeneous physical core count. For the current host
+/// use `machine_topology().lane_counts()` (logical cores are not physical).
+pub fn machine_lane_counts(physical: usize) -> (usize, usize) {
+    MachineTopology::homogeneous(physical).lane_counts()
+}
+
+pub fn machine_topology() -> MachineTopology {
+    static TOPOLOGY: OnceLock<MachineTopology> = OnceLock::new();
+    *TOPOLOGY.get_or_init(|| detect_machine_topology(available_parallelism().get()))
+}
+
+#[cfg(target_vendor = "apple")]
+fn detect_machine_topology(logical: usize) -> MachineTopology {
+    fn count(name: &[u8]) -> Option<usize> {
+        unsafe extern "C" {
+            fn sysctlbyname(
+                name: *const std::ffi::c_char,
+                old: *mut std::ffi::c_void,
+                size: *mut usize,
+                new: *mut std::ffi::c_void,
+                new_size: usize,
+            ) -> i32;
+        }
+        let mut value = 0u32;
+        let mut size = std::mem::size_of_val(&value);
+        let result = unsafe {
+            sysctlbyname(
+                name.as_ptr().cast(),
+                (&mut value as *mut u32).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (result == 0 && size == 4 && value > 0).then_some(value as usize)
+    }
+    let physical = count(b"hw.physicalcpu\0");
+    let performance = count(b"hw.perflevel0.physicalcpu\0");
+    let physical = physical.unwrap_or(1);
+    let performance = performance.unwrap_or(physical).min(physical);
+    MachineTopology {
+        logical,
+        physical,
+        performance,
+        efficiency: physical - performance,
+        source: "sysctl-physical",
+    }
+    .limited_to(logical)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn detect_machine_topology(logical: usize) -> MachineTopology {
+    use std::{collections::BTreeMap, fs};
+    // Respect affinity/cpuset restrictions, and deduplicate SMT siblings.
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"));
+    let mut cores = BTreeMap::new();
+    if let Some(allowed) = allowed {
+        for range in allowed.trim().split(',') {
+            let mut bounds = range.split('-');
+            let Some(first) = bounds.next().and_then(|n| n.parse::<usize>().ok()) else {
+                continue;
+            };
+            let last = bounds
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(first);
+            for cpu in first..=last {
+                let base = format!("/sys/devices/system/cpu/cpu{cpu}");
+                let siblings = fs::read_to_string(format!("{base}/topology/thread_siblings_list"));
+                let Ok(siblings) = siblings else { continue };
+                let capacity = fs::read_to_string(format!("{base}/cpu_capacity"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok());
+                cores.entry(siblings.trim().to_string()).or_insert(capacity);
+            }
+        }
+    }
+    if cores.is_empty() {
+        return MachineTopology {
+            source: "physical-unavailable-conservative",
+            logical,
+            ..MachineTopology::homogeneous(1)
+        };
+    }
+    let physical = cores.len();
+    let performance = if cores.values().all(Option::is_some) {
+        let max = cores.values().filter_map(|c| *c).max();
+        cores.values().filter(|c| **c == max).count()
+    } else {
+        physical
+    };
+    MachineTopology {
+        logical,
+        physical,
+        performance,
+        efficiency: physical - performance,
+        source: "sysfs-affinity-physical",
+    }
+    .limited_to(logical)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_machine_topology(logical: usize) -> MachineTopology {
+    // Query RelationProcessorCore. Each variable-size record is one physical
+    // core, regardless of the number of SMT bits in its group masks.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetLogicalProcessorInformationEx(
+            relationship: u32,
+            buffer: *mut u8,
+            length: *mut u32,
+        ) -> i32;
+    }
+    let mut bytes = 0u32;
+    unsafe {
+        GetLogicalProcessorInformationEx(0, std::ptr::null_mut(), &mut bytes);
+    }
+    let mut classes = Vec::new();
+    if bytes > 0 {
+        let mut buffer = vec![0u8; bytes as usize];
+        if unsafe { GetLogicalProcessorInformationEx(0, buffer.as_mut_ptr(), &mut bytes) } != 0 {
+            let mut offset = 0;
+            while offset + 32 <= bytes as usize {
+                let relationship =
+                    u32::from_ne_bytes(buffer[offset..offset + 4].try_into().unwrap());
+                let size =
+                    u32::from_ne_bytes(buffer[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                if size < 32 || offset + size > bytes as usize {
+                    break;
+                }
+                if relationship == 0 {
+                    classes.push(buffer[offset + 9]);
+                }
+                offset += size;
+            }
+        }
+    }
+    if classes.is_empty() {
+        return MachineTopology {
+            source: "physical-unavailable-conservative",
+            logical,
+            ..MachineTopology::homogeneous(1)
+        };
+    }
+    let max = classes.iter().copied().max().unwrap();
+    let performance = classes.iter().filter(|c| **c == max).count();
+    MachineTopology {
+        logical,
+        physical: classes.len(),
+        performance,
+        efficiency: classes.len() - performance,
+        source: "windows-physical",
+    }
+    .limited_to(logical)
+}
+
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows"
+)))]
+fn detect_machine_topology(logical: usize) -> MachineTopology {
+    MachineTopology {
+        logical,
+        source: "physical-unavailable-conservative",
+        ..MachineTopology::homogeneous(1)
+    }
 }
 
 fn worker_count_from(parallelism: NonZeroUsize, reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
@@ -611,6 +876,8 @@ impl Cx {
     }
 
     pub(crate) fn warm_task_pool(&self) {
+        let status = Cx::set_thread_priority(CxThreadPriority::UserInteractive);
+        crate::log!("UI thread priority UserInteractive: {status:?}");
         let _ = self.task_pool();
     }
 
@@ -635,12 +902,18 @@ impl Cx {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let result = self.thread_spawner().spawn_worker(ThreadOptions::default(), f);
+        let result = self
+            .thread_spawner()
+            .spawn_worker(ThreadOptions::default(), f);
         log_unsupported_spawn_once(&result);
         result
     }
 
-    pub fn spawn_worker_with<F, T>(&self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
+    pub fn spawn_worker_with<F, T>(
+        &self,
+        options: ThreadOptions,
+        f: F,
+    ) -> Result<TaskHandle<T>, SpawnError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -708,12 +981,13 @@ pub enum ShutdownMode {
     Drain,
 }
 
-/// The most workers one pool tracks; the idle set is one `u32` bit mask.
+/// Legacy staging-window default for callers. Runtime worker counts are
+/// derived from physical topology and are no longer capped by a bit mask.
 pub const MAX_POOL_WORKERS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct PoolOptions {
-    /// Total worker threads, clamped to `1..=MAX_POOL_WORKERS`.
+    /// Total worker threads (runtime defaults use physical topology).
     pub workers: NonZeroUsize,
     /// Workers that only ever run `Lane::Light` jobs. Clamped so at least one
     /// worker can run heavy jobs.
@@ -725,8 +999,8 @@ pub struct PoolOptions {
 }
 
 impl PoolOptions {
-    /// The runtime sizing law. Desktop: heavy = cores − 2 (minimum 1), light = 2,
-    /// no upper clamp other than `MAX_POOL_WORKERS`. Web: hardware concurrency
+    /// Native sizing uses physical performance cores, reserving two for UI
+    /// and rendering, plus one or two light workers. Web: hardware concurrency
     /// minus one, capped at 6 (Web Workers are expensive to start but cheap to
     /// keep) and at least 3. Two workers are reserved for light jobs on both.
     pub fn runtime(parallelism: NonZeroUsize) -> Self {
@@ -739,8 +1013,8 @@ impl PoolOptions {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let (heavy, light) = machine_lane_counts(hardware);
-                let total = (heavy + light).min(MAX_POOL_WORKERS);
+                let (heavy, light) = machine_topology().limited_to(hardware).lane_counts();
+                let total = heavy + light;
                 (total, light.min(total.saturating_sub(1)).max(1))
             }
         };
@@ -790,22 +1064,25 @@ pub struct Refused<F> {
 
 impl<F> fmt::Debug for Refused<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Refused").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("Refused")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
 struct PoolJob {
     lane: Lane,
+    label: &'static str,
     submitted_at: f64,
-    run: Option<Box<dyn FnOnce() + Send>>,
+    run: Option<Box<dyn FnOnce(PriorityStatus) + Send>>,
     cancel: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl PoolJob {
-    fn run(mut self) {
+    fn run(mut self, priority_status: PriorityStatus) {
         self.cancel.take();
         if let Some(run) = self.run.take() {
-            run();
+            run(priority_status);
         }
     }
 }
@@ -856,7 +1133,10 @@ impl LaneQueue {
     }
 
     fn try_take(&self) -> Option<PoolJob> {
-        let receiver = self.receiver.lock().unwrap_or_else(|error| error.into_inner());
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let job = receiver.try_recv().ok();
         drop(receiver);
         if job.is_some() {
@@ -888,9 +1168,29 @@ impl LaneQueue {
     }
 }
 
+const LIGHT_BUDGET_US: u64 = 2_000;
+const POOL_REPORT_US: u64 = 5_000_000;
+const MAX_LIGHT_LABELS: usize = 64;
+
+#[derive(Default)]
+struct LightOffender {
+    label: OnceLock<&'static str>,
+    count: AtomicU64,
+    max_us: AtomicU64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightOffenderStats {
+    pub label: &'static str,
+    pub count: u64,
+    pub max_ms: f64,
+}
+
 struct WorkerSlot {
     thread: OnceLock<std::thread::Thread>,
     heavy_capable: bool,
+    idle: AtomicBool,
+    priority_status: AtomicU8,
 }
 
 const POOL_OPEN: u8 = 0;
@@ -901,9 +1201,6 @@ struct PoolInner {
     lanes: [LaneQueue; 2],
     workers: Vec<WorkerSlot>,
     light_reserve: usize,
-    /// One bit per parked worker. Set by the worker before it parks, cleared
-    /// by whoever unparks it — the unpark token makes the hand-off lossless.
-    idle: AtomicU32,
     closed: AtomicU8,
     started: AtomicUsize,
     exited: AtomicUsize,
@@ -913,6 +1210,11 @@ struct PoolInner {
     shutdown_state: Arc<TaskState<()>>,
     ui_thread: ThreadId,
     name: Arc<str>,
+    light_over_budget: AtomicU64,
+    light_label_overflow: AtomicU64,
+    offenders: [LightOffender; MAX_LIGHT_LABELS],
+    next_report_us: AtomicU64,
+    reported_completed: AtomicU64,
 }
 
 impl PoolInner {
@@ -926,23 +1228,157 @@ impl PoolInner {
         if let Some(job) = self.lanes[Lane::Light.index()].try_take() {
             return Some(job);
         }
+        // Utility workers may help with short jobs at utility priority. The
+        // user-initiated workers never run heavy work or promote its priority.
         if heavy_capable {
-            return self.lanes[Lane::Heavy.index()].try_take();
+            self.lanes[Lane::Heavy.index()].try_take()
+        } else {
+            None
         }
-        None
     }
 
-    fn run_job(&self, job: PoolJob) {
+    fn run_job(&self, job: PoolJob, status: PriorityStatus) {
         let queue = &self.lanes[job.lane.index()];
         let started = Cx::monotonic_now();
         let wait_us = ((started - job.submitted_at).max(0.0) * 1_000_000.0) as u64;
         queue.wait_total_us.fetch_add(wait_us, Ordering::Relaxed);
         queue.wait_max_us.fetch_max(wait_us, Ordering::Relaxed);
-        job.run();
+        let lane = job.lane;
+        let label = job.label;
+        job.run(status);
         let run_us = ((Cx::monotonic_now() - started).max(0.0) * 1_000_000.0) as u64;
         queue.run_total_us.fetch_add(run_us, Ordering::Relaxed);
         queue.run_max_us.fetch_max(run_us, Ordering::Relaxed);
+        if lane == Lane::Light && run_us > LIGHT_BUDGET_US {
+            self.light_over_budget.fetch_add(1, Ordering::Relaxed);
+            let mut recorded = false;
+            for offender in &self.offenders {
+                if offender.label.get().is_none() {
+                    let _ = offender.label.set(label);
+                }
+                if offender.label.get() == Some(&label) {
+                    offender.count.fetch_add(1, Ordering::Relaxed);
+                    offender.max_us.fetch_max(run_us, Ordering::Relaxed);
+                    recorded = true;
+                    break;
+                }
+            }
+            if !recorded {
+                self.light_label_overflow.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         queue.completed.fetch_add(1, Ordering::Relaxed);
+        // Worker zero is also the reporter. No extra thread or UI timer.
+        if let Some(thread) = self.workers.first().and_then(|w| w.thread.get()) {
+            thread.unpark();
+        }
+    }
+
+    fn report_delay(&self) -> Option<Duration> {
+        let submitted: u64 = self
+            .lanes
+            .iter()
+            .map(|q| q.submitted.load(Ordering::Relaxed))
+            .sum();
+        let completed: u64 = self
+            .lanes
+            .iter()
+            .map(|q| q.completed.load(Ordering::Relaxed))
+            .sum();
+        if submitted == self.reported_completed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let now = (Cx::monotonic_now() * 1_000_000.0) as u64;
+        let mut due = self.next_report_us.load(Ordering::Relaxed);
+        if due == 0 {
+            due = now + POOL_REPORT_US;
+            self.next_report_us.store(due, Ordering::Relaxed);
+        }
+        if now >= due {
+            crate::log!("{}", self.summary());
+            self.reported_completed.store(completed, Ordering::Relaxed);
+            self.next_report_us
+                .store(now + POOL_REPORT_US, Ordering::Relaxed);
+            if submitted == completed {
+                return None;
+            }
+            return Some(Duration::from_micros(POOL_REPORT_US));
+        }
+        Some(Duration::from_micros(due - now))
+    }
+
+    fn stats(&self) -> PoolStats {
+        PoolStats {
+            workers: self.workers.len(),
+            light_reserve: self.light_reserve,
+            started: self.started.load(Ordering::Acquire),
+            exited: self.exited.load(Ordering::Acquire),
+            light_over_budget: self.light_over_budget.load(Ordering::Relaxed),
+            light_label_overflow: self.light_label_overflow.load(Ordering::Relaxed),
+            priority_applied: self
+                .workers
+                .iter()
+                .filter(|w| PriorityStatus::load(&w.priority_status) == PriorityStatus::Applied)
+                .count(),
+            light: self.lanes[0].snapshot(),
+            heavy: self.lanes[1].snapshot(),
+        }
+    }
+
+    /// `pool: 7 workers (2 light-only), 143 jobs, peak queue light 6 / heavy 3, ...`
+    fn summary(&self) -> String {
+        let stats = self.stats();
+        let mut out = format!(
+            "pool: {} workers ({} light-only, {} started), {} jobs, peak queue light {} / heavy {}",
+            stats.workers,
+            stats.light_reserve,
+            stats.started,
+            stats.light.submitted + stats.heavy.submitted,
+            stats.light.peak_queued,
+            stats.heavy.peak_queued,
+        );
+        for (lane, lane_stats) in Lane::ALL.iter().zip([stats.light, stats.heavy]) {
+            out.push_str(&format!(
+                "; {} {}: wait avg {:.2} ms max {:.2} ms, run avg {:.1} ms max {:.1} ms",
+                lane.label(),
+                lane_stats.completed,
+                lane_stats.wait_avg_ms,
+                lane_stats.wait_max_ms,
+                lane_stats.run_avg_ms,
+                lane_stats.run_max_ms,
+            ));
+        }
+        out.push_str(&format!("; priority applied {}/{} (light UserInitiated / heavy Utility); light >2ms {} offenders=[",
+            stats.priority_applied, stats.workers, stats.light_over_budget));
+        for (index, offender) in self.light_offenders().iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!(
+                "{} count={} max={:.2}ms",
+                offender.label, offender.count, offender.max_ms
+            ));
+        }
+        out.push_str(&format!("] overflow={}", stats.light_label_overflow));
+        out
+    }
+
+    fn light_offenders(&self) -> Vec<LightOffenderStats> {
+        let mut offenders: Vec<_> = self
+            .offenders
+            .iter()
+            .filter_map(|o| {
+                let label = *o.label.get()?;
+                let count = o.count.load(Ordering::Relaxed);
+                (count > 0).then(|| LightOffenderStats {
+                    label,
+                    count,
+                    max_ms: o.max_us.load(Ordering::Relaxed) as f64 / 1000.0,
+                })
+            })
+            .collect();
+        offenders.sort_by(|a, b| b.count.cmp(&a.count).then(a.label.cmp(b.label)));
+        offenders
     }
 
     /// Wake one parked worker able to serve `lane`. Any thread may call this;
@@ -950,24 +1386,16 @@ impl PoolInner {
     /// leaving the heavy-capable ones free for heavy work.
     fn wake_one(&self, lane: Lane) {
         std::sync::atomic::fence(Ordering::SeqCst);
-        let mask = self.idle.load(Ordering::SeqCst);
-        if mask == 0 {
-            return;
-        }
         let passes: &[bool] = match lane {
             Lane::Light => &[false, true],
             Lane::Heavy => &[true],
         };
         for &heavy_capable in passes {
-            for (index, slot) in self.workers.iter().enumerate() {
+            for slot in &self.workers {
                 if slot.heavy_capable != heavy_capable {
                     continue;
                 }
-                let bit = 1u32 << index;
-                if mask & bit == 0 {
-                    continue;
-                }
-                if self.idle.fetch_and(!bit, Ordering::SeqCst) & bit != 0 {
+                if slot.idle.swap(false, Ordering::SeqCst) {
                     if let Some(thread) = slot.thread.get() {
                         thread.unpark();
                     }
@@ -990,29 +1418,44 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
     let _exit = PoolWorkerExit(inner.clone());
     let slot = &inner.workers[index];
     let _ = slot.thread.set(std::thread::current());
+    let priority = if slot.heavy_capable {
+        CxThreadPriority::Utility
+    } else {
+        CxThreadPriority::UserInitiated
+    };
+    slot.priority_status
+        .store(Cx::set_thread_priority(priority) as u8, Ordering::Release);
     inner.started.fetch_add(1, Ordering::AcqRel);
-    let bit = 1u32 << index;
     loop {
+        let report_delay = if index == 0 {
+            inner.report_delay()
+        } else {
+            None
+        };
         if let Some(job) = inner.take_job(slot.heavy_capable) {
-            inner.run_job(job);
+            inner.run_job(job, PriorityStatus::load(&slot.priority_status));
             continue;
         }
         if inner.closed.load(Ordering::Acquire) != POOL_OPEN {
             break;
         }
-        inner.idle.fetch_or(bit, Ordering::SeqCst);
+        slot.idle.store(true, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
         if let Some(job) = inner.take_job(slot.heavy_capable) {
-            inner.idle.fetch_and(!bit, Ordering::SeqCst);
-            inner.run_job(job);
+            slot.idle.store(false, Ordering::SeqCst);
+            inner.run_job(job, PriorityStatus::load(&slot.priority_status));
             continue;
         }
         if inner.closed.load(Ordering::SeqCst) != POOL_OPEN {
-            inner.idle.fetch_and(!bit, Ordering::SeqCst);
+            slot.idle.store(false, Ordering::SeqCst);
             continue;
         }
-        std::thread::park();
-        inner.idle.fetch_and(!bit, Ordering::SeqCst);
+        if let Some(delay) = report_delay {
+            std::thread::park_timeout(delay);
+        } else {
+            std::thread::park();
+        }
+        slot.idle.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1046,6 +1489,9 @@ pub struct PoolStats {
     pub light_reserve: usize,
     pub started: usize,
     pub exited: usize,
+    pub light_over_budget: u64,
+    pub light_label_overflow: u64,
+    pub priority_applied: usize,
     pub light: LaneStats,
     pub heavy: LaneStats,
 }
@@ -1066,7 +1512,9 @@ pub struct TaskPool {
 impl Clone for TaskPool {
     fn clone(&self) -> Self {
         self.inner.handles.fetch_add(1, Ordering::AcqRel);
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -1084,8 +1532,14 @@ impl fmt::Debug for TaskPool {
             .field("name", &self.inner.name)
             .field("workers", &self.inner.workers.len())
             .field("light_reserve", &self.inner.light_reserve)
-            .field("queued_light", &self.inner.lanes[0].queued.load(Ordering::Relaxed))
-            .field("queued_heavy", &self.inner.lanes[1].queued.load(Ordering::Relaxed))
+            .field(
+                "queued_light",
+                &self.inner.lanes[0].queued.load(Ordering::Relaxed),
+            )
+            .field(
+                "queued_heavy",
+                &self.inner.lanes[1].queued.load(Ordering::Relaxed),
+            )
             .field("closed", &self.inner.closed.load(Ordering::Relaxed))
             .finish()
     }
@@ -1094,12 +1548,14 @@ impl fmt::Debug for TaskPool {
 impl TaskPool {
     /// Spawn the workers now; they park until the first job.
     pub fn new(spawner: ThreadSpawner, options: PoolOptions) -> Result<Self, SpawnError> {
-        let worker_len = options.workers.get().min(MAX_POOL_WORKERS);
+        let worker_len = options.workers.get();
         let light_reserve = options.light_reserve.min(worker_len - 1);
         let workers = (0..worker_len)
             .map(|index| WorkerSlot {
                 thread: OnceLock::new(),
                 heavy_capable: index >= light_reserve,
+                idle: AtomicBool::new(false),
+                priority_status: AtomicU8::new(PriorityStatus::Pending as u8),
             })
             .collect();
         let inner = Arc::new(PoolInner {
@@ -1109,7 +1565,6 @@ impl TaskPool {
             ],
             workers,
             light_reserve,
-            idle: AtomicU32::new(0),
             closed: AtomicU8::new(POOL_OPEN),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
@@ -1117,13 +1572,25 @@ impl TaskPool {
             shutdown_state: Arc::new(TaskState::default()),
             ui_thread: spawner.ui_thread,
             name: options.name.clone(),
+            light_over_budget: AtomicU64::new(0),
+            light_label_overflow: AtomicU64::new(0),
+            offenders: std::array::from_fn(|_| LightOffender::default()),
+            next_report_us: AtomicU64::new(0),
+            reported_completed: AtomicU64::new(0),
         });
-        let pool = Self { inner: inner.clone() };
+        let pool = Self {
+            inner: inner.clone(),
+        };
         for index in 0..worker_len {
             let worker_inner = inner.clone();
             let spawned = spawner.spawn_worker(
                 ThreadOptions {
                     name: Some(format!("{}-{index}", options.name).into()),
+                    priority: if index < light_reserve {
+                        CxThreadPriority::UserInitiated
+                    } else {
+                        CxThreadPriority::Utility
+                    },
                     ..Default::default()
                 },
                 move || pool_worker(worker_inner, index),
@@ -1153,7 +1620,6 @@ impl TaskPool {
             lanes: [LaneQueue::new(1), LaneQueue::new(1)],
             workers: Vec::new(),
             light_reserve: 0,
-            idle: AtomicU32::new(0),
             closed: AtomicU8::new(POOL_CANCELLED),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
@@ -1161,6 +1627,11 @@ impl TaskPool {
             shutdown_state: Arc::new(TaskState::default()),
             ui_thread: std::thread::current().id(),
             name: "closed".into(),
+            light_over_budget: AtomicU64::new(0),
+            light_label_overflow: AtomicU64::new(0),
+            offenders: std::array::from_fn(|_| LightOffender::default()),
+            next_report_us: AtomicU64::new(0),
+            reported_completed: AtomicU64::new(0),
         });
         inner.shutdown_state.complete(Ok(()));
         Self { inner }
@@ -1190,11 +1661,17 @@ impl TaskPool {
     /// Workers parked with nothing to do right now — what a staging queue
     /// may hand over without the jobs sitting in the pool's channel.
     pub fn idle_workers(&self) -> usize {
-        self.inner.idle.load(Ordering::Acquire).count_ones() as usize
+        self.inner
+            .workers
+            .iter()
+            .filter(|w| w.idle.load(Ordering::Acquire))
+            .count()
     }
 
     pub fn queued(&self, lane: Lane) -> usize {
-        self.inner.lanes[lane.index()].queued.load(Ordering::Acquire)
+        self.inner.lanes[lane.index()]
+            .queued
+            .load(Ordering::Acquire)
     }
 
     pub fn submit<F, T>(&self, lane: Lane, f: F) -> Result<TaskHandle<T>, SubmitError>
@@ -1202,7 +1679,21 @@ impl TaskPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.try_submit(lane, f).map_err(|refused| refused.error)
+        self.submit_named(lane, std::any::type_name::<F>(), f)
+    }
+
+    pub fn submit_named<F, T>(
+        &self,
+        lane: Lane,
+        label: &'static str,
+        f: F,
+    ) -> Result<TaskHandle<T>, SubmitError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.try_submit_named(lane, label, f)
+            .map_err(|refused| refused.error)
     }
 
     /// Like [`submit`](Self::submit) but a refused job comes back intact so
@@ -1212,8 +1703,21 @@ impl TaskPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        self.try_submit_named(lane, std::any::type_name::<F>(), f)
+    }
+
+    pub fn try_submit_named<F, T>(
+        &self,
+        lane: Lane,
+        label: &'static str,
+        f: F,
+    ) -> Result<TaskHandle<T>, Refused<F>>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         match self.reserve(lane) {
-            Ok(slot) => Ok(slot.submit(f)),
+            Ok(slot) => Ok(slot.submit_named(label, f)),
             Err(error) => Err(Refused { job: f, error }),
         }
     }
@@ -1232,44 +1736,23 @@ impl TaskPool {
             return Err(SubmitError::QueueFull);
         }
         queue.peak_queued.fetch_max(queued, Ordering::Relaxed);
-        Ok(PoolSlot { pool: self.clone(), lane, armed: true })
+        Ok(PoolSlot {
+            pool: self.clone(),
+            lane,
+            armed: true,
+        })
     }
 
     pub fn stats(&self) -> PoolStats {
-        PoolStats {
-            workers: self.inner.workers.len(),
-            light_reserve: self.inner.light_reserve,
-            started: self.inner.started.load(Ordering::Acquire),
-            exited: self.inner.exited.load(Ordering::Acquire),
-            light: self.inner.lanes[0].snapshot(),
-            heavy: self.inner.lanes[1].snapshot(),
-        }
+        self.inner.stats()
     }
 
-    /// `pool: 7 workers (2 light-only), 143 jobs, peak queue light 6 / heavy 3, ...`
+    pub fn light_offenders(&self) -> Vec<LightOffenderStats> {
+        self.inner.light_offenders()
+    }
+
     pub fn summary(&self) -> String {
-        let stats = self.stats();
-        let mut out = format!(
-            "pool: {} workers ({} light-only, {} started), {} jobs, peak queue light {} / heavy {}",
-            stats.workers,
-            stats.light_reserve,
-            stats.started,
-            stats.light.submitted + stats.heavy.submitted,
-            stats.light.peak_queued,
-            stats.heavy.peak_queued,
-        );
-        for (lane, lane_stats) in Lane::ALL.iter().zip([stats.light, stats.heavy]) {
-            out.push_str(&format!(
-                "; {} {}: wait avg {:.2} ms max {:.2} ms, run avg {:.1} ms max {:.1} ms",
-                lane.label(),
-                lane_stats.completed,
-                lane_stats.wait_avg_ms,
-                lane_stats.wait_max_ms,
-                lane_stats.run_avg_ms,
-                lane_stats.run_max_ms,
-            ));
-        }
-        out
+        self.inner.summary()
     }
 
     /// Stop accepting work and let the workers exit — never waits.
@@ -1290,7 +1773,7 @@ impl TaskPool {
             state: self.inner.shutdown_state.clone(),
             token: CancellationToken::new(),
             ui_thread: self.inner.ui_thread,
-            priority_status: PriorityStatus::Applied,
+            priority_status: priority_state(PriorityStatus::Applied),
             native_join: None,
         }
     }
@@ -1303,7 +1786,7 @@ impl TaskPool {
             state: self.inner.shutdown_state.clone(),
             token: CancellationToken::new(),
             ui_thread: self.inner.ui_thread,
-            priority_status: PriorityStatus::Applied,
+            priority_status: priority_state(PriorityStatus::Applied),
             #[cfg(not(target_arch = "wasm32"))]
             native_join: None,
         }
@@ -1354,7 +1837,10 @@ impl TaskPool {
                 Err(_) => break,
             }
         }
-        let _wait = FanOutParent { shared: &shared, handles };
+        let _wait = FanOutParent {
+            shared: &shared,
+            handles,
+        };
         fan_out_work(&shared);
     }
 }
@@ -1446,7 +1932,15 @@ impl PoolSlot {
 
     /// Queue the job. It cannot be refused any more: if the pool closed in
     /// the meantime the handle completes as `TaskError::Cancelled`.
-    pub fn submit<F, T>(mut self, f: F) -> TaskHandle<T>
+    pub fn submit<F, T>(self, f: F) -> TaskHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.submit_named(std::any::type_name::<F>(), f)
+    }
+
+    pub fn submit_named<F, T>(mut self, label: &'static str, f: F) -> TaskHandle<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -1461,7 +1955,10 @@ impl PoolSlot {
         let cancel_state = state.clone();
         let pool_name = inner.name.clone();
         let lane = self.lane;
-        let run = move || {
+        let priority_status = priority_state(PriorityStatus::Pending);
+        let run_priority_status = priority_status.clone();
+        let run = move |status: PriorityStatus| {
+            run_priority_status.store(status as u8, Ordering::Release);
             if run_token.is_cancelled() {
                 run_state.complete(Err(TaskError::Cancelled));
                 signal_ui_completion();
@@ -1469,7 +1966,12 @@ impl PoolSlot {
             }
             let result = catch_unwind(AssertUnwindSafe(f)).map_err(|payload| {
                 let report = panic_report(payload);
-                crate::error!("{} {} job panicked: {}", pool_name, lane.label(), report.message);
+                crate::error!(
+                    "{} {} job panicked: {}",
+                    pool_name,
+                    lane.label(),
+                    report.message
+                );
                 TaskError::Panicked(report)
             });
             run_state.complete(result);
@@ -1477,6 +1979,7 @@ impl PoolSlot {
         };
         let job = PoolJob {
             lane: self.lane,
+            label,
             submitted_at: Cx::monotonic_now(),
             run: Some(Box::new(run)),
             cancel: Some(Box::new(move || {
@@ -1485,7 +1988,12 @@ impl PoolSlot {
         };
         queue.submitted.fetch_add(1, Ordering::Relaxed);
         match queue.sender.try_send(job) {
-            Ok(()) => inner.wake_one(self.lane),
+            Ok(()) => {
+                inner.wake_one(self.lane);
+                if let Some(thread) = inner.workers.first().and_then(|w| w.thread.get()) {
+                    thread.unpark();
+                }
+            }
             Err(TrySendError::Full(job)) | Err(TrySendError::Disconnected(job)) => {
                 // The reservation bounds the channel, so this is the pool
                 // going away underneath us: give the slot back and let the
@@ -1498,7 +2006,7 @@ impl PoolSlot {
             state,
             token,
             ui_thread: inner.ui_thread,
-            priority_status: PriorityStatus::Applied,
+            priority_status,
             #[cfg(not(target_arch = "wasm32"))]
             native_join: None,
         }
@@ -1596,7 +2104,14 @@ impl<K: PartialEq> TaskQueue<K> {
     /// Stage a job and hand over what fits. With `replace_queued` a staged
     /// job with the same key is dropped first. `Lifo` makes this job the
     /// next to run.
-    pub fn push<F>(&mut self, pool: &TaskPool, key: K, replace_queued: bool, order: QueueOrder, job: F) -> Result<(), SubmitError>
+    pub fn push<F>(
+        &mut self,
+        pool: &TaskPool,
+        key: K,
+        replace_queued: bool,
+        order: QueueOrder,
+        job: F,
+    ) -> Result<(), SubmitError>
     where
         F: FnOnce() + Send + 'static,
     {
@@ -1620,9 +2135,15 @@ impl<K: PartialEq> TaskQueue<K> {
 
     /// Hand staged jobs to the pool while the in-flight window has room.
     pub fn pump(&mut self, pool: &TaskPool) {
-        while !self.staged.is_empty() && self.in_flight.load(Ordering::Acquire) < self.in_flight_limit {
-            let Ok(slot) = pool.reserve(self.lane) else { break };
-            let Some((_, job)) = self.staged.pop_front() else { break };
+        while !self.staged.is_empty()
+            && self.in_flight.load(Ordering::Acquire) < self.in_flight_limit
+        {
+            let Ok(slot) = pool.reserve(self.lane) else {
+                break;
+            };
+            let Some((_, job)) = self.staged.pop_front() else {
+                break;
+            };
             self.in_flight.fetch_add(1, Ordering::AcqRel);
             let guard = InFlightGuard(self.in_flight.clone());
             slot.submit(move || {
@@ -1747,24 +2268,54 @@ impl Scheduler {
         })
     }
 
-    pub fn interval<F>(&self, period: Duration, missed: MissedTick, token: CancellationToken, job: F) -> Result<TimerHandle, SpawnError>
+    pub fn interval<F>(
+        &self,
+        period: Duration,
+        missed: MissedTick,
+        token: CancellationToken,
+        job: F,
+    ) -> Result<TimerHandle, SpawnError>
     where
         F: FnMut() + Send + 'static,
     {
         if period.is_zero() {
             return Err(SpawnError::Backend("timer period must be non-zero".into()));
         }
-        self.insert(Cx::monotonic_now() + period.as_secs_f64(), Some(period.as_secs_f64()), missed, token, TimerCallback::Interval(Box::new(job)))
+        self.insert(
+            Cx::monotonic_now() + period.as_secs_f64(),
+            Some(period.as_secs_f64()),
+            missed,
+            token,
+            TimerCallback::Interval(Box::new(job)),
+        )
     }
 
-    pub fn at<F>(&self, deadline: f64, token: CancellationToken, job: F) -> Result<TimerHandle, SpawnError>
+    pub fn at<F>(
+        &self,
+        deadline: f64,
+        token: CancellationToken,
+        job: F,
+    ) -> Result<TimerHandle, SpawnError>
     where
         F: FnOnce() + Send + 'static,
     {
-        self.insert(deadline, None, MissedTick::Skip, token, TimerCallback::Once(Some(Box::new(job))))
+        self.insert(
+            deadline,
+            None,
+            MissedTick::Skip,
+            token,
+            TimerCallback::Once(Some(Box::new(job))),
+        )
     }
 
-    fn insert(&self, deadline: f64, period: Option<f64>, missed: MissedTick, external_token: CancellationToken, callback: TimerCallback) -> Result<TimerHandle, SpawnError> {
+    fn insert(
+        &self,
+        deadline: f64,
+        period: Option<f64>,
+        missed: MissedTick,
+        external_token: CancellationToken,
+        callback: TimerCallback,
+    ) -> Result<TimerHandle, SpawnError> {
         if !self.runtime_open.load(Ordering::Acquire) {
             return Err(SpawnError::RuntimeClosed);
         }
@@ -1867,10 +2418,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
     };
     {
         let mut inner = lock_from_ui(&state.inner);
-        if inner
-            .armed
-            .is_some_and(|(timer, _)| Some(timer.0) == fired)
-        {
+        if inner.armed.is_some_and(|(timer, _)| Some(timer.0) == fired) {
             inner.armed = None;
         }
     }
@@ -1879,9 +2427,9 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
     run_scheduler_due(&state, now);
 
     let mut inner = lock_from_ui(&state.inner);
-    inner.entries.retain(|entry| {
-        !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled()
-    });
+    inner
+        .entries
+        .retain(|entry| !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled());
     let next = inner
         .entries
         .iter()
@@ -1922,7 +2470,9 @@ pub(crate) struct WebWorkerBookkeeping {
 #[cfg_attr(not(test), allow(dead_code))]
 impl WebWorkerBookkeeping {
     pub(crate) fn request(&mut self, id: u32) -> bool {
-        self.requests.insert(id, WebWorkerStage::Requested).is_none()
+        self.requests
+            .insert(id, WebWorkerStage::Requested)
+            .is_none()
     }
 
     pub(crate) fn started(&mut self, id: u32) -> bool {
@@ -1938,8 +2488,10 @@ impl WebWorkerBookkeeping {
     pub(crate) fn terminal(&mut self, id: u32, terminal: WebWorkerTerminal) -> bool {
         let valid = matches!(
             (self.requests.get(&id), terminal),
-            (Some(WebWorkerStage::Requested), WebWorkerTerminal::FailedToStart)
-                | (Some(WebWorkerStage::Started), WebWorkerTerminal::Finished)
+            (
+                Some(WebWorkerStage::Requested),
+                WebWorkerTerminal::FailedToStart
+            ) | (Some(WebWorkerStage::Started), WebWorkerTerminal::Finished)
                 | (Some(WebWorkerStage::Started), WebWorkerTerminal::Trapped)
         );
         if valid {
@@ -1982,19 +2534,36 @@ fn web_requests() -> &'static Mutex<HashMap<u32, WebRequest>> {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-fn spawn_web_task<T: Send + 'static>(ui_thread: ThreadId, options: ThreadOptions, state: Arc<TaskState<T>>, token: CancellationToken, run: impl FnOnce() + Send + 'static) -> Result<TaskHandle<T>, SpawnError> {
+fn spawn_web_task<T: Send + 'static>(
+    ui_thread: ThreadId,
+    options: ThreadOptions,
+    state: Arc<TaskState<T>>,
+    token: CancellationToken,
+    run: impl FnOnce() + Send + 'static,
+) -> Result<TaskHandle<T>, SpawnError> {
     static NEXT_REQUEST: AtomicU32 = AtomicU32::new(1);
     let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
     let closure: WebClosure = Box::new(run);
     let context_ptr = Box::into_raw(Box::new(closure)) as u32;
-    lock_from_ui(web_requests()).insert(request_id, WebRequest {
-        context_ptr,
-        completion: state.clone(),
-        stage: WebWorkerStage::Requested,
-    });
+    lock_from_ui(web_requests()).insert(
+        request_id,
+        WebRequest {
+            context_ptr,
+            completion: state.clone(),
+            stage: WebWorkerStage::Requested,
+        },
+    );
     let stack_size = options.stack_size.unwrap_or(DEFAULT_WEB_THREAD_STACK_SIZE) as u32;
     let name = options.name.as_deref().unwrap_or("");
-    let accepted = unsafe { js_spawn_thread(request_id, context_ptr, stack_size, name.as_ptr(), name.len()) };
+    let accepted = unsafe {
+        js_spawn_thread(
+            request_id,
+            context_ptr,
+            stack_size,
+            name.as_ptr(),
+            name.len(),
+        )
+    };
     if accepted == 0 {
         if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
             unsafe { drop(Box::from_raw(request.context_ptr as *mut WebClosure)) };
@@ -2005,14 +2574,20 @@ fn spawn_web_task<T: Send + 'static>(ui_thread: ThreadId, options: ThreadOptions
         state,
         token,
         ui_thread,
-        priority_status: priority_status(options.priority),
+        priority_status: priority_state(PriorityStatus::BestEffortUnsupported),
     })
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
-    fn js_spawn_thread(request_id: u32, context_ptr: u32, stack_size: u32, name_ptr: *const u8, name_len: usize) -> u32;
+    fn js_spawn_thread(
+        request_id: u32,
+        context_ptr: u32,
+        stack_size: u32,
+        name_ptr: *const u8,
+        name_len: usize,
+    ) -> u32;
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
@@ -2039,7 +2614,11 @@ pub extern "C" fn wasm_thread_started(request_id: u32) {
 pub unsafe extern "C" fn wasm_thread_failed_to_start(request_id: u32) {
     if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
         drop(Box::from_raw(request.context_ptr as *mut WebClosure));
-        request.completion.complete_error(TaskError::Spawn(SpawnError::Backend("web worker failed to start".into())));
+        request
+            .completion
+            .complete_error(TaskError::Spawn(SpawnError::Backend(
+                "web worker failed to start".into(),
+            )));
     }
 }
 
@@ -2083,12 +2662,20 @@ mod tests {
     fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
         let deadline = Cx::monotonic_now() + 10.0;
         while !ready() {
-            assert!(Cx::monotonic_now() < deadline, "timed out waiting for {what}");
+            assert!(
+                Cx::monotonic_now() < deadline,
+                "timed out waiting for {what}"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    fn test_pool(workers: usize, light_reserve: usize, light_capacity: usize, heavy_capacity: usize) -> TaskPool {
+    fn test_pool(
+        workers: usize,
+        light_reserve: usize,
+        light_capacity: usize,
+        heavy_capacity: usize,
+    ) -> TaskPool {
         let spawner = ThreadSpawner::for_current_thread(workers + 1);
         TaskPool::new(
             spawner,
@@ -2104,7 +2691,10 @@ mod tests {
     }
 
     /// A job that reports it started and then waits for a release.
-    fn gate_job(started: mpsc::Sender<()>, release: mpsc::Receiver<u32>) -> impl FnOnce() -> u32 + Send + 'static {
+    fn gate_job(
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<u32>,
+    ) -> impl FnOnce() -> u32 + Send + 'static {
         move || {
             started.send(()).unwrap();
             release.recv().unwrap_or(0)
@@ -2133,14 +2723,18 @@ mod tests {
     #[test]
     fn worker_completion_is_taken_once_and_ui_join_is_refused() {
         let spawner = ThreadSpawner::for_current_thread(2);
-        let mut handle = spawner.spawn_worker(ThreadOptions::default(), || 42).unwrap();
+        let mut handle = spawner
+            .spawn_worker(ThreadOptions::default(), || 42)
+            .unwrap();
         while !handle.is_finished() {
             std::thread::yield_now();
         }
         assert_eq!(handle.try_take().unwrap().unwrap(), 42);
         assert!(handle.try_take().is_none());
 
-        let handle = spawner.spawn_worker(ThreadOptions::default(), || 7).unwrap();
+        let handle = spawner
+            .spawn_worker(ThreadOptions::default(), || 7)
+            .unwrap();
         assert_eq!(handle.join(), Err(TaskError::WouldBlockUi));
     }
 
@@ -2151,7 +2745,7 @@ mod tests {
             state: state.clone(),
             token: CancellationToken::new(),
             ui_thread: std::thread::current().id(),
-            priority_status: PriorityStatus::Applied,
+            priority_status: priority_state(PriorityStatus::Applied),
             native_join: None,
         };
         let mut slot = state.result.lock().unwrap();
@@ -2176,7 +2770,10 @@ mod tests {
                 || std::thread::current().name().map(str::to_owned),
             )
             .unwrap();
-        assert_eq!(worker_join(named).unwrap().as_deref(), Some("runtime-test-name"));
+        assert_eq!(
+            worker_join(named).unwrap().as_deref(),
+            Some("runtime-test-name")
+        );
         assert!(matches!(
             spawner.spawn_worker(
                 ThreadOptions {
@@ -2197,16 +2794,14 @@ mod tests {
                 || (),
             )
             .unwrap();
-        assert_eq!(
-            prioritized.priority_status(),
-            if cfg!(target_os = "android") {
-                PriorityStatus::Applied
-            } else {
-                PriorityStatus::BestEffortUnsupported
-            }
-        );
+        wait_for("priority application", || {
+            prioritized.priority_status() != PriorityStatus::Pending
+        });
+        assert_eq!(prioritized.priority_status(), PriorityStatus::Applied);
         worker_join(prioritized).unwrap();
-        let panicked = spawner.spawn_worker(ThreadOptions::default(), || panic!("completion panic")).unwrap();
+        let panicked = spawner
+            .spawn_worker(ThreadOptions::default(), || panic!("completion panic"))
+            .unwrap();
         assert!(matches!(worker_join(panicked), Err(TaskError::Panicked(_))));
     }
 
@@ -2216,7 +2811,9 @@ mod tests {
         let token = CancellationToken::new();
         let waiter_token = token.clone();
         let handle = spawner
-            .spawn_worker(ThreadOptions::default(), move || waiter_token.wait_until(Cx::monotonic_now() + 30.0))
+            .spawn_worker(ThreadOptions::default(), move || {
+                waiter_token.wait_until(Cx::monotonic_now() + 30.0)
+            })
             .unwrap();
         token.cancel();
         assert_eq!(worker_join(handle).unwrap(), WaitOutcome::Cancelled);
@@ -2226,8 +2823,14 @@ mod tests {
     fn closed_runtime_refuses_new_work() {
         let spawner = ThreadSpawner::for_current_thread(2);
         spawner.close_runtime();
-        assert!(matches!(spawner.spawn_worker(ThreadOptions::default(), || ()), Err(SpawnError::RuntimeClosed)));
-        assert!(matches!(spawner.scheduler(), Err(SpawnError::RuntimeClosed)));
+        assert!(matches!(
+            spawner.spawn_worker(ThreadOptions::default(), || ()),
+            Err(SpawnError::RuntimeClosed)
+        ));
+        assert!(matches!(
+            spawner.scheduler(),
+            Err(SpawnError::RuntimeClosed)
+        ));
         assert!(matches!(
             TaskPool::new(spawner, PoolOptions::with_workers(1, 0)),
             Err(SpawnError::RuntimeClosed)
@@ -2236,23 +2839,124 @@ mod tests {
 
     #[test]
     fn runtime_sizing_reserves_the_ui_thread_and_two_light_workers() {
-        let tiny = PoolOptions::runtime(NonZeroUsize::new(1).unwrap());
-        assert_eq!(tiny.light_reserve, 2);
-        let mid = PoolOptions::runtime(NonZeroUsize::new(6).unwrap());
-        let big = PoolOptions::runtime(NonZeroUsize::new(32).unwrap());
-        let desktop_16 = PoolOptions::runtime(NonZeroUsize::new(16).unwrap());
-        if cfg!(target_arch = "wasm32") {
-            assert_eq!(tiny.workers.get(), 3);
-            assert_eq!(mid.workers.get(), 5);
-            assert_eq!(big.workers.get(), 6);
-        } else {
-            assert_eq!(tiny.workers.get(), 3);
-            assert_eq!(mid.workers.get(), 6);
-            assert_eq!(big.workers.get(), 32);
-            assert_eq!(desktop_16.workers.get(), 16);
-            assert_eq!(desktop_16.light_reserve, 2);
-            assert_eq!(machine_lane_counts(16), (14, 2));
+        for (physical, expected) in [(1, (1, 1)), (4, (2, 1)), (8, (6, 2))] {
+            assert_eq!(machine_lane_counts(physical), expected);
         }
+        let hybrid = MachineTopology {
+            logical: 16,
+            physical: 16,
+            performance: 12,
+            efficiency: 4,
+            source: "test",
+        };
+        assert_eq!(hybrid.lane_counts(), (10, 2));
+        assert_eq!(machine_lane_counts(64), (62, 2));
+        let smt = MachineTopology {
+            logical: 16,
+            ..MachineTopology::homogeneous(8)
+        };
+        assert_eq!(smt.lane_counts(), (6, 2));
+        let actual = PoolOptions::runtime(available_parallelism());
+        let (heavy, light) = machine_topology().lane_counts();
+        assert_eq!(
+            (
+                actual.workers.get() - actual.light_reserve,
+                actual.light_reserve
+            ),
+            (heavy, light)
+        );
+    }
+
+    #[test]
+    fn named_light_offenders_are_counted_and_heavy_jobs_are_excluded() {
+        let pool = test_pool(3, 1, 8, 8);
+        for _ in 0..2 {
+            worker_join(
+                pool.submit_named(Lane::Light, "test.slow-light", || {
+                    std::thread::sleep(Duration::from_millis(4));
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        worker_join(
+            pool.submit_named(Lane::Heavy, "test.slow-heavy", || {
+                std::thread::sleep(Duration::from_millis(4));
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        wait_for("offender accounting", || {
+            pool.stats().light.completed == 2 && pool.stats().heavy.completed == 1
+        });
+        let offenders = pool.light_offenders();
+        assert_eq!(pool.stats().light_over_budget, 2);
+        assert_eq!(offenders.len(), 1);
+        assert_eq!(offenders[0].label, "test.slow-light");
+        assert_eq!(offenders[0].count, 2);
+        assert!(offenders[0].max_ms > 2.0);
+        assert!(pool.summary().contains("test.slow-light count=2"));
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn cancellation_registration_race_wakes_every_waiter_and_reuses_nodes() {
+        let token = CancellationToken::new();
+        let waiters: Vec<_> = (0..8)
+            .map(|_| {
+                let token = token.clone();
+                std::thread::spawn(move || {
+                    // Multiple waits on one thread reuse one registry node.
+                    let _ = token.wait_until(Cx::monotonic_now() - 1.0);
+                    token.wait_until(Cx::monotonic_now() + 10.0)
+                })
+            })
+            .collect();
+        // Some registrations may still be in flight.
+        token.cancel();
+        for waiter in waiters {
+            assert_eq!(waiter.join().unwrap(), WaitOutcome::Cancelled);
+        }
+    }
+
+    #[test]
+    fn task_poll_does_not_join_a_published_but_live_thread() {
+        let state = Arc::new(TaskState::default());
+        let worker_state = state.clone();
+        let (release_tx, release_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            worker_state.complete(Ok(42));
+            release_rx.recv().unwrap();
+        });
+        let mut handle = TaskHandle {
+            state,
+            token: CancellationToken::new(),
+            ui_thread: std::thread::current().id(),
+            priority_status: priority_state(PriorityStatus::Applied),
+            native_join: Some(thread),
+        };
+        wait_for("payload publication", || handle.is_finished());
+        // This must return before the thread is allowed to exit.
+        assert_eq!(handle.try_take(), Some(Ok(42)));
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn reporter_stops_scheduling_after_the_final_completed_report() {
+        let pool = test_pool(2, 1, 8, 8);
+        worker_join(
+            pool.submit_named(Lane::Light, "test.report", || ())
+                .unwrap(),
+        )
+        .unwrap();
+        wait_for("completion accounting", || {
+            pool.stats().light.completed == 1
+        });
+        // Only worker zero owns report_delay; wait until shutdown before
+        // inspecting its terminal idle behavior without a competing reporter.
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+        pool.inner.reported_completed.store(1, Ordering::Relaxed);
+        assert!(pool.inner.report_delay().is_none());
     }
 
     #[test]
@@ -2273,7 +2977,10 @@ mod tests {
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
         assert_eq!(pool.stats().exited, 3);
         assert!(!pool.is_open());
-        assert!(matches!(pool.submit(Lane::Light, || ()), Err(SubmitError::Closed)));
+        assert!(matches!(
+            pool.submit(Lane::Light, || ()),
+            Err(SubmitError::Closed)
+        ));
     }
 
     #[test]
@@ -2322,21 +3029,29 @@ mod tests {
         let pool = test_pool(1, 0, 1, 1);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let running = pool.submit(Lane::Light, gate_job(started_tx, release_rx)).unwrap();
+        let running = pool
+            .submit(Lane::Light, gate_job(started_tx, release_rx))
+            .unwrap();
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
         let queued = pool.submit(Lane::Light, || 1).unwrap();
         assert_eq!(pool.queued(Lane::Light), 1);
         let before = Cx::monotonic_now();
         let refused = pool.try_submit(Lane::Light, || 2).unwrap_err();
-        assert!(Cx::monotonic_now() - before < 0.5, "a full lane must answer at once");
+        assert!(
+            Cx::monotonic_now() - before < 0.5,
+            "a full lane must answer at once"
+        );
         assert_eq!(refused.error, SubmitError::QueueFull);
         // The job comes back intact.
         assert_eq!((refused.job)(), 2);
 
         // The heavy lane is bounded on its own.
         let heavy = pool.submit(Lane::Heavy, || 3).unwrap();
-        assert!(matches!(pool.submit(Lane::Heavy, || 4), Err(SubmitError::QueueFull)));
+        assert!(matches!(
+            pool.submit(Lane::Heavy, || 4),
+            Err(SubmitError::QueueFull)
+        ));
 
         // Polling never blocks while the worker is busy.
         let mut probe = pool.submit(Lane::Heavy, || 5);
@@ -2350,7 +3065,11 @@ mod tests {
         assert_eq!(worker_join(heavy).unwrap(), 3);
         probe = pool.submit(Lane::Heavy, || 5);
         assert_eq!(worker_join(probe.unwrap()).unwrap(), 5);
-        assert_eq!(pool.stats().light.peak_queued, 1, "the running job left the queue; one waited behind it");
+        assert_eq!(
+            pool.stats().light.peak_queued,
+            1,
+            "the running job left the queue; one waited behind it"
+        );
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
     }
 
@@ -2364,7 +3083,10 @@ mod tests {
         for _ in 0..3 {
             let (release_tx, release_rx) = mpsc::channel();
             releases.push(release_tx);
-            heavy.push(pool.submit(Lane::Heavy, gate_job(started_tx.clone(), release_rx)).unwrap());
+            heavy.push(
+                pool.submit(Lane::Heavy, gate_job(started_tx.clone(), release_rx))
+                    .unwrap(),
+            );
         }
         // Exactly one heavy worker: one job runs, two stay queued.
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2374,7 +3096,10 @@ mod tests {
         let before = Cx::monotonic_now();
         let light = pool.submit(Lane::Light, || "icon").unwrap();
         assert_eq!(worker_join(light).unwrap(), "icon");
-        assert!(Cx::monotonic_now() - before < 2.0, "light work must not queue behind heavy work");
+        assert!(
+            Cx::monotonic_now() - before < 2.0,
+            "light work must not queue behind heavy work"
+        );
         assert!(pool.stats().light.wait_max_ms < 1_000.0);
 
         for release in releases {
@@ -2391,7 +3116,9 @@ mod tests {
         let pool = test_pool(1, 0, 4, 4);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let running = pool.submit(Lane::Light, gate_job(started_tx, release_rx)).unwrap();
+        let running = pool
+            .submit(Lane::Light, gate_job(started_tx, release_rx))
+            .unwrap();
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let queued_light = pool.submit(Lane::Light, || 1).unwrap();
         let queued_heavy = pool.submit(Lane::Heavy, || 2).unwrap();
@@ -2411,7 +3138,9 @@ mod tests {
     #[test]
     fn pool_reports_panic_and_keeps_worker_alive() {
         let pool = test_pool(1, 0, 2, 2);
-        let failed = pool.submit(Lane::Light, || panic!("pool task panic")).unwrap();
+        let failed = pool
+            .submit(Lane::Light, || panic!("pool task panic"))
+            .unwrap();
         let Err(TaskError::Panicked(report)) = worker_join(failed) else {
             panic!("panicking job did not report TaskError::Panicked");
         };
@@ -2426,7 +3155,10 @@ mod tests {
     fn pool_reservation_returns_its_slot_when_unused() {
         let pool = test_pool(1, 0, 1, 1);
         let slot = pool.reserve(Lane::Light).unwrap();
-        assert!(matches!(pool.reserve(Lane::Light), Err(SubmitError::QueueFull)));
+        assert!(matches!(
+            pool.reserve(Lane::Light),
+            Err(SubmitError::QueueFull)
+        ));
         drop(slot);
         let slot = pool.reserve(Lane::Light).unwrap();
         assert_eq!(worker_join(slot.submit(|| 4)).unwrap(), 4);
@@ -2454,7 +3186,9 @@ mod tests {
         for key in [2, 3] {
             let order = order.clone();
             queue
-                .push(&pool, key, true, QueueOrder::Lifo, move || order.lock().unwrap().push(key))
+                .push(&pool, key, true, QueueOrder::Lifo, move || {
+                    order.lock().unwrap().push(key)
+                })
                 .unwrap();
         }
         assert_eq!(queue.staged_len(), 2);
@@ -2462,14 +3196,18 @@ mod tests {
         assert!(queue.contains(&3));
         let replaced_order = order.clone();
         queue
-            .push(&pool, 3, true, QueueOrder::Lifo, move || replaced_order.lock().unwrap().push(30))
+            .push(&pool, 3, true, QueueOrder::Lifo, move || {
+                replaced_order.lock().unwrap().push(30)
+            })
             .unwrap();
         assert_eq!(queue.staged_len(), 1, "replace keeps one job per key");
 
         release_tx.send(0).unwrap();
         wait_for("first job to finish", || queue.in_flight() == 0);
         queue.pump(&pool);
-        wait_for("replacement to run", || queue.is_idle() && order.lock().unwrap().len() == 2);
+        wait_for("replacement to run", || {
+            queue.is_idle() && order.lock().unwrap().len() == 2
+        });
         assert_eq!(*order.lock().unwrap(), vec![1, 30]);
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
     }
@@ -2505,7 +3243,10 @@ mod tests {
         for _ in 0..2 {
             let (release_tx, release_rx) = mpsc::channel();
             releases.push(release_tx);
-            blockers.push(pool.submit(Lane::Light, gate_job(started_tx.clone(), release_rx)).unwrap());
+            blockers.push(
+                pool.submit(Lane::Light, gate_job(started_tx.clone(), release_rx))
+                    .unwrap(),
+            );
         }
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2527,7 +3268,10 @@ mod tests {
             worker_join(blocker).unwrap();
         }
         // The cancelled helpers drained cleanly; the pool is still usable.
-        assert_eq!(worker_join(pool.submit(Lane::Light, || 8).unwrap()).unwrap(), 8);
+        assert_eq!(
+            worker_join(pool.submit(Lane::Light, || 8).unwrap()).unwrap(),
+            8
+        );
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
     }
 

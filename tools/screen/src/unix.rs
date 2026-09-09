@@ -1,20 +1,23 @@
 //! Small Unix PTY and terminal boundary. No platform GUI or libc crate needed.
+#[cfg(target_os = "macos")]
+use crate::pty_spawn::{self, Child};
 use std::{
     ffi::{c_void, OsStr, OsString},
     fs::File,
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::{
-            ffi::OsStrExt,
-            net::UnixStream,
-            process::{CommandExt, ExitStatusExt},
-        },
+        unix::{ffi::OsStrExt, net::UnixStream, process::ExitStatusExt},
     },
     path::Path,
-    process::{Child, Command, Stdio},
+    process::Command,
     sync::atomic::{AtomicI32, Ordering},
     time::{Duration, Instant},
+};
+#[cfg(target_os = "linux")]
+use std::{
+    os::unix::process::CommandExt,
+    process::{Child, Stdio},
 };
 
 pub struct Pty {
@@ -71,11 +74,12 @@ impl Pty {
         for (key, value) in environment {
             command.env(key, value);
         }
-        command
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
+        #[cfg(target_os = "linux")]
         unsafe {
+            command
+                .stdin(Stdio::from(slave.try_clone()?))
+                .stdout(Stdio::from(slave.try_clone()?))
+                .stderr(Stdio::from(slave));
             command.pre_exec(|| {
                 if ffi::setsid() == -1 {
                     return Err(io::Error::last_os_error());
@@ -88,7 +92,10 @@ impl Pty {
                 Ok(())
             });
         }
+        #[cfg(target_os = "linux")]
         let child = command.spawn()?;
+        #[cfg(target_os = "macos")]
+        let child = pty_spawn::spawn(&command, slave.as_raw_fd(), &pty_spawn::screen_helper()?)?;
         Ok(Self {
             master,
             child,
@@ -699,8 +706,6 @@ mod ffi {
     pub const O_NONBLOCK: i32 = 4;
     #[cfg(target_os = "linux")]
     pub const O_NONBLOCK: i32 = 0x800;
-    #[cfg(target_os = "macos")]
-    pub const TIOCSCTTY: usize = 0x20007461;
     #[cfg(target_os = "linux")]
     pub const TIOCSCTTY: usize = 0x540e;
     #[cfg(target_os = "macos")]

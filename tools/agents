@@ -18,4 +18,9 @@ if [ -z "${MAKEPAD_SCREEN_STATE_DIR:-}" ] &&
     export MAKEPAD_SCREEN_STATE_DIR
 fi
 
-exec "$screen_target_dir/release/makepad-screen" agents "$@"
+# Keep the option-only browser form, but forward explicit operations intact.
+# The helper opens the TUI itself when no arguments are supplied.
+case "${1:-}" in
+    --state-dir|--cwd) set -- agents "$@" ;;
+esac
+exec "$screen_target_dir/release/makepad-screen" "$@"

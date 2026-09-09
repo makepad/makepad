@@ -82,6 +82,7 @@ impl Cx {
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         // Before anything touches the GPU. This is the one place holding both `&mut D3d11Cx`
         // and `&mut Vec<D3d11Window>` exclusively while nothing is mid-render — the wndproc
         // queues re-entrant events, `handle_platform_ops` only borrows the Cx immutably, and

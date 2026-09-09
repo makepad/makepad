@@ -1517,7 +1517,9 @@ impl Backend {
             if studio {
                 command.arg("--state-dir").arg(&self.records);
             } else {
-                command.arg("--cwd").arg(repo);
+                // Use the launcher's workspace resolution without passing
+                // start/TUI-only options to list.
+                command.current_dir(repo);
             }
             let (status, output) = self.run_command(&mut command, stop)?;
             if !status.success() {

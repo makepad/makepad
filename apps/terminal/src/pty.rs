@@ -1,5 +1,12 @@
 use std::io;
 
+#[cfg(target_os = "macos")]
+use crate::pty_spawn;
+#[cfg(target_os = "macos")]
+type UnixChild = pty_spawn::Child;
+#[cfg(target_os = "linux")]
+type UnixChild = std::process::Child;
+
 #[cfg(windows)]
 use std::{
     fs::File,
@@ -65,7 +72,8 @@ impl PtyWriter {
 
 /// PTY handle — spawns a shell in a pseudo-terminal.
 ///
-/// Unix implementation uses `openpty` plus `std::process::Command::spawn`.
+/// macOS uses `openpty` and direct `posix_spawn` file actions, never fork.
+/// Linux uses `openpty` plus `std::process::Command::spawn`.
 /// I/O is done directly on a nonblocking master fd (no background worker threads).
 pub struct Pty {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -81,7 +89,7 @@ pub struct Pty {
     #[cfg(windows)]
     pseudo_console: isize,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    child: Option<std::process::Child>,
+    child: Option<UnixChild>,
 }
 
 impl Pty {
@@ -259,9 +267,14 @@ impl Pty {
         env: &[(&str, &str)],
         cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        use std::os::fd::AsRawFd;
         use std::os::fd::FromRawFd;
+        #[cfg(target_os = "linux")]
         use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
+        use std::process::Command;
+        #[cfg(target_os = "linux")]
+        use std::process::Stdio;
 
         let env_shell = env.iter().find_map(|(key, value)| {
             (*key == "SHELL" && !value.is_empty()).then(|| (*value).to_owned())
@@ -278,6 +291,10 @@ impl Pty {
             set_cloexec(slave);
             set_nonblocking(master);
         }
+        // Own both descriptors before any fallible setup, including cloning
+        // stdio or building the spawn actions.
+        let master_file = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
 
         let mut cmd = Command::new(&shell);
         cmd.arg("-l");
@@ -307,43 +324,32 @@ impl Pty {
 
         // Make the spawned shell/session own the slave PTY as controlling terminal,
         // so kernel SIGWINCH delivery works for foreground jobs on resize.
-        let master_for_child = master;
-        let slave_for_child = slave;
+        #[cfg(target_os = "linux")]
         unsafe {
             cmd.pre_exec(move || {
                 if libc_ffi::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc_ffi::ioctl(slave_for_child, libc_ffi::TIOCSCTTY, 0) == -1 {
+                if libc_ffi::ioctl(0, libc_ffi::TIOCSCTTY, 0) == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                // Child no longer needs these raw PTY fds after stdio setup.
-                libc_ffi::close(slave_for_child);
-                libc_ffi::close(master_for_child);
                 Ok(())
             });
         }
 
-        // Attach slave side to child stdio. These handles are consumed by Command.
-        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
-        let slave_out = slave_file.try_clone()?;
-        let slave_err = slave_file.try_clone()?;
-        cmd.stdin(Stdio::from(slave_file));
-        cmd.stdout(Stdio::from(slave_out));
-        cmd.stderr(Stdio::from(slave_err));
-
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                unsafe {
-                    libc_ffi::close(master);
-                }
-                return Err(err);
-            }
+        #[cfg(target_os = "macos")]
+        let child = pty_spawn::spawn(&cmd, slave_file.as_raw_fd(), &pty_spawn::screen_helper()?)?;
+        #[cfg(target_os = "linux")]
+        let child = {
+            cmd.stdin(Stdio::from(slave_file.try_clone()?));
+            cmd.stdout(Stdio::from(slave_file.try_clone()?));
+            cmd.stderr(Stdio::from(slave_file));
+            cmd.spawn()?
         };
 
+        use std::os::fd::IntoRawFd;
         Ok(Self {
-            master_fd: master,
+            master_fd: master_file.into_raw_fd(),
             child: Some(child),
         })
     }
@@ -635,7 +641,7 @@ impl Drop for PtyReader {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // The job goes FIRST. `pre_exec` gave the shell its own session, so
+        // The job goes FIRST. Spawning gave the shell its own session, so
         // its pid is also its process-group id: signalling the group takes
         // whatever it started with it (a pager the shell forked instead of
         // exec'ing would otherwise outlive us holding the slave). With the
@@ -970,8 +976,9 @@ mod libc_ffi {
         pub fn dup(fd: i32) -> i32;
         pub fn read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
         pub fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
-        pub fn ioctl(fd: i32, request: u64, ...) -> i32;
+        pub fn ioctl(fd: i32, request: usize, ...) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        #[cfg(target_os = "linux")]
         pub fn setsid() -> i32;
         pub fn killpg(pgrp: i32, sig: i32) -> i32;
     }
@@ -1004,13 +1011,11 @@ mod libc_ffi {
     pub const EWOULDBLOCK: i32 = 11;
 
     #[cfg(target_os = "macos")]
-    pub const TIOCSWINSZ: u64 = 0x80087467;
-    #[cfg(target_os = "macos")]
-    pub const TIOCSCTTY: u64 = 0x20007461;
+    pub const TIOCSWINSZ: usize = 0x80087467;
     #[cfg(target_os = "linux")]
-    pub const TIOCSWINSZ: u64 = 0x5414;
+    pub const TIOCSWINSZ: usize = 0x5414;
     #[cfg(target_os = "linux")]
-    pub const TIOCSCTTY: u64 = 0x540E;
+    pub const TIOCSCTTY: usize = 0x540E;
 
     #[repr(C)]
     pub struct winsize {
