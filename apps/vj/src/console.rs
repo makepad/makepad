@@ -3,6 +3,8 @@
 //! without drawing anything.
 
 use crate::mixer::AudioHealth;
+use makepad_widgets::makepad_platform::log::LogLevel;
+use makepad_widgets::makepad_platform::log_ring;
 
 /// The strip closed: one line, the numbers.
 pub const CLOSED_POINTS: f64 = 24.0;
@@ -58,6 +60,9 @@ pub struct Console {
     /// What it opens to. Kept while closed, so closing forgets nothing.
     open_points: f64,
     pub filter: String,
+    /// Whether the one line names the newest fault. Off is the line this
+    /// strip has always shown, to the byte.
+    pub faults_on: bool,
 }
 
 impl Console {
@@ -67,7 +72,30 @@ impl Console {
             view: ConsoleView::Both,
             open_points: OPEN_DEFAULT_POINTS,
             filter: String::new(),
+            faults_on: false,
         }
+    }
+
+    /// The one line as the operator reads it: the numbers, and -- when
+    /// the switch is on and something has gone wrong -- what it was.
+    ///
+    /// The fault goes LAST, after the master level, which is the one
+    /// figure somebody watches all set; the fault is a latched message,
+    /// and the end of the line is where the label's ellipsis eats in.
+    /// Keeping the policy here rather than in the pump is what lets a
+    /// test hold the off case to the byte.
+    pub fn line(
+        &self,
+        health: &AudioHealth,
+        master: f32,
+        clipped: bool,
+        faults: &Faults,
+    ) -> String {
+        let mut line = summary_line(health, master, clipped);
+        if self.faults_on {
+            line.push_str(&faults.suffix());
+        }
+        line
     }
 
     /// The height the strip asks for, given the room the lists column has.
@@ -104,10 +132,11 @@ impl Console {
 
     pub fn to_text(&self) -> String {
         format!(
-            "console_open {}\nconsole_height {}\nconsole_view {}\n",
+            "console_open {}\nconsole_height {}\nconsole_view {}\nconsole_faults {}\n",
             u8::from(self.open),
             self.open_points,
             self.view.index(),
+            u8::from(self.faults_on),
         )
     }
 
@@ -128,8 +157,115 @@ impl Console {
                     self.view = ConsoleView::from_index(index);
                 }
             }
+            "console_faults" => self.faults_on = value.trim() == "1",
             _ => {}
         }
+    }
+}
+
+/// The longest a fault's own words are kept. Generous, because what the
+/// operator sees is truncated by WIDTH with an ellipsis, which is the
+/// unit that matters on a screen; this only stops a runaway message from
+/// becoming the whole line.
+const FAULT_CHARS: usize = 120;
+
+/// Lines read from the process log in one look. The same bound the log
+/// pane reads with, and for the same reason.
+const FAULT_SCAN: usize = 200;
+
+/// What the app has said went wrong, for the one line.
+///
+/// A fault reaches the process log at error level -- a record that could
+/// not be decoded, a worker that stopped short, an output device that
+/// went -- and in a booth the log pane is shut. The one line under the
+/// lists is where an operator is already looking.
+///
+/// Only the newest fault is kept. A list of eight nobody can read costs
+/// memory to tell the same story: what the eye needs is the last thing
+/// that broke, whether it is still breaking, and how much has broken
+/// since anybody looked.
+#[derive(Default)]
+pub struct Faults {
+    /// How far into the log this has read. Its OWN cursor: the log
+    /// pane's cursor says what the PANE has shown, and borrowing it here
+    /// would empty the pane of everything logged while it was shut.
+    cursor: u64,
+    /// The newest fault's words, and how many times running they have
+    /// been said. A record that fails twice is one fault said twice.
+    newest: Option<(String, u32)>,
+    /// Faults since the operator last looked. Every one, so the number
+    /// does not quietly stop rising at the size of something.
+    seen: u32,
+}
+
+impl Faults {
+    /// Read what the log has said since the last look.
+    pub fn scan(&mut self) {
+        let (cursor, fresh) = log_ring::read_since(self.cursor, FAULT_SCAN);
+        self.cursor = cursor;
+        for line in fresh {
+            self.saw(line.level, &line.text);
+        }
+    }
+
+    /// Start from what the log says now. Whatever is already in the ring
+    /// happened before anybody asked to be told, so it is not news; the
+    /// bound of nothing reads the head without copying a line.
+    pub fn start_from_now(&mut self) {
+        self.cursor = log_ring::read_since(u64::MAX, 0).0;
+    }
+
+    /// Nothing to say, and nothing owed for what came before `cursor`:
+    /// the log on screen IS the acknowledgement.
+    pub fn forget_up_to(&mut self, cursor: u64) {
+        self.newest = None;
+        self.seen = 0;
+        self.cursor = cursor;
+    }
+
+    /// Forget the fault without moving the cursor: the operator turned
+    /// the line's fault word off.
+    pub fn clear(&mut self) {
+        self.newest = None;
+        self.seen = 0;
+    }
+
+    /// One line from the log. Anything below error level is a note.
+    pub fn saw(&mut self, level: LogLevel, text: &str) {
+        if !matches!(level, LogLevel::Error | LogLevel::Panic) {
+            return;
+        }
+        // The line carries the place it was logged from, which the
+        // operator did not ask about. The FIRST " - " is the one the log
+        // sink wrote; a message carrying one of its own keeps it.
+        let words = text.split_once(" - ").map_or(text, |(_, rest)| rest);
+        // One row, one line: a message with a newline in it would take
+        // the rest of the strip with it. Cut by CHARACTERS, because a
+        // file name is not always seven bits wide and a byte cut inside
+        // one is a panic in front of an audience.
+        let words: String = words
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(FAULT_CHARS)
+            .collect();
+        self.seen = self.seen.saturating_add(1);
+        match &mut self.newest {
+            Some((newest, count)) if *newest == words => *count = count.saturating_add(1),
+            slot => *slot = Some((words, 1)),
+        }
+    }
+
+    /// What the one line says about it, and nothing at all when there is
+    /// nothing to say.
+    pub fn suffix(&self) -> String {
+        let Some((words, count)) = &self.newest else {
+            return String::new();
+        };
+        let mut out = format!("  FAULT {}: {words}", self.seen);
+        if *count > 1 {
+            out.push_str(&format!(" (x{count})"));
+        }
+        out
     }
 }
 
@@ -578,6 +714,7 @@ mod tests {
         let mut console = Console::new();
         console.open = true;
         console.view = ConsoleView::Log;
+        console.faults_on = true;
         console.set_open_height(220.0, 900.0);
         let text = console.to_text();
         let mut read_back = Console::new();
@@ -590,6 +727,14 @@ mod tests {
         assert!(read_back.open);
         assert_eq!(read_back.view, ConsoleView::Log);
         assert_eq!(read_back.extent(900.0), 220.0);
+        assert!(read_back.faults_on);
+        // A file written before the switch existed leaves it off.
+        let mut older = Console::new();
+        for line in ["console_open 1", "console_height 220", "console_view 1"] {
+            let (key, value) = line.split_once(char::is_whitespace).unwrap();
+            older.apply_line(key, value);
+        }
+        assert!(!older.faults_on, "a file without the key reads as off");
     }
 
     #[test]
@@ -598,9 +743,144 @@ mod tests {
         console.apply_line("console_height", "not a number");
         console.apply_line("console_height", "NaN");
         console.apply_line("console_view", "9");
+        console.apply_line("console_faults", "2");
         console.apply_line("something_else", "7");
         assert_eq!(console.extent(900.0), CLOSED_POINTS);
         assert_eq!(console.view, ConsoleView::Both);
+        assert!(!console.faults_on, "anything but 1 is off");
+    }
+
+    /// A log line as the sink writes it: level, where it was logged
+    /// from, then the words.
+    fn logged(words: &str) -> String {
+        format!("[E] apps\\vj\\src\\main.rs:21088:25 - {words}")
+    }
+
+    #[test]
+    fn a_note_is_not_a_fault_and_a_fault_is() {
+        for level in [LogLevel::Log, LogLevel::Warning, LogLevel::Wait] {
+            let mut faults = Faults::default();
+            faults.saw(level, &logged("deck A: a.wav could not be decoded"));
+            assert_eq!(faults.suffix(), "", "{level:?} is a note, not a fault");
+        }
+        for level in [LogLevel::Error, LogLevel::Panic] {
+            let mut faults = Faults::default();
+            faults.saw(level, &logged("deck A: a.wav could not be decoded"));
+            assert_eq!(
+                faults.suffix(),
+                "  FAULT 1: deck A: a.wav could not be decoded",
+                "{level:?} is a fault, said whole",
+            );
+        }
+    }
+
+    #[test]
+    fn the_line_names_the_newest_fault_and_says_when_it_is_the_same_one() {
+        let mut faults = Faults::default();
+        for words in ["A", "B", "A"] {
+            faults.saw(LogLevel::Error, &logged(words));
+        }
+        assert_eq!(faults.suffix(), "  FAULT 3: A", "the newest, and all three counted");
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, &logged("A"));
+        faults.saw(LogLevel::Error, &logged("A"));
+        assert_eq!(faults.suffix(), "  FAULT 2: A (x2)", "one fault, said twice");
+        // Past the size of any list this could have kept: the number is
+        // a count of faults, not a length.
+        let mut faults = Faults::default();
+        for n in 0..12 {
+            faults.saw(LogLevel::Error, &logged(&format!("fault {n}")));
+        }
+        assert_eq!(faults.suffix(), "  FAULT 12: fault 11");
+    }
+
+    #[test]
+    fn a_fault_arrives_without_the_place_it_was_logged_from() {
+        let mut faults = Faults::default();
+        faults.saw(
+            LogLevel::Error,
+            "[E] apps/vj/src/main.rs:21088:25 - deck A: x could not be decoded",
+        );
+        assert_eq!(faults.suffix(), "  FAULT 1: deck A: x could not be decoded");
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, &logged("deck A: a - b.wav could not be decoded"));
+        assert_eq!(
+            faults.suffix(),
+            "  FAULT 1: deck A: a - b.wav could not be decoded",
+            "the sink's dash is the first one; the message keeps its own",
+        );
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, "no prefix at all");
+        assert_eq!(faults.suffix(), "  FAULT 1: no prefix at all");
+    }
+
+    #[test]
+    fn a_fault_that_runs_on_stops_at_a_letter_and_not_inside_one() {
+        let mut faults = Faults::default();
+        let long: String = std::iter::repeat('é').take(400).collect();
+        faults.saw(LogLevel::Error, &logged(&format!("deck A: {long}.wav could not be decoded")));
+        let suffix = faults.suffix();
+        assert!(suffix.starts_with("  FAULT 1: deck A: éé"), "{suffix}");
+        assert!(suffix.chars().count() < 140, "and it does not become the whole line");
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, &logged("deck A: two\nlines could not be decoded"));
+        assert_eq!(
+            faults.suffix(),
+            "  FAULT 1: deck A: two lines could not be decoded",
+            "one row, one line",
+        );
+    }
+
+    #[test]
+    fn the_one_line_is_the_line_it_always_was_until_it_is_asked_for_more() {
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, &logged("deck A: a.wav could not be decoded"));
+        let mut console = Console::new();
+        assert_eq!(
+            console.line(&health(), 0.5, false, &faults),
+            summary_line(&health(), 0.5, false),
+            "off: the line is what it always was, fault or no fault",
+        );
+        console.faults_on = true;
+        assert!(
+            console
+                .line(&health(), 0.5, false, &faults)
+                .ends_with("master 50%  FAULT 1: deck A: a.wav could not be decoded"),
+            "on: after the master level, where the eye is not already",
+        );
+        assert_eq!(
+            console.line(&health(), 0.5, false, &Faults::default()),
+            summary_line(&health(), 0.5, false),
+            "on with nothing wrong: still the line it always was",
+        );
+    }
+
+    #[test]
+    fn a_fault_the_log_is_already_showing_is_not_also_news() {
+        let mut faults = Faults::default();
+        faults.saw(LogLevel::Error, &logged("deck A: a.wav could not be decoded"));
+        assert!(!faults.suffix().is_empty());
+        faults.forget_up_to(7);
+        assert_eq!(faults.suffix(), "", "the log on screen is the acknowledgement");
+    }
+
+    /// The scan reads the same ring the log pane reads, and must not
+    /// consume the pane's lines: an operator who opens the log after a
+    /// fault has to find the fault in it.
+    #[test]
+    fn the_fault_scan_leaves_the_log_pane_its_own_lines() {
+        let pane = log_ring::read_since(u64::MAX, 0).0;
+        let words = "deck Z: the console fixture could not be decoded";
+        let mut faults = Faults::default();
+        faults.start_from_now();
+        log_ring::push(LogLevel::Error, format!("[E] apps/vj/src/console.rs:1:1 - {words}"));
+        faults.scan();
+        assert!(faults.suffix().contains(words), "the scan found it: {}", faults.suffix());
+        let (_, pane_lines) = log_ring::read_since(pane, 400);
+        assert!(
+            pane_lines.iter().any(|line| line.text.contains(words)),
+            "and the pane's own cursor still has it",
+        );
     }
 
     #[test]

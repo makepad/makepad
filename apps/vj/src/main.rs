@@ -224,7 +224,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::columns::{Column, ColumnLayout};
-use crate::console::{ClipLatch, Console, ConsoleView};
+use crate::console::{ClipLatch, Console, ConsoleView, Faults};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
@@ -10386,6 +10386,10 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// The newest thing the app said went wrong, for the one line. Reads
+    /// the process log through a cursor of its own.
+    #[rust]
+    faults: Faults,
     /// How the three meters READ: master, deck A, deck B. Ticked once per
     /// poll from the peaks the mixer has been collecting, and read by
     /// whatever is drawing at whatever rate it draws at.
@@ -18735,8 +18739,6 @@ p2 {}
         // What the limiter had to do, not what the peak reached: the
         // ceiling means the peak can never reach full scale.
         self.console_clip.saw(self.mixer.limiter_reduction_db());
-        let line = crate::console::summary_line(&health, master, self.console_clip.lit());
-        self.set_status_label(cx, ids!(console_line), &line);
         // The chrome meter, which is up on every page -- so unlike the deck
         // columns it is fed here rather than from the deck surface. Same
         // deadband, same reason: pushing a uniform marks the pass for
@@ -18778,6 +18780,10 @@ p2 {}
             while self.console_lines.len() > 400 {
                 self.console_lines.pop_front();
             }
+            // The log is on screen, so nothing in it is also a fault
+            // waiting to be noticed -- and the fault word starts again
+            // from where the pane has read to, never from what it showed.
+            self.faults.forget_up_to(cursor);
             // The strip's extent as `paint_console` last worked it out.
             // Measuring the column here would read its over-ask again.
             let strip = self.console_points.map_or(crate::console::CLOSED_POINTS, |(_, s)| s);
@@ -18785,7 +18791,15 @@ p2 {}
             let lines: Vec<String> = self.console_lines.iter().cloned().collect();
             let text = crate::console::pane_text(&lines, &self.console.filter, rows);
             self.set_status_label(cx, ids!(console_log), &text);
+        } else if self.console.faults_on {
+            // Its own cursor, and only when asked for: an operator who
+            // leaves the switch off pays one comparison a tick.
+            self.faults.scan();
         }
+        // Last, so a fault this pump found is on this pump's line, and so
+        // the pane above has already said what it is showing.
+        let line = self.console.line(&health, master, self.console_clip.lit(), &self.faults);
+        self.set_status_label(cx, ids!(console_line), &line);
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
         self.pump_import(cx);
@@ -23939,6 +23953,9 @@ p2 {}
         {
             field.set_value(cx, self.prep.concurrency as f64);
         }
+        self.ui
+            .check_box(cx, ids!(console_faults))
+            .set_active(cx, self.console.faults_on, Animate::No);
         self.paint_lit(cx, ids!(prep_fast), self.prep.fast);
         let root = match &self.prep.cache_root {
             Some(root) => root.display().to_string(),
@@ -24032,6 +24049,17 @@ p2 {}
         if reset_changed {
             self.decks.set_load_reset(reset);
             self.save_autopilot_settings();
+        }
+        // Whether the one line names the newest fault. Switching it on
+        // starts from the log's head: what is already in the ring
+        // happened before anybody asked to be told about it.
+        if let Some(on) = self.ui.check_box(cx, ids!(console_faults)).changed(actions) {
+            self.console.faults_on = on;
+            match on {
+                true => self.faults.start_from_now(),
+                false => self.faults.clear(),
+            }
+            self.save_preprocess_settings();
         }
         let mut changed = false;
         for (index, pass) in PASSES.iter().enumerate() {

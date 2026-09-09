@@ -3703,7 +3703,17 @@ script_mod! {
                                     console_chevron_down := ChevronIcon{
                                         draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
                                     }
-                                    console_line := MusicLabel{width: Fill text: ""}
+                                    // One line, and it says so: the row is
+                                    // twenty-four points and a second line
+                                    // would be drawn where there is nothing
+                                    // to draw it in. What does not fit ends
+                                    // in an ellipsis rather than vanishing.
+                                    console_line := MusicLabel{
+                                        width: Fill
+                                        max_lines: 1
+                                        text_overflow: TextOverflow.Ellipsis
+                                        text: ""
+                                    }
                                     console_view_0 := MusicChipButton{height: 20 text: "numbers"}
                                     console_view_1 := MusicChipButton{height: 20 text: "log"}
                                     console_view_2 := MusicChipButton{height: 20 text: "both"}
@@ -4318,6 +4328,21 @@ script_mod! {
                             precision: 0
                         }
                         MusicLabel{width: Fill text: "every chain, and it survives a restart"}
+                    }
+                    // The one line under the lists, and whether it names
+                    // what most recently went wrong. Off is the line the
+                    // strip has always shown; a fault is otherwise only in
+                    // the log, which is shut in a booth. Set once and left,
+                    // like the rows above it.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "THE ONE LINE"}
+                        console_faults := CheckBox{width: 170 text: "names the newest fault"}
+                        MusicLabel{width: Fill text: "cleared by opening the log"}
                     }
                     View{
                         width: Fill
