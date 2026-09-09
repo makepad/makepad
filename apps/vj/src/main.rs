@@ -9364,6 +9364,10 @@ pub struct App {
     /// guard: device slots are positional and captured at thread spawn.
     #[rust]
     last_audio_request: Vec<AudioDeviceId>,
+    /// The device the program was last resolved onto, so the log can say
+    /// when the room moves and when there is nowhere for it to go.
+    #[rust]
+    last_main_output: Option<AudioDeviceId>,
     /// Fallback re-resolve after a truncated (repositioning) request whose
     /// displaced device thread never fired a devices event.
     #[rust]
@@ -24353,6 +24357,30 @@ p2 {}
             .cloned()
             .collect();
         let main_id = devices.default_output().first().copied();
+        // The room follows the system default, and the default moves on its
+        // own: a display's audio waking, a headset connecting. The log names
+        // the device the program lands on whenever that changes, and says
+        // at error level when there is none left -- in which case the
+        // budget the console quotes belongs to a device that is gone, and
+        // is forgotten with it.
+        if main_id != self.last_main_output {
+            match main_id {
+                Some(main) => {
+                    let name = self
+                        .audio_out_descs
+                        .iter()
+                        .find(|desc| desc.device_id == main)
+                        .map(|desc| desc.name.as_str())
+                        .unwrap_or("?");
+                    log!("audio: output -> {name}");
+                }
+                None => {
+                    error!("audio: no output device");
+                    self.mixer.forget_device();
+                }
+            }
+            self.last_main_output = main_id;
+        }
         // Resolve the phones by EXACT name, never through `match_outputs`,
         // whose no-match fallback is the default output — the one device
         // the cue must never land on.

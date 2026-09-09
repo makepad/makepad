@@ -3008,6 +3008,14 @@ impl Mixer {
         }
     }
 
+    /// The output device is gone: forget the buffer it rendered last, so
+    /// the budget reads as unknown rather than as that device's. Nothing
+    /// else is touched -- the rate still feeds the output latency and the
+    /// cue ring, and the next device's first render sets the frames again.
+    pub fn forget_device(&self) {
+        self.shared.buffer_frames.store(0, Ordering::Relaxed);
+    }
+
     /// Callbacks whose render outran its own buffer period. On this engine
     /// nothing else can silence a buffer, so this is THE dropout counter.
     pub fn audio_overruns(&self) -> u64 {
@@ -10620,6 +10628,22 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_budget_is_forgotten_with_the_device_that_set_it() {
+        // The budget is the last buffer's cost against that buffer's own
+        // length. With no output device left there is no buffer, and the
+        // console's line kept quoting the one a gone device rendered last.
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        assert!(mixer.audio_health().budget_used().is_some(), "a rendered buffer has a budget");
+        mixer.forget_device();
+        assert_eq!(mixer.audio_health().budget_used(), None, "no device, no budget to quote");
+        render(&mixer, 48_000.0, 512);
+        assert!(mixer.audio_health().budget_used().is_some(), "and the next device's first buffer sets it again");
     }
 
     #[test]
