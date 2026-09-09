@@ -6604,6 +6604,31 @@ mod tests {
         }
     }
 
+    /// The rack renders every buffer and had never been told to play: no
+    /// clock, `playing` never set, so the three synth strips were silence
+    /// for the life of the app. This is the contract the SYNTH page's PLAY
+    /// button relies on. No samples needed: the default patterns are a demo
+    /// and the piano and the synth model their own sound.
+    #[test]
+    fn the_rack_is_silent_until_told_to_play() {
+        let mixer = TestMixer::new();
+        mixer.state().master = Ramp::at(1.0);
+        mixer.set_synth_clock(crate::synth::SynthClock {
+            beat_frame: 0,
+            frames_per_beat: 24_000.0,
+            beat_index: 0,
+        });
+        let quiet = render(&mixer, 48_000.0, 8_192);
+        assert!(quiet.channel(0).iter().all(|s| *s == 0.0), "a rack nobody started is silent");
+        assert!(!mixer.synth_snapshot().playing);
+
+        mixer.set_synth_playing(true);
+        let _ = render(&mixer, 48_000.0, 8_192);
+        let loud = render(&mixer, 48_000.0, 8_192);
+        assert!(loud.channel(0).iter().any(|s| s.abs() > 1e-4), "PLAY makes sound");
+        assert!(mixer.synth_snapshot().playing);
+    }
+
     /// The handle's setter is what remembers the bank; `ensure_synth_rate`
     /// rebuilds the rack from that memory. The app used to hand the bank
     /// over as a raw command, which reached the audio thread and left the

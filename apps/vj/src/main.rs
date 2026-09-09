@@ -107,6 +107,8 @@ mod program_mix;
 // The lock-free hand-off across the audio thread's boundary, in either direction.
 mod spsc;
 mod synth;
+// The step-grid widget the synth page's three editors are made of.
+mod synth_ui;
 // One writer, any readers, never a lock: what the callback publishes per buffer.
 mod published;
 // The audio path pinned against what it rendered the day the reference was
@@ -170,6 +172,12 @@ use crate::apc40::{
     palette_velocity, splat_led_frame, thumb_color, Apc40State, ApcAction, ApcSurface, LedDiff,
     LedFrame, PadLed, PAD_COUNT,
 };
+use crate::program_mix::{MasterParam, MasterParams, StripId, STRIP_COUNT};
+use crate::synth::{
+    FilterKind, IronfishParam, IronfishPatch, LfoWave, OscillatorKind, RackPatterns, RootNote,
+    ScaleKind, SynthClock, SynthTrack,
+};
+use crate::synth_ui::{VjStepGrid, VjStepGridAction};
 use crate::beat_sync::{
     BeatClock, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
     BeatTarget, ClockSource, TapTempo,
@@ -234,7 +242,7 @@ use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
     TrackStems,
-    CueMode, CueReadState, MixCmd, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
+    CueMode, CueReadState, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
     VideoTransitionPhase,
 };
 use crate::pads::{PadCmd, PadEngine, PadItem};
@@ -467,6 +475,7 @@ script_mod! {
             track_color: uniform(#x2b343f)
             fill_color: uniform(#xff5c39)
             cap_color: uniform(#xe8eef4)
+            inert: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let track_h = 6.
@@ -483,10 +492,54 @@ script_mod! {
                 let cap_x = left + w * self.slide_pos - cap_w * 0.5
                 sdf.box(cap_x, 3., cap_w, self.rect_size.y - 6., 3.)
                 sdf.fill(self.cap_color)
-                return sdf.result
+                return sdf.result * (1.0 - self.inert * 0.72)
             }
         }
     }
+
+    // A normalized 0..1 control whose semantic zero is the centre. The data
+    // path stays identical to ApcHSlider; only the fill law changes, so MIDI
+    // mapping and persistence remain stable.
+    let ApcBipolarSlider = Slider{
+        width: Fill
+        height: 22
+        min: 0.0
+        max: 1.0
+        text: ""
+        text_input: TextInput{width: 0 height: 0}
+        draw_bg +: {
+            body_color: uniform(#x1d222a)
+            track_color: uniform(#x2b343f)
+            fill_color: uniform(#xff5c39)
+            cap_color: uniform(#xe8eef4)
+            centre_color: uniform(#xffffff36)
+            inert: instance(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let track_h = 6.
+                let track_y = (self.rect_size.y - track_h) * 0.5
+                sdf.box(1., track_y, self.rect_size.x - 2., track_h, 3.)
+                sdf.fill(self.track_color)
+                let cap_w = 10.
+                let left = 1. + cap_w * 0.5
+                let w = self.rect_size.x - 2. - cap_w
+                let lo = min(self.slide_pos, 0.5)
+                let hi = max(self.slide_pos, 0.5)
+                sdf.box(left + w * lo, track_y, max(1., w * (hi - lo)), track_h, 3.)
+                sdf.fill(self.fill_color)
+                sdf.rect(left + w * 0.5 - 0.5, track_y - 2., 1., track_h + 4.)
+                sdf.fill(self.centre_color)
+                let cap_x = left + w * self.slide_pos - cap_w * 0.5
+                sdf.box(cap_x, 3., cap_w, self.rect_size.y - 6., 3.)
+                sdf.fill(self.cap_color)
+                return sdf.result * (1.0 - self.inert * 0.72)
+            }
+        }
+    }
+
+    // APC40 knob mirror: dark body, 270-degree LED ring (gap at the bottom,
+    // like the hardware), white pointer. The stock Rotary is drawn for a
+    // 65x95 well with a label gutter and vanishes at pad size.
 
     // APC40 knob mirror: dark body, 270-degree LED ring (gap at the bottom,
     // like the hardware), white pointer. The stock Rotary is drawn for a
@@ -653,6 +706,30 @@ script_mod! {
         draw_text.text_style: theme.font_bold{font_size: 8}
     }
 
+    // Synth sound-design groups use the same restrained panel chrome as the
+    // MIX final bus. Keeping this as one template makes the dense Ironfish
+    // editor read as an instrument, rather than a spreadsheet of sliders.
+    let SynthPanel = RoundedView{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: 3
+        padding: 7
+        draw_bg +: {
+            color: #x181e25
+            border_color: #xffffff20
+            border_size: 1.0
+            border_radius: 3.0
+        }
+    }
+
+    let SynthParamRow = View{
+        width: Fill
+        height: 22
+        flow: Right
+        spacing: 5
+        align: Align{x: 0.0 y: 0.5}
+    }
     let FaderCol = View{
         width: 44
         height: Fit
@@ -784,13 +861,17 @@ script_mod! {
                                     }
                                 }
                             }
-                            // The three MODES sit far left, where the
-                            // wordmark used to be — the lit mode button IS
-                            // the label. VJ = the visual surface, DJ the
-                            // two-deck music mode, SFX the pad sampler.
+                            // The MODES sit far left, where the wordmark
+                            // used to be — the lit mode button IS the label.
+                            // VJ = the visual surface, DJ the two-deck music
+                            // mode, SFX the pad sampler, SYNTH the rack and
+                            // MIX the bus where every source meets. Each
+                            // button replaces the whole console body.
                             mode_vj := PillButton{text: "VJ"}
                             mode_dj := PillButton{text: "DJ"}
                             mode_sfx := PillButton{text: "SFX"}
+                            mode_synth := PillButton{text: "SYNTH"}
+                            mode_mix := PillButton{text: "MIX"}
                             // OFFSCREEN RENDER HOSTS — every 4x4 heartbeat
                             // widget stacked in ONE overlay slot with a
                             // bar-colored cover on top: the sample draws
@@ -2537,6 +2618,380 @@ script_mod! {
                                 flow: Down
                                 music_surface := MusicDeckPage{}
                             }
+
+                            synth_page := View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 6
+                                // Transport is global to the rack. Instrument
+                                // selection and CLEAR live with the sequencer
+                                // they affect, so this line stays honest as the
+                                // rack grows.
+                                View{
+                                    width: Fill height: 28 flow: Right spacing: 8
+                                    align: Align{x: 0.0 y: 0.5}
+                                    synth_play := ChromeButton{width: 62 text: "PLAY"}
+                                    synth_status := Label{
+                                        width: Fit text: "STEP 01"
+                                        draw_text.color: #xffe0a3
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    synth_clock_status := Label{
+                                        width: Fit text: "120.0 · FREE"
+                                        draw_text.color: #x8e9aa7
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    synth_drop_status := Label{
+                                        width: Fit text: ""
+                                        draw_text.color: #xff5c39
+                                        draw_text.text_style: theme.font_bold{font_size: 8}
+                                    }
+                                    View{width: Fill height: 1}
+                                    Tick{width: Fit text: "ONE CLOCK · ALL INSTRUMENTS"}
+                                }
+                                View{
+                                    width: Fill height: Fill flow: Right spacing: 10
+                                    // Sequencer plus rack overview. This side
+                                    // expands to the full page for Piano and
+                                    // Drums, whose engines have no editable
+                                    // parameter surface.
+                                    View{
+                                        width: Fill height: Fill flow: Down spacing: 7
+                                        synth_editors := PageFlip{
+                                            width: Fill
+                                            height: 575
+                                            active_page: @synth_piano_editor
+                                            synth_piano_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "PIANO · C3–B3 · 12 NOTE LANES"}
+                                                    View{width: Fill height: 1}
+                                                    Label{
+                                                        width: Fit text: "consecutive notes tie"
+                                                        draw_text.color: #x657383
+                                                        draw_text.text_style.font_size: 8
+                                                    }
+                                                    piano_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                    View{width: 74 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "B3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "A#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "A3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "G#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "G3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "F#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "F3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "E3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "D#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "D3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C3"}}
+                                                    }
+                                                    piano_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                }
+                                            }
+                                            synth_ironfish_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "IRONFISH · 12 SCALE-DEGREE LANES"}
+                                                    View{width: Fill height: 1}
+                                                    Tick{width: 30 text: "ROOT"}
+                                                    ironfish_root := DropDown{width: 92 labels: ["A" "A#" "B" "C" "C#" "D" "D#" "E" "F" "F#" "G" "G#"]}
+                                                    Tick{width: 34 text: "SCALE"}
+                                                    ironfish_scale := DropDown{width: 116 labels: ["MINOR" "MAJOR" "DORIAN" "PENTATONIC"]}
+                                                    ironfish_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                    View{width: 74 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_11 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_10 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_9 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_8 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_7 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_6 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_5 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_4 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_3 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_2 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_1 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_0 := Tick{text: ""}}
+                                                    }
+                                                    ironfish_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                }
+                                            }
+                                            synth_drums_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "DRUM COMPUTER · 8 LANES"}
+                                                    View{width: Fill height: 1}
+                                                    drums_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{
+                                                    width: Fill height: Fill flow: Right spacing: 8
+                                                    View{
+                                                        width: 82 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "CRASH"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "RIDE"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "TOM HIGH"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "TOM LOW"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "OPEN HAT"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "CLOSED HAT"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "SNARE"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "KICK"}}
+                                                    }
+                                                    drums_grid := VjStepGrid{width: Fill height: Fill rows: 8}
+                                                }
+                                            }
+                                        }
+                                        // The rack is the scalable instrument
+                                        // chooser. Selection is orange; runtime
+                                        // activity and the MIX mute state remain
+                                        // visible without duplicating faders.
+                                        SynthPanel{
+                                            width: Fill height: Fit
+                                            View{width: Fill height: 18 flow: Right
+                                                Tick{width: Fill text: "RACK · SELECT AN INSTRUMENT TO EDIT"}
+                                                Tick{width: Fit text: "MUTE IS SHARED WITH MIX"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_piano_btn := PillButton{width: 82 text: "PIANO"}
+                                                rack_piano_state := Label{width: 150 text: "IDLE · 12 NOTE LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                piano_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_piano_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_ironfish_btn := PillButton{width: 82 text: "IRONFISH"}
+                                                rack_ironfish_state := Label{width: 150 text: "IDLE · DUAL OSC SYNTH" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                ironfish_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_ironfish_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_drums_btn := PillButton{width: 82 text: "DRUMS"}
+                                                rack_drums_state := Label{width: 150 text: "IDLE · 8 DRUM LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                drums_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_drums_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            Tick{width: Fill text: "+ FUTURE SYNTHS APPEAR HERE · THE TRANSPORT AND MIX BUS STAY SHARED"}
+                                        }
+                                    }
+
+                                    // Ironfish engine. VOICE and FX are one
+                                    // gesture apart and each page is complete;
+                                    // the ScrollYView is only a short-window
+                                    // fallback, not the primary navigation.
+                                    synth_engine_column := SynthPanel{
+                                        width: 600 height: Fill spacing: 5
+                                        View{width: Fill height: 20 flow: Right align: Align{x: 0.0 y: 0.5}
+                                            Tick{width: Fill text: "IRONFISH"}
+                                            ironfish_voice_status := Label{width: Fit text: "0 / 16 VOICES" draw_text.color: #xffe0a3 draw_text.text_style.font_size: 9}
+                                        }
+                                        View{width: Fill height: 22 flow: Right spacing: 4
+                                            ironfish_preset_0 := ChromeButton{width: Fill text: "INIT"}
+                                            ironfish_preset_1 := ChromeButton{width: Fill text: "GLASS"}
+                                            ironfish_preset_2 := ChromeButton{width: Fill text: "ACID"}
+                                            ironfish_preset_3 := ChromeButton{width: Fill text: "SUB"}
+                                            ironfish_preset_4 := ChromeButton{width: Fill text: "FORMANT"}
+                                            ironfish_preset_5 := ChromeButton{width: Fill text: "CRUSH"}
+                                            ironfish_preset_6 := ChromeButton{width: Fill text: "WIDE"}
+                                            ironfish_preset_7 := ChromeButton{width: Fill text: "PAD"}
+                                        }
+                                        View{width: Fill height: 22 flow: Right spacing: 4
+                                            ironfish_voice_tab := PillButton{width: 76 text: "VOICE"}
+                                            ironfish_fx_tab := PillButton{width: 62 text: "FX"}
+                                            View{width: Fill height: 1}
+                                            Tick{width: Fit text: "FULL FINAL ENGINE · SHARED CLOCK"}
+                                        }
+                                        ironfish_engine_pages := PageFlip{
+                                            width: Fill height: Fill active_page: @ironfish_voice_page
+                                            ironfish_voice_page := ScrollYView{
+                                                width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
+                                                scroll_bars.scroll_bar_y.drag_scrolling: false
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "OSCILLATOR 1"}
+                                                        ironfish_osc1_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc1_transpose := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc1_detune := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc1_spread := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc1_diffuse := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc1_harmonic := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc1_harmonic_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc1_harmonic_lfo := ApcBipolarSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "OSCILLATOR 2"}
+                                                        ironfish_osc2_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc2_transpose := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc2_detune := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc2_spread := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc2_diffuse := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc2_harmonic := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc2_harmonic_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc2_harmonic_lfo := ApcBipolarSlider{}}
+                                                    }
+                                                }
+                                                SynthPanel{
+                                                    Tick{width: Fill text: "VOICE MIX"}
+                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                        SynthParamRow{Tick{width: 62 text: "BALANCE"} ironfish_osc_balance := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 40 text: "SUB"} ironfish_sub := ApcHSlider{}}
+                                                    }
+                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                        SynthParamRow{Tick{width: 62 text: "NOISE"} ironfish_noise := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 40 text: "PORTA"} ironfish_portamento := ApcHSlider{}}
+                                                    }
+                                                }
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "AMP ENVELOPE"}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_amp_predelay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_amp_attack := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_amp_hold := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_amp_decay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_amp_sustain := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_amp_release := ApcHSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "MOD ENVELOPE"}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_mod_predelay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_mod_attack := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_mod_hold := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_mod_decay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_mod_sustain := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_mod_release := ApcHSlider{}}
+                                                    }
+                                                }
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "FILTER"}
+                                                        ironfish_filter_type := DropDown{width: Fill labels: ["LOW PASS" "HIGH PASS" "BAND PASS" "BAND REJECT"]}
+                                                        SynthParamRow{Tick{width: 62 text: "CUTOFF"} ironfish_filter_cutoff := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RESONANCE"} ironfish_filter_resonance := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ENV AMT"} ironfish_filter_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "LFO AMT"} ironfish_filter_lfo := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH AMT"} ironfish_filter_touch := ApcBipolarSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "LFO + PERFORMANCE"}
+                                                        ironfish_lfo_wave := DropDown{width: Fill labels: ["SAW" "SINE" "PULSE" "TRIANGLE"]}
+                                                        SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_lfo_rate := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH"} ironfish_touch := ApcHSlider{}}
+                                                        View{width: Fill height: 22 flow: Right spacing: 5
+                                                            ironfish_lfo_key_sync := Toggle{width: 92 text: "KEY SYNC"}
+                                                            ironfish_arp_enable := Toggle{width: 70 text: "ARP"}
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "OCTAVES"} ironfish_arp_octaves := ApcBipolarSlider{}}
+                                                    }
+                                                }
+                                            }
+                                            ironfish_fx_page := ScrollYView{
+                                                width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
+                                                scroll_bars.scroll_bar_y.drag_scrolling: false
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    View{width: Fill height: Fit flow: Down spacing: 6
+                                                        SynthPanel{
+                                                            View{width: Fill height: 22 flow: Right
+                                                                Tick{width: Fill text: "BITCRUSH"}
+                                                                ironfish_bitcrush_enable := Toggle{width: 48 text: "ON"}
+                                                            }
+                                                            SynthParamRow{Tick{width: 62 text: "AMOUNT"} ironfish_bitcrush := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "CROSS STEREO DELAY"}
+                                                            SynthParamRow{Tick{width: 62 text: "SEND"} ironfish_delay_send := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_delay_feedback := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "CROSS"} ironfish_delay_cross := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "DIFFERENCE"} ironfish_delay_difference := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "LENGTH"} ironfish_delay_length := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "OUTPUT"}
+                                                            SynthParamRow{Tick{width: 62 text: "LEVEL"} ironfish_output := ApcHSlider{}}
+                                                        }
+                                                    }
+                                                    View{width: Fill height: Fit flow: Down spacing: 6
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "SIX-LINE WAVEGUIDE CHORUS"}
+                                                            SynthParamRow{Tick{width: 62 text: "MIN DELAY"} ironfish_chorus_min_delay := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "DEPTH"} ironfish_chorus_mod_depth := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_chorus_rate := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "PHASE"} ironfish_chorus_phase_diff := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_chorus_mix := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_chorus_feedback := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "GRIESINGER REVERB"}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_reverb_mix := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_reverb_feedback := ApcHSlider{}}
+                                                        }
+                                                    }
+                                                }
+                                                View{width: Fill height: Fill}
+                                                Label{
+                                                    width: Fill text: "Historical order: bitcrush → chorus → cross delay → reverb. Final dynamics live in MIX."
+                                                    draw_text.color: #x657383
+                                                    draw_text.text_style.font_size: 9
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            mix_page := View{
+                                width: Fill height: Fill flow: Down spacing: 6
+                                View{
+                                    width: Fill height: Fit flow: Right spacing: 8
+                                    Tick{width: Fit text: "PROGRAM MIX"}
+                                    mix_solo_status := Label{
+                                        width: Fill text: "all channels listening"
+                                        draw_text.color: #x8e9aa7
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    mix_master_meter := Label{
+                                        width: Fit text: "PEAK — · GR —"
+                                        draw_text.color: #xe8eef4
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                }
+                                View{
+                                    width: Fill height: Fill flow: Right spacing: 10
+                                    FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "SFX"} mix_sfx_meter := Tick{text: "····"} mix_sfx_gain := ApcFader{max: 1.5} mix_sfx_mute := ChromeButton{width: 54 text: "MUTE"} mix_sfx_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    View{width: 8 height: Fill}
+                                    RoundedView{
+                                        width: Fill height: Fill flow: Down spacing: 3 padding: 8
+                                        draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
+                                        View{width: Fill height: Fit flow: Right
+                                            Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
+                                            mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
+                                        }
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
+                                        View{width: Fill height: Fill}
+                                        Label{
+                                            width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
+                                            draw_text.color: #x657383
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ============ SFX ============
 
                             // ============ SFX ============
                             sfx_page := View{
@@ -4809,12 +5264,304 @@ fn stale_fade_to_land(
     active.filter(|schedule| *schedule != published)
 }
 
-/// The three top-level modes. Everything else is a filter or a drawer.
-const MODE_BUTTONS: [(&[LiveId], ApcSurface); 3] = [
-    (ids!(mode_vj), ApcSurface::Video),
-    (ids!(mode_dj), ApcSurface::Music),
-    (ids!(mode_sfx), ApcSurface::Sfx),
+/// The operator's workspaces: one page each. VJ, DJ and SFX also select
+/// their matching controller surface; SYNTH and MIX leave the controller on
+/// whatever surface it was performing on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleMode {
+    Vj,
+    Dj,
+    Sfx,
+    Synth,
+    Mix,
+}
+
+impl ConsoleMode {
+    const ALL: [ConsoleMode; 5] = [Self::Vj, Self::Dj, Self::Sfx, Self::Synth, Self::Mix];
+
+    fn page(self) -> LiveId {
+        match self {
+            Self::Vj => live_id!(video_page),
+            Self::Dj => live_id!(music_page),
+            Self::Sfx => live_id!(sfx_page),
+            Self::Synth => live_id!(synth_page),
+            Self::Mix => live_id!(mix_page),
+        }
+    }
+
+    /// The word the `ui-surface` file holds for this mode. Frozen the way a
+    /// settings slug is: an install that closed on a page reopens on it.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Vj => "video",
+            Self::Dj => "music",
+            Self::Sfx => "sfx",
+            Self::Synth => "synth",
+            Self::Mix => "mix",
+        }
+    }
+
+    fn parse_word(word: &str) -> Option<ConsoleMode> {
+        Self::ALL.into_iter().find(|mode| mode.word() == word.trim())
+    }
+
+    /// The page a controller surface shows when the hardware picks it.
+    fn for_surface(surface: ApcSurface) -> ConsoleMode {
+        match surface {
+            ApcSurface::Video => Self::Vj,
+            ApcSurface::Music => Self::Dj,
+            ApcSurface::Sfx => Self::Sfx,
+        }
+    }
+}
+
+const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 5] = [
+    (ids!(mode_vj), ConsoleMode::Vj),
+    (ids!(mode_dj), ConsoleMode::Dj),
+    (ids!(mode_sfx), ConsoleMode::Sfx),
+    (ids!(mode_synth), ConsoleMode::Synth),
+    (ids!(mode_mix), ConsoleMode::Mix),
 ];
+
+/// UI-owned edit model for the rack and program bus. Audio owns its own copy;
+/// every edit crosses the bounded mixer command queue, never a shared lock.
+#[derive(Clone, Copy, Debug)]
+struct SynthMixUiState {
+    selected: SynthTrack,
+    /// The two Ironfish pages are navigation state, not audio state.
+    ironfish_fx_page: bool,
+    /// A program is lit only until the operator changes a parameter.
+    ironfish_program: Option<u8>,
+    patterns: RackPatterns,
+    patch: IronfishPatch,
+    playing: bool,
+    strip_gains: [f32; STRIP_COUNT],
+    strip_mutes: [bool; STRIP_COUNT],
+    strip_solos: [bool; STRIP_COUNT],
+    master: MasterParams,
+    last_step: u8,
+    last_clock_token: Option<(u64, u8)>,
+}
+
+impl Default for SynthMixUiState {
+    fn default() -> Self {
+        Self {
+            selected: SynthTrack::Piano,
+            ironfish_fx_page: false,
+            ironfish_program: Some(0),
+            patterns: RackPatterns::default(),
+            patch: IronfishPatch::default(),
+            playing: false,
+            strip_gains: [1.0; STRIP_COUNT],
+            strip_mutes: [false; STRIP_COUNT],
+            strip_solos: [false; STRIP_COUNT],
+            master: MasterParams::default(),
+            last_step: u8::MAX,
+            last_clock_token: None,
+        }
+    }
+}
+
+const MIX_STRIP_CONTROLS: [(
+    StripId,
+    &[LiveId],
+    &[LiveId],
+    &[LiveId],
+    &[LiveId],
+); STRIP_COUNT] = [
+    (StripId::Video, ids!(mix_video_gain), ids!(mix_video_mute), ids!(mix_video_solo), ids!(mix_video_meter)),
+    (StripId::DjA, ids!(mix_dja_gain), ids!(mix_dja_mute), ids!(mix_dja_solo), ids!(mix_dja_meter)),
+    (StripId::DjB, ids!(mix_djb_gain), ids!(mix_djb_mute), ids!(mix_djb_solo), ids!(mix_djb_meter)),
+    (StripId::Sfx, ids!(mix_sfx_gain), ids!(mix_sfx_mute), ids!(mix_sfx_solo), ids!(mix_sfx_meter)),
+    (StripId::Piano, ids!(mix_piano_gain), ids!(mix_piano_mute), ids!(mix_piano_solo), ids!(mix_piano_meter)),
+    (StripId::Ironfish, ids!(mix_ironfish_gain), ids!(mix_ironfish_mute), ids!(mix_ironfish_solo), ids!(mix_ironfish_meter)),
+    (StripId::Drums, ids!(mix_drums_gain), ids!(mix_drums_mute), ids!(mix_drums_solo), ids!(mix_drums_meter)),
+];
+
+const IRONFISH_CONTROLS: [(IronfishParam, &[LiveId]); 53] = [
+    (IronfishParam::OscBalance, ids!(ironfish_osc_balance)),
+    (IronfishParam::Osc1Transpose, ids!(ironfish_osc1_transpose)),
+    (IronfishParam::Osc1Detune, ids!(ironfish_osc1_detune)),
+    (IronfishParam::Osc1Spread, ids!(ironfish_osc1_spread)),
+    (IronfishParam::Osc1Diffuse, ids!(ironfish_osc1_diffuse)),
+    (IronfishParam::Osc1Harmonic, ids!(ironfish_osc1_harmonic)),
+    (IronfishParam::Osc1HarmonicEnv, ids!(ironfish_osc1_harmonic_env)),
+    (IronfishParam::Osc1HarmonicLfo, ids!(ironfish_osc1_harmonic_lfo)),
+    (IronfishParam::Osc2Transpose, ids!(ironfish_osc2_transpose)),
+    (IronfishParam::Osc2Detune, ids!(ironfish_osc2_detune)),
+    (IronfishParam::Osc2Spread, ids!(ironfish_osc2_spread)),
+    (IronfishParam::Osc2Diffuse, ids!(ironfish_osc2_diffuse)),
+    (IronfishParam::Osc2Harmonic, ids!(ironfish_osc2_harmonic)),
+    (IronfishParam::Osc2HarmonicEnv, ids!(ironfish_osc2_harmonic_env)),
+    (IronfishParam::Osc2HarmonicLfo, ids!(ironfish_osc2_harmonic_lfo)),
+    (IronfishParam::Sub, ids!(ironfish_sub)),
+    (IronfishParam::Noise, ids!(ironfish_noise)),
+    (IronfishParam::Portamento, ids!(ironfish_portamento)),
+    (IronfishParam::AmpPredelay, ids!(ironfish_amp_predelay)),
+    (IronfishParam::AmpAttack, ids!(ironfish_amp_attack)),
+    (IronfishParam::AmpHold, ids!(ironfish_amp_hold)),
+    (IronfishParam::AmpDecay, ids!(ironfish_amp_decay)),
+    (IronfishParam::AmpSustain, ids!(ironfish_amp_sustain)),
+    (IronfishParam::AmpRelease, ids!(ironfish_amp_release)),
+    (IronfishParam::ModPredelay, ids!(ironfish_mod_predelay)),
+    (IronfishParam::ModAttack, ids!(ironfish_mod_attack)),
+    (IronfishParam::ModHold, ids!(ironfish_mod_hold)),
+    (IronfishParam::ModDecay, ids!(ironfish_mod_decay)),
+    (IronfishParam::ModSustain, ids!(ironfish_mod_sustain)),
+    (IronfishParam::ModRelease, ids!(ironfish_mod_release)),
+    (IronfishParam::FilterCutoff, ids!(ironfish_filter_cutoff)),
+    (IronfishParam::FilterResonance, ids!(ironfish_filter_resonance)),
+    (IronfishParam::FilterEnvAmount, ids!(ironfish_filter_env)),
+    (IronfishParam::FilterLfoAmount, ids!(ironfish_filter_lfo)),
+    (IronfishParam::FilterTouchAmount, ids!(ironfish_filter_touch)),
+    (IronfishParam::LfoRate, ids!(ironfish_lfo_rate)),
+    (IronfishParam::Touch, ids!(ironfish_touch)),
+    (IronfishParam::Bitcrush, ids!(ironfish_bitcrush)),
+    (IronfishParam::DelaySend, ids!(ironfish_delay_send)),
+    (IronfishParam::DelayFeedback, ids!(ironfish_delay_feedback)),
+    (IronfishParam::DelayCross, ids!(ironfish_delay_cross)),
+    (IronfishParam::DelayDifference, ids!(ironfish_delay_difference)),
+    (IronfishParam::DelayLength, ids!(ironfish_delay_length)),
+    (IronfishParam::ChorusMinDelay, ids!(ironfish_chorus_min_delay)),
+    (IronfishParam::ChorusModDepth, ids!(ironfish_chorus_mod_depth)),
+    (IronfishParam::ChorusRate, ids!(ironfish_chorus_rate)),
+    (IronfishParam::ChorusPhaseDiff, ids!(ironfish_chorus_phase_diff)),
+    (IronfishParam::ChorusMix, ids!(ironfish_chorus_mix)),
+    (IronfishParam::ChorusFeedback, ids!(ironfish_chorus_feedback)),
+    (IronfishParam::ReverbMix, ids!(ironfish_reverb_mix)),
+    (IronfishParam::ReverbFeedback, ids!(ironfish_reverb_feedback)),
+    (IronfishParam::ArpOctaves, ids!(ironfish_arp_octaves)),
+    (IronfishParam::Output, ids!(ironfish_output)),
+];
+
+const MASTER_CONTROLS: [(MasterParam, &[LiveId]); 6] = [
+    (MasterParam::Threshold, ids!(mix_comp_threshold)),
+    (MasterParam::Ratio, ids!(mix_comp_ratio)),
+    (MasterParam::Attack, ids!(mix_comp_attack)),
+    (MasterParam::Release, ids!(mix_comp_release)),
+    (MasterParam::Makeup, ids!(mix_comp_makeup)),
+    (MasterParam::Ceiling, ids!(mix_limiter_ceiling)),
+];
+
+/// The rack and program-bus settings as the `synth-mix.txt` file holds
+/// them. Pure, so the round trip is a unit test and not a restart.
+fn synth_mix_text(state: &SynthMixUiState) -> String {
+    fn pattern(value: synth::StepPattern) -> String {
+        value.map(|column| format!("{column:04x}")).join(",")
+    }
+    fn values<const N: usize>(value: [f32; N]) -> String {
+        value.map(|v| format!("{v:.7}")).join(",")
+    }
+    fn flags<const N: usize>(value: [bool; N]) -> String {
+        value.map(|v| if v { "1" } else { "0" }).join(",")
+    }
+    let patch = IRONFISH_CONTROLS.map(|(param, _)| state.patch.normalised(param));
+    let master = MASTER_CONTROLS.map(|(param, _)| state.master.normalised(param));
+    let patch_modes = format!(
+        "{},{},{},{},{},{},{},{},{}",
+        state.patch.osc1.kind.index(),
+        state.patch.osc2.kind.index(),
+        state.patch.filter.kind.index(),
+        state.patch.lfo.wave.index(),
+        state.patch.root.index(),
+        state.patch.scale.index(),
+        u8::from(state.patch.lfo.key_sync),
+        u8::from(state.patch.bitcrush_enabled),
+        u8::from(state.patch.arp_enabled),
+    );
+    format!(
+        "VJ_SYNTH_MIX 3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{},{}\n",
+        state.selected as u8,
+        pattern(state.patterns.piano),
+        pattern(state.patterns.ironfish),
+        pattern(state.patterns.drums),
+        values(patch),
+        patch_modes,
+        values(state.strip_gains),
+        flags(state.strip_mutes),
+        values(master),
+        u8::from(state.master.bypass),
+    )
+}
+
+/// The file read back. Only the header this build writes is understood; a
+/// stranger's file leaves the defaults standing rather than half-applying.
+/// A lit program is not restored: the file holds patch VALUES, and a
+/// program number that no longer matches them would be a lie.
+fn parse_synth_mix(body: &str) -> Option<SynthMixUiState> {
+    fn floats<const N: usize>(line: Option<&str>) -> Option<[f32; N]> {
+        let mut out = [0.0; N];
+        let mut parts = line?.split(',');
+        for item in &mut out {
+            *item = parts.next()?.parse().ok()?;
+        }
+        Some(out)
+    }
+    fn flags<const N: usize>(line: Option<&str>) -> Option<[bool; N]> {
+        floats::<N>(line).map(|value| value.map(|v| v != 0.0))
+    }
+    fn pattern(line: Option<&str>) -> Option<synth::StepPattern> {
+        let mut out = [0u16; synth::STEPS];
+        let mut parts = line?.split(',');
+        for item in &mut out {
+            *item = u16::from_str_radix(parts.next()?, 16).ok()?;
+        }
+        Some(out)
+    }
+    let mut lines = body.lines();
+    if lines.next()?.trim() != "VJ_SYNTH_MIX 3" {
+        return None;
+    }
+    let mut state = SynthMixUiState::default();
+    state.selected = match lines.next().and_then(|line| line.trim().parse().ok()) {
+        Some(1) => SynthTrack::Ironfish,
+        Some(2) => SynthTrack::Drums,
+        _ => SynthTrack::Piano,
+    };
+    if let Some(value) = pattern(lines.next()) {
+        state.patterns.piano = value;
+    }
+    if let Some(value) = pattern(lines.next()) {
+        state.patterns.ironfish = value;
+    }
+    if let Some(value) = pattern(lines.next()) {
+        state.patterns.drums = value;
+    }
+    if let Some(value) = floats::<53>(lines.next()) {
+        for ((param, _), value) in IRONFISH_CONTROLS.into_iter().zip(value) {
+            state.patch.set_normalised(param, value);
+        }
+    }
+    if let Some(modes) = floats::<9>(lines.next()) {
+        state.patch.osc1.kind = OscillatorKind::from_index(modes[0] as usize);
+        state.patch.osc2.kind = OscillatorKind::from_index(modes[1] as usize);
+        state.patch.filter.kind = FilterKind::from_index(modes[2] as usize);
+        state.patch.lfo.wave = LfoWave::from_index(modes[3] as usize);
+        state.patch.root = RootNote::from_index(modes[4] as usize);
+        state.patch.scale = ScaleKind::from_index(modes[5] as usize);
+        state.patch.lfo.key_sync = modes[6] != 0.0;
+        state.patch.bitcrush_enabled = modes[7] != 0.0;
+        state.patch.arp_enabled = modes[8] != 0.0;
+    }
+    if let Some(value) = floats::<STRIP_COUNT>(lines.next()) {
+        state.strip_gains = value.map(|gain| gain.clamp(0.0, 1.5));
+    }
+    if let Some(value) = flags::<STRIP_COUNT>(lines.next()) {
+        state.strip_mutes = value;
+    }
+    if let Some(value) = floats::<6>(lines.next()) {
+        for ((param, _), value) in MASTER_CONTROLS.into_iter().zip(value) {
+            state.master.set_normalised(param, value);
+        }
+    }
+    state.master.bypass = lines
+        .next()
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .is_some_and(|value| value != 0);
+    state.patch = state.patch.sanitise();
+    state.ironfish_program = None;
+    Some(state)
+}
 
 /// The explorer's lane: exactly one chip at a time (radio; the selected
 /// chip clicked again returns to ALL). Audio has no chip here — that is
@@ -4925,6 +5672,104 @@ fn seven_bit_detent(position: f32, neutral: f32) -> f32 {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+mod console_mode_tests {
+    use super::*;
+
+    /// Every mode has a button and every button names a mode: a mode with
+    /// no button is unreachable, a button with no mode is dead.
+    #[test]
+    fn every_mode_has_exactly_one_button() {
+        for mode in ConsoleMode::ALL {
+            let buttons = MODE_BUTTONS.iter().filter(|(_, m)| *m == mode).count();
+            assert_eq!(buttons, 1, "{mode:?}");
+        }
+        assert_eq!(MODE_BUTTONS.len(), ConsoleMode::ALL.len());
+    }
+
+    #[test]
+    fn every_mode_names_its_own_page() {
+        let pages: Vec<LiveId> = ConsoleMode::ALL.iter().map(|mode| mode.page()).collect();
+        for (i, page) in pages.iter().enumerate() {
+            assert!(!pages[..i].contains(page), "two modes share a page");
+        }
+    }
+
+    /// The file word is frozen: an install that closed on a page reopens on
+    /// it, and a word this build does not know leaves the default standing.
+    #[test]
+    fn the_surface_word_round_trips_and_a_stranger_reads_as_nothing() {
+        for mode in ConsoleMode::ALL {
+            assert_eq!(ConsoleMode::parse_word(mode.word()), Some(mode));
+            assert_eq!(ConsoleMode::parse_word(&format!("{}\n", mode.word())), Some(mode));
+        }
+        assert_eq!(ConsoleMode::parse_word("lights"), None);
+        assert_eq!(ConsoleMode::parse_word(""), None);
+    }
+
+    #[test]
+    fn the_hardware_surfaces_each_have_a_page() {
+        assert_eq!(ConsoleMode::for_surface(ApcSurface::Video), ConsoleMode::Vj);
+        assert_eq!(ConsoleMode::for_surface(ApcSurface::Music), ConsoleMode::Dj);
+        assert_eq!(ConsoleMode::for_surface(ApcSurface::Sfx), ConsoleMode::Sfx);
+    }
+}
+
+#[cfg(test)]
+mod synth_mix_file_tests {
+    use super::*;
+
+    /// A state that is nothing like the default, so a field the writer
+    /// forgot would show as the default coming back.
+    fn edited() -> SynthMixUiState {
+        let mut state = SynthMixUiState::default();
+        state.selected = SynthTrack::Drums;
+        state.patterns.drums[3] = 0x00a5;
+        state.patterns.piano[15] = 0x0800;
+        state.patch = IronfishPatch::preset(2);
+        state.patch.arp_enabled = true;
+        state.strip_gains[StripId::Sfx as usize] = 0.25;
+        state.strip_mutes[StripId::Video as usize] = true;
+        state.master.set_normalised(MasterParam::Ratio, 0.8);
+        state.master.bypass = false;
+        state
+    }
+
+    #[test]
+    fn the_file_round_trips_everything_it_holds() {
+        let before = edited();
+        let text = synth_mix_text(&before);
+        let after = parse_synth_mix(&text).expect("our own file reads back");
+        assert_eq!(after.selected, before.selected);
+        assert_eq!(after.patterns.piano, before.patterns.piano);
+        assert_eq!(after.patterns.ironfish, before.patterns.ironfish);
+        assert_eq!(after.patterns.drums, before.patterns.drums);
+        assert_eq!(after.strip_gains, before.strip_gains);
+        assert_eq!(after.strip_mutes, before.strip_mutes);
+        assert_eq!(after.master.bypass, before.master.bypass);
+        assert!(after.patch.arp_enabled);
+        for (param, _) in IRONFISH_CONTROLS {
+            let (a, b) = (after.patch.normalised(param), before.patch.normalised(param));
+            assert!((a - b).abs() < 1e-5, "{param:?}: {a} vs {b}");
+        }
+        for (param, _) in MASTER_CONTROLS {
+            let (a, b) = (after.master.normalised(param), before.master.normalised(param));
+            assert!((a - b).abs() < 1e-5, "{param:?}: {a} vs {b}");
+        }
+        // A program is not a value: the file holds the knobs, and a program
+        // that no longer matched them would be a lie.
+        assert_eq!(after.ironfish_program, None);
+    }
+
+    #[test]
+    fn a_strangers_file_leaves_the_defaults_standing() {
+        assert!(parse_synth_mix("VJ_SYNTH_MIX 2\n0\n").is_none());
+        assert!(parse_synth_mix("").is_none());
+        assert!(parse_synth_mix("junk").is_none());
+    }
+}
+
+
 mod detent_tests {
     use super::seven_bit_detent;
 
@@ -7384,6 +8229,11 @@ pub struct App {
     decks: DeckEngine,
     #[rust(PadEngine::new())]
     pads: PadEngine,
+    /// Rack patterns, the synth patch and the final-bus controls,
+    /// mirrored on the UI thread. The callback receives bounded copy
+    /// commands only.
+    #[rust]
+    synth_mix: SynthMixUiState,
     #[rust(GenModel::new())]
     gen: GenModel,
     #[rust]
@@ -7439,6 +8289,9 @@ pub struct App {
     /// displaced device thread never fired a devices event.
     #[rust]
     phones_retry_timer: Timer,
+    /// Debounces rack and mix persistence while a fader is moving.
+    #[rust]
+    synth_mix_save_timer: Timer,
     /// Decode generation for the pre-listen: stale decodes land and die.
     #[rust]
     phones_preview_gen: u64,
@@ -10794,8 +11647,8 @@ p2 {}
         }
         self.paint_chip(cx, ids!(chip_lights), self.lower_tab == LowerTab::Lights, Some("LIGHTS"));
         self.paint_chip(cx, ids!(chip_archive), self.lower_tab == LowerTab::Archive, Some("ARCHIVE"));
-        for (button, surface) in MODE_BUTTONS {
-            self.paint_chip(cx, button, self.apc.surface == surface, None);
+        for (button, mode) in MODE_BUTTONS {
+            self.paint_chip(cx, button, self.console_page == mode.page(), None);
         }
     }
 
@@ -10864,12 +11717,28 @@ p2 {}
         self.set_lane(cx, lane);
     }
 
-    /// Switch top-level mode. The APC surface and the page are the same
-    /// choice seen from two sides, so they move together.
-    fn select_mode(&mut self, cx: &mut Cx, surface: ApcSurface) {
-        self.apc.surface = surface;
-        self.apc.bank = 0;
-        self.show_apc_surface(cx);
+    /// Switch the whole console. The three performance pages also select
+    /// their controller surface -- the surface and the page are one choice
+    /// seen from two sides -- while SYNTH and MIX leave the controller on
+    /// whatever it was performing on, so editing does not steal the pads.
+    fn select_mode(&mut self, cx: &mut Cx, mode: ConsoleMode) {
+        match mode {
+            ConsoleMode::Vj => {
+                self.apc.surface = ApcSurface::Video;
+                self.apc.bank = 0;
+            }
+            ConsoleMode::Dj => {
+                self.apc.surface = ApcSurface::Music;
+                self.apc.bank = 0;
+            }
+            ConsoleMode::Sfx => {
+                self.apc.surface = ApcSurface::Sfx;
+                self.apc.bank = 0;
+            }
+            ConsoleMode::Synth | ConsoleMode::Mix => {}
+        }
+        Self::save_ui_surface(mode);
+        self.show_console_page(cx, mode.page());
     }
 
     fn set_visual_mix(&mut self, cx: &mut Cx, value: f32) {
@@ -12472,29 +13341,18 @@ p2 {}
         }
     }
 
-    /// Where the last-active surface sleeps between sessions: one word in
-    /// a file, so closing on the DJ tab reopens on the DJ tab.
+    /// Where the last-active workspace sleeps between sessions: one word in
+    /// a file, so closing on any top-level tab reopens on that tab.
     fn ui_surface_path() -> PathBuf {
         crate::service::data_root().join("ui-surface")
     }
 
-    fn save_ui_surface(surface: ApcSurface) {
-        let path = Self::ui_surface_path();
-        let name = match surface {
-            ApcSurface::Video => "video",
-            ApcSurface::Music => "music",
-            ApcSurface::Sfx => "sfx",
-        };
-        let _ = crate::durable::write_file(&path, name);
+    fn save_ui_surface(mode: ConsoleMode) {
+        let _ = crate::durable::write_file(&Self::ui_surface_path(), mode.word());
     }
 
-    fn load_ui_surface() -> Option<ApcSurface> {
-        match std::fs::read_to_string(Self::ui_surface_path()).ok()?.trim() {
-            "video" => Some(ApcSurface::Video),
-            "music" => Some(ApcSurface::Music),
-            "sfx" => Some(ApcSurface::Sfx),
-            _ => None,
-        }
+    fn load_ui_surface() -> Option<ConsoleMode> {
+        ConsoleMode::parse_word(&std::fs::read_to_string(Self::ui_surface_path()).ok()?)
     }
 
     /// Where a track's saved loops and bookmarks sleep between sessions:
@@ -12681,13 +13539,14 @@ p2 {}
         (spans, scores)
     }
 
+    /// The hardware picked a surface: show its page.
     fn show_apc_surface(&mut self, cx: &mut Cx) {
-        let page = match self.apc.surface {
-            ApcSurface::Video => id!(video_page),
-            ApcSurface::Music => id!(music_page),
-            ApcSurface::Sfx => id!(sfx_page),
-        };
-        Self::save_ui_surface(self.apc.surface);
+        let mode = ConsoleMode::for_surface(self.apc.surface);
+        Self::save_ui_surface(mode);
+        self.show_console_page(cx, mode.page());
+    }
+
+    fn show_console_page(&mut self, cx: &mut Cx, page: LiveId) {
         self.ui.page_flip(cx, ids!(pages)).set_active_page(cx, page.into());
         self.console_page = page.into();
         // Coming back to the decks: the pump stops re-arming itself for a
@@ -12696,6 +13555,11 @@ p2 {}
         // it was showing when the operator left it.
         if self.console_page == live_id!(music_page) {
             self.music_pump = cx.new_next_frame();
+        }
+        // The rack and the bus repaint on arrival, whichever door was used
+        // -- a mode button or the controller.
+        if self.console_page == live_id!(synth_page) || self.console_page == live_id!(mix_page) {
+            self.sync_synth_mix_ui(cx);
         }
         self.sync_mesh_liveness(cx);
         self.paint_tabs(cx, page);
@@ -23975,6 +24839,10 @@ p2 {}
         // Everything below reads the SAME resolved clock the fades, the
         // visual PLL and the loop rate-fit run on.
         let clock = self.current_beat();
+        if let Some(beat) = clock.as_ref() {
+            self.sync_synth_clock(beat);
+        }
+        self.sync_synth_runtime_ui(cx);
         // The NOMINAL tempo, not the effective one: a correction in flight
         // is a transient, and a BPM readout that swings to 280 while the
         // clock catches half a beat is a lie about the music.
@@ -23991,6 +24859,10 @@ p2 {}
         {
             field.set_value(cx, shown_bpm.clamp(40.0, 300.0));
         };
+        self.ui.label(cx, ids!(synth_clock_status)).set_text(
+            cx,
+            &format!("{shown_bpm:.1} · {lock_text}"),
+        );
         // …and the FLOOR follows the live clock while one exists, so
         // losing every source coasts at the last known tempo with the
         // grid lines where they were.
@@ -26737,6 +27609,580 @@ p2 {}
     /// only fires when the state actually changes.
     /// The phones-cue variant of `paint_lit`: same diff cache, green face.
     /// Buttons painted here are painted ONLY here, so the shared bool
+    // ---- the SYNTH and MIX pages --------------------------------------
+
+    fn select_synth_track(&mut self, cx: &mut Cx, track: SynthTrack) {
+        self.synth_mix.selected = track;
+        let page = match track {
+            SynthTrack::Piano => id!(synth_piano_editor),
+            SynthTrack::Ironfish => id!(synth_ironfish_editor),
+            SynthTrack::Drums => id!(synth_drums_editor),
+        };
+        self.ui
+            .page_flip(cx, ids!(synth_editors))
+            .set_active_page(cx, page.into());
+        self.ui
+            .view(cx, ids!(synth_engine_column))
+            .set_visible(cx, track == SynthTrack::Ironfish);
+        self.sync_synth_mix_ui(cx);
+        self.schedule_synth_mix_save(cx);
+    }
+
+    fn set_grid_pattern(&mut self, cx: &mut Cx, path: &[LiveId], pattern: synth::StepPattern) {
+        let widget = self.ui.widget(cx, path);
+        if let Some(mut grid) = widget.borrow_mut::<VjStepGrid>() {
+            grid.set_pattern(cx, pattern);
+        };
+    }
+
+    /// Push the edit model into controls and audio. This is called at boot
+    /// and after a page switch; the 20 Hz meter path below only updates live
+    /// readouts and the playhead.
+    fn sync_synth_mix_ui(&mut self, cx: &mut Cx) {
+        let editor = match self.synth_mix.selected {
+            SynthTrack::Piano => id!(synth_piano_editor),
+            SynthTrack::Ironfish => id!(synth_ironfish_editor),
+            SynthTrack::Drums => id!(synth_drums_editor),
+        };
+        self.ui
+            .page_flip(cx, ids!(synth_editors))
+            .set_active_page(cx, editor.into());
+        self.ui
+            .view(cx, ids!(synth_engine_column))
+            .set_visible(cx, self.synth_mix.selected == SynthTrack::Ironfish);
+        self.ui
+            .page_flip(cx, ids!(ironfish_engine_pages))
+            .set_active_page(
+                cx,
+                if self.synth_mix.ironfish_fx_page {
+                    id!(ironfish_fx_page)
+                } else {
+                    id!(ironfish_voice_page)
+                }
+                .into(),
+            );
+        for (track, path, label) in [
+            (SynthTrack::Piano, ids!(synth_piano_btn), "PIANO"),
+            (SynthTrack::Ironfish, ids!(synth_ironfish_btn), "IRONFISH"),
+            (SynthTrack::Drums, ids!(synth_drums_btn), "DRUMS"),
+        ] {
+            self.paint_chip(cx, path, self.synth_mix.selected == track, Some(label));
+        }
+        self.paint_chip(
+            cx,
+            ids!(ironfish_voice_tab),
+            !self.synth_mix.ironfish_fx_page,
+            Some("VOICE"),
+        );
+        self.paint_chip(cx, ids!(ironfish_fx_tab), self.synth_mix.ironfish_fx_page, Some("FX"));
+        for (index, (path, label)) in [
+            (ids!(ironfish_preset_0), "INIT"),
+            (ids!(ironfish_preset_1), "GLASS"),
+            (ids!(ironfish_preset_2), "ACID"),
+            (ids!(ironfish_preset_3), "SUB"),
+            (ids!(ironfish_preset_4), "FORMANT"),
+            (ids!(ironfish_preset_5), "CRUSH"),
+            (ids!(ironfish_preset_6), "WIDE"),
+            (ids!(ironfish_preset_7), "PAD"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.paint_chip(
+                cx,
+                path,
+                self.synth_mix.ironfish_program == Some(index as u8),
+                Some(label),
+            );
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(rack_piano_mute)),
+            (StripId::Ironfish, ids!(rack_ironfish_mute)),
+            (StripId::Drums, ids!(rack_drums_mute)),
+        ] {
+            self.paint_lit(cx, path, self.synth_mix.strip_mutes[strip.index()]);
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(piano_rack_grid)),
+            (StripId::Ironfish, ids!(ironfish_rack_grid)),
+            (StripId::Drums, ids!(drums_rack_grid)),
+        ] {
+            if let Some(mut grid) = self.ui.widget(cx, path).borrow_mut::<VjStepGrid>() {
+                grid.set_dim(cx, if self.synth_mix.strip_mutes[strip.index()] { 1.0 } else { 0.0 });
+            }
+        }
+        self.paint_lit(cx, ids!(synth_play), self.synth_mix.playing);
+        self.ui
+            .button(cx, ids!(synth_play))
+            .set_text(cx, if self.synth_mix.playing { "STOP" } else { "PLAY" });
+
+        self.set_grid_pattern(cx, ids!(piano_grid), self.synth_mix.patterns.piano);
+        self.set_grid_pattern(cx, ids!(ironfish_grid), self.synth_mix.patterns.ironfish);
+        self.set_grid_pattern(cx, ids!(drums_grid), self.synth_mix.patterns.drums);
+        let activity = |pattern: synth::StepPattern| pattern.map(|column| u16::from(column != 0));
+        self.set_grid_pattern(
+            cx,
+            ids!(piano_rack_grid),
+            activity(self.synth_mix.patterns.piano),
+        );
+        self.set_grid_pattern(
+            cx,
+            ids!(ironfish_rack_grid),
+            activity(self.synth_mix.patterns.ironfish),
+        );
+        self.set_grid_pattern(
+            cx,
+            ids!(drums_rack_grid),
+            activity(self.synth_mix.patterns.drums),
+        );
+        for (param, path) in IRONFISH_CONTROLS {
+            self.ui
+                .slider(cx, path)
+                .set_value(cx, self.synth_mix.patch.normalised(param) as f64);
+        }
+        for (path, selected) in [
+            (ids!(ironfish_osc1_type), self.synth_mix.patch.osc1.kind.index()),
+            (ids!(ironfish_osc2_type), self.synth_mix.patch.osc2.kind.index()),
+            (ids!(ironfish_filter_type), self.synth_mix.patch.filter.kind.index()),
+            (ids!(ironfish_lfo_wave), self.synth_mix.patch.lfo.wave.index()),
+            (ids!(ironfish_root), self.synth_mix.patch.root.index()),
+            (ids!(ironfish_scale), self.synth_mix.patch.scale.index()),
+        ] {
+            self.ui.drop_down(cx, path).set_selected_item(cx, selected);
+        }
+        const NOTE_NAMES: [&str; 12] =
+            ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        for (row, path) in [
+            ids!(ironfish_lane_0),
+            ids!(ironfish_lane_1),
+            ids!(ironfish_lane_2),
+            ids!(ironfish_lane_3),
+            ids!(ironfish_lane_4),
+            ids!(ironfish_lane_5),
+            ids!(ironfish_lane_6),
+            ids!(ironfish_lane_7),
+            ids!(ironfish_lane_8),
+            ids!(ironfish_lane_9),
+            ids!(ironfish_lane_10),
+            ids!(ironfish_lane_11),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let note = self.synth_mix.patch.grid_note(row);
+            let name = NOTE_NAMES[note as usize % NOTE_NAMES.len()];
+            self.ui
+                .label(cx, path)
+                .set_text(cx, &format!("{name}{}", note / 12 - 1));
+        }
+        for (path, active) in [
+            (ids!(ironfish_lfo_key_sync), self.synth_mix.patch.lfo.key_sync),
+            (ids!(ironfish_bitcrush_enable), self.synth_mix.patch.bitcrush_enabled),
+            (ids!(ironfish_arp_enable), self.synth_mix.patch.arp_enabled),
+        ] {
+            self.ui.check_box(cx, path).set_active(cx, active, Animate::No);
+        }
+        let osc1_cloud = matches!(
+            self.synth_mix.patch.osc1.kind,
+            OscillatorKind::SuperSaw | OscillatorKind::HyperSaw
+        );
+        let osc2_cloud = matches!(
+            self.synth_mix.patch.osc2.kind,
+            OscillatorKind::SuperSaw | OscillatorKind::HyperSaw
+        );
+        let osc1_harmonic = self.synth_mix.patch.osc1.kind == OscillatorKind::HarmonicSeries;
+        let osc2_harmonic = self.synth_mix.patch.osc2.kind == OscillatorKind::HarmonicSeries;
+        for (path, active) in [
+            (ids!(ironfish_osc1_spread), osc1_cloud),
+            (ids!(ironfish_osc1_diffuse), osc1_cloud),
+            (ids!(ironfish_osc2_spread), osc2_cloud),
+            (ids!(ironfish_osc2_diffuse), osc2_cloud),
+            (ids!(ironfish_osc1_harmonic), osc1_harmonic),
+            (ids!(ironfish_osc1_harmonic_env), osc1_harmonic),
+            (ids!(ironfish_osc1_harmonic_lfo), osc1_harmonic),
+            (ids!(ironfish_osc2_harmonic), osc2_harmonic),
+            (ids!(ironfish_osc2_harmonic_env), osc2_harmonic),
+            (ids!(ironfish_osc2_harmonic_lfo), osc2_harmonic),
+            (ids!(ironfish_bitcrush), self.synth_mix.patch.bitcrush_enabled),
+            (ids!(ironfish_arp_octaves), self.synth_mix.patch.arp_enabled),
+        ] {
+            let inert = if active { 0.0f64 } else { 1.0 };
+            let mut slider = self.ui.slider(cx, path);
+            script_apply_eval!(cx, slider, {
+                draw_bg +: { inert: #(inert) }
+            });
+        }
+        for (strip, gain, mute, solo, _) in MIX_STRIP_CONTROLS {
+            let index = strip.index();
+            self.ui
+                .slider(cx, gain)
+                .set_value(cx, self.synth_mix.strip_gains[index] as f64);
+            self.paint_lit(cx, mute, self.synth_mix.strip_mutes[index]);
+            self.paint_lit(cx, solo, self.synth_mix.strip_solos[index]);
+        }
+        for (param, path) in MASTER_CONTROLS {
+            self.ui
+                .slider(cx, path)
+                .set_value(cx, self.synth_mix.master.normalised(param) as f64);
+        }
+        self.paint_lit(cx, ids!(mix_master_bypass), self.synth_mix.master.bypass);
+    }
+
+    fn push_synth_mix_state(&mut self, cx: &mut Cx) {
+        let rate = self.mixer.output_sample_rate().unwrap_or(48_000.0).round() as u32;
+        self.mixer.ensure_synth_rate(rate, self.synth_mix.patch);
+        for track in SynthTrack::ALL {
+            self.mixer
+                .set_synth_pattern(track, self.synth_mix.patterns.get(track));
+        }
+        self.mixer.set_ironfish_patch(self.synth_mix.patch);
+        self.mixer.set_synth_playing(self.synth_mix.playing);
+        for strip in StripId::ALL {
+            let index = strip.index();
+            self.mixer.set_strip_gain(strip, self.synth_mix.strip_gains[index]);
+            self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+            self.mixer.set_strip_soloed(strip, self.synth_mix.strip_solos[index]);
+        }
+        self.mixer.set_master_dynamics(self.synth_mix.master);
+        self.sync_synth_mix_ui(cx);
+    }
+
+    fn handle_synth_mix_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(synth_piano_btn)),
+            (SynthTrack::Ironfish, ids!(synth_ironfish_btn)),
+            (SynthTrack::Drums, ids!(synth_drums_btn)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.select_synth_track(cx, track);
+            }
+        }
+        for (path, fx_page) in [
+            (ids!(ironfish_voice_tab), false),
+            (ids!(ironfish_fx_tab), true),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.ironfish_fx_page = fx_page;
+                self.sync_synth_mix_ui(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(synth_play)).clicked(actions) {
+            self.synth_mix.playing = !self.synth_mix.playing;
+            self.mixer.set_synth_playing(self.synth_mix.playing);
+            self.sync_synth_mix_ui(cx);
+        }
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(piano_clear)),
+            (SynthTrack::Ironfish, ids!(ironfish_clear)),
+            (SynthTrack::Drums, ids!(drums_clear)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.patterns.set(track, [0; synth::STEPS]);
+                self.mixer.set_synth_pattern(track, [0; synth::STEPS]);
+                self.sync_synth_mix_ui(cx);
+                self.schedule_synth_mix_save(cx);
+            }
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(rack_piano_mute)),
+            (StripId::Ironfish, ids!(rack_ironfish_mute)),
+            (StripId::Drums, ids!(rack_drums_mute)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                let index = strip.index();
+                self.synth_mix.strip_mutes[index] = !self.synth_mix.strip_mutes[index];
+                self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(cx, path, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(
+                    cx,
+                    MIX_STRIP_CONTROLS[index].2,
+                    self.synth_mix.strip_mutes[index],
+                );
+                self.sync_synth_mix_ui(cx);
+                self.schedule_synth_mix_save(cx);
+            }
+        }
+
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(piano_grid)),
+            (SynthTrack::Ironfish, ids!(ironfish_grid)),
+            (SynthTrack::Drums, ids!(drums_grid)),
+        ] {
+            let widget = self.ui.widget(cx, path);
+            let changed = actions
+                .find_widget_action(widget.widget_uid())
+                .is_some_and(|item| matches!(item.cast(), VjStepGridAction::Changed));
+            if changed {
+                if let Some(grid) = widget.borrow::<VjStepGrid>() {
+                    let pattern = grid.pattern();
+                    drop(grid);
+                    self.synth_mix.patterns.set(track, pattern);
+                    self.mixer.set_synth_pattern(track, pattern);
+                    self.schedule_synth_mix_save(cx);
+                }
+            }
+        }
+
+        let mut changed = false;
+        let mut ironfish_changed = false;
+        for (index, path) in [
+            ids!(ironfish_preset_0),
+            ids!(ironfish_preset_1),
+            ids!(ironfish_preset_2),
+            ids!(ironfish_preset_3),
+            ids!(ironfish_preset_4),
+            ids!(ironfish_preset_5),
+            ids!(ironfish_preset_6),
+            ids!(ironfish_preset_7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.patch = IronfishPatch::preset(index);
+                self.synth_mix.ironfish_program = Some(index as u8);
+                self.mixer.set_ironfish_patch(self.synth_mix.patch);
+                self.sync_synth_mix_ui(cx);
+                changed = true;
+            }
+        }
+        for (param, path) in IRONFISH_CONTROLS {
+            if let Some(value) = self.ui.slider(cx, path).slided(actions) {
+                let value = value as f32;
+                self.synth_mix.patch.set_normalised(param, value);
+                self.synth_mix.ironfish_program = None;
+                self.mixer.set_ironfish_param(param, value);
+                changed = true;
+                ironfish_changed = true;
+            }
+        }
+        let mut discrete_changed = false;
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_osc1_type)).selected(actions) {
+            self.synth_mix.patch.osc1.kind = OscillatorKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_osc2_type)).selected(actions) {
+            self.synth_mix.patch.osc2.kind = OscillatorKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_filter_type)).selected(actions) {
+            self.synth_mix.patch.filter.kind = FilterKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_lfo_wave)).selected(actions) {
+            self.synth_mix.patch.lfo.wave = LfoWave::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_root)).selected(actions) {
+            self.synth_mix.patch.root = RootNote::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_scale)).selected(actions) {
+            self.synth_mix.patch.scale = ScaleKind::from_index(index);
+            discrete_changed = true;
+        }
+        for (path, field) in [
+            (ids!(ironfish_lfo_key_sync), 0u8),
+            (ids!(ironfish_bitcrush_enable), 1u8),
+            (ids!(ironfish_arp_enable), 2u8),
+        ] {
+            if let Some(active) = self.ui.check_box(cx, path).changed(actions) {
+                match field {
+                    0 => self.synth_mix.patch.lfo.key_sync = active,
+                    1 => self.synth_mix.patch.bitcrush_enabled = active,
+                    _ => self.synth_mix.patch.arp_enabled = active,
+                }
+                discrete_changed = true;
+            }
+        }
+        if discrete_changed {
+            self.synth_mix.patch = self.synth_mix.patch.sanitise();
+            self.synth_mix.ironfish_program = None;
+            self.mixer.set_ironfish_patch(self.synth_mix.patch);
+            changed = true;
+            ironfish_changed = true;
+        }
+        for (strip, gain, mute, solo, _) in MIX_STRIP_CONTROLS {
+            let index = strip.index();
+            if let Some(value) = self.ui.slider(cx, gain).slided(actions) {
+                self.synth_mix.strip_gains[index] = value as f32;
+                self.mixer.set_strip_gain(strip, value as f32);
+                changed = true;
+            }
+            if self.ui.button(cx, mute).clicked(actions) {
+                self.synth_mix.strip_mutes[index] = !self.synth_mix.strip_mutes[index];
+                self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(cx, mute, self.synth_mix.strip_mutes[index]);
+                changed = true;
+            }
+            if self.ui.button(cx, solo).clicked(actions) {
+                self.synth_mix.strip_solos[index] = !self.synth_mix.strip_solos[index];
+                self.mixer.set_strip_soloed(strip, self.synth_mix.strip_solos[index]);
+                self.paint_lit(cx, solo, self.synth_mix.strip_solos[index]);
+                changed = true;
+            }
+        }
+        for (param, path) in MASTER_CONTROLS {
+            if let Some(value) = self.ui.slider(cx, path).slided(actions) {
+                self.synth_mix.master.set_normalised(param, value as f32);
+                self.mixer.set_master_dynamics_param(param, value as f32);
+                changed = true;
+            }
+        }
+        if self.ui.button(cx, ids!(mix_master_bypass)).clicked(actions) {
+            self.synth_mix.master.bypass = !self.synth_mix.master.bypass;
+            self.mixer
+                .set_master_dynamics_bypass(self.synth_mix.master.bypass);
+            self.paint_lit(cx, ids!(mix_master_bypass), self.synth_mix.master.bypass);
+            changed = true;
+        }
+        if ironfish_changed {
+            self.sync_synth_mix_ui(cx);
+        }
+        if changed {
+            self.schedule_synth_mix_save(cx);
+        }
+    }
+
+    fn sync_synth_clock(&mut self, beat: &BeatInfo) {
+        let token = (beat.beats_observed, beat.beat_index as u8);
+        let rate = self.mixer.output_sample_rate().unwrap_or(48_000.0);
+        self.mixer.ensure_synth_rate(rate.round() as u32, self.synth_mix.patch);
+        if self.synth_mix.last_clock_token == Some(token) {
+            return;
+        }
+        let delay = beat.next_beat.saturating_duration_since(Instant::now());
+        let beat_frame = self
+            .mixer
+            .rendered_output_frames()
+            .saturating_add((delay.as_secs_f64() * rate).round() as u64);
+        self.mixer.set_synth_clock(SynthClock {
+            beat_frame,
+            frames_per_beat: beat.period.as_secs_f64() * rate,
+            beat_index: beat.beat_index as u8,
+        });
+        self.synth_mix.last_clock_token = Some(token);
+    }
+
+    fn sync_synth_runtime_ui(&mut self, cx: &mut Cx) {
+        if self.console_page != live_id!(synth_page) && self.console_page != live_id!(mix_page) {
+            return;
+        }
+        let rack = self.mixer.synth_snapshot();
+        if rack.step != self.synth_mix.last_step {
+            self.synth_mix.last_step = rack.step;
+            for path in [
+                ids!(piano_grid),
+                ids!(ironfish_grid),
+                ids!(drums_grid),
+                ids!(piano_rack_grid),
+                ids!(ironfish_rack_grid),
+                ids!(drums_rack_grid),
+            ] {
+                let widget = self.ui.widget(cx, path);
+                if let Some(mut grid) = widget.borrow_mut::<VjStepGrid>() {
+                    grid.set_playhead(cx, self.synth_mix.playing.then_some(rack.step));
+                };
+            }
+        }
+        self.ui.label(cx, ids!(synth_status)).set_text(
+            cx,
+            &format!("STEP {:02}", rack.step as usize + 1),
+        );
+        // The queue count is cumulative and deliberately visible only when it
+        // needs operator attention.
+        let drop_text = (rack.dropped_events != 0)
+            .then(|| format!("DROP {}", rack.dropped_events))
+            .unwrap_or_default();
+        self.ui
+            .label(cx, ids!(synth_drop_status))
+            .set_text(cx, &drop_text);
+        self.ui.label(cx, ids!(ironfish_voice_status)).set_text(
+            cx,
+            &format!("{} / 16 VOICES", rack.ironfish_voices),
+        );
+        self.ui.label(cx, ids!(rack_piano_state)).set_text(
+            cx,
+            &format!(
+                "{} · 12 NOTE LANES",
+                if rack.piano_notes > 0 {
+                    format!("{} NOTES", rack.piano_notes)
+                } else {
+                    "IDLE".to_string()
+                }
+            ),
+        );
+        self.ui.label(cx, ids!(rack_ironfish_state)).set_text(
+            cx,
+            &format!(
+                "{} · DUAL OSC SYNTH",
+                if rack.ironfish_voices > 0 {
+                    format!("{} VOICES", rack.ironfish_voices)
+                } else {
+                    "IDLE".to_string()
+                }
+            ),
+        );
+        self.ui.label(cx, ids!(rack_drums_state)).set_text(
+            cx,
+            if rack.drums_active { "PLAYING · 8 DRUM LANES" } else { "IDLE · 8 DRUM LANES" },
+        );
+
+        let (strips, master) = self.mixer.program_mix_snapshot();
+        for (strip, _, _, _, meter) in MIX_STRIP_CONTROLS {
+            let snap = strips[strip.index()];
+            let level = snap.peak_l.max(snap.peak_r).clamp(0.0, 1.0);
+            let bars = (level * 4.0).ceil() as usize;
+            self.ui
+                .label(cx, meter)
+                .set_text(cx, &format!("{}{}", "#".repeat(bars), "·".repeat(4 - bars)));
+        }
+        let solo_count = self.synth_mix.strip_solos.iter().filter(|&&on| on).count();
+        self.ui.label(cx, ids!(mix_solo_status)).set_text(
+            cx,
+            if solo_count == 0 {
+                "all channels listening"
+            } else {
+                "solo listen active · mute states preserved"
+            },
+        );
+        self.ui.label(cx, ids!(mix_master_meter)).set_text(
+            cx,
+            &format!(
+                "PEAK {:>4.1} · COMP -{:>3.1} · LIM -{:>3.1} dB",
+                master.peak,
+                master.compressor_reduction_db,
+                master.limiter_reduction_db,
+            ),
+        );
+    }
+
+
+    fn schedule_synth_mix_save(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.synth_mix_save_timer);
+        self.synth_mix_save_timer = cx.start_timeout(0.35);
+    }
+
+    /// Where the rack and the bus sleep between sessions. Operator work,
+    /// beside the marks and the surface word -- not in the cache.
+    fn synth_mix_path() -> PathBuf {
+        crate::service::data_root().join("synth-mix.txt")
+    }
+
+    fn save_synth_mix(&self) {
+        let path = Self::synth_mix_path();
+        if let Err(error) = crate::durable::write_file(&path, synth_mix_text(&self.synth_mix)) {
+            log!("synth/mix settings: could not write {}: {error}", path.display());
+        }
+    }
+
+    fn load_synth_mix(&mut self) {
+        let Ok(body) = std::fs::read_to_string(Self::synth_mix_path()) else { return };
+        if let Some(state) = parse_synth_mix(&body) {
+            self.synth_mix = state;
+        }
+    }
+
     /// cache cannot cross-talk with the orange latches.
     fn paint_phones_lit(&mut self, cx: &mut Cx, path: &[LiveId], lit: bool) {
         let key = path.iter().fold(0u64, |acc, id| acc ^ id.0.rotate_left(7));
@@ -30777,16 +32223,28 @@ impl MatchEvent for App {
                     self.run_deck_cmds(cx, cmds);
                 }
             }
-        } else if let Some(surface) = Self::load_ui_surface() {
+        } else if let Some(mode) = Self::load_ui_surface() {
             // No explicit ask (files, VJ_SURFACE): reopen where the last
-            // session closed, so shutting down on the DJ tab comes back on
-            // the DJ tab.
-            self.apc.surface = surface;
-            self.show_apc_surface(cx);
+            // session closed, so every top-level workspace comes back where
+            // the operator left it.
+            match mode {
+                ConsoleMode::Vj => self.apc.surface = ApcSurface::Video,
+                ConsoleMode::Dj => self.apc.surface = ApcSurface::Music,
+                ConsoleMode::Sfx => self.apc.surface = ApcSurface::Sfx,
+                ConsoleMode::Synth | ConsoleMode::Mix => {}
+            }
+            self.show_console_page(cx, mode.page());
         } else {
             self.paint_tabs(cx, id!(video_page));
         }
+        self.load_synth_mix();
         self.set_lower_tab(cx, self.lower_tab);
+        // The rack and the bus are pushed to the engine whether or not
+        // their page is up: the strips carry sound the decks make.
+        self.push_synth_mix_state(cx);
+        if self.console_page == live_id!(synth_page) || self.console_page == live_id!(mix_page) {
+            self.sync_synth_mix_ui(cx);
+        }
         // GEN starts put away unless the operator had it open last time
         // (load_gen_panel may reopen it after the session connects).
         self.set_gen_panel_open(cx, self.gen_panel_open);
@@ -31011,13 +32469,14 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // The lane tabs are gone: VJ/DJ/SFX are the modes (see
-        // `select_mode`) and the presets filter the VJ explorer.
-        for (button, surface) in MODE_BUTTONS {
+        // Full-console navigation (see `select_mode`); the presets filter
+        // the VJ explorer.
+        for (button, mode) in MODE_BUTTONS {
             if self.ui.button(cx, button).clicked(actions) {
-                self.select_mode(cx, surface);
+                self.select_mode(cx, mode);
             }
         }
+        self.handle_synth_mix_actions(cx, actions);
         if self.ui.button(cx, ids!(gen_fold)).clicked(actions) {
             self.set_gen_panel_open(cx, !self.gen_panel_open);
             self.save_gen_panel();
@@ -33510,6 +34969,7 @@ impl AppMain for App {
         crate::fx_thumbs::script_mod(vm);
         crate::fx_slot::script_mod(vm);
         crate::midi_learn::script_mod(vm);
+        crate::synth_ui::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -33566,20 +35026,21 @@ impl AppMain for App {
                     } else {
                         34.0
                     };
-                    // The stretch between the SFX tab and the beat-wave/BPM
-                    // cluster carries only the status label (no clicks to
-                    // lose), so — like the gripper — it is genuinely empty
-                    // bar and answers Caption too. Everything else in the
-                    // strip still answers Client explicitly.
-                    let sfx = self.ui.widget(cx, ids!(mode_sfx)).area();
+                    // The stretch between the last mode button and the
+                    // beat-wave/BPM cluster carries only the status label
+                    // (no clicks to lose), so — like the gripper — it is
+                    // genuinely empty bar and answers Caption too.
+                    // Everything else in the strip still answers Client
+                    // explicitly.
+                    let mode_end = self.ui.widget(cx, ids!(mode_mix)).area();
                     let beats = self.ui.view(cx, ids!(beat_cluster)).area();
                     let in_gap = dq.abs.y <= strip_bottom
-                        && sfx.is_valid(cx)
+                        && mode_end.is_valid(cx)
                         && beats.is_valid(cx)
                         && {
-                            let sfx_rect = sfx.rect(cx);
+                            let mode_rect = mode_end.rect(cx);
                             let beats_rect = beats.rect(cx);
-                            let gap_left = sfx_rect.pos.x + sfx_rect.size.x;
+                            let gap_left = mode_rect.pos.x + mode_rect.size.x;
                             let gap_right = beats_rect.pos.x;
                             gap_right > gap_left
                                 && dq.abs.x >= gap_left
@@ -33799,6 +35260,9 @@ impl AppMain for App {
                 let cmds = self.model(Surface::Video).set_text(text.trim().to_string());
                 self.run_cat_cmds(Surface::Video, cmds);
             }
+        }
+        if self.synth_mix_save_timer.is_event(event).is_some() {
+            self.save_synth_mix();
         }
         if self.phones_retry_timer.is_event(event).is_some() {
             // Second leg of a repositioning: the truncated request has had
