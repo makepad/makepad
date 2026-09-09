@@ -9,7 +9,7 @@ use {
             core::PCWSTR,
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
             Win32::Foundation::PROPERTYKEY,
-            Win32::Foundation::{HANDLE, WAIT_OBJECT_0},
+            Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
             Win32::Media::Audio::{
                 eAll,
                 eCapture,
@@ -86,6 +86,31 @@ fn should_spawn(
 /// entry, or the old one's exit takes the new one's entry with it and the
 /// next scan opens the device a third time.
 static NEXT_OUTPUT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
+/// What an output thread leaves behind however it leaves: its entry gone
+/// from the list and the app told. A guard rather than code at the end
+/// of the thread, because a thread that dies on a device error -- a cable
+/// pulled between two calls -- never reaches the end, and the entry it
+/// left behind then refused the device its own return.
+struct OutputLease {
+    outputs: Arc<Mutex<Vec<WasapiBaseRef>>>,
+    serial: u64,
+    change_signal: SignalToUI,
+}
+
+impl Drop for OutputLease {
+    fn drop(&mut self) {
+        // Poisoned or not, the list is edited: this may be running because
+        // another thread died holding it.
+        let mut outputs = match self.outputs.lock() {
+            Ok(outputs) => outputs,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        outputs.retain(|v| v.serial != self.serial);
+        drop(outputs);
+        self.change_signal.set();
+    }
+}
 
 /// Elevate the current thread to Pro Audio priority using Windows MMCSS
 /// Returns the task handle for later cleanup, or None if failed
@@ -339,62 +364,72 @@ impl WasapiAccess {
 
             std::thread::spawn(move || {
                 let _mmcss_handle = elevate_audio_thread_priority();
-                if let Ok(mut wasapi) = WasapiOutput::new(device_id, channel_count) {
-                    let sample_rate = wasapi.base.sample_rate;
-                    // The entry is already published; give it the event so
-                    // a terminate can wake this thread, and honour one that
-                    // arrived while the device was opening.
-                    let terminated_meanwhile = {
-                        let mut outputs = audio_outputs.lock().unwrap();
-                        match outputs.iter_mut().find(|v| v.serial == serial) {
-                            Some(entry) => {
-                                entry.event = wasapi.base.event;
-                                entry.is_terminated
-                            }
-                            // Nothing waits for a thread nobody is tracking.
-                            None => true,
-                        }
-                    };
-                    while !terminated_meanwhile {
-                        let Ok(mut buffer) = wasapi.wait_for_buffer() else { break };
-                        // Use try_lock to avoid blocking the audio thread
-                        if let Ok(outputs) = audio_outputs.try_lock() {
-                            if outputs
-                                .iter()
-                                .find(|v| v.serial == serial && v.is_terminated)
-                                .is_some()
-                            {
-                                break;
-                            }
-                        }
-                        // Use try_lock - if we can't get the lock, output silence this frame
-                        if let Ok(mut cb_guard) = audio_output_cb.try_lock() {
-                            if let Some(fbox) = &mut *cb_guard {
-                                fbox(
-                                    AudioInfo {
-                                        device_id,
-                                        time: None,
-                                        sample_rate,
-                                    },
-                                    &mut buffer.audio_buffer,
-                                );
-                            }
-                        }
-                        wasapi.release_buffer(buffer);
-                    }
-                    // Its OWN entry, by serial: a newer thread for the same
-                    // device may already have published its.
-                    let mut audio_outputs = audio_outputs.lock().unwrap();
-                    audio_outputs.retain(|v| v.serial != serial);
-                    change_signal.set();
-                } else {
+                let opened = WasapiOutput::new(device_id, channel_count);
+                // Whatever happens from here -- the loop ends, the open
+                // fails, a call on a vanished device unwinds the thread --
+                // the entry goes and the app is told. A thread that died on
+                // a device error used to leave its entry behind, and that
+                // ghost then refused the device its own return.
+                let lease = OutputLease {
+                    outputs: audio_outputs.clone(),
+                    serial,
+                    change_signal,
+                };
+                let Ok(mut wasapi) = opened else {
                     println!("Error opening wasapi output device");
-                    // The entry published for the open comes back out, or it
-                    // would block the device's own retry once it is cleared.
-                    audio_outputs.lock().unwrap().retain(|v| v.serial != serial);
                     failed_devices.lock().unwrap().insert(device_id);
-                    change_signal.set();
+                    return;
+                };
+                let sample_rate = wasapi.base.sample_rate;
+                // The entry is already published; give it the event so a
+                // terminate can wake this thread, and honour one that
+                // arrived while the device was opening.
+                let terminated_meanwhile = {
+                    let mut outputs = audio_outputs.lock().unwrap();
+                    match outputs.iter_mut().find(|v| v.serial == serial) {
+                        Some(entry) => {
+                            entry.event = wasapi.base.event;
+                            entry.is_terminated
+                        }
+                        // Nothing waits for a thread nobody is tracking.
+                        None => true,
+                    }
+                };
+                while !terminated_meanwhile {
+                    let Ok(mut buffer) = wasapi.wait_for_buffer() else { break };
+                    // Use try_lock to avoid blocking the audio thread
+                    if let Ok(outputs) = audio_outputs.try_lock() {
+                        if outputs
+                            .iter()
+                            .find(|v| v.serial == serial && v.is_terminated)
+                            .is_some()
+                        {
+                            break;
+                        }
+                    }
+                    // Use try_lock - if we can't get the lock, output silence this frame
+                    if let Ok(mut cb_guard) = audio_output_cb.try_lock() {
+                        if let Some(fbox) = &mut *cb_guard {
+                            fbox(
+                                AudioInfo {
+                                    device_id,
+                                    time: None,
+                                    sample_rate,
+                                },
+                                &mut buffer.audio_buffer,
+                            );
+                        }
+                    }
+                    // A device that went away between the wait and the
+                    // release ends the loop, not the process.
+                    if wasapi.release_buffer(buffer).is_err() {
+                        break;
+                    }
                 }
+                // The entry goes before the device does: a terminate from the
+                // app side wakes this thread through the entry's event, and
+                // must not find the handle closed.
+                drop(lease);
             });
         }
     }
@@ -617,9 +652,25 @@ impl WasapiBaseRef {
     pub fn signal_termination(&mut self) {
         self.is_terminated = true;
         // A thread still opening its device has no event yet; it reads the
-        // flag the moment the open lands and leaves.
+        // flag the moment the open lands and leaves. A thread that has
+        // already gone took its handle with it; the flag is enough.
         if !self.event.is_invalid() {
-            unsafe { SetEvent(self.event).unwrap() };
+            unsafe {
+                let _ = SetEvent(self.event);
+            }
+        }
+    }
+}
+
+impl Drop for WasapiBase {
+    /// The stream stopped and the wake event closed: an event handle was
+    /// leaked per open, and the client was never told to stop.
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.client.Stop();
+            if !self.event.is_invalid() {
+                let _ = CloseHandle(self.event);
+            }
         }
     }
 }
@@ -833,7 +884,7 @@ pub struct WasapiAudioOutputBuffer {
 impl WasapiOutput {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new(device_id, channel_count)?;
-        let render_client = unsafe { base.client.GetService().unwrap() };
+        let render_client = unsafe { base.client.GetService().map_err(|_| ())? };
         Ok(Self {
             render_client,
             base,
@@ -846,16 +897,19 @@ impl WasapiOutput {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
                     return Err(());
                 };
-                let padding = self.base.client.GetCurrentPadding();
-                if padding.is_err() {
+                let Ok(padding) = self.base.client.GetCurrentPadding() else {
                     return Err(());
-                }
-                let padding = padding.unwrap();
-                let buffer_size = self.base.client.GetBufferSize().unwrap();
-                let req_size = buffer_size - padding;
+                };
+                // Every call here can fail once the device has gone -- between
+                // the padding and the buffer is exactly where a pulled cable
+                // lands -- and a failure ends this thread, not the process.
+                let buffer_size = self.base.client.GetBufferSize().map_err(|_| ())?;
+                let req_size = buffer_size.saturating_sub(padding);
                 if req_size > 0 {
-                    let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
-                    let mut audio_buffer = self.base.audio_buffer.take().unwrap();
+                    let device_buffer = self.render_client.GetBuffer(req_size).map_err(|_| ())?;
+                    let Some(mut audio_buffer) = self.base.audio_buffer.take() else {
+                        return Err(());
+                    };
                     let channel_count = self.base.channel_count;
                     // GetBuffer / GetCurrentPadding sizes are in frames, not samples.
                     let frame_count = req_size as usize;
@@ -873,17 +927,19 @@ impl WasapiOutput {
         }
     }
 
-    pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
+    /// Hand the rendered frames to the device. Err when the device has
+    /// gone; the audio buffer is kept either way, so the thread can leave
+    /// cleanly rather than trip over a missing one on the way out.
+    pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) -> Result<(), ()> {
         unsafe {
             let device_buffer = std::slice::from_raw_parts_mut(
                 output.device_buffer,
                 output.frame_count * output.channel_count,
             );
             output.audio_buffer.copy_to_interleaved(device_buffer);
-            self.render_client
-                .ReleaseBuffer(output.frame_count as u32, 0)
-                .unwrap();
+            let released = self.render_client.ReleaseBuffer(output.frame_count as u32, 0);
             self.base.audio_buffer = Some(output.audio_buffer);
+            released.map_err(|_| ())
         }
     }
 }
@@ -900,7 +956,7 @@ pub struct WasapiAudioInputBuffer {
 impl WasapiInput {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new(device_id, channel_count)?;
-        let capture_client = unsafe { base.client.GetService().unwrap() };
+        let capture_client = unsafe { base.client.GetService().map_err(|_| ())? };
         Ok(Self {
             capture_client,
             base,
@@ -934,11 +990,16 @@ impl WasapiInput {
                     pdata as *mut f32,
                     frame_count as usize * self.base.channel_count,
                 );
-                let mut audio_buffer = self.base.audio_buffer.take().unwrap();
+                let Some(mut audio_buffer) = self.base.audio_buffer.take() else {
+                    return Err(());
+                };
                 audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
-
-                self.capture_client.ReleaseBuffer(frame_count).unwrap();
-
+                // A device that went away between the two calls: the buffer
+                // goes back and the thread leaves, rather than the process.
+                if self.capture_client.ReleaseBuffer(frame_count).is_err() {
+                    self.base.audio_buffer = Some(audio_buffer);
+                    return Err(());
+                }
                 return Ok(audio_buffer);
             }
         }
@@ -958,7 +1019,7 @@ pub struct WasapiLoopback {
 impl WasapiLoopback {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new_loopback(device_id, channel_count)?;
-        let capture_client = unsafe { base.client.GetService().unwrap() };
+        let capture_client = unsafe { base.client.GetService().map_err(|_| ())? };
         Ok(Self {
             capture_client,
             base,
@@ -996,11 +1057,16 @@ impl WasapiLoopback {
                     pdata as *mut f32,
                     frame_count as usize * self.base.channel_count,
                 );
-                let mut audio_buffer = self.base.audio_buffer.take().unwrap();
+                let Some(mut audio_buffer) = self.base.audio_buffer.take() else {
+                    return Err(());
+                };
                 audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
-
-                self.capture_client.ReleaseBuffer(frame_count).unwrap();
-
+                // A device that went away between the two calls: the buffer
+                // goes back and the thread leaves, rather than the process.
+                if self.capture_client.ReleaseBuffer(frame_count).is_err() {
+                    self.base.audio_buffer = Some(audio_buffer);
+                    return Err(());
+                }
                 return Ok(audio_buffer);
             }
         }
@@ -1067,6 +1133,37 @@ mod tests {
 
     fn id(n: u64) -> AudioDeviceId {
         AudioDeviceId(LiveId(n))
+    }
+
+    fn entry(device: u64, serial: u64) -> WasapiBaseRef {
+        WasapiBaseRef {
+            device_id: id(device),
+            is_terminated: false,
+            event: HANDLE(std::ptr::null_mut()),
+            serial,
+        }
+    }
+
+    /// A thread that dies mid-buffer -- the process unwinding it -- still
+    /// takes its own entry out and nobody else's, so the device can come
+    /// back and its neighbour goes on.
+    #[test]
+    fn a_thread_that_dies_takes_its_entry_with_it_and_nobody_elses() {
+        let outputs = Arc::new(Mutex::new(vec![entry(1, 7), entry(2, 8)]));
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lease = OutputLease {
+                outputs: outputs.clone(),
+                serial: 7,
+                change_signal: SignalToUI::new(),
+            };
+            panic!("the device went away between two calls");
+        }));
+        assert!(died.is_err());
+        let left: Vec<u64> = outputs.lock().unwrap().iter().map(|v| v.serial).collect();
+        assert_eq!(left, vec![8], "its own entry gone, its neighbour's kept");
+        // And the scan would open the device again now.
+        let known: Vec<_> = outputs.lock().unwrap().iter().map(|v| (v.device_id, v.is_terminated)).collect();
+        assert!(should_spawn(known.into_iter(), &HashSet::new(), id(1)));
     }
 
     #[test]
