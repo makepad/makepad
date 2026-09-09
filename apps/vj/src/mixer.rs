@@ -2168,10 +2168,21 @@ impl CueRing {
         }
         let wp = self.write_pos.load(Ordering::Acquire);
         if state.priming {
-            if wp < CUE_TARGET_FRAMES {
+            // The margin is sized to the device that drains it. A fixed
+            // 2048 frames is a margin of 2048 MINUS whatever this callback
+            // asks for, so a phones device asking for that many or more --
+            // a big-buffer interface, or one another program set wide --
+            // ran the ring dry on its every callback, forever. Two of its
+            // own buffers is a margin either way; an ordinary device asks
+            // for far less than a thousand frames and keeps exactly the
+            // latency it always had.
+            state.depth = CUE_TARGET_FRAMES
+                .max(frames as u64 * 2)
+                .min(CUE_RING_FRAMES as u64 - CUE_TARGET_FRAMES);
+            if wp < state.depth {
                 return;
             }
-            state.cursor_fp = (wp - CUE_TARGET_FRAMES) << 32;
+            state.cursor_fp = (wp - state.depth) << 32;
             state.priming = false;
             // Fade in from silence on every (re)start — a device open is
             // never a click.
@@ -2184,14 +2195,13 @@ impl CueRing {
         }
         // Lapped by the producer (a stalled consumer): jump back to depth.
         if wp.saturating_sub(state.cursor_fp >> 32) as usize > CUE_RING_FRAMES - 1_024 {
-            state.cursor_fp = (wp - CUE_TARGET_FRAMES) << 32;
+            state.cursor_fp = (wp - state.depth) << 32;
         }
         // The fill servo: trim the nominal ratio a hair (±0.05%) toward the
         // target depth, so mismatched rates and drifting clocks converge on
         // a steady offset instead of stepping through drops and underruns.
         let avail = wp.saturating_sub(state.cursor_fp >> 32);
-        let fill_err =
-            (avail as f64 - CUE_TARGET_FRAMES as f64) / CUE_TARGET_FRAMES as f64;
+        let fill_err = (avail as f64 - state.depth as f64) / state.depth as f64;
         let ratio = (main_rate / cue_rate) * (1.0 + fill_err.clamp(-0.25, 0.25) * 0.002);
         let step = ((ratio * FP_ONE as f64) as u64).max(1);
         let target_volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
@@ -2241,11 +2251,20 @@ pub struct CueReadState {
     priming: bool,
     /// One-pole smoothed volume, so the modal slider never zips.
     volume: f32,
+    /// Frames this consumer keeps behind the writer: the monitor latency
+    /// and the underrun margin in one number, set on every prime from the
+    /// size THIS device asks for.
+    depth: u64,
 }
 
 impl Default for CueReadState {
     fn default() -> CueReadState {
-        CueReadState { cursor_fp: 0, priming: true, volume: 0.0 }
+        CueReadState {
+            cursor_fp: 0,
+            priming: true,
+            volume: 0.0,
+            depth: CUE_TARGET_FRAMES,
+        }
     }
 }
 
@@ -8868,6 +8887,43 @@ mod tests {
             "the pcm comes back out, to be dropped on the UI thread"
         );
         assert!(mixer.preview_position().is_none(), "cleared means gone");
+    }
+
+    /// The margin the phones keep used to be a fixed number of frames,
+    /// so a device that asks for that many or more per callback found the
+    /// ring dry on its every callback and monitored silence for the whole
+    /// set. The margin is the device's own buffer twice over now.
+    #[test]
+    fn a_big_buffer_monitor_is_not_starved_by_its_own_size() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 30.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_cue_armed(true);
+        mixer.set_deck_cue(DeckId::A, true);
+        // A device asking for four thousand frames a callback -- what a
+        // wide-buffer interface, or one another program has set wide,
+        // does. Its callback comes round that much less often, so the
+        // producer fills the same seconds either way.
+        let block = 4_096;
+        let mut state = CueReadState::default();
+        let mut silent_after_start = 0;
+        let mut started = false;
+        for _step in 0..40 {
+            for _buffer in 0..(block / 512) {
+                render(&mixer, 48_000.0, 512);
+            }
+            let out = consume_cue(&mixer, &mut state, 48_000.0, block);
+            let peak = out.channel(0).iter().fold(0.0f32, |peak, v| peak.max(v.abs()));
+            match peak > 1e-6 {
+                true => started = true,
+                false if started => silent_after_start += 1,
+                false => {}
+            }
+        }
+        assert!(started, "the monitor never started at all");
+        assert_eq!(silent_after_start, 0, "buffers the monitor could not fill");
+        assert_eq!(mixer.audio_health().phones_starved, 0, "and none counted");
     }
 
     #[test]
