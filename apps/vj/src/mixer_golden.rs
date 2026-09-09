@@ -594,6 +594,33 @@ fn the_step_finder_reports_the_largest_jump() {
     assert_eq!(worst_adjacent_step(&[]), 0.0);
 }
 
+/// The master compressor's switch used to be read raw, frame by frame:
+/// with makeup on it, or with the bus held down, switching it in moved
+/// the whole room between two samples. Its envelope also stopped
+/// tracking while it was out, so it re-engaged from whatever it had been
+/// looking at whenever it was last in.
+#[test]
+fn switching_the_master_compressor_in_and_out_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    // Well over the signal's own level, so the compressor is holding the
+    // bus down by several decibels and lifting it back with makeup: the
+    // switch has something to step by.
+    let mut params = crate::program_mix::MasterParams::default();
+    params.threshold_db = -30.0;
+    params.ratio = 8.0;
+    params.makeup_db = 9.0;
+    params.bypass = true;
+    mixer.set_master_dynamics(params);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_master_dynamics_bypass(false),
+        24 => mixer.set_master_dynamics_bypass(true),
+        _ => {}
+    });
+    assert!(worst < CLICK, "the master compressor must glide, biggest step {worst}");
+}
+
 #[test]
 fn a_seek_is_click_free() {
     let mixer = deck_a(split_pcm(16_384, -16_384, 480_000, 48_000));

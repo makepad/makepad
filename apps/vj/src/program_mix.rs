@@ -231,6 +231,9 @@ struct MasterFx {
     limiter_reduction_db: f32,
     peak: f32,
     makeup: Smooth,
+    /// How far the compressor is switched in: 1 while it is, 0 while the
+    /// bypass is on, and a glide between the two.
+    engaged: Smooth,
     /// The ceiling, and not a clamp. A clamp is a clipper: pushed past
     /// full scale it flat-tops every sample that got there, which is grit
     /// rather than loudness. This one looks ahead and ducks the bus before
@@ -266,6 +269,9 @@ impl MasterFx {
             limiter_reduction_db: 0.0,
             peak: 0.0,
             makeup: Smooth::new(db_to_gain(params.makeup_db)),
+            // Wherever the switch starts, so the first buffer is not a
+            // glide out of a state the bus was never in.
+            engaged: Smooth::new(if params.bypass { 0.0 } else { 1.0 }),
             limiter,
         }
     }
@@ -294,28 +300,39 @@ impl MasterFx {
         // The compressor is the only thing the bypass switches. The
         // ceiling below it is a guarantee, and a guarantee that comes and
         // goes with a switch is not one.
-        let comp_gain = if self.params.bypass {
-            1.0
+        //
+        // It runs whether or not it is switched in, for two reasons. Its
+        // detector has to know what the bus has been doing before it takes
+        // hold, or engaging it attacks from an envelope left over from
+        // whenever it was last on; and the makeup only glides while it is
+        // being asked for.
+        let detector = input[0].abs().max(input[1].abs());
+        let attack = coeff(self.params.attack_secs, rate);
+        let release = coeff(self.params.release_secs, rate);
+        let coefficient = if detector > self.envelope { attack } else { release };
+        self.envelope += (detector - self.envelope) * coefficient;
+        let level_db = gain_to_db(self.envelope.max(1e-9));
+        let over = level_db - self.params.threshold_db;
+        let knee = 6.0;
+        let compressed_over = if over <= -knee * 0.5 {
+            0.0
+        } else if over >= knee * 0.5 {
+            over * (1.0 - 1.0 / self.params.ratio)
         } else {
-            let detector = input[0].abs().max(input[1].abs());
-            let attack = coeff(self.params.attack_secs, rate);
-            let release = coeff(self.params.release_secs, rate);
-            let coefficient = if detector > self.envelope { attack } else { release };
-            self.envelope += (detector - self.envelope) * coefficient;
-            let level_db = gain_to_db(self.envelope.max(1e-9));
-            let over = level_db - self.params.threshold_db;
-            let knee = 6.0;
-            let compressed_over = if over <= -knee * 0.5 {
-                0.0
-            } else if over >= knee * 0.5 {
-                over * (1.0 - 1.0 / self.params.ratio)
-            } else {
-                let x = over + knee * 0.5;
-                x * x / (2.0 * knee) * (1.0 - 1.0 / self.params.ratio)
-            };
-            self.compressor_reduction_db = self.compressor_reduction_db.max(compressed_over);
-            db_to_gain(-compressed_over) * self.makeup.next(rate)
+            let x = over + knee * 0.5;
+            x * x / (2.0 * knee) * (1.0 - 1.0 / self.params.ratio)
         };
+        let pressed = db_to_gain(-compressed_over) * self.makeup.next(rate);
+        // And switching it in is a glide rather than a step: a compressor
+        // holding the bus down, or a makeup lifting it, is several
+        // decibels from unity, and several decibels arriving between two
+        // samples is the loudest thing in the set.
+        self.engaged.set(if self.params.bypass { 0.0 } else { 1.0 });
+        let engaged = self.engaged.next(rate);
+        let comp_gain = 1.0 + (pressed - 1.0) * engaged;
+        // What the meter reads is what the bus is actually getting.
+        self.compressor_reduction_db =
+            self.compressor_reduction_db.max(compressed_over * engaged);
         let pressed = [input[0] * comp_gain, input[1] * comp_gain];
         let mut out = self.limiter.process(pressed);
         self.limiter_reduction_db =
