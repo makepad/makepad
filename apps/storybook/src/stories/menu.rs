@@ -22,6 +22,10 @@ script_mod! {
             context := RoundedView{
                 width: 320.
                 height: 90.
+                // Not decoration. A View hit-tests only when it has a cursor
+                // or an animator, so without this it raises no FingerDown at
+                // all and the secondary press below never arrives.
+                cursor: MouseCursor.Arrow
                 align: Align{x: 0.5 y: 0.5}
                 show_bg: true
                 draw_bg +: {color: theme.color_surface_container}
