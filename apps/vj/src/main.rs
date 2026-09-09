@@ -864,15 +864,15 @@ script_mod! {
                                     }
                                 }
                             }
-                            // The MODES sit far left, where the wordmark
-                            // used to be — the lit mode button IS the label.
-                            // VJ = the visual surface, DJ the two-deck music
-                            // mode, SFX the pad sampler, SYNTH the rack and
-                            // MIX the bus where every source meets. Each
-                            // button replaces the whole console body.
+                            // The four MODES sit far left, where the
+                            // wordmark used to be — the lit mode button IS
+                            // the label. VJ = the visual surface, DJ the
+                            // two-deck music mode, SYNTH the rack with the
+                            // sample pads, MIX the bus where every source
+                            // meets and the effects live. Each button
+                            // replaces the whole console body.
                             mode_vj := PillButton{text: "VJ"}
                             mode_dj := PillButton{text: "DJ"}
-                            mode_sfx := PillButton{text: "SFX"}
                             mode_synth := PillButton{text: "SYNTH"}
                             mode_mix := PillButton{text: "MIX"}
                             // OFFSCREEN RENDER HOSTS — every 4x4 heartbeat
@@ -3448,22 +3448,6 @@ script_mod! {
                                 }
                             }
 
-                            // ============ SFX ============
-
-                            // ============ SFX ============
-                            // The pads moved in with the synth; what is
-                            // left here is the deck effects rack, until it
-                            // moves to the mix page.
-                            sfx_page := View{
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                spacing: 8
-                                // Empty until the tab goes: the pads moved
-                                // in with the synth and the rack moved to
-                                // the mix page.
-                            }
-
                             // ============ MESH ============
                             mesh_page := View{
                                 width: Fill
@@ -5308,50 +5292,60 @@ fn stale_fade_to_land(
     active.filter(|schedule| *schedule != published)
 }
 
-/// The operator's workspaces: one page each. VJ, DJ and SFX also select
-/// their matching controller surface; SYNTH and MIX leave the controller on
+/// The operator's workspaces: one page each. VJ and DJ also select their
+/// matching controller surface; SYNTH and MIX leave the controller on
 /// whatever surface it was performing on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsoleMode {
     Vj,
     Dj,
-    Sfx,
     Synth,
     Mix,
 }
 
 impl ConsoleMode {
-    const ALL: [ConsoleMode; 5] = [Self::Vj, Self::Dj, Self::Sfx, Self::Synth, Self::Mix];
+    const ALL: [ConsoleMode; 4] = [Self::Vj, Self::Dj, Self::Synth, Self::Mix];
 
     fn page(self) -> LiveId {
         match self {
             Self::Vj => live_id!(video_page),
             Self::Dj => live_id!(music_page),
-            Self::Sfx => live_id!(sfx_page),
             Self::Synth => live_id!(synth_page),
             Self::Mix => live_id!(mix_page),
         }
     }
 
-    /// The word the `ui-surface` file holds for this mode. Frozen the way a
-    /// settings slug is: an install that closed on a page reopens on it.
-    fn word(self) -> &'static str {
-        match self {
-            Self::Vj => "video",
-            Self::Dj => "music",
-            Self::Sfx => "sfx",
-            Self::Synth => "synth",
-            Self::Mix => "mix",
+    /// The word the `ui-surface` file holds. Frozen the way a settings slug
+    /// is: an install that closed on a page reopens on it. The pad surface
+    /// keeps the word it always had, `sfx`, so an install that closed on
+    /// the pads comes back on them -- on the synth page, with both lamps
+    /// lit -- rather than on the video page as a stranger to the word would.
+    fn word(mode: ConsoleMode, surface: ApcSurface) -> &'static str {
+        match (mode, surface) {
+            (Self::Synth, ApcSurface::Sfx) => "sfx",
+            (Self::Vj, _) => "video",
+            (Self::Dj, _) => "music",
+            (Self::Synth, _) => "synth",
+            (Self::Mix, _) => "mix",
         }
     }
 
-    fn parse_word(word: &str) -> Option<ConsoleMode> {
-        Self::ALL.into_iter().find(|mode| mode.word() == word.trim())
+    /// The page a word names, and the controller surface it carries if the
+    /// word is the pad surface's own.
+    fn parse_word(word: &str) -> Option<(ConsoleMode, Option<ApcSurface>)> {
+        match word.trim() {
+            "video" => Some((Self::Vj, None)),
+            "music" => Some((Self::Dj, None)),
+            "sfx" => Some((Self::Synth, Some(ApcSurface::Sfx))),
+            "synth" => Some((Self::Synth, None)),
+            "mix" => Some((Self::Mix, None)),
+            _ => None,
+        }
     }
 
     /// The page a controller surface shows when the hardware picks it.
     /// The pad surface shows the synth page, because that is where the
-    /// pads are: the SFX tab holds only the effects rack now.
+    /// pads are.
     fn for_surface(surface: ApcSurface) -> ConsoleMode {
         match surface {
             ApcSurface::Video => Self::Vj,
@@ -5375,10 +5369,9 @@ const FX_TARGET_CHIPS: [(&[LiveId], FxTarget); 9] = [
     (ids!(fx_target_master), FxTarget::One(ChainTarget::Master)),
 ];
 
-const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 5] = [
+const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 4] = [
     (ids!(mode_vj), ConsoleMode::Vj),
     (ids!(mode_dj), ConsoleMode::Dj),
-    (ids!(mode_sfx), ConsoleMode::Sfx),
     (ids!(mode_synth), ConsoleMode::Synth),
     (ids!(mode_mix), ConsoleMode::Mix),
 ];
@@ -5760,11 +5753,27 @@ mod console_mode_tests {
     #[test]
     fn the_surface_word_round_trips_and_a_stranger_reads_as_nothing() {
         for mode in ConsoleMode::ALL {
-            assert_eq!(ConsoleMode::parse_word(mode.word()), Some(mode));
-            assert_eq!(ConsoleMode::parse_word(&format!("{}\n", mode.word())), Some(mode));
+            let word = ConsoleMode::word(mode, ApcSurface::Video);
+            assert_eq!(ConsoleMode::parse_word(word), Some((mode, None)));
+            assert_eq!(ConsoleMode::parse_word(&format!("{word}\n")), Some((mode, None)));
         }
         assert_eq!(ConsoleMode::parse_word("lights"), None);
         assert_eq!(ConsoleMode::parse_word(""), None);
+    }
+
+    /// The pad surface keeps the word it always had. An install that closed
+    /// on the pads -- under the old SFX tab or on the synth page with the
+    /// controller on them -- reopens on the synth page WITH the controller
+    /// on the pads, both lamps lit, rather than on the video page.
+    #[test]
+    fn an_install_that_closed_on_the_pads_reopens_on_them() {
+        assert_eq!(ConsoleMode::word(ConsoleMode::Synth, ApcSurface::Sfx), "sfx");
+        assert_eq!(ConsoleMode::word(ConsoleMode::Synth, ApcSurface::Music), "synth");
+        assert_eq!(ConsoleMode::word(ConsoleMode::Mix, ApcSurface::Sfx), "mix");
+        assert_eq!(
+            ConsoleMode::parse_word("sfx"),
+            Some((ConsoleMode::Synth, Some(ApcSurface::Sfx)))
+        );
     }
 
     #[test]
@@ -11842,13 +11851,9 @@ p2 {}
                 self.apc.surface = ApcSurface::Music;
                 self.apc.bank = 0;
             }
-            ConsoleMode::Sfx => {
-                self.apc.surface = ApcSurface::Sfx;
-                self.apc.bank = 0;
-            }
             ConsoleMode::Synth | ConsoleMode::Mix => {}
         }
-        Self::save_ui_surface(mode);
+        Self::save_ui_surface(mode, self.apc.surface);
         self.show_console_page(cx, mode.page());
     }
 
@@ -13458,11 +13463,12 @@ p2 {}
         crate::service::data_root().join("ui-surface")
     }
 
-    fn save_ui_surface(mode: ConsoleMode) {
-        let _ = crate::durable::write_file(&Self::ui_surface_path(), mode.word());
+    fn save_ui_surface(mode: ConsoleMode, surface: ApcSurface) {
+        let word = ConsoleMode::word(mode, surface);
+        let _ = crate::durable::write_file(&Self::ui_surface_path(), word);
     }
 
-    fn load_ui_surface() -> Option<ConsoleMode> {
+    fn load_ui_surface() -> Option<(ConsoleMode, Option<ApcSurface>)> {
         ConsoleMode::parse_word(&std::fs::read_to_string(Self::ui_surface_path()).ok()?)
     }
 
@@ -13653,7 +13659,7 @@ p2 {}
     /// The hardware picked a surface: show its page.
     fn show_apc_surface(&mut self, cx: &mut Cx) {
         let mode = ConsoleMode::for_surface(self.apc.surface);
-        Self::save_ui_surface(mode);
+        Self::save_ui_surface(mode, self.apc.surface);
         self.show_console_page(cx, mode.page());
     }
 
@@ -32192,15 +32198,19 @@ impl MatchEvent for App {
                     self.run_deck_cmds(cx, cmds);
                 }
             }
-        } else if let Some(mode) = Self::load_ui_surface() {
+        } else if let Some((mode, surface)) = Self::load_ui_surface() {
             // No explicit ask (files, VJ_SURFACE): reopen where the last
             // session closed, so every top-level workspace comes back where
-            // the operator left it.
+            // the operator left it -- and an install that closed on the
+            // pads comes back with the controller on them.
             match mode {
                 ConsoleMode::Vj => self.apc.surface = ApcSurface::Video,
                 ConsoleMode::Dj => self.apc.surface = ApcSurface::Music,
-                ConsoleMode::Sfx => self.apc.surface = ApcSurface::Sfx,
-                ConsoleMode::Synth | ConsoleMode::Mix => {}
+                ConsoleMode::Synth | ConsoleMode::Mix => {
+                    if let Some(surface) = surface {
+                        self.apc.surface = surface;
+                    }
+                }
             }
             self.show_console_page(cx, mode.page());
         } else {
