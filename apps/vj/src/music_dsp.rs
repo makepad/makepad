@@ -266,6 +266,13 @@ impl ParamRamp {
     pub fn settled(&self) -> bool {
         self.current == self.target
     }
+
+    /// Settled, and at exactly this value: a tick would return `value`
+    /// and move nothing. What a unit's "a walk would change nothing"
+    /// answer is made of.
+    pub fn settled_at(&self, value: f32) -> bool {
+        self.settled() && self.current == value
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,6 +1511,21 @@ impl DeckEq {
             && (self.effective_filter() - 0.5).abs() <= FILTER_DEADZONE
     }
 
+    /// True when a walk through `process` would change nothing -- not
+    /// the frame and not the unit. Not `at_unity`: that is what DECIDES
+    /// engagement, and the wet ramp it drives takes a while to get there.
+    /// This is off with every one of the nine ramps the walk ticks first
+    /// already where it is going, which is the exact condition under
+    /// which the walk is an identity. The chain's step-aside stands on
+    /// it being exact.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+            && self.gain.iter().all(ParamRamp::settled)
+            && self.blend.iter().all(ParamRamp::settled)
+            && self.filter.settled()
+            && self.blend_filter.settled()
+    }
+
     /// How much the sweep may ring at its corner.
     ///
     /// Off is Butterworth -- the flattest four-pole there is, and what
@@ -1910,6 +1932,17 @@ impl DeckEcho {
         self.fraction.is_some()
     }
 
+    /// True when a walk would change nothing: off, the tail rung out,
+    /// and the three ramps the walk ticks before it looks all settled --
+    /// the feedback and the ping-pong too, because they are ticked
+    /// whether or not the line is touched.
+    pub fn transparent(&self) -> bool {
+        self.quiet
+            && self.send.settled_at(0.0)
+            && self.feedback.settled()
+            && self.pingpong.settled()
+    }
+
     /// The rung the operator has asked for, or none for off.
     pub fn fraction(&self) -> Option<(u32, u32)> {
         self.fraction
@@ -2170,6 +2203,26 @@ impl Freeze {
         self.held.is_some()
     }
 
+    /// True when a walk would change nothing but the ring: no lap held
+    /// or letting go. The ring is the exception a chain that steps aside
+    /// has to feed by hand, through `record`.
+    pub fn transparent(&self) -> bool {
+        self.held.is_none()
+    }
+
+    /// Keep the ring warm with the live signal: what the not-held walk
+    /// does and all it does. A chain that steps aside still calls this,
+    /// so a hold pressed a moment later latches the last quarter-second
+    /// that actually sounded rather than whatever the ring held before
+    /// the chain went quiet.
+    #[inline]
+    pub fn record(&mut self, live: [f32; 2]) {
+        let cap = self.ring.len();
+        self.ring[self.write] = live;
+        self.write = (self.write + 1) % cap;
+        self.fresh = (self.fresh + 1).min(cap);
+    }
+
     /// The lap's length in frames, for the tests that check what a press
     /// asked for actually became.
     #[cfg(test)]
@@ -2185,10 +2238,7 @@ impl Freeze {
         // only while `held` is Some), so the untouched path is the
         // sample just read, bit-for-bit, exactly `DeckEcho`'s own rule.
         let Some(h) = self.held.as_mut() else {
-            let cap = self.ring.len();
-            self.ring[self.write] = live;
-            self.write = (self.write + 1) % cap;
-            self.fresh = (self.fresh + 1).min(cap);
+            self.record(live);
             return live;
         };
         let cap = self.ring.len();
@@ -2397,6 +2447,13 @@ impl Flanger {
 
     pub fn engaged(&self) -> bool {
         self.wet.target() > 0.0
+    }
+
+    /// True when a walk would change nothing: off and settled there,
+    /// with the tail rung out. The rate and depth ramps are ticked only
+    /// past that point, so they do not enter into it.
+    pub fn transparent(&self) -> bool {
+        self.quiet && self.wet.settled_at(0.0)
     }
 
     #[cfg(test)]
@@ -2617,6 +2674,12 @@ impl Bitcrusher {
 
     pub fn engaged(&self) -> bool {
         self.wet.target() > 0.0
+    }
+
+    /// True when a walk would change nothing: off and settled there.
+    /// Nothing here rings, so there is no tail to wait for.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
     }
 
     #[cfg(test)]
@@ -2880,6 +2943,12 @@ impl Tremolo {
         self.wet.target() > 0.0
     }
 
+    /// True when a walk would change nothing: off and settled there. The
+    /// LFO advances only past that point.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+    }
+
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo. Called once per device buffer, mirroring `DeckEcho`'s own
     /// `prepare_block` (`mixer.rs`) -- not a hard grid-lock (no phase
@@ -3011,6 +3080,11 @@ impl Distortion {
 
     pub fn engaged(&self) -> bool {
         self.wet.target() > 0.0
+    }
+
+    /// True when a walk would change nothing: off and settled there.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
     }
 
     /// Process one stereo frame.
@@ -3224,6 +3298,12 @@ impl Phaser {
         self.wet.target() > 0.0
     }
 
+    /// True when a walk would change nothing: off and settled there. The
+    /// LFO and the all-pass memory are touched only past that point.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+    }
+
     /// Process one stereo frame.
     #[inline]
     pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
@@ -3399,6 +3479,12 @@ impl Autopan {
         self.wet.target() > 0.0
     }
 
+    /// True when a walk would change nothing: off and settled there. The
+    /// LFO advances only past that point.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+    }
+
     /// Process one stereo frame.
     #[inline]
     pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
@@ -3476,6 +3562,11 @@ impl StereoWidth {
 
     pub fn engaged(&self) -> bool {
         self.wet.target() > 0.0
+    }
+
+    /// True when a walk would change nothing: off and settled there.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
     }
 
     /// Process one stereo frame.
@@ -3752,6 +3843,12 @@ impl PlateReverb {
         self.wet.target() > 0.0
     }
 
+    /// True when a walk would change nothing: off and settled there,
+    /// with the tail rung out of the tank.
+    pub fn transparent(&self) -> bool {
+        self.quiet && self.wet.settled_at(0.0)
+    }
+
     /// Drop the tank's stored energy directly rather than freeing it.
     /// A different technique from [`DeckEcho::silence`] and
     /// [`Flanger::silence`]'s watermark trick (advancing a mark so
@@ -3923,6 +4020,12 @@ impl MoogLadder {
         self.wet.target() > 0.0
     }
 
+    /// True when a walk would change nothing: off and settled there. The
+    /// ladder's memory is touched only past that point.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+    }
+
     pub fn reset(&mut self) {
         self.channels = Default::default();
     }
@@ -4087,6 +4190,34 @@ impl SlotLevel {
     /// Blend and correct one frame. `dry` is what went into the effect,
     /// `wet` what it returned, and `default` the deck's own policy for
     /// the slots that follow it.
+    /// The mode in force, with `Follow` resolved through the chain's own
+    /// default. `Follow` resolving to `Follow` would be a loop; the
+    /// chain's default is never that, but resolve it defensively rather
+    /// than trust a caller.
+    #[inline]
+    fn resolved(&self, default: LevelMode) -> LevelMode {
+        match self.mode {
+            LevelMode::Follow => match default {
+                LevelMode::Follow => LevelMode::Off,
+                resolved => resolved,
+            },
+            pinned => pinned,
+        }
+    }
+
+    /// True when `apply` would hand `wet` straight back and touch
+    /// nothing: no correction asked for or still in force, and the blend
+    /// settled at all wet -- exactly the fast path below, so a slot that
+    /// steps aside steps aside from an identity. A blend settled BELOW
+    /// one is not it: `dry + (wet - dry) * mix` with `wet == dry` comes
+    /// out as `dry + 0.0`, which turns a negative zero positive, and
+    /// bit-transparent means bit-transparent.
+    pub fn transparent(&self, default: LevelMode) -> bool {
+        matches!(self.resolved(default), LevelMode::Off | LevelMode::Follow)
+            && self.gain == 1.0
+            && self.mix.settled_at(1.0)
+    }
+
     #[inline]
     pub fn apply(
         &mut self,
@@ -4095,16 +4226,7 @@ impl SlotLevel {
         device_rate: f32,
         default: LevelMode,
     ) -> [f32; 2] {
-        // `Follow` resolving to `Follow` would be a loop; the deck's own
-        // default is never that, but resolve it defensively rather than
-        // trust a caller.
-        let mode = match self.mode {
-            LevelMode::Follow => match default {
-                LevelMode::Follow => LevelMode::Off,
-                resolved => resolved,
-            },
-            pinned => pinned,
-        };
+        let mode = self.resolved(default);
 
         match mode {
             LevelMode::Off | LevelMode::Follow => self.gain = 1.0,
@@ -4305,9 +4427,22 @@ impl Compressor {
         self.gain_db
     }
 
-    /// Process one stereo frame.
+    /// True when a walk would change nothing but what `listen` changes:
+    /// off and settled there. The two followers and the coefficient
+    /// cache are the exception a chain that steps aside feeds by hand.
+    pub fn transparent(&self) -> bool {
+        self.wet.settled_at(0.0)
+    }
+
+    /// The part of a walk that runs whether or not it is on: the
+    /// coefficients for this rate, and the cheap follower that tells an
+    /// engage where the music already is. A chain that steps aside still
+    /// calls this, or the first press after a quiet stretch starts the
+    /// detector at silence -- which is the bang the follower exists to
+    /// prevent. Returns the frame's peak, which the working path goes on
+    /// to detect.
     #[inline]
-    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+    pub fn listen(&mut self, frame: [f32; 2], device_rate: f32) -> f32 {
         if (self.coeff_rate - device_rate).abs() > 0.5 {
             self.coeff_rate = device_rate;
             let rate = device_rate.max(1.0);
@@ -4324,6 +4459,13 @@ impl Compressor {
             false => self.release_coeff,
         };
         self.idle_peak += (peak - self.idle_peak) * idle_coeff;
+        peak
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let peak = self.listen(frame, device_rate);
 
         let wet = self.wet.tick(device_rate);
         if wet <= 0.0 {

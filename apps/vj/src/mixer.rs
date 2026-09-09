@@ -1061,6 +1061,29 @@ impl EffectKind {
             EffectKind::Compressor(compressor) => compressor.process(frame, device_rate),
         }
     }
+
+    /// True when a walk through this slot would hand the frame straight
+    /// back and change nothing in the unit -- each unit's own answer,
+    /// which is its early return's condition made strict: off, settled
+    /// there, and every ramp it ticks before looking already home.
+    #[inline]
+    fn transparent(&self) -> bool {
+        match self {
+            EffectKind::Eq(eq) => eq.transparent(),
+            EffectKind::Freeze(freeze) => freeze.transparent(),
+            EffectKind::Echo(echo) => echo.transparent(),
+            EffectKind::Flanger(flanger) => flanger.transparent(),
+            EffectKind::Bitcrusher(bitcrusher) => bitcrusher.transparent(),
+            EffectKind::Tremolo(tremolo) => tremolo.transparent(),
+            EffectKind::Distortion(distortion) => distortion.transparent(),
+            EffectKind::Phaser(phaser) => phaser.transparent(),
+            EffectKind::Autopan(autopan) => autopan.transparent(),
+            EffectKind::StereoWidth(stereo_width) => stereo_width.transparent(),
+            EffectKind::PlateReverb(plate_reverb) => plate_reverb.transparent(),
+            EffectKind::MoogLadder(moog_ladder) => moog_ladder.transparent(),
+            EffectKind::Compressor(compressor) => compressor.transparent(),
+        }
+    }
 }
 
 /// rate, whatever the real head is doing -- paused, scratched, jumped,
@@ -1287,13 +1310,36 @@ struct DeckChain {
     /// The policy a slot follows unless it has been pinned to one
     /// of its own. Off, so nothing changes until it is asked for.
     level_default: LevelMode,
+    /// Whether every slot would hand its frame straight back and change
+    /// nothing, as of this buffer's preparation. Decided once a buffer,
+    /// at the END of `prepare_block` -- after each unit's own, because
+    /// that is where the EQ decides its engagement and the crossovers
+    /// glide, so any earlier lands a knob a buffer late -- and it holds
+    /// for the buffer: nothing in a walk moves a settled ramp, and a
+    /// command lands between buffers, before the next preparation.
+    ///
+    /// Eight chains sit in the frame loop now and most are idle most of
+    /// the night; walking thirteen slots to return the input costs about
+    /// a fifth of the loop, measured, which is what this buys back.
+    idle: bool,
+    /// Whether an idle chain is allowed to step aside. Always, outside a
+    /// test that wants the walked chain to compare against.
+    skip_when_idle: bool,
+    /// Whether a freeze can ever be asked to hold on this chain. A deck's
+    /// can; the six others have no command that reaches theirs, so the
+    /// step-aside keeps the ring warm only where a hold could read it.
+    holds: bool,
 }
 
 impl DeckChain {
+    /// A deck's chain: every slot, and a freeze that can be asked to hold.
     fn new(sample_rate: f32) -> DeckChain {
         DeckChain {
             levels: std::array::from_fn(|_| SlotLevel::new()),
             level_default: LevelMode::Off,
+            idle: false,
+            skip_when_idle: true,
+            holds: true,
             slots: [
                 EffectKind::Eq(DeckEq::new(sample_rate)),
                 EffectKind::Freeze(Freeze::new()),
@@ -1312,8 +1358,28 @@ impl DeckChain {
         }
     }
 
+    /// A chain for a source that is not a deck -- the mix, the pads, the
+    /// synth tracks: the same slots, but no command can ask its freeze to
+    /// hold, so an idle one need not keep the ring warm.
+    fn for_source(sample_rate: f32) -> DeckChain {
+        let mut chain = DeckChain::new(sample_rate);
+        chain.holds = false;
+        chain
+    }
+
     #[inline]
     fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        if self.idle && self.skip_when_idle {
+            // Every slot would hand the frame straight back; the two that
+            // keep working while dry are fed by hand, in the walk's own
+            // order. The same samples and the same state as the walk, bit
+            // for bit -- a test holds the chain to that.
+            if self.holds {
+                self.freeze_mut().record(frame);
+            }
+            self.compressor_mut().listen(frame, device_rate);
+            return frame;
+        }
         let mut out = frame;
         for (slot, level) in self.slots.iter_mut().zip(&mut self.levels) {
             // What went in and what came back, so the slot's own policy
@@ -1358,6 +1424,15 @@ impl DeckChain {
         self.autopan_mut().prepare_block(clock, buffer_secs);
         self.flanger_mut().prepare_block(clock, buffer_secs);
         self.phaser_mut().prepare_block(clock, buffer_secs);
+        // Last, after every unit's own preparation: the EQ's is where its
+        // engagement is decided, and a verdict taken before it would be a
+        // buffer stale.
+        let level_default = self.level_default;
+        self.idle = self
+            .slots
+            .iter()
+            .zip(&self.levels)
+            .all(|(slot, level)| slot.transparent() && level.transparent(level_default));
     }
 
     /// The policy the slots that have not been pinned follow.
@@ -1367,6 +1442,16 @@ impl DeckChain {
 
     fn level_default(&self) -> LevelMode {
         self.level_default
+    }
+
+    #[cfg(test)]
+    fn idle(&self) -> bool {
+        self.idle
+    }
+
+    #[cfg(test)]
+    fn set_skip_when_idle(&mut self, on: bool) {
+        self.skip_when_idle = on;
     }
 
     #[cfg(test)]
@@ -2230,6 +2315,15 @@ impl MixState {
         (0..DECK_CHAIN_SLOTS).any(|slot| chain.slot_engaged(slot))
     }
 
+    /// Let every chain step aside when idle, or forbid it -- for the
+    /// report that measures what the step-aside is worth.
+    #[cfg(test)]
+    fn set_skip_when_idle(&mut self, on: bool) {
+        for target in ChainTarget::ALL {
+            self.chain_mut(target).set_skip_when_idle(on);
+        }
+    }
+
     fn new() -> MixState {
         MixState {
             video: [VideoBus::new(), VideoBus::new()],
@@ -2250,8 +2344,8 @@ impl MixState {
             score_preview: ScorePreviewVoice::new(48_000),
             synth: SynthRack::new(48_000),
             program_mix: ProgramMix::new(),
-            master_chain: DeckChain::new(48_000.0),
-            source_chains: std::array::from_fn(|_| DeckChain::new(48_000.0)),
+            master_chain: DeckChain::for_source(48_000.0),
+            source_chains: std::array::from_fn(|_| DeckChain::for_source(48_000.0)),
             chain_clock_deck: DeckId::A,
         }
     }
@@ -10281,6 +10375,98 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
                 let got = chain.process(frame, rate);
                 assert_eq!(got, want, "buffer {buffer} frame {i}");
             }
+        }
+    }
+
+    /// A chain with nothing engaged steps out of the walk, and the chain
+    /// that stepped aside is the chain that walked: the same samples out
+    /// and the same state, bit for bit. Two chains fed the same signal,
+    /// one forbidden to skip; then a compressor engaged (which starts its
+    /// detector where the follower says the music is -- the follower an
+    /// idle chain has to keep feeding), an echo, a freeze held (which
+    /// latches what the ring recorded -- the ring an idle chain has to
+    /// keep feeding), everything released, and a long enough silence for
+    /// the tails to ring out and the chain to idle again.
+    #[test]
+    fn a_chain_that_steps_aside_is_the_chain_that_walked_bit_for_bit() {
+        let rate = 48_000.0f32;
+        let clock = DeckClock::default();
+        let mut walked = DeckChain::new(rate);
+        walked.set_skip_when_idle(false);
+        let mut stepped = DeckChain::new(rate);
+        let (mut idle_before, mut idle_after) = (0u32, 0u32);
+        let buffers = 400u32;
+        for buffer in 0..buffers {
+            // Each of the two hand-fed units is engaged FROM idle, with the
+            // chain back at idle in between: an engage that follows a
+            // walk would have been fed by the walk, and prove nothing.
+            for chain in [&mut walked, &mut stepped] {
+                match buffer {
+                    40 => MixEngine::apply_effect(chain, EffectParam::Compressor(true)),
+                    60 => MixEngine::apply_effect(chain, EffectParam::Compressor(false)),
+                    100 => chain.freeze_mut().hold(4_096, rate),
+                    // A short rung: the tail has to ring out inside the
+                    // run, and at 0.55 feedback that is eighteen periods.
+                    120 => MixEngine::apply_effect(chain, EffectParam::Echo(Some((1, 16)))),
+                    140 => {
+                        MixEngine::apply_effect(chain, EffectParam::Echo(None));
+                        chain.freeze_mut().release();
+                    }
+                    _ => {}
+                }
+                chain.prepare_block(&clock, rate, 512);
+            }
+            assert_eq!(walked.idle(), stepped.idle(), "buffer {buffer}: the verdicts differ");
+            if buffer == 39 || buffer == 99 {
+                assert!(stepped.idle(), "buffer {buffer}: the engage that follows must come from idle");
+            }
+            if stepped.idle() {
+                if buffer < 40 { idle_before += 1 } else if buffer > 140 { idle_after += 1 }
+            }
+            for i in 0..512u32 {
+                let n = (buffer * 512 + i) as f32;
+                let s = (n * 443.0 / rate * std::f32::consts::TAU).sin() * 0.4;
+                let frame = [s, s * 0.8];
+                let want = walked.process(frame, rate);
+                let got = stepped.process(frame, rate);
+                assert_eq!(
+                    got.map(f32::to_bits),
+                    want.map(f32::to_bits),
+                    "buffer {buffer} frame {i}: {got:?} stepped aside, {want:?} walked"
+                );
+            }
+        }
+        assert_eq!(idle_before, 40, "an untouched chain steps aside from the first buffer");
+        assert!(!walked.idle() || idle_after > 0, "and idles again once the tails have rung out");
+        assert!(idle_after > 0, "the chain never idled again after the release");
+    }
+
+    /// Not a test: a report. What the idle chains cost the frame loop with
+    /// the step-aside and without it, in nanoseconds per rendered frame,
+    /// on a rig with one deck playing and every other chain idle. Run it
+    /// with `--ignored --nocapture`; the figure that matters is the share
+    /// on the console strip of a release build, and this is the check
+    /// that the two move together.
+    #[test]
+    #[ignore]
+    fn chain_cost_report() {
+        for skip in [true, false, true, false] {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            mixer.install_deck(DeckId::A, tone_pcm(443.0, 48_000, 10.0));
+            mixer.set_deck_playing(DeckId::A, true);
+            mixer.state().set_skip_when_idle(skip);
+            render(&mixer, 48_000.0, 4_096);
+            let buffers = 400u64;
+            let mut mix_nanos = 0u64;
+            for _ in 0..buffers {
+                render(&mixer, 48_000.0, 512);
+                mix_nanos += mixer.audio_health().stages.mix;
+            }
+            println!(
+                "step aside {skip}: {:.1} ns per frame in the frame loop",
+                mix_nanos as f64 / (buffers * 512) as f64
+            );
         }
     }
 
