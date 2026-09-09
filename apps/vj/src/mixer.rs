@@ -2215,8 +2215,17 @@ impl CueRing {
             state.volume += (target_volume - state.volume) * volume_pole;
             let l = (al + (bl - al) * fraction) * state.volume;
             let r = (ar + (br - ar) * fraction) * state.volume;
-            for channel in 0..channels {
-                output.channel_mut(channel)[frame] = if channel == 0 { l } else { r };
+            match channels {
+                // The same law the room's output follows: a device with
+                // one channel hears the whole mix folded, not the left
+                // half of it.
+                1 => output.channel_mut(0)[frame] = (l + r) * 0.5,
+                _ => {
+                    for channel in 0..channels {
+                        output.channel_mut(channel)[frame] =
+                            if channel == 0 { l } else { r };
+                    }
+                }
             }
             state.cursor_fp = state.cursor_fp.saturating_add(step);
         }
@@ -6433,9 +6442,7 @@ impl MixEngine {
             );
             let l = mixed[0].clamp(-CLAMP, CLAMP);
             let r = mixed[1].clamp(-CLAMP, CLAMP);
-            for channel in 0..channels {
-                output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
-            }
+            write_frame(output, channels, frame, l, r);
             peaks[METER_MASTER] = peaks[METER_MASTER].max(l.abs()).max(r.abs());
             peaks[METER_VIDEO] = peaks[METER_VIDEO].max(video.0.abs()).max(video.1.abs());
             peaks[METER_DECK_A] =
@@ -6553,6 +6560,26 @@ impl MixEngine {
         shared.render_max_nanos.fetch_max(render_nanos, Ordering::Relaxed);
         if overran(render_nanos, frames, device_rate) {
             shared.overrun_callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// One mixed frame into however many channels the device opened.
+///
+/// A device with ONE channel -- a headset profile, a mono interface, a
+/// endpoint the platform opened narrow -- used to be handed the left half
+/// of the mix and nothing else, so anything panned right went missing
+/// rather than quiet. It hears the fold. Two channels are what they always
+/// were, to the bit, and anything wider keeps taking the right for every
+/// channel past the first.
+#[inline]
+fn write_frame(output: &mut AudioBuffer, channels: usize, frame: usize, l: f32, r: f32) {
+    match channels {
+        1 => output.channel_mut(0)[frame] += (l + r) * 0.5,
+        _ => {
+            for channel in 0..channels {
+                output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
+            }
         }
     }
 }
@@ -10628,6 +10655,63 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    /// A device the platform opened with one channel used to be handed
+    /// the left half of the mix: a record with anything panned right came
+    /// out missing it, which sounds like a broken record rather than a
+    /// narrow device.
+    #[test]
+    fn a_one_channel_output_hears_both_halves_of_the_mix() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, const_stereo_pcm(16_384, 0, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        // Past the play ramp and the master's look-ahead, so the two
+        // buffers below differ only in how many channels asked for them.
+        render(&mixer, 48_000.0, 8_192);
+        let mut stereo = AudioBuffer::new_with_size(256, 2);
+        mixer.render(48_000.0, &mut stereo);
+        let mut mono = AudioBuffer::new_with_size(256, 1);
+        mixer.render(48_000.0, &mut mono);
+        let peak = |buffer: &AudioBuffer, channel: usize| {
+            buffer.channel(channel)[128..].iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+        };
+        let left = peak(&stereo, 0);
+        assert!(left > 0.05, "the fixture reached the stereo output: {left}");
+        assert!(peak(&stereo, 1) < 1e-6, "and only on the left");
+        let folded = peak(&mono, 0);
+        assert!(
+            (folded - left * 0.5).abs() < left * 0.05,
+            "one channel hears the fold, not one half: {folded} against {left}",
+        );
+    }
+
+    /// The phones follow the same law: a mono monitor is the whole cue.
+    #[test]
+    fn a_one_channel_monitor_hears_both_halves_of_the_cue() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_cue_armed(true);
+        mixer.install_deck(DeckId::A, const_stereo_pcm(16_384, 0, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_cue(DeckId::A, true);
+        render(&mixer, 48_000.0, 8_192);
+        let mut state = CueReadState::default();
+        let stereo = consume_cue(&mixer, &mut state, 48_000.0, 512);
+        let mut state = CueReadState::default();
+        let mut mono = AudioBuffer::new_with_size(512, 1);
+        mixer.cue_ring().consume(&mut state, 48_000.0, &mut mono);
+        let peak = |buffer: &AudioBuffer, channel: usize| {
+            buffer.channel(channel)[128..].iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+        };
+        let left = peak(&stereo, 0);
+        assert!(left > 0.05, "the fixture reached the phones: {left}");
+        let folded = peak(&mono, 0);
+        assert!(
+            (folded - left * 0.5).abs() < left * 0.05,
+            "one channel hears the fold: {folded} against {left}",
+        );
     }
 
     #[test]
