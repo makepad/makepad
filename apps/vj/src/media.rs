@@ -55,15 +55,19 @@ pub const WAVE_COLS: usize = 2048;
 // video slot player
 // ---------------------------------------------------------------------------
 
-/// Platform media frameworks use a path's extension as a container type
-/// hint. Asset-cache objects intentionally have digest-only names, so an
-/// otherwise valid MP4 is reported as having no video track by AVURLAsset.
+/// The platform demuxers take a path's extension as the container hint,
+/// and an asset-cache object is named by its digest: nothing in that name
+/// says what the bytes are, so an otherwise valid clip is reported as
+/// having no video track.
 ///
-/// Give the decoder an extension-bearing hard link beside (but outside) the
-/// cache's content-addressed `objects/` tree. A hard link does not duplicate
-/// a potentially large clip. The decode thread owns this lease and removes
-/// the link only after every reopen/loop has stopped, which keeps detached
-/// slot teardown safe.
+/// Such a source -- and ONLY such a source -- gets an extension-bearing
+/// hard link beside (but outside) the cache's content-addressed `objects/`
+/// tree. A hard link does not duplicate a potentially large clip. The
+/// decode thread owns this lease and removes the link only after every
+/// reopen/loop has stopped, which keeps detached slot teardown safe.
+///
+/// A source that already carries a name is handed over by its own path:
+/// no directory, no link, and no lease to outlive a crash.
 struct DecoderInput {
     path: String,
     alias: Option<PathBuf>,
@@ -78,24 +82,40 @@ impl DecoderInput {
         if !source.is_file() {
             return Err(format!("media file not found: {}", source.display()));
         }
+        // A source that already carries a name is opened under the name it
+        // has. The link below was written for one case -- a cache object,
+        // whose name is a digest and says nothing about the container --
+        // and every other source was paying for it: a link beside the file
+        // on a volume that may allow none, and a hidden directory left in
+        // the operator's own music folder.
         if source
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+            .is_some_and(|value| !value.is_empty())
         {
-            return Ok(Self {
-                path: source
-                    .to_str()
-                    .ok_or_else(|| format!("non-utf8 media path: {}", source.display()))?
-                    .to_string(),
-                alias: None,
-            });
+            if let Some(path) = source.to_str() {
+                return Ok(Self { path: path.to_string(), alias: None });
+            }
+            // A name this platform cannot spell in UTF-8 still goes out
+            // under a typed link, exactly as it always has.
+        }
+        Self::aliased(source, extension)
+    }
+
+    /// The typed link, whatever the source is called. The audio path asks
+    /// for this by name when a file handed over under its own name turned
+    /// out to be something else.
+    fn aliased(source: &Path, extension: &str) -> Result<Self, String> {
+        if !source.is_file() {
+            return Err(format!("media file not found: {}", source.display()));
         }
 
         // Cache paths are `<root>/objects/<prefix>/<digest>`. Keep aliases
-        // under `<root>/decoder-input/`; for a non-cache source, use a
-        // sibling private directory. Either choice is on the source volume,
-        // so hard-linking never needs a byte-copy fallback.
+        // under `<root>/decoder-input/`; for a nameless source that is not a
+        // cache object, a sibling private directory. The cache root is the
+        // app's own volume, where linking works. The sibling case is the one
+        // a link-less volume can still refuse, and a byte copy is the answer
+        // there -- with the sweep for what a crash leaves, both later.
         let parent = source.parent().ok_or("media path has no parent")?;
         let objects = parent.parent();
         let alias_dir = match objects {
@@ -1982,16 +2002,14 @@ pub fn decode_audio_clip(
             if let Some(format) = repo_audio_format(&audio_magic(path).unwrap_or_default()) {
                 return decode_repo_audio(path, format, max_frames);
             }
-            // Cache objects are digest-only names, and the platform
-            // demuxers key off the extension. Lease a typed hard link the
-            // same way video slots do.
-            let input = DecoderInput::prepare(path, MediaType::Mp4)?;
-            // Opened for its SOUND. This arm never wanted a picture, and
-            // every platform opener refuses a file that has none before it
-            // looks at the audio -- which is why an audio-only container
-            // could not be loaded at all.
-            let mut decoder =
-                VideoFileDecoder::open_audio(&input.path).map_err(|e| e.to_string())?;
+            // A cache object's name is a digest and the platform demuxers
+            // key on the extension, so a nameless source goes out under a
+            // typed link. A file that has a name is opened by it.
+            //
+            // Opened for its SOUND, either way: this arm never wanted a
+            // picture, and every platform opener refuses a file that has
+            // none before it looks at the audio.
+            let (_input, mut decoder) = open_container_audio(path)?;
             let mut frames: Vec<[i16; 2]> = Vec::new();
             let mut sample_rate = decoder.info().audio_sample_rate.max(1);
             loop {
@@ -2022,6 +2040,31 @@ pub fn decode_audio_clip(
         MediaType::Mp3 => decode_repo_audio(path, AudioFormat::Mp3, max_frames),
         MediaType::Ogg => decode_repo_audio(path, AudioFormat::OggVorbis, max_frames),
         other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// Open a container for its sound, under its own name when it has one.
+///
+/// The lease comes back with the decoder because it owns the typed link:
+/// dropping it removes the link, and the decode has to finish first.
+///
+/// A file whose name MISDESCRIBES its container used to reach the platform
+/// under a correct hint, because everything was renamed. Now that a named
+/// file goes out as itself, such a file is offered once more under a typed
+/// link -- the door it always went through -- and the FIRST refusal is the
+/// one reported, since that is the answer about the file as it is named.
+fn open_container_audio(path: &PathBuf) -> Result<(DecoderInput, VideoFileDecoder), String> {
+    let input = DecoderInput::prepare(path, MediaType::Mp4)?;
+    match VideoFileDecoder::open_audio(&input.path) {
+        Ok(decoder) => Ok((input, decoder)),
+        Err(first) if input.alias.is_none() => {
+            let leased = DecoderInput::aliased(path, "mp4").map_err(|_| first.to_string())?;
+            match VideoFileDecoder::open_audio(&leased.path) {
+                Ok(decoder) => Ok((leased, decoder)),
+                Err(_) => Err(first.to_string()),
+            }
+        }
+        Err(other) => Err(other.to_string()),
     }
 }
 
@@ -3910,6 +3953,133 @@ mod tests {
         }
         drop(input);
         assert!(!alias.exists(), "the decode-thread lease removes its hard link");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The link exists for a name that says nothing about the bytes. A file
+    /// that already carries a name was paying for it anyway: a link beside
+    /// it on a volume that may allow none, and a hidden directory left in
+    /// the operator's own music folder.
+    #[test]
+    fn a_source_that_already_has_a_name_is_opened_by_it() {
+        let root = test_dir("decoder-named");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["clip.mov", "tune.m4a", "beat.aac", "CLIP.MP4", "noise.wave"] {
+            let source = root.join(name);
+            std::fs::write(&source, b"bytes stand in").unwrap();
+            let input = DecoderInput::prepare(&source, MediaType::Mp4).unwrap();
+            assert!(input.alias.is_none(), "{name} was renamed");
+            assert_eq!(Path::new(&input.path), source, "{name} went out as itself");
+            drop(input);
+            assert!(source.is_file(), "{name} survived its own lease");
+        }
+        assert!(
+            !root.join(".makepad-decoder-input").exists(),
+            "and nothing was left in the folder",
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A name this platform cannot spell in UTF-8 keeps the link it has:
+    /// the bypass has to convert the path and the link branch never does.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_cannot_be_spelt_still_gets_a_typed_link() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = test_dir("decoder-unspellable");
+        std::fs::create_dir_all(&root).unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"tune\xff.m4a");
+        let source = root.join(name);
+        std::fs::write(&source, b"bytes stand in").unwrap();
+        let input = DecoderInput::prepare(&source, MediaType::Mp4).unwrap();
+        assert!(input.alias.is_some(), "a name that cannot be spelt is linked");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The branch that must survive: a source whose name says nothing.
+    #[test]
+    fn a_name_with_no_extension_still_gets_a_typed_link() {
+        let root = test_dir("decoder-nameless");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("0123456789abcdef");
+        std::fs::write(&source, b"bytes stand in").unwrap();
+        let input = DecoderInput::prepare(&source, MediaType::Mp4).unwrap();
+        let alias = PathBuf::from(&input.path);
+        assert_eq!(alias.extension().and_then(|e| e.to_str()), Some("mp4"));
+        assert_eq!(alias.parent(), Some(root.join(".makepad-decoder-input").as_path()));
+        assert_eq!(std::fs::read(&alias).unwrap(), std::fs::read(&source).unwrap());
+        drop(input);
+        assert!(!alias.exists(), "the lease removes its link");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The file has to be there before anything is created for it.
+    #[test]
+    fn a_missing_file_is_refused_before_anything_is_created() {
+        let root = test_dir("decoder-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("gone.m4a");
+        let error = match DecoderInput::prepare(&missing, MediaType::Mp4) {
+            Err(error) => error,
+            Ok(_) => panic!("a file that is not there was prepared for decoding"),
+        };
+        assert!(error.contains("media file not found"), "{error}");
+        assert!(!root.join(".makepad-decoder-input").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A container under a name that misdescribes it used to reach the
+    /// platform under a corrected hint, because every source was renamed.
+    /// Now that a named file goes out as itself, it is offered once more
+    /// under the typed link rather than becoming a load that stopped
+    /// working.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_container_under_a_wrong_name_still_opens() {
+        use makepad_widgets::makepad_platform::video_file::{
+            PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+
+        let root = test_dir("decoder-misnamed");
+        std::fs::create_dir_all(&root).unwrap();
+        let encoded = root.join("clip.mp4");
+        let mut encoder = VideoFileEncoder::new(
+            encoded.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: 64,
+                height: 48,
+                fps_num: 30,
+                fps_den: 1,
+                video_bitrate_bps: 2_000_000,
+                audio: Some(PcmAudioTrackOptions {
+                    sample_rate: 48_000,
+                    channels: 2,
+                    aac_bitrate_bps: 128_000,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let frame = vec![128u8; 64 * 48 * 3];
+        for _ in 0..30 {
+            encoder.push_frame_rgb8(&frame, None).unwrap();
+        }
+        let samples: Vec<i16> =
+            (0..48_000 * 2).map(|i| ((i / 2) % 200) as i16 * 160 - 16_000).collect();
+        encoder.push_audio_i16(&samples).unwrap();
+        encoder.finish().unwrap();
+
+        let misnamed = root.join("clip.aac");
+        std::fs::rename(&encoded, &misnamed).unwrap();
+        let pcm = decode_audio_clip(&misnamed, MediaType::Mp4, MAX_TRACK_FRAMES)
+            .expect("a container under the wrong name still opens");
+        assert_eq!(pcm.sample_rate, 48_000);
+        assert!(
+            (40_000..=60_000).contains(&pcm.frames.len()),
+            "about a second: {}",
+            pcm.frames.len(),
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
