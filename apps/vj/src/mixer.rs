@@ -1252,6 +1252,11 @@ pub struct AudioHealth {
     /// Callbacks that found the lock poisoned and took it over. Zero for
     /// the same reason.
     pub poisoned: u64,
+    /// Buffers the render could not fill inside their own playing time,
+    /// since the app started. Nothing else can silence a buffer on this
+    /// engine, so this is THE dropout figure -- counted since the render
+    /// was first timed, and shown nowhere until now.
+    pub overruns: u64,
     /// Buffers the monitor could not fill from the cue ring, since the app
     /// started. Priming a fresh or re-opened phones device does not count.
     pub phones_starved: u64,
@@ -2993,6 +2998,7 @@ impl Mixer {
             // Both zero by construction on this engine; see the struct.
             contended: 0,
             poisoned: 0,
+            overruns: self.shared.overrun_callbacks.load(Ordering::Relaxed),
             phones_starved: self.shared.cue_ring.starved.load(Ordering::Relaxed),
             render_nanos: self.shared.render_nanos.load(Ordering::Relaxed),
             render_max_nanos: self.shared.render_max_nanos.load(Ordering::Relaxed),
@@ -6537,11 +6543,19 @@ impl MixEngine {
         shared.render_nanos.store(render_nanos, Ordering::Relaxed);
         shared.buffer_frames.store(frames as u64, Ordering::Relaxed);
         shared.render_max_nanos.fetch_max(render_nanos, Ordering::Relaxed);
-        let budget_nanos = (frames as f64 / device_rate * 1e9) as u64;
-        if render_nanos > budget_nanos {
+        if overran(render_nanos, frames, device_rate) {
             shared.overrun_callbacks.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Whether a render that took `render_nanos` outran the buffer it was
+/// filling: longer than the buffer's own playing time at the device's
+/// rate. Pure, so the boundary the console's dropout figure counts on
+/// can be pinned.
+fn overran(render_nanos: u64, frames: usize, device_rate: f64) -> bool {
+    let budget_nanos = (frames as f64 / device_rate * 1e9) as u64;
+    render_nanos > budget_nanos
 }
 
 /// Fixtures the audio tests share: tracks with a known shape and one
@@ -11011,6 +11025,33 @@ fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
             stages.mix,
             stages.setup
         );
+    }
+
+    /// The line between coping and not: a render that takes exactly the
+    /// buffer's playing time has coped, one nanosecond more has not.
+    #[test]
+    fn a_render_outruns_its_buffer_one_nanosecond_past_its_playing_time() {
+        // 512 frames at 48 kHz play for 10 666 666 ns.
+        assert!(!overran(10_666_666, 512, 48_000.0));
+        assert!(overran(10_666_667, 512, 48_000.0));
+        assert!(!overran(1_000, 512, 48_000.0));
+        assert!(overran(20_000_000, 512, 48_000.0));
+    }
+
+    /// The count reaches the console's health, and it counts: at a device
+    /// rate of a gigahertz a 64-frame buffer plays for 64 ns, which no
+    /// render finishes inside, so every buffer is an overrun.
+    #[test]
+    fn a_render_that_outran_its_buffer_is_counted_where_the_console_reads() {
+        let mixer = TestMixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        assert_eq!(mixer.audio_health().overruns, 0, "nothing rendered yet");
+        render(&mixer, 1.0e9, 64);
+        render(&mixer, 1.0e9, 64);
+        let health = mixer.audio_health();
+        assert!(health.overruns >= 2, "two impossible buffers, {} counted", health.overruns);
+        assert_eq!(health.overruns, mixer.audio_overruns(), "one counter, two readers");
     }
 
     #[test]

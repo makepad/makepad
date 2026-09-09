@@ -324,6 +324,12 @@ pub fn summary_line(health: &AudioHealth, master: f32, clipped: bool) -> String 
     if health.contended > 0 {
         line.push_str(&format!("   silenced {}", health.contended));
     }
+    // The buffers the render could not fill in time: the one dropout this
+    // engine can have, and until now the one number the line did not show.
+    // Only once there has been one, so the healthy line does not move.
+    if health.overruns > 0 {
+        line.push_str(&format!("   overran {}", health.overruns));
+    }
     if health.phones_starved > 0 {
         line.push_str(&format!("   phones {}", health.phones_starved));
     }
@@ -365,6 +371,9 @@ pub fn detail_text(health: &AudioHealth, meters: &[f32; 5], decks: [f32; 2]) -> 
         "silenced {}, phones {}",
         health.contended, health.phones_starved
     ));
+    if health.overruns > 0 {
+        text.push_str(&format!(", overran {}", health.overruns));
+    }
     if health.poisoned > 0 {
         text.push_str(&format!(", POISONED {}", health.poisoned));
     }
@@ -408,6 +417,7 @@ mod tests {
     fn health() -> AudioHealth {
         AudioHealth {
             poisoned: 0,
+            overruns: 0,
             stages: crate::mixer::StageNanos::default(),
             contended: 0,
             phones_starved: 0,
@@ -454,6 +464,21 @@ mod tests {
         let line = summary_line(&fresh, 0.0, false);
         assert!(line.starts_with("idle"), "before the first buffer it says so: {line}");
         assert!(!line.contains(" fr"), "and it claims no buffer it has not seen: {line}");
+    }
+
+    /// The render's own dropout count was kept and never shown: the line
+    /// reported a lock-contention figure that is zero by construction. It
+    /// shows the buffers that overran now -- and only once there has been
+    /// one, so the healthy line is the line it always was.
+    #[test]
+    fn the_one_line_counts_the_buffers_the_render_missed() {
+        assert_eq!(summary_line(&health(), 0.5, false), "5% of 512 fr   master 50%");
+        let mut late = health();
+        late.overruns = 3;
+        let line = summary_line(&late, 0.5, false);
+        assert!(line.contains("overran 3"), "{line}");
+        assert!(detail_text(&late, &[0.0; 5], [0.0, 0.0]).contains("overran 3"));
+        assert!(!detail_text(&health(), &[0.0; 5], [0.0, 0.0]).contains("overran"));
     }
 
     #[test]

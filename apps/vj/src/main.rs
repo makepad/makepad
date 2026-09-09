@@ -10416,7 +10416,7 @@ pub struct App {
     /// contended callback IS an audible gap; render high-water says whether
     /// the render itself ever threatens its buffer.
     #[rust]
-    audio_contended_seen: u64,
+    audio_overruns_seen: u64,
     /// Poisoned callbacks already reported.
     #[rust]
     audio_poisoned_seen: u64,
@@ -18620,13 +18620,17 @@ p2 {}
         // a whole callback; render high-water = the render itself is the
         // threat. Atomic reads, so this costs nothing when all is well.
         let health = self.mixer.audio_health();
-        if health.contended != self.audio_contended_seen {
+        // A buffer the render could not fill in time is the one dropout
+        // this engine can have. It was counted from the day the render was
+        // timed and reported nowhere; the line that stood here reported a
+        // lock-contention figure that is zero by construction.
+        if health.overruns != self.audio_overruns_seen {
             log!(
-                "audio: {} SILENT callback(s) from lock contention (+{} since last)",
-                health.contended,
-                health.contended - self.audio_contended_seen
+                "audio: {} callback(s) overran their buffer (+{} since last)",
+                health.overruns,
+                health.overruns - self.audio_overruns_seen
             );
-            self.audio_contended_seen = health.contended;
+            self.audio_overruns_seen = health.overruns;
         }
         // A panic on a thread that held the mixer lock. The buffer played,
         // so nobody heard a thing; the app is one panic worse off than it
