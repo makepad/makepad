@@ -39,6 +39,7 @@ pub mod view;
 pub mod breadcrumb;
 pub mod field;
 pub mod chart;
+pub mod text_flow;
 pub mod overlay_messages;
 pub mod drop_controls;
 pub mod vector;
@@ -93,6 +94,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
     chart::script_mod(vm);
+    text_flow::script_mod(vm);
     overlay_messages::script_mod(vm);
     drop_controls::script_mod(vm);
     vector::script_mod(vm);
@@ -169,6 +171,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         breadcrumb::STORIES,
         field::STORIES,
         chart::STORIES,
+        text_flow::STORIES,
         overlay_messages::STORIES,
         drop_controls::STORIES,
         vector::STORIES,
