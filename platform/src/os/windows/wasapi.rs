@@ -121,7 +121,7 @@ fn elevate_audio_thread_priority() -> Option<HANDLE> {
         let task_name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
         let handle = AvSetMmThreadCharacteristicsW(PCWSTR(task_name.as_ptr()), &mut task_index);
         if handle.is_err() {
-            println!("Warning: Failed to elevate audio thread priority");
+            crate::warning!("audio: could not raise the audio thread's priority");
             None
         } else {
             Some(handle.unwrap())
@@ -263,7 +263,7 @@ impl WasapiAccess {
                         let mut audio_inputs = audio_inputs.lock().unwrap();
                         audio_inputs.retain(|v| v.device_id != device_id);
                     } else {
-                        println!("Error opening wasapi loopback device");
+                        crate::error!("audio: could not open loopback device {device_id:?}");
                         failed_devices.lock().unwrap().insert(device_id);
                         change_signal.set();
                     }
@@ -304,7 +304,7 @@ impl WasapiAccess {
                         let mut audio_inputs = audio_inputs.lock().unwrap();
                         audio_inputs.retain(|v| v.device_id != device_id);
                     } else {
-                        println!("Error opening wasapi input device");
+                        crate::error!("audio: could not open input device {device_id:?}");
                         failed_devices.lock().unwrap().insert(device_id);
                         change_signal.set();
                     }
@@ -376,7 +376,10 @@ impl WasapiAccess {
                     change_signal,
                 };
                 let Ok(mut wasapi) = opened else {
-                    println!("Error opening wasapi output device");
+                    // Through the log, not stdout: every fault this layer
+                    // met was printed where nothing in the app could read
+                    // it, and the app's console reads the log.
+                    crate::error!("audio: could not open output device {device_id:?}");
                     failed_devices.lock().unwrap().insert(device_id);
                     return;
                 };
@@ -395,8 +398,21 @@ impl WasapiAccess {
                         None => true,
                     }
                 };
+                // A wait that fails on a device nobody terminated is the
+                // device going; said once, at error level, as the loop ends.
+                let terminated = || {
+                    audio_outputs
+                        .lock()
+                        .map(|outputs| outputs.iter().any(|v| v.serial == serial && v.is_terminated))
+                        .unwrap_or(true)
+                };
                 while !terminated_meanwhile {
-                    let Ok(mut buffer) = wasapi.wait_for_buffer() else { break };
+                    let Ok(mut buffer) = wasapi.wait_for_buffer() else {
+                        if !terminated() {
+                            crate::error!("audio: output device {device_id:?} stopped");
+                        }
+                        break;
+                    };
                     // Use try_lock to avoid blocking the audio thread
                     if let Ok(outputs) = audio_outputs.try_lock() {
                         if outputs
@@ -423,6 +439,9 @@ impl WasapiAccess {
                     // A device that went away between the wait and the
                     // release ends the loop, not the process.
                     if wasapi.release_buffer(buffer).is_err() {
+                        if !terminated() {
+                            crate::error!("audio: output device {device_id:?} stopped");
+                        }
                         break;
                     }
                 }
@@ -967,7 +986,7 @@ impl WasapiInput {
         unsafe {
             loop {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
-                    println!("Wait for object error");
+                    crate::error!("audio: input device {:?} stopped", self.base.device_id);
                     return Err(());
                 };
                 let mut pdata: *mut u8 = 0 as *mut _;
@@ -1034,7 +1053,7 @@ impl WasapiLoopback {
         unsafe {
             loop {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
-                    println!("Loopback: Wait for object error");
+                    crate::error!("audio: loopback device {:?} stopped", self.base.device_id);
                     return Err(());
                 };
                 let mut pdata: *mut u8 = 0 as *mut _;
@@ -1174,6 +1193,20 @@ mod tests {
         assert!(should_spawn(known.iter().copied(), &failed, id(3)), "unknown: opened");
         assert!(should_spawn(known.iter().copied(), &failed, id(2)), "winding down: opened again");
         assert!(should_spawn(std::iter::empty(), &failed, id(1)), "nothing known: opened");
+    }
+
+    /// Every fault this layer met was printed to stdout, where nothing in
+    /// the app could read it; the other desktop backend already said the
+    /// same things through the log. The sink a line goes to has no witness
+    /// but the source, so the source is what this reads.
+    #[test]
+    fn the_device_layer_says_so_where_the_app_can_hear_it() {
+        let source = include_str!("wasapi.rs");
+        let to_stdout: Vec<&str> = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("println!("))
+            .collect();
+        assert!(to_stdout.is_empty(), "printed past the log: {to_stdout:?}");
     }
 
     #[test]
