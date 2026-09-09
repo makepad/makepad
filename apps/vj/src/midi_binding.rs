@@ -380,6 +380,263 @@ pub enum Learnable {
     Button(Behaviour),
 }
 
+// ---------------------------------------------------------------------------
+// what a press on a learned button does
+// ---------------------------------------------------------------------------
+
+/// A tap and a hold part here, in milliseconds: a release before it is a
+/// tap, at or past it a hold. Inclusive at the boundary on the hold's
+/// side, so a stated 300 is a hold.
+pub const WINDOW_MS: u64 = 300;
+
+/// One learned button's remembered state: which source set it, whether
+/// it is down, when it went down, what the target was before the press,
+/// and the two flags a long press keeps between messages.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gate {
+    pub source: Source,
+    pub down: bool,
+    pub since_ms: u64,
+    pub before: bool,
+    pub latched: bool,
+    pub spent: bool,
+}
+
+/// Whether a learned button's value begins a press.
+///
+/// A pad repeats its CC while it is held, so a press is the 0 to 1
+/// crossing and nothing else. The level the last message left is
+/// remembered per control -- but a level is only a valid "previous" for
+/// the SOURCE that set it. Re-learn a button onto another pad while the
+/// old one is still held down and the remembered "down" belongs to a pad
+/// that is no longer bound to anything; read as this pad's own past, it
+/// swallows the new pad's first press, and nothing ever clears it because
+/// clearing a binding does not clear a level.
+///
+/// So the rule is: a press begins unless THIS source already had it down.
+pub fn learned_press_begins(prev: Option<(Source, bool)>, source: Source, v: f32) -> bool {
+    v >= 0.5 && !matches!(prev, Some((was, true)) if was == source)
+}
+
+/// The target's on/off after this message, if it changes. `v` is the
+/// 0..1 level (half is down, the line `learned_press_begins` draws);
+/// `current` is the target's state now; `now_ms` is the caller's clock,
+/// so the window is a number a test can set. Every decision is made AT a
+/// message: there is no timer, so nothing is pending between them.
+///
+/// Push is level-follow and consults no gate: a release after the gates
+/// were cleared by a port change still lets go, where a gated release
+/// would have left a reversed deck reversed. The four that latch take
+/// their edge from `learned_press_begins` over the gate.
+pub fn press(
+    behaviour: Behaviour,
+    gate: &mut Option<Gate>,
+    source: Source,
+    v: f32,
+    current: bool,
+    now_ms: u64,
+) -> Option<bool> {
+    let down = v >= 0.5;
+    let fresh = Gate { source, down, since_ms: now_ms, before: current, latched: false, spent: false };
+    if behaviour == Behaviour::Push {
+        *gate = Some(fresh);
+        return Some(down);
+    }
+    let prev = gate.map(|g| (g.source, g.down));
+    let pressed = learned_press_begins(prev, source, v);
+    let released = !down && matches!(prev, Some((was, true)) if was == source);
+    // A gate another source left is a fresh start.
+    let mut g = match *gate {
+        Some(g) if g.source == source => g,
+        _ => fresh,
+    };
+    g.down = down;
+    let verdict = if pressed {
+        g.since_ms = now_ms;
+        g.before = current;
+        match behaviour {
+            Behaviour::Toggle => Some(!current),
+            Behaviour::TapHold => Some(true),
+            Behaviour::LongPress => {
+                if g.latched {
+                    // The press that lets a latched hold go: its release
+                    // must not be read as a tap's.
+                    g.latched = false;
+                    g.spent = true;
+                    Some(false)
+                } else {
+                    g.spent = false;
+                    Some(true)
+                }
+            }
+            Behaviour::Trigger => Some(true),
+            Behaviour::Push => unreachable!("handled above"),
+        }
+    } else if released {
+        let held = now_ms.saturating_sub(g.since_ms);
+        match behaviour {
+            Behaviour::Toggle | Behaviour::Trigger => None,
+            // A tap latches the OTHER side of what it found; a hold was
+            // momentary and lets go.
+            Behaviour::TapHold => Some(if held < WINDOW_MS { !g.before } else { false }),
+            Behaviour::LongPress => {
+                if g.spent {
+                    g.spent = false;
+                    None
+                } else if held >= WINDOW_MS {
+                    g.latched = true;
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            Behaviour::Push => unreachable!("handled above"),
+        }
+    } else {
+        None
+    };
+    *gate = Some(g);
+    verdict
+}
+
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+
+    const PAD: Source = (0, 20);
+
+    #[test]
+    fn a_held_pad_presses_once_and_a_release_rearms_it() {
+        let pad = (0u8, 20u8);
+        // Nothing remembered: the first message down is a press.
+        assert!(learned_press_begins(None, pad, 1.0));
+        // Held: the repeats are not presses.
+        assert!(!learned_press_begins(Some((pad, true)), pad, 1.0));
+        // Released, then pressed again.
+        assert!(!learned_press_begins(Some((pad, true)), pad, 0.0), "a release is not a press");
+        assert!(learned_press_begins(Some((pad, false)), pad, 1.0));
+    }
+
+    /// The defect this rule exists for: a level left by a pad that is no
+    /// longer bound must not hold back the pad that is.
+    #[test]
+    fn a_level_left_by_another_source_cannot_swallow_the_first_press() {
+        let old_pad = (0u8, 20u8);
+        let new_pad = (0u8, 21u8);
+        // The old pad is held when the control is re-learned onto the new
+        // one, so the remembered level says "down" and belongs to nobody.
+        assert!(
+            learned_press_begins(Some((old_pad, true)), new_pad, 1.0),
+            "the new pad's first press is a press",
+        );
+        // A different CHANNEL is a different source too.
+        assert!(learned_press_begins(Some(((1, 20), true)), old_pad, 1.0));
+    }
+
+    /// Halfway is down: a pad that reports anything but zero is pressed,
+    /// and the threshold has to be the same one the release uses or a
+    /// button can latch on a value that is neither.
+    #[test]
+    fn half_is_down() {
+        let pad = (0u8, 20u8);
+        assert!(learned_press_begins(None, pad, 0.5));
+        assert!(!learned_press_begins(None, pad, 0.49));
+    }
+
+    #[test]
+    fn half_is_down_for_a_toggle() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 0.49, false, 0), None);
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 0.5, false, 10), Some(true));
+    }
+
+    #[test]
+    fn push_follows_the_hand() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::Push, &mut gate, PAD, 1.0, false, 0), Some(true));
+        assert_eq!(press(Behaviour::Push, &mut gate, PAD, 1.0, true, 10), Some(true), "a repeat says the same");
+        assert_eq!(press(Behaviour::Push, &mut gate, PAD, 0.0, true, 20), Some(false));
+    }
+
+    /// The gates are cleared on a port change; a release that arrives
+    /// after that still lets a pushed button go.
+    #[test]
+    fn a_release_after_a_port_change_still_lets_go() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::Push, &mut gate, PAD, 0.0, true, 0), Some(false));
+    }
+
+    #[test]
+    fn a_toggle_flips_on_the_press_and_ignores_the_release() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 1.0, false, 0), Some(true));
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 1.0, true, 10), None, "held: a repeat is not a press");
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 0.0, true, 20), None);
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 1.0, true, 30), Some(false));
+    }
+
+    /// A gate another source left does not swallow this source's press.
+    #[test]
+    fn a_toggle_pressed_from_another_pad_is_a_press() {
+        let mut gate = Some(Gate { source: (0, 21), down: true, since_ms: 0, before: false, latched: false, spent: false });
+        assert_eq!(press(Behaviour::Toggle, &mut gate, PAD, 1.0, false, 5), Some(true));
+        assert_eq!(gate.map(|g| g.source), Some(PAD), "the gate is this source's now");
+    }
+
+    #[test]
+    fn a_tap_inside_the_window_latches_and_a_hold_is_momentary() {
+        let mut gate = None;
+        // A tap on an off target: on, and still on after the release.
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 1.0, false, 0), Some(true));
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 0.0, true, 120), Some(true));
+        // A hold: on while held, off at the release.
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 1.0, true, 1000), Some(true));
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 0.0, true, 1400), Some(false));
+        // A tap on an on target turns it off.
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 1.0, true, 2000), Some(true));
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 0.0, true, 2100), Some(false));
+    }
+
+    #[test]
+    fn a_long_press_latches_and_the_next_press_lets_go() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 1.0, false, 0), Some(true));
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 0.0, true, 500), None, "held long: it stays");
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 1.0, true, 1000), Some(false), "the next press lets go");
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 0.0, false, 1050), None, "and its release is spent");
+        // A short press is momentary.
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 1.0, false, 2000), Some(true));
+        assert_eq!(press(Behaviour::LongPress, &mut gate, PAD, 0.0, true, 2100), Some(false));
+    }
+
+    #[test]
+    fn a_trigger_only_ever_turns_it_on() {
+        let mut gate = None;
+        assert_eq!(press(Behaviour::Trigger, &mut gate, PAD, 1.0, false, 0), Some(true));
+        assert_eq!(press(Behaviour::Trigger, &mut gate, PAD, 0.0, true, 10), None);
+        assert_eq!(press(Behaviour::Trigger, &mut gate, PAD, 1.0, true, 20), Some(true));
+    }
+
+    #[test]
+    fn the_window_is_inclusive_at_three_hundred() {
+        let mut gate = None;
+        press(Behaviour::TapHold, &mut gate, PAD, 1.0, false, 0);
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 0.0, true, 299), Some(true), "299 is a tap");
+        press(Behaviour::TapHold, &mut gate, PAD, 1.0, true, 1000);
+        assert_eq!(press(Behaviour::TapHold, &mut gate, PAD, 0.0, true, 1300), Some(false), "300 is a hold");
+    }
+
+    #[test]
+    fn press_words_round_trip_and_an_unset_press_writes_nothing() {
+        let mut binding = Binding::new((0, 20));
+        assert_eq!(binding.words(), "");
+        binding.press = Some(Behaviour::LongPress);
+        assert_eq!(binding.words(), "press=long");
+        let back = Binding::new((0, 20)).with_words(binding.words().split_whitespace());
+        assert_eq!(back.press, Some(Behaviour::LongPress));
+    }
+}
+
 #[cfg(test)]
 mod transform_tests {
     use super::*;

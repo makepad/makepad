@@ -4191,6 +4191,9 @@ script_mod! {
                                     midi_bind_sensbox0 := View{ width: Fit height: Fit
                                         midi_bind_sens0 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox0 := View{ width: Fit height: Fit
+                                        midi_bind_press0 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear0 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row1 := View{
@@ -4206,6 +4209,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox1 := View{ width: Fit height: Fit
                                         midi_bind_sens1 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox1 := View{ width: Fit height: Fit
+                                        midi_bind_press1 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear1 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4223,6 +4229,9 @@ script_mod! {
                                     midi_bind_sensbox2 := View{ width: Fit height: Fit
                                         midi_bind_sens2 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox2 := View{ width: Fit height: Fit
+                                        midi_bind_press2 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear2 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row3 := View{
@@ -4238,6 +4247,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox3 := View{ width: Fit height: Fit
                                         midi_bind_sens3 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox3 := View{ width: Fit height: Fit
+                                        midi_bind_press3 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear3 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4255,6 +4267,9 @@ script_mod! {
                                     midi_bind_sensbox4 := View{ width: Fit height: Fit
                                         midi_bind_sens4 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox4 := View{ width: Fit height: Fit
+                                        midi_bind_press4 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear4 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row5 := View{
@@ -4270,6 +4285,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox5 := View{ width: Fit height: Fit
                                         midi_bind_sens5 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox5 := View{ width: Fit height: Fit
+                                        midi_bind_press5 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear5 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4287,6 +4305,9 @@ script_mod! {
                                     midi_bind_sensbox6 := View{ width: Fit height: Fit
                                         midi_bind_sens6 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox6 := View{ width: Fit height: Fit
+                                        midi_bind_press6 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear6 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row7 := View{
@@ -4302,6 +4323,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox7 := View{ width: Fit height: Fit
                                         midi_bind_sens7 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox7 := View{ width: Fit height: Fit
+                                        midi_bind_press7 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear7 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4319,6 +4343,9 @@ script_mod! {
                                     midi_bind_sensbox8 := View{ width: Fit height: Fit
                                         midi_bind_sens8 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox8 := View{ width: Fit height: Fit
+                                        midi_bind_press8 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear8 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row9 := View{
@@ -4334,6 +4361,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox9 := View{ width: Fit height: Fit
                                         midi_bind_sens9 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox9 := View{ width: Fit height: Fit
+                                        midi_bind_press9 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear9 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4351,6 +4381,9 @@ script_mod! {
                                     midi_bind_sensbox10 := View{ width: Fit height: Fit
                                         midi_bind_sens10 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox10 := View{ width: Fit height: Fit
+                                        midi_bind_press10 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear10 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row11 := View{
@@ -4366,6 +4399,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox11 := View{ width: Fit height: Fit
                                         midi_bind_sens11 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox11 := View{ width: Fit height: Fit
+                                        midi_bind_press11 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear11 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4383,6 +4419,9 @@ script_mod! {
                                     midi_bind_sensbox12 := View{ width: Fit height: Fit
                                         midi_bind_sens12 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox12 := View{ width: Fit height: Fit
+                                        midi_bind_press12 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear12 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row13 := View{
@@ -4398,6 +4437,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox13 := View{ width: Fit height: Fit
                                         midi_bind_sens13 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox13 := View{ width: Fit height: Fit
+                                        midi_bind_press13 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear13 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4415,6 +4457,9 @@ script_mod! {
                                     midi_bind_sensbox14 := View{ width: Fit height: Fit
                                         midi_bind_sens14 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox14 := View{ width: Fit height: Fit
+                                        midi_bind_press14 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear14 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row15 := View{
@@ -4430,6 +4475,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox15 := View{ width: Fit height: Fit
                                         midi_bind_sens15 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox15 := View{ width: Fit height: Fit
+                                        midi_bind_press15 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear15 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4447,6 +4495,9 @@ script_mod! {
                                     midi_bind_sensbox16 := View{ width: Fit height: Fit
                                         midi_bind_sens16 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox16 := View{ width: Fit height: Fit
+                                        midi_bind_press16 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear16 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row17 := View{
@@ -4462,6 +4513,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox17 := View{ width: Fit height: Fit
                                         midi_bind_sens17 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox17 := View{ width: Fit height: Fit
+                                        midi_bind_press17 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear17 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4479,6 +4533,9 @@ script_mod! {
                                     midi_bind_sensbox18 := View{ width: Fit height: Fit
                                         midi_bind_sens18 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox18 := View{ width: Fit height: Fit
+                                        midi_bind_press18 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear18 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row19 := View{
@@ -4494,6 +4551,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox19 := View{ width: Fit height: Fit
                                         midi_bind_sens19 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox19 := View{ width: Fit height: Fit
+                                        midi_bind_press19 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear19 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -4511,6 +4571,9 @@ script_mod! {
                                     midi_bind_sensbox20 := View{ width: Fit height: Fit
                                         midi_bind_sens20 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox20 := View{ width: Fit height: Fit
+                                        midi_bind_press20 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear20 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row21 := View{
@@ -4527,6 +4590,9 @@ script_mod! {
                                     midi_bind_sensbox21 := View{ width: Fit height: Fit
                                         midi_bind_sens21 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
                                     }
+                                    midi_bind_pressbox21 := View{ width: Fit height: Fit
+                                        midi_bind_press21 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                    }
                                     midi_bind_clear21 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row22 := View{
@@ -4542,6 +4608,9 @@ script_mod! {
                                     }
                                     midi_bind_sensbox22 := View{ width: Fit height: Fit
                                         midi_bind_sens22 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
+                                    midi_bind_pressbox22 := View{ width: Fit height: Fit
+                                        midi_bind_press22 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
                                     }
                                     midi_bind_clear22 := ChromeButton{width: 26 text: "X"}
                                 }
@@ -6576,6 +6645,22 @@ mod learnable_tests {
         }
     }
 
+    /// A binding that has not said what a press does gets the button's
+    /// own, which is what each did before presses could be told: the
+    /// latch and the plays flip, the reverses follow the hand.
+    #[test]
+    fn every_button_has_the_press_it_had_yesterday() {
+        for (_, name, kind) in LEARNABLES {
+            let Learnable::Button(own) = kind else { continue };
+            let expected = match name {
+                "autofade" | "deck_a_play" | "deck_b_play" => Behaviour::Toggle,
+                "deck_a_rev" | "deck_b_rev" => Behaviour::Push,
+                other => panic!("{other} is a button nobody named"),
+            };
+            assert_eq!(own, expected, "{name}");
+        }
+    }
+
     /// Every learnable has somewhere a turn can read from, and the slot
     /// knobs the parse accepts are exactly the twelve rows.
     #[test]
@@ -7017,65 +7102,6 @@ mod fader_takeover_tests {
     fn a_fader_parked_at_an_end_still_holds_a_value_that_is_there_too() {
         assert!(fader_takes_over(Some(0.0), 0.0, 1.0, NEAR), "it holds the bottom");
         assert!(fader_takes_over(Some(1.0), 1.0, 0.0, NEAR), "and the top");
-    }
-}
-
-/// Whether a learned button's value begins a press.
-///
-/// A pad repeats its CC while it is held, so a press is the 0 to 1
-/// crossing and nothing else. The level the last message left is
-/// remembered per control — but a level is only a valid "previous" for the
-/// SOURCE that set it. Re-learn a button onto another pad while the old
-/// one is still held down and the remembered "down" belongs to a pad that
-/// is no longer bound to anything; read as this pad's own past, it
-/// swallows the new pad's first press, and nothing ever clears it because
-/// clearing a binding does not clear a level.
-///
-/// So the rule is: a press begins unless THIS source already had it down.
-fn learned_press_begins(prev: Option<((u8, u8), bool)>, source: (u8, u8), v: f32) -> bool {
-    v >= 0.5 && !matches!(prev, Some((was, true)) if was == source)
-}
-
-#[cfg(test)]
-mod learned_button_tests {
-    use super::learned_press_begins;
-
-    #[test]
-    fn a_held_pad_presses_once_and_a_release_rearms_it() {
-        let pad = (0u8, 20u8);
-        // Nothing remembered: the first message down is a press.
-        assert!(learned_press_begins(None, pad, 1.0));
-        // Held: the repeats are not presses.
-        assert!(!learned_press_begins(Some((pad, true)), pad, 1.0));
-        // Released, then pressed again.
-        assert!(!learned_press_begins(Some((pad, true)), pad, 0.0), "a release is not a press");
-        assert!(learned_press_begins(Some((pad, false)), pad, 1.0));
-    }
-
-    /// The defect this rule exists for: a level left by a pad that is no
-    /// longer bound must not hold back the pad that is.
-    #[test]
-    fn a_level_left_by_another_source_cannot_swallow_the_first_press() {
-        let old_pad = (0u8, 20u8);
-        let new_pad = (0u8, 21u8);
-        // The old pad is held when the control is re-learned onto the new
-        // one, so the remembered level says "down" and belongs to nobody.
-        assert!(
-            learned_press_begins(Some((old_pad, true)), new_pad, 1.0),
-            "the new pad's first press is a press",
-        );
-        // A different CHANNEL is a different source too.
-        assert!(learned_press_begins(Some(((1, 20), true)), old_pad, 1.0));
-    }
-
-    /// Halfway is down: a pad that reports anything but zero is pressed,
-    /// and the threshold has to be the same one the release uses or a
-    /// button can latch on a value that is neither.
-    #[test]
-    fn half_is_down() {
-        let pad = (0u8, 20u8);
-        assert!(learned_press_begins(None, pad, 0.5));
-        assert!(!learned_press_begins(None, pad, 0.49));
     }
 }
 
@@ -9677,7 +9703,7 @@ pub struct App {
     /// belongs to a pad that is no longer bound; without the source it
     /// swallows the new pad's first press.
     #[rust]
-    midi_gates: HashMap<String, ((u8, u8), bool)>,
+    midi_gates: HashMap<String, Option<crate::midi_binding::Gate>>,
     /// Where each physical fader was when it last spoke, by (channel, CC).
     /// A fader has to agree with the value it points at before it may move
     /// it — see [`fader_takes_over`].
@@ -11709,33 +11735,57 @@ impl App {
 
     /// The page's binding rows, one per learnable, in `LEARNABLES` order:
     /// the row itself, the control's name, its source, how it reads and
-    /// the sensitivity (each picker in a box, because a dropdown cannot be
-    /// hidden and a box can), the clear button.
+    /// the sensitivity, what a press does (each picker in a box, because a
+    /// dropdown cannot be hidden and a box can), the clear button.
     const MIDI_BIND_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId],
-        &'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId]); 23] = [
-        (ids!(midi_bind_row0), ids!(midi_bind_name0), ids!(midi_bind_src0), ids!(midi_bind_readbox0), ids!(midi_bind_read0), ids!(midi_bind_sensbox0), ids!(midi_bind_sens0), ids!(midi_bind_clear0)),
-        (ids!(midi_bind_row1), ids!(midi_bind_name1), ids!(midi_bind_src1), ids!(midi_bind_readbox1), ids!(midi_bind_read1), ids!(midi_bind_sensbox1), ids!(midi_bind_sens1), ids!(midi_bind_clear1)),
-        (ids!(midi_bind_row2), ids!(midi_bind_name2), ids!(midi_bind_src2), ids!(midi_bind_readbox2), ids!(midi_bind_read2), ids!(midi_bind_sensbox2), ids!(midi_bind_sens2), ids!(midi_bind_clear2)),
-        (ids!(midi_bind_row3), ids!(midi_bind_name3), ids!(midi_bind_src3), ids!(midi_bind_readbox3), ids!(midi_bind_read3), ids!(midi_bind_sensbox3), ids!(midi_bind_sens3), ids!(midi_bind_clear3)),
-        (ids!(midi_bind_row4), ids!(midi_bind_name4), ids!(midi_bind_src4), ids!(midi_bind_readbox4), ids!(midi_bind_read4), ids!(midi_bind_sensbox4), ids!(midi_bind_sens4), ids!(midi_bind_clear4)),
-        (ids!(midi_bind_row5), ids!(midi_bind_name5), ids!(midi_bind_src5), ids!(midi_bind_readbox5), ids!(midi_bind_read5), ids!(midi_bind_sensbox5), ids!(midi_bind_sens5), ids!(midi_bind_clear5)),
-        (ids!(midi_bind_row6), ids!(midi_bind_name6), ids!(midi_bind_src6), ids!(midi_bind_readbox6), ids!(midi_bind_read6), ids!(midi_bind_sensbox6), ids!(midi_bind_sens6), ids!(midi_bind_clear6)),
-        (ids!(midi_bind_row7), ids!(midi_bind_name7), ids!(midi_bind_src7), ids!(midi_bind_readbox7), ids!(midi_bind_read7), ids!(midi_bind_sensbox7), ids!(midi_bind_sens7), ids!(midi_bind_clear7)),
-        (ids!(midi_bind_row8), ids!(midi_bind_name8), ids!(midi_bind_src8), ids!(midi_bind_readbox8), ids!(midi_bind_read8), ids!(midi_bind_sensbox8), ids!(midi_bind_sens8), ids!(midi_bind_clear8)),
-        (ids!(midi_bind_row9), ids!(midi_bind_name9), ids!(midi_bind_src9), ids!(midi_bind_readbox9), ids!(midi_bind_read9), ids!(midi_bind_sensbox9), ids!(midi_bind_sens9), ids!(midi_bind_clear9)),
-        (ids!(midi_bind_row10), ids!(midi_bind_name10), ids!(midi_bind_src10), ids!(midi_bind_readbox10), ids!(midi_bind_read10), ids!(midi_bind_sensbox10), ids!(midi_bind_sens10), ids!(midi_bind_clear10)),
-        (ids!(midi_bind_row11), ids!(midi_bind_name11), ids!(midi_bind_src11), ids!(midi_bind_readbox11), ids!(midi_bind_read11), ids!(midi_bind_sensbox11), ids!(midi_bind_sens11), ids!(midi_bind_clear11)),
-        (ids!(midi_bind_row12), ids!(midi_bind_name12), ids!(midi_bind_src12), ids!(midi_bind_readbox12), ids!(midi_bind_read12), ids!(midi_bind_sensbox12), ids!(midi_bind_sens12), ids!(midi_bind_clear12)),
-        (ids!(midi_bind_row13), ids!(midi_bind_name13), ids!(midi_bind_src13), ids!(midi_bind_readbox13), ids!(midi_bind_read13), ids!(midi_bind_sensbox13), ids!(midi_bind_sens13), ids!(midi_bind_clear13)),
-        (ids!(midi_bind_row14), ids!(midi_bind_name14), ids!(midi_bind_src14), ids!(midi_bind_readbox14), ids!(midi_bind_read14), ids!(midi_bind_sensbox14), ids!(midi_bind_sens14), ids!(midi_bind_clear14)),
-        (ids!(midi_bind_row15), ids!(midi_bind_name15), ids!(midi_bind_src15), ids!(midi_bind_readbox15), ids!(midi_bind_read15), ids!(midi_bind_sensbox15), ids!(midi_bind_sens15), ids!(midi_bind_clear15)),
-        (ids!(midi_bind_row16), ids!(midi_bind_name16), ids!(midi_bind_src16), ids!(midi_bind_readbox16), ids!(midi_bind_read16), ids!(midi_bind_sensbox16), ids!(midi_bind_sens16), ids!(midi_bind_clear16)),
-        (ids!(midi_bind_row17), ids!(midi_bind_name17), ids!(midi_bind_src17), ids!(midi_bind_readbox17), ids!(midi_bind_read17), ids!(midi_bind_sensbox17), ids!(midi_bind_sens17), ids!(midi_bind_clear17)),
-        (ids!(midi_bind_row18), ids!(midi_bind_name18), ids!(midi_bind_src18), ids!(midi_bind_readbox18), ids!(midi_bind_read18), ids!(midi_bind_sensbox18), ids!(midi_bind_sens18), ids!(midi_bind_clear18)),
-        (ids!(midi_bind_row19), ids!(midi_bind_name19), ids!(midi_bind_src19), ids!(midi_bind_readbox19), ids!(midi_bind_read19), ids!(midi_bind_sensbox19), ids!(midi_bind_sens19), ids!(midi_bind_clear19)),
-        (ids!(midi_bind_row20), ids!(midi_bind_name20), ids!(midi_bind_src20), ids!(midi_bind_readbox20), ids!(midi_bind_read20), ids!(midi_bind_sensbox20), ids!(midi_bind_sens20), ids!(midi_bind_clear20)),
-        (ids!(midi_bind_row21), ids!(midi_bind_name21), ids!(midi_bind_src21), ids!(midi_bind_readbox21), ids!(midi_bind_read21), ids!(midi_bind_sensbox21), ids!(midi_bind_sens21), ids!(midi_bind_clear21)),
-        (ids!(midi_bind_row22), ids!(midi_bind_name22), ids!(midi_bind_src22), ids!(midi_bind_readbox22), ids!(midi_bind_read22), ids!(midi_bind_sensbox22), ids!(midi_bind_sens22), ids!(midi_bind_clear22)),
+        &'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId],
+        &'static [LiveId]); 23] = [
+        (ids!(midi_bind_row0), ids!(midi_bind_name0), ids!(midi_bind_src0), ids!(midi_bind_readbox0), ids!(midi_bind_read0),
+            ids!(midi_bind_sensbox0), ids!(midi_bind_sens0), ids!(midi_bind_pressbox0), ids!(midi_bind_press0), ids!(midi_bind_clear0)),
+        (ids!(midi_bind_row1), ids!(midi_bind_name1), ids!(midi_bind_src1), ids!(midi_bind_readbox1), ids!(midi_bind_read1),
+            ids!(midi_bind_sensbox1), ids!(midi_bind_sens1), ids!(midi_bind_pressbox1), ids!(midi_bind_press1), ids!(midi_bind_clear1)),
+        (ids!(midi_bind_row2), ids!(midi_bind_name2), ids!(midi_bind_src2), ids!(midi_bind_readbox2), ids!(midi_bind_read2),
+            ids!(midi_bind_sensbox2), ids!(midi_bind_sens2), ids!(midi_bind_pressbox2), ids!(midi_bind_press2), ids!(midi_bind_clear2)),
+        (ids!(midi_bind_row3), ids!(midi_bind_name3), ids!(midi_bind_src3), ids!(midi_bind_readbox3), ids!(midi_bind_read3),
+            ids!(midi_bind_sensbox3), ids!(midi_bind_sens3), ids!(midi_bind_pressbox3), ids!(midi_bind_press3), ids!(midi_bind_clear3)),
+        (ids!(midi_bind_row4), ids!(midi_bind_name4), ids!(midi_bind_src4), ids!(midi_bind_readbox4), ids!(midi_bind_read4),
+            ids!(midi_bind_sensbox4), ids!(midi_bind_sens4), ids!(midi_bind_pressbox4), ids!(midi_bind_press4), ids!(midi_bind_clear4)),
+        (ids!(midi_bind_row5), ids!(midi_bind_name5), ids!(midi_bind_src5), ids!(midi_bind_readbox5), ids!(midi_bind_read5),
+            ids!(midi_bind_sensbox5), ids!(midi_bind_sens5), ids!(midi_bind_pressbox5), ids!(midi_bind_press5), ids!(midi_bind_clear5)),
+        (ids!(midi_bind_row6), ids!(midi_bind_name6), ids!(midi_bind_src6), ids!(midi_bind_readbox6), ids!(midi_bind_read6),
+            ids!(midi_bind_sensbox6), ids!(midi_bind_sens6), ids!(midi_bind_pressbox6), ids!(midi_bind_press6), ids!(midi_bind_clear6)),
+        (ids!(midi_bind_row7), ids!(midi_bind_name7), ids!(midi_bind_src7), ids!(midi_bind_readbox7), ids!(midi_bind_read7),
+            ids!(midi_bind_sensbox7), ids!(midi_bind_sens7), ids!(midi_bind_pressbox7), ids!(midi_bind_press7), ids!(midi_bind_clear7)),
+        (ids!(midi_bind_row8), ids!(midi_bind_name8), ids!(midi_bind_src8), ids!(midi_bind_readbox8), ids!(midi_bind_read8),
+            ids!(midi_bind_sensbox8), ids!(midi_bind_sens8), ids!(midi_bind_pressbox8), ids!(midi_bind_press8), ids!(midi_bind_clear8)),
+        (ids!(midi_bind_row9), ids!(midi_bind_name9), ids!(midi_bind_src9), ids!(midi_bind_readbox9), ids!(midi_bind_read9),
+            ids!(midi_bind_sensbox9), ids!(midi_bind_sens9), ids!(midi_bind_pressbox9), ids!(midi_bind_press9), ids!(midi_bind_clear9)),
+        (ids!(midi_bind_row10), ids!(midi_bind_name10), ids!(midi_bind_src10), ids!(midi_bind_readbox10), ids!(midi_bind_read10),
+            ids!(midi_bind_sensbox10), ids!(midi_bind_sens10), ids!(midi_bind_pressbox10), ids!(midi_bind_press10), ids!(midi_bind_clear10)),
+        (ids!(midi_bind_row11), ids!(midi_bind_name11), ids!(midi_bind_src11), ids!(midi_bind_readbox11), ids!(midi_bind_read11),
+            ids!(midi_bind_sensbox11), ids!(midi_bind_sens11), ids!(midi_bind_pressbox11), ids!(midi_bind_press11), ids!(midi_bind_clear11)),
+        (ids!(midi_bind_row12), ids!(midi_bind_name12), ids!(midi_bind_src12), ids!(midi_bind_readbox12), ids!(midi_bind_read12),
+            ids!(midi_bind_sensbox12), ids!(midi_bind_sens12), ids!(midi_bind_pressbox12), ids!(midi_bind_press12), ids!(midi_bind_clear12)),
+        (ids!(midi_bind_row13), ids!(midi_bind_name13), ids!(midi_bind_src13), ids!(midi_bind_readbox13), ids!(midi_bind_read13),
+            ids!(midi_bind_sensbox13), ids!(midi_bind_sens13), ids!(midi_bind_pressbox13), ids!(midi_bind_press13), ids!(midi_bind_clear13)),
+        (ids!(midi_bind_row14), ids!(midi_bind_name14), ids!(midi_bind_src14), ids!(midi_bind_readbox14), ids!(midi_bind_read14),
+            ids!(midi_bind_sensbox14), ids!(midi_bind_sens14), ids!(midi_bind_pressbox14), ids!(midi_bind_press14), ids!(midi_bind_clear14)),
+        (ids!(midi_bind_row15), ids!(midi_bind_name15), ids!(midi_bind_src15), ids!(midi_bind_readbox15), ids!(midi_bind_read15),
+            ids!(midi_bind_sensbox15), ids!(midi_bind_sens15), ids!(midi_bind_pressbox15), ids!(midi_bind_press15), ids!(midi_bind_clear15)),
+        (ids!(midi_bind_row16), ids!(midi_bind_name16), ids!(midi_bind_src16), ids!(midi_bind_readbox16), ids!(midi_bind_read16),
+            ids!(midi_bind_sensbox16), ids!(midi_bind_sens16), ids!(midi_bind_pressbox16), ids!(midi_bind_press16), ids!(midi_bind_clear16)),
+        (ids!(midi_bind_row17), ids!(midi_bind_name17), ids!(midi_bind_src17), ids!(midi_bind_readbox17), ids!(midi_bind_read17),
+            ids!(midi_bind_sensbox17), ids!(midi_bind_sens17), ids!(midi_bind_pressbox17), ids!(midi_bind_press17), ids!(midi_bind_clear17)),
+        (ids!(midi_bind_row18), ids!(midi_bind_name18), ids!(midi_bind_src18), ids!(midi_bind_readbox18), ids!(midi_bind_read18),
+            ids!(midi_bind_sensbox18), ids!(midi_bind_sens18), ids!(midi_bind_pressbox18), ids!(midi_bind_press18), ids!(midi_bind_clear18)),
+        (ids!(midi_bind_row19), ids!(midi_bind_name19), ids!(midi_bind_src19), ids!(midi_bind_readbox19), ids!(midi_bind_read19),
+            ids!(midi_bind_sensbox19), ids!(midi_bind_sens19), ids!(midi_bind_pressbox19), ids!(midi_bind_press19), ids!(midi_bind_clear19)),
+        (ids!(midi_bind_row20), ids!(midi_bind_name20), ids!(midi_bind_src20), ids!(midi_bind_readbox20), ids!(midi_bind_read20),
+            ids!(midi_bind_sensbox20), ids!(midi_bind_sens20), ids!(midi_bind_pressbox20), ids!(midi_bind_press20), ids!(midi_bind_clear20)),
+        (ids!(midi_bind_row21), ids!(midi_bind_name21), ids!(midi_bind_src21), ids!(midi_bind_readbox21), ids!(midi_bind_read21),
+            ids!(midi_bind_sensbox21), ids!(midi_bind_sens21), ids!(midi_bind_pressbox21), ids!(midi_bind_press21), ids!(midi_bind_clear21)),
+        (ids!(midi_bind_row22), ids!(midi_bind_name22), ids!(midi_bind_src22), ids!(midi_bind_readbox22), ids!(midi_bind_read22),
+            ids!(midi_bind_sensbox22), ids!(midi_bind_sens22), ids!(midi_bind_pressbox22), ids!(midi_bind_press22), ids!(midi_bind_clear22)),
     ];
 
     /// Paint the MIDI page from the port list, the switches and the learn
@@ -11810,7 +11860,7 @@ impl App {
         // the source, and for a knob how it reads its number, with the
         // sensitivity beside it while that reading is a turn.
         let mut any = false;
-        for (slot, (view, name, src, readbox, read, sensbox, sens, _clear)) in
+        for (slot, (view, name, src, readbox, read, sensbox, sens, pressbox, press, _clear)) in
             Self::MIDI_BIND_ROWS.iter().enumerate()
         {
             let (_, control, kind) = LEARNABLES[slot];
@@ -11824,13 +11874,24 @@ impl App {
             self.ui.label(cx, src).set_text(cx, &format!("ch{channel} cc{cc}"));
             let knob = !matches!(kind, Learnable::Button(_));
             self.ui.widget(cx, readbox).set_visible(cx, knob);
-            self.ui.widget(cx, sensbox).set_visible(cx, knob && record.transform.is_relative());
+            // The sensitivity applies only to a turn, but its box stays: a
+            // blank in its place would let the name column grow and push
+            // the row's cells out of line with the header's.
+            self.ui.widget(cx, sensbox).set_visible(cx, knob);
             if knob {
                 let index = Transform::ALL.iter().position(|t| *t == record.transform).unwrap_or(0);
                 self.ui.drop_down(cx, read).set_selected_item(cx, index);
                 self.ui
                     .drop_down(cx, sens)
                     .set_selected_item(cx, crate::midi_binding::sens_rung(record.sensitivity));
+            }
+            // A button's row shows what a press does in the reading's
+            // place: the binding's own, or the button's until it says.
+            self.ui.widget(cx, pressbox).set_visible(cx, !knob);
+            if let Learnable::Button(own) = kind {
+                let behaviour = record.press.unwrap_or(own);
+                let index = Behaviour::ALL.iter().position(|b| *b == behaviour).unwrap_or(0);
+                self.ui.drop_down(cx, press).set_selected_item(cx, index);
             }
         }
         self.ui.widget(cx, ids!(midi_bind_note)).set_visible(cx, !any);
@@ -11900,8 +11961,17 @@ impl App {
             self.save_midi_settings();
             return;
         }
-        for (slot, (_, _, _, _, read, _, sens, clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
+        for (slot, (_, _, _, _, read, _, sens, _, press, clear)) in
+            Self::MIDI_BIND_ROWS.iter().enumerate()
+        {
             let control = LEARNABLES[slot].1;
+            if let Some(index) = self.ui.drop_down(cx, press).selected(actions) {
+                if let Some(behaviour) = Behaviour::ALL.get(index) {
+                    self.midi_learn.set_press(control, Some(*behaviour));
+                    self.save_midi_map();
+                }
+                return;
+            }
             if self.ui.button(cx, clear).clicked(actions) {
                 // The same path the alt-click clear takes.
                 self.midi_learn.clear(control);
@@ -11951,12 +12021,22 @@ impl App {
         fader_takes_over(previous, destination, incoming, FADER_NEAR)
     }
 
-    /// Rising-edge detector for learned BUTTON controls (pads repeat CCs;
-    /// a press is the 0→1 crossing only). See [`learned_press_begins`] for
-    /// the rule; this only carries the remembered level.
-    fn midi_edge(&mut self, control: &str, source: (u8, u8), v: f32) -> bool {
-        let prev = self.midi_gates.insert(control.to_string(), (source, v >= 0.5));
-        learned_press_begins(prev, source, v)
+    /// What a message on a learned BUTTON does to its target: the binding's
+    /// own press behaviour, or the button's when it has not said. The rule
+    /// is `midi_binding::press`; this only carries the gate and the clock,
+    /// which is the drain's, so the tap-or-hold window has the pump's
+    /// fifty-millisecond resolution.
+    fn learned_press(&mut self, control: &str, source: (u8, u8), v: f32, current: bool) -> Option<bool> {
+        let own = LEARNABLES
+            .iter()
+            .find(|(_, name, _)| *name == control)
+            .and_then(|(_, _, kind)| match kind {
+                Learnable::Button(behaviour) => Some(*behaviour),
+                _ => None,
+            })?;
+        let behaviour = self.midi_learn.record(control).and_then(|b| b.press).unwrap_or(own);
+        let gate = self.midi_gates.entry(control.to_string()).or_insert(None);
+        crate::midi_binding::press(behaviour, gate, source, v, current, now_ms())
     }
 
     /// Where a learned control is now, in its own 0..1 terms, for a turn
@@ -12022,29 +12102,35 @@ impl App {
                 self.set_fadeout(cx, v);
             }
             "autofade" => {
-                // A pad press = one click of the AUTOFADE latch.
-                if self.midi_edge(control, source, v) {
-                    self.fx_slots.click_autofade = !self.fx_slots.click_autofade;
+                // A press does what the binding says to the AUTOFADE latch;
+                // its own press is a toggle, one click per press.
+                let current = self.fx_slots.click_autofade;
+                if let Some(on) = self.learned_press(control, source, v, current) {
+                    self.fx_slots.click_autofade = on;
                     self.save_fx_slots();
                     self.sync_autofade_ui(cx);
                 }
             }
             "deck_a_play" | "deck_b_play" => {
                 let slot = if control == "deck_a_play" { SlotId::A } else { SlotId::B };
-                // Empty-slot law holds for hardware too.
-                if self.midi_edge(control, source, v)
-                    && self.slot_media[slot.index()] != SlotMedia::Empty
-                {
-                    let playing = self.slot_is_playing(cx, slot);
-                    self.set_slot_paused(cx, slot, playing);
-                    self.sync_slot_controls_ui(cx);
+                let playing = self.slot_is_playing(cx, slot);
+                // The gate is fed whatever the slot holds; the empty-slot
+                // law holds for hardware too.
+                if let Some(on) = self.learned_press(control, source, v, playing) {
+                    if self.slot_media[slot.index()] != SlotMedia::Empty {
+                        self.set_slot_paused(cx, slot, !on);
+                        self.sync_slot_controls_ui(cx);
+                    }
                 }
             }
             "deck_a_rev" | "deck_b_rev" => {
-                // TRUE momentary on a pad: reversed exactly while held.
+                // Its own press follows the hand: reversed exactly while
+                // held. A binding may say otherwise.
                 let slot = if control == "deck_a_rev" { SlotId::A } else { SlotId::B };
                 let i = slot.index();
-                let flip = v >= 0.5;
+                let Some(flip) = self.learned_press(control, source, v, self.slot_flip[i]) else {
+                    return;
+                };
                 if self.slot_media[i] != SlotMedia::Empty && self.slot_flip[i] != flip {
                     self.slot_flip[i] = flip;
                     let mode = self.slot_play_mode(i);
