@@ -1121,6 +1121,23 @@ impl ChainState {
         }
         params
     }
+
+    /// Where the bands meet, written as `fx.eq.low_hz` / `fx.eq.high_hz`
+    /// -- once, not per chain: the split is the desk's EQ character and
+    /// the same on every chain, so whichever chain writes it, writes it
+    /// for all.
+    pub fn write_crossovers(&self, store: &mut Settings) {
+        store.set_f64("fx.eq.low_hz", self.eq_low_hz as f64);
+        store.set_f64("fx.eq.high_hz", self.eq_high_hz as f64);
+    }
+
+    /// Read them back; a file without them leaves the defaults. Returns
+    /// what the engine has to be told.
+    pub fn read_crossovers(&mut self, store: &Settings) -> Vec<EffectParam> {
+        let low = store.f64("fx.eq.low_hz", crate::music_dsp::EQ_LOW_HZ as f64) as f32;
+        let high = store.f64("fx.eq.high_hz", crate::music_dsp::EQ_HIGH_HZ as f64) as f32;
+        self.set_crossovers(low, high)
+    }
 }
 
 #[cfg(test)]
@@ -1173,6 +1190,25 @@ mod levels_file_tests {
             assert_eq!(chain.flanger_level_mode, fresh.flanger_level_mode, "{tag}");
             assert!((chain.flanger_mix - fresh.flanger_mix).abs() < 1e-6, "{tag}");
         }
+    }
+
+    /// The split round-trips, and a file that never heard of it -- every
+    /// file written before it was a setting -- leaves the defaults.
+    #[test]
+    fn write_then_read_crossovers_is_the_same_split() {
+        let mut before = ChainState::default();
+        before.set_crossovers(320.0, 3_000.0);
+        let mut store = Settings::new();
+        before.write_crossovers(&mut store);
+        let mut after = ChainState::default();
+        let params = after.read_crossovers(&Settings::from_text(&store.to_text()));
+        assert!((after.eq_low_hz - 320.0).abs() < 1e-3);
+        assert!((after.eq_high_hz - 3_000.0).abs() < 1e-3);
+        assert_eq!(params.len(), 1, "the engine is told, in one command");
+        let mut untouched = ChainState::default();
+        untouched.read_crossovers(&Settings::new());
+        assert_eq!(untouched.eq_low_hz, crate::music_dsp::EQ_LOW_HZ);
+        assert_eq!(untouched.eq_high_hz, crate::music_dsp::EQ_HIGH_HZ);
     }
 
     /// Every word the file uses names a slot the chain has.

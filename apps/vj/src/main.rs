@@ -3086,31 +3086,14 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            // The EQ split -- where the three bands
+                                            // meet -- is the equalizer's own setting
+                                            // and lives with the equalizer, in the DJ
+                                            // tab's prep dialog.
                                             FxRoute{
                                                 PanelLabel{text: "fx on"}
                                                 View{width: Fill height: 1}
                                                 sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
-                                            }
-                                            PanelLabel{width: 62 text: "EQ SPLIT"}
-                                            sfx_eq_low_hz := Slider{
-                                                width: 170
-                                                text: "low | mid"
-                                                min: 80.0
-                                                max: 800.0
-                                                default: 250.0
-                                                taper: Log
-                                                unit: "Hz"
-                                                precision: 0
-                                            }
-                                            sfx_eq_high_hz := Slider{
-                                                width: 170
-                                                text: "mid | high"
-                                                min: 1000.0
-                                                max: 8000.0
-                                                default: 2500.0
-                                                taper: Log
-                                                unit: "Hz"
-                                                precision: 0
                                             }
                                         }
                                         View{
@@ -23050,6 +23033,8 @@ p2 {}
         for target in ChainTarget::ALL {
             self.chain_state(target).write_levels(&mut store, target.tag());
         }
+        // The EQ split is one setting for every chain, written once.
+        self.rack_chain().write_crossovers(&mut store);
         let _ = crate::durable::write_file(&path, store.to_text());
     }
 
@@ -23067,6 +23052,8 @@ p2 {}
                 self.mixer.set_chain_effect(target, param);
             }
         }
+        let split = &store;
+        self.edit_rack(|chain| chain.read_crossovers(split));
         // The rack repaints here rather than on the next sync: at boot it
         // is painted before its file is read.
         self.sync_sfx_fx_ui(cx);
@@ -34020,6 +34007,9 @@ impl MatchEvent for App {
                 chain.set_crossovers(low, high)
             });
             self.sync_sfx_fx_ui(cx);
+            // A setting, not a performance control: it lives in the prep
+            // dialog and survives the app.
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_echo_rung)).widget_uid();

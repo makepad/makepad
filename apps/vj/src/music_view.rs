@@ -4275,6 +4275,50 @@ script_mod! {
                         reset_stems := CheckBox{width: 86 text: "lanes"}
                         MusicLabel{width: Fill text: ""}
                     }
+                    // Where the equalizer's three bands meet. The equalizer's
+                    // own setting, so it lives here with the equalizer rather
+                    // than on the effects rack -- and one setting for every
+                    // chain, because the split is the desk's EQ character,
+                    // not a record's and not a channel's. Set once and left,
+                    // like the row above it.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "EQ SPLIT"}
+                        sfx_eq_low_hz := Slider{
+                            width: 170
+                            text: "low | mid"
+                            min: 80.0
+                            max: 800.0
+                            default: 250.0
+                            taper: Log
+                            unit: "Hz"
+                            precision: 0
+                        }
+                        MusicLabel{width: Fill text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: ""}
+                        sfx_eq_high_hz := Slider{
+                            width: 170
+                            text: "mid | high"
+                            min: 1000.0
+                            max: 8000.0
+                            default: 2500.0
+                            taper: Log
+                            unit: "Hz"
+                            precision: 0
+                        }
+                        MusicLabel{width: Fill text: "every chain, and it survives a restart"}
+                    }
                     View{
                         width: Fill
                         height: Fit
