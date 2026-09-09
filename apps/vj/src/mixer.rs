@@ -4311,6 +4311,12 @@ impl Mixer {
         });
     }
 
+    /// Whether a rate change would rebuild the rack WITH a drum bank.
+    #[cfg(test)]
+    pub fn drum_bank_remembered(&self) -> bool {
+        self.ui.with(|ui| ui.drum_bank.is_some())
+    }
+
     pub fn set_synth_clock(&self, clock: SynthClock) {
         self.run_cmd(MixCmd::SetSynthClock(clock));
     }
@@ -6596,6 +6602,24 @@ mod tests {
         if latency > 0 {
             render(mixer, rate, latency);
         }
+    }
+
+    /// The handle's setter is what remembers the bank; `ensure_synth_rate`
+    /// rebuilds the rack from that memory. The app used to hand the bank
+    /// over as a raw command, which reached the audio thread and left the
+    /// memory empty -- so any device not at 48 kHz was rebuilt drumless.
+    /// Skips, like its neighbours, when the local corpus is absent.
+    #[test]
+    fn the_bank_the_mixer_was_handed_is_the_bank_a_rate_change_rebuilds_with() {
+        let Some(bank) = local_drum_bank() else { return };
+        let mixer = TestMixer::new();
+        // The door the app used to take: the audio thread gets the bank,
+        // the memory does not.
+        mixer.run_cmd(MixCmd::SetDrumBank(bank.clone()));
+        assert!(!mixer.drum_bank_remembered(), "a raw command is not a memory");
+        // The door it takes now.
+        mixer.set_drum_bank(bank);
+        assert!(mixer.drum_bank_remembered());
     }
 
     #[test]

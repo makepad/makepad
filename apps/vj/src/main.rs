@@ -13893,7 +13893,13 @@ p2 {}
             self.drum_bank_rx = None;
             match completed {
                 Ok((bank, summary)) => {
-                    self.mixer.run_cmd(MixCmd::SetDrumBank(bank));
+                    // Through the handle's own setter, not a raw command:
+                    // the setter is what REMEMBERS the bank, and the rack is
+                    // rebuilt from that memory whenever the device rate
+                    // changes. A raw command reached the audio thread and
+                    // left the memory empty, so any device not at 48 kHz
+                    // got a rack with no drums in it.
+                    self.mixer.set_drum_bank(bank);
                     self.drum_bank_loaded = true;
                     log!("drum kit: {summary}");
                     if let Some(key) = self.loop_score_presented {
