@@ -3134,10 +3134,20 @@ mod tests {
     #[test]
     fn test_observe_and_find_single_node() {
         let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
         let uid = WidgetUid::new();
         let w = make_widget(uid, vec![]);
-        tree.observe_node(uid, name("root"), w.clone(), None);
-        let found = tree.find_within(uid, &[name("root")]);
+        let parent = make_widget(parent_uid, vec![(name("root"), w.clone())]);
+        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
+        tree.observe_node(uid, name("root"), w.clone(), Some(parent_uid));
+
+        // find_within searches WITHIN a subtree, so a node never answers to
+        // its own name from inside itself - the walk skips the root it was
+        // handed. Asking the node for itself finds nothing.
+        assert!(tree.find_within(uid, &[name("root")]).is_empty());
+
+        // Asking its parent does.
+        let found = tree.find_within(parent_uid, &[name("root")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
     }
@@ -3262,22 +3272,18 @@ mod tests {
         tree.observe_node(uid, name("node"), w.clone(), None);
         stabilize_graph_cache(&tree);
 
-        // Re-observe same node with different name (property change)
+        // Re-observe the same node under a different name: a property
+        // change, not a structural one.
         tree.observe_node(uid, name("renamed"), w.clone(), None);
 
-        {
-            let inner = tree.inner.borrow();
-            // structure_dirty should be false (just a name patch)
-            assert!(!inner.structure_dirty);
-        }
-
-        let found = tree.find_within(uid, &[name("renamed")]);
-        assert!(!found.is_empty());
-        assert_eq!(found.widget_uid(), uid);
-
-        // Old name should not find it
-        let old = tree.find_within(uid, &[name("node")]);
-        assert!(old.is_empty());
+        let inner = tree.inner.borrow();
+        assert!(!inner.structure_dirty);
+        // Read the name off the graph rather than through find_within: the
+        // node has no parent to be searched from, and find_within skips the
+        // root it is handed, so there is no subtree in which this node could
+        // answer to either name. What is under test here is the patch.
+        let node = inner.graph.get(&uid).expect("node still in the graph");
+        assert_eq!(node.name, name("renamed"));
     }
 
     // ------------------------------------------------------------------
