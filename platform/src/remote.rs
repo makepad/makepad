@@ -558,7 +558,7 @@ mod imp {
     /// Only macOS downshifts, so this is unused on the other backends — they
     /// poll the control channel at a fixed rate anyway.
     #[allow(dead_code)]
-    #[allow(dead_code)] // only the macos paint clock asks
+    #[allow(dead_code)]// only the macos paint clock asks
     pub(crate) fn needs_ticks() -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
@@ -2237,6 +2237,22 @@ mod imp {
             Reply::Text(text) => text,
             _ => String::new(),
         };
+        Out::Json(200, log_json(p, &pool))
+    }
+
+    // The recorder exercises the same /log serialization without binding a
+    // socket or starting an app. Only this headless process's ring is enabled.
+    #[cfg(headless)]
+    pub fn headless_start_log_capture() {
+        ACTIVE.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(headless)]
+    pub fn headless_log_snapshot() -> String {
+        log_json(&Params(vec![("since".into(), "0".into())]), "")
+    }
+
+    fn log_json(p: &Params, pool: &str) -> String {
         let ring = log_ring().lock().unwrap();
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
@@ -2253,7 +2269,7 @@ mod imp {
         let mut out = format!(
             "{{\"n\":{},\"pool\":{},\"l\":[",
             ring.next_seq,
-            json_str(&pool)
+            json_str(pool)
         );
         for (index, (_, line)) in selected.iter().enumerate() {
             if index > 0 {
@@ -2262,7 +2278,7 @@ mod imp {
             out.push_str(&json_str(line));
         }
         out.push_str("]}");
-        Out::Json(200, out)
+        out
     }
 
     struct Grabbed {

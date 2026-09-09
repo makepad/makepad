@@ -362,7 +362,7 @@ script_mod! {
         inspector_tabs := DockTabs{tabs: [@inspector_tab, @history_tab] selected: 0 closable: false}
         inspector_tab := DockTab{name: "Inspector" template: @PermanentTab kind: @InspectorTab}
         history_tab := DockTab{name:"History" template:@PermanentTab kind:@HistoryTab}
-        ArchitectureTab := AtlasView{}
+        ArchitectureTab := AtlasView{loading_title: "Loading workspace"}
         InspectorTab := AtlasInspector{}
         HistoryTab := AtlasHistoryList{}
     }
@@ -398,7 +398,7 @@ script_mod! {
         root := DockTabs{tabs: [] selected: 0 closable: false hide_tab_bar: true}
         ArchitectureUtilityTab := View{
             width: Fill height: Fill flow: Right
-            utility_atlas := AtlasView{secondary: true}
+            utility_atlas := AtlasView{secondary: true loading_title: "Loading workspace"}
             Dock{
                 width: 304 height: Fill
                 tab_bar: StudioTabBar{}

@@ -97,6 +97,14 @@ where
             .unwrap_or(false)
     }
 
+    /// Validate a handle using dense UI-owned metadata, without touching the
+    /// potentially large resource stored in each pool slot.
+    pub fn is_live_generation(&self, id: usize, generation: u64) -> bool {
+        let state = self.free.0.borrow();
+        state.generations.get(id) == Some(&generation)
+            && !state.is_free.get(id).copied().unwrap_or(true)
+    }
+
     pub fn live_count(&self) -> usize {
         self.slot_count().saturating_sub(self.free_count())
     }
@@ -136,6 +144,16 @@ where
             item: item.unwrap_or_else(|| T::default()),
         });
         let mut state = self.free.0.borrow_mut();
+        // Returning a UI-owned handle must not allocate. Both queues are
+        // coalesced per slot, so their maximum occupancy is the slot count.
+        // Grow geometrically with cold slot construction, before any drop.
+        let slots = id + 1;
+        let free_len = state.free.len();
+        state.free.reserve(slots.saturating_sub(free_len));
+        let pending_len = state.retirement_pending.len();
+        state
+            .retirement_pending
+            .reserve(slots.saturating_sub(pending_len));
         state.is_free.push(false);
         state.generations.push(0);
         state.retirement_queued.push(false);

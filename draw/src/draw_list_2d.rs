@@ -38,6 +38,28 @@ impl DrawListExt for DrawList {
             }*/
             let uniforms_gen = cx.next_uniform_gen();
             cx.draw_lists[draw_list_id].set_uniform_view_transform(mat, uniforms_gen);
+            if cx.draw_lists[draw_list_id]
+                .draw_items
+                .child_inventory()
+                .is_some()
+                && cx.draw_lists[draw_list_id].draw_item_reorder.is_none()
+            {
+                let len = cx.draw_lists[draw_list_id]
+                    .draw_items
+                    .child_inventory()
+                    .unwrap()
+                    .len();
+                for index in 0..len {
+                    let child = cx.draw_lists[draw_list_id]
+                        .draw_items
+                        .child_inventory()
+                        .unwrap()[index];
+                    if !cx.draw_lists.is_id_freed(child) {
+                        set_view_transform_recur(child, cx, mat);
+                    }
+                }
+                return;
+            }
             let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             for order_index in 0..draw_order_len {
                 let Some(draw_item_id) =

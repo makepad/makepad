@@ -104,7 +104,7 @@ impl Target {
         unsafe {
             let mut info: DlInfo = std::mem::zeroed();
             if dladdr(pc as *const c_void, &mut info) != 0 && !info.symbol.is_null() {
-                format!("{}+0x{:x}", CStr::from_ptr(info.symbol).to_string_lossy(), pc.saturating_sub(info.address as usize))
+                format!("{}+0x{:x}", super::demangle::demangle(&CStr::from_ptr(info.symbol).to_string_lossy()), pc.saturating_sub(info.address as usize))
             } else { format!("0x{pc:x}") }
         }
     }

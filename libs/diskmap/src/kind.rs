@@ -240,7 +240,19 @@ pub fn set_scan_all(on: bool) {
 /// the user's home — a `Library` folder inside a project is a project's
 /// library and gets measured like anything else.
 pub fn skip_for_scan(path: &Path, home: &Path) -> bool {
-    !scan_all() && home_scan_exclusion(path, home)
+    tool_dir_exclusion(path) || (!scan_all() && home_scan_exclusion(path, home))
+}
+
+/// Tool state folders the size map never enters, at any depth and in both
+/// scan scopes (the user: "in the directory viz tool please ignore the
+/// .cargo/.claude/.grok directories"): registries, agent worktrees and
+/// session state, not the user's own files.
+pub const TOOL_SKIP: [&str; 3] = [".cargo", ".claude", ".grok"];
+
+pub fn tool_dir_exclusion(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| TOOL_SKIP.contains(&name))
 }
 
 pub fn home_scan_exclusion(path: &Path, home: &Path) -> bool {
@@ -259,15 +271,28 @@ pub fn home_scan_exclusion(path: &Path, home: &Path) -> bool {
 /// states, so nobody misreads a total.
 pub fn scan_exclusions() -> Option<String> {
     if scan_all() {
-        return Some("including system folders".to_string());
+        return Some("including system folders · never .cargo, .claude, .grok".to_string());
     }
-    Some("excluding Library and Trash".to_string())
+    Some("excluding Library and Trash · never .cargo, .claude, .grok".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn tool_state_folders_are_skipped_at_any_depth_in_both_scopes() {
+        let home = Path::new("/Users/me");
+        for on in [false, true] {
+            set_scan_all(on);
+            assert!(skip_for_scan(Path::new("/Users/me/.cargo"), home));
+            assert!(skip_for_scan(Path::new("/Users/me/makepad/.claude"), home));
+            assert!(skip_for_scan(Path::new("/Users/me/makepad/deep/er/.grok"), home));
+            assert!(!skip_for_scan(Path::new("/Users/me/makepad/cargo"), home));
+            assert!(!skip_for_scan(Path::new("/Users/me/makepad/src"), home));
+        }
+        set_scan_all(false);
+    }
     #[test]
     fn kind_for_matches_the_files_app_table() {
         assert_eq!(kind_for(Path::new("/a/b"), true), FileKind::Folder);
