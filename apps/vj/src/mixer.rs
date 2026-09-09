@@ -2386,7 +2386,7 @@ impl From<DeckId> for ChainTarget {
 /// own. They are all the same shape -- a deck, a slot, a number -- and
 /// seventy variants would be seventy places to forget when a slot gains a
 /// knob. Small and `Copy`, so the ring moves it by value.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EffectParam {
     /// The echo's delay as a beat fraction, or none to let it run free.
     Echo(Option<(u32, u32)>),

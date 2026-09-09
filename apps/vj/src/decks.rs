@@ -22,8 +22,10 @@
 //! [`DeckEngine::observe`], so every sync decision in the tests is exactly
 //! the decision the running app makes.
 
+use crate::chain_state::ChainState;
 use crate::loop_splat::{SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS};
 use crate::wave_analysis::{SoundSpan, TrackGrid};
+use crate::mixer::EffectParam;
 use makepad_asset_data::{AssetId, AssetRevisionId, BlobId, MediaType};
 use std::sync::Arc;
 
@@ -1301,203 +1303,11 @@ pub struct DeckState {
     /// channel strip like the filter beside it, so a swap carries it and
     /// a load leaves it, for the same reasons.
     pub resonance: usize,
-    /// Which echo rung is on; 0 is off, otherwise an index into
-    /// [`crate::music_dsp::ECHO_RUNGS`] plus one. Part of the channel
-    /// strip, like resonance beside it.
-    pub echo_rung: usize,
-    /// Whether the echo's repeats land on the other channel.
-    pub echo_pingpong: bool,
-    /// How much of an echo repeat feeds the next one, in
-    /// [`crate::music_dsp::ECHO_FEEDBACK_MAX`]'s range. Edited from the
-    /// SFX page rather than the deck header -- there is no room there
-    /// for a fourth knob -- so it is part of the channel strip like the
-    /// rung beside it: a swap carries it and a load leaves it.
-    pub echo_feedback: f32,
-    /// Whether the flanger is on. Same channel-strip treatment as the
-    /// echo: a swap carries it, a load leaves it.
-    pub flanger_on: bool,
-    /// The flanger LFO's sweep speed, in Hz.
-    pub flanger_rate: f32,
-    /// How far the flanger's sweep reaches from its centre delay, 0..1.
-    pub flanger_depth: f32,
-    /// How much of the flanger's delayed tap feeds back into its line.
-    pub flanger_feedback: f32,
-    /// Which rung of the sync ladder the flanger sweep runs on:
-    /// `LFO_SYNC_FREE` to follow `flanger_rate`'s Hz, or eighths of a
-    /// cycle per beat to follow the grid.
-    pub flanger_sync_units: u32,
-    /// Where in the cycle the flanger sweep starts when it engages, 0..1.
-    pub flanger_beat_offset: f32,
-    /// Whether the bitcrusher is on. Same channel-strip treatment as
-    /// the flanger beside it.
-    pub bitcrusher_on: bool,
-    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
-    pub bitcrusher_rate: f32,
-    /// The bitcrusher's quantizer bit depth.
-    pub bitcrusher_bits: f32,
-    /// Whether the tremolo is on. Same channel-strip treatment as the
-    /// bitcrusher beside it.
-    pub tremolo_on: bool,
-    /// The tremolo LFO's speed, in Hz.
-    pub tremolo_rate: f32,
-    /// The tremolo LFO's swing, 0..1.
-    pub tremolo_depth: f32,
-    /// Which rung of the sync ladder the tremolo runs on:
-    /// `LFO_SYNC_FREE` to follow `tremolo_rate`'s Hz, or eighths of a
-    /// cycle per beat to follow the grid.
-    pub tremolo_sync_units: u32,
-    /// Where in the cycle the tremolo starts when it engages, 0..1.
-    pub tremolo_beat_offset: f32,
-    /// Whether the distortion is on. Same channel-strip treatment as
-    /// the tremolo beside it.
-    pub distortion_on: bool,
-    /// The distortion's pre-gain into the soft clip.
-    pub distortion_drive: f32,
-    /// Whether the phaser is on. Same channel-strip treatment as the
-    /// distortion beside it.
-    pub phaser_on: bool,
-    /// The phaser LFO's sweep speed, in Hz.
-    pub phaser_rate: f32,
-    /// How much of the phaser's own output feeds back into its first
-    /// stage.
-    pub phaser_feedback: f32,
-    /// Which rung of the sync ladder the phaser sweep runs on:
-    /// `LFO_SYNC_FREE` to follow `phaser_rate`'s Hz, or eighths of a
-    /// cycle per beat to follow the grid.
-    pub phaser_sync_units: u32,
-    /// Where in the cycle the phaser sweep starts when it engages, 0..1.
-    pub phaser_beat_offset: f32,
-    /// Whether the autopan is on. Same channel-strip treatment as the
-    /// phaser beside it.
-    pub autopan_on: bool,
-    /// The autopan LFO's sweep speed, in Hz.
-    pub autopan_rate: f32,
-    /// Which rung of the sync ladder the autopan swing runs on:
-    /// `LFO_SYNC_FREE` to follow `autopan_rate`'s Hz, or eighths of a
-    /// cycle per beat to follow the grid.
-    pub autopan_sync_units: u32,
-    /// Where in the cycle the autopan swing starts when it engages, 0..1.
-    pub autopan_beat_offset: f32,
-    /// The echo's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub echo_mix: f32,
-    /// What the echo's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub echo_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the echo holds under on Ceiling.
-    pub echo_ceiling: f32,
-    /// The flanger's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub flanger_mix: f32,
-    /// What the flanger's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub flanger_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the flanger holds under on Ceiling.
-    pub flanger_ceiling: f32,
-    /// The bitcrusher's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub bitcrusher_mix: f32,
-    /// What the bitcrusher's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub bitcrusher_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the bitcrusher holds under on Ceiling.
-    pub bitcrusher_ceiling: f32,
-    /// The tremolo's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub tremolo_mix: f32,
-    /// What the tremolo's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub tremolo_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the tremolo holds under on Ceiling.
-    pub tremolo_ceiling: f32,
-    /// The distortion's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub distortion_mix: f32,
-    /// What the distortion's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub distortion_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the distortion holds under on Ceiling.
-    pub distortion_ceiling: f32,
-    /// The phaser's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub phaser_mix: f32,
-    /// What the phaser's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub phaser_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the phaser holds under on Ceiling.
-    pub phaser_ceiling: f32,
-    /// The autopan's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub autopan_mix: f32,
-    /// What the autopan's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub autopan_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the autopan holds under on Ceiling.
-    pub autopan_ceiling: f32,
-    /// The stereo width's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub stereo_width_mix: f32,
-    /// What the stereo width's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub stereo_width_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the stereo width holds under on Ceiling.
-    pub stereo_width_ceiling: f32,
-    /// The plate reverb's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub plate_reverb_mix: f32,
-    /// What the plate reverb's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub plate_reverb_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the plate reverb holds under on Ceiling.
-    pub plate_reverb_ceiling: f32,
-    /// The ladder filter's wet/dry mix, 0 = inaudible, 1 = all of it. The
-    /// effect's own on/off stays the engage; this is how much of it is
-    /// heard once it is on.
-    pub moog_ladder_mix: f32,
-    /// What the ladder filter's slot does about the level it returns: follow the
-    /// deck, leave it alone, match the input, or hold under a ceiling.
-    pub moog_ladder_level_mode: crate::music_dsp::LevelMode,
-    /// The amplitude the ladder filter holds under on Ceiling.
-    pub moog_ladder_ceiling: f32,
-    /// The policy every effect that has not been pinned follows.
-    pub level_default: crate::music_dsp::LevelMode,
-    /// Whether the compressor is on. Same channel-strip treatment as
-    /// the ladder beside it.
-    pub compressor_on: bool,
-    /// Where it starts working, in decibels below full scale.
-    pub compressor_threshold_db: f32,
-    /// How hard it works above that.
-    pub compressor_ratio: f32,
-    /// Where this deck's three EQ bands are split, in Hz.
-    pub eq_low_hz: f32,
-    pub eq_high_hz: f32,
-    /// Whether the stereo width is on. Same channel-strip treatment as
-    /// the autopan beside it.
-    pub stereo_width_on: bool,
-    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
-    /// original image, above 1 widens further.
-    pub stereo_width_amount: f32,
-    /// Whether the plate reverb is on. Same channel-strip treatment as
-    /// the stereo width beside it.
-    pub plate_reverb_on: bool,
-    /// How long the reverb tank's tail rings.
-    pub plate_reverb_size: f32,
-    /// Whether the Moog ladder is on. Same channel-strip treatment as
-    /// the plate reverb beside it.
-    pub moog_ladder_on: bool,
-    /// Where the ladder starts rolling off, in Hz.
-    pub moog_ladder_cutoff: f32,
-    /// How much of the last stage feeds back into the first.
-    pub moog_ladder_resonance: f32,
+    /// The effect rack: every slot's settings, as the operator left
+    /// them. Part of the channel strip like the resonance above it, so
+    /// a swap carries it and a load leaves it standing and sends it
+    /// again for the new record.
+    pub chain: ChainState,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1563,77 +1373,7 @@ impl Default for DeckState {
             eq_solo: [false; 3],
             filter: 0.5,
             resonance: 0,
-            echo_rung: 0,
-            echo_pingpong: false,
-            echo_feedback: crate::music_dsp::ECHO_FEEDBACK,
-            flanger_on: false,
-            flanger_rate: crate::music_dsp::FLANGER_RATE_DEFAULT,
-            flanger_depth: crate::music_dsp::FLANGER_DEPTH_DEFAULT,
-            flanger_feedback: crate::music_dsp::FLANGER_FEEDBACK_DEFAULT,
-            flanger_sync_units: crate::music_dsp::LFO_SYNC_FREE,
-            flanger_beat_offset: 0.0,
-            bitcrusher_on: false,
-            bitcrusher_rate: crate::music_dsp::BITCRUSHER_RATE_DEFAULT,
-            bitcrusher_bits: crate::music_dsp::BITCRUSHER_BITS_DEFAULT,
-            tremolo_on: false,
-            tremolo_rate: crate::music_dsp::TREMOLO_RATE_DEFAULT,
-            tremolo_depth: crate::music_dsp::TREMOLO_DEPTH_DEFAULT,
-            tremolo_sync_units: crate::music_dsp::LFO_SYNC_FREE,
-            tremolo_beat_offset: 0.0,
-            distortion_on: false,
-            distortion_drive: crate::music_dsp::DISTORTION_DRIVE_DEFAULT,
-            phaser_on: false,
-            phaser_rate: crate::music_dsp::PHASER_RATE_DEFAULT,
-            phaser_feedback: crate::music_dsp::PHASER_FEEDBACK_DEFAULT,
-            phaser_sync_units: crate::music_dsp::LFO_SYNC_FREE,
-            phaser_beat_offset: 0.0,
-            autopan_on: false,
-            autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
-            autopan_sync_units: crate::music_dsp::LFO_SYNC_FREE,
-            autopan_beat_offset: 0.0,
-            echo_mix: 1.0,
-            echo_level_mode: crate::music_dsp::LevelMode::Follow,
-            echo_ceiling: 1.0,
-            flanger_mix: 1.0,
-            flanger_level_mode: crate::music_dsp::LevelMode::Follow,
-            flanger_ceiling: 1.0,
-            bitcrusher_mix: 1.0,
-            bitcrusher_level_mode: crate::music_dsp::LevelMode::Follow,
-            bitcrusher_ceiling: 1.0,
-            tremolo_mix: 1.0,
-            tremolo_level_mode: crate::music_dsp::LevelMode::Follow,
-            tremolo_ceiling: 1.0,
-            distortion_mix: 1.0,
-            distortion_level_mode: crate::music_dsp::LevelMode::Follow,
-            distortion_ceiling: 1.0,
-            phaser_mix: 1.0,
-            phaser_level_mode: crate::music_dsp::LevelMode::Follow,
-            phaser_ceiling: 1.0,
-            autopan_mix: 1.0,
-            autopan_level_mode: crate::music_dsp::LevelMode::Follow,
-            autopan_ceiling: 1.0,
-            stereo_width_mix: 1.0,
-            stereo_width_level_mode: crate::music_dsp::LevelMode::Follow,
-            stereo_width_ceiling: 1.0,
-            plate_reverb_mix: 1.0,
-            plate_reverb_level_mode: crate::music_dsp::LevelMode::Follow,
-            plate_reverb_ceiling: 1.0,
-            moog_ladder_mix: 1.0,
-            moog_ladder_level_mode: crate::music_dsp::LevelMode::Follow,
-            moog_ladder_ceiling: 1.0,
-            level_default: crate::music_dsp::LevelMode::Off,
-            compressor_on: false,
-            compressor_threshold_db: crate::music_dsp::COMPRESSOR_THRESHOLD_DEFAULT_DB,
-            compressor_ratio: crate::music_dsp::COMPRESSOR_RATIO_DEFAULT,
-            eq_low_hz: crate::music_dsp::EQ_LOW_HZ,
-            eq_high_hz: crate::music_dsp::EQ_HIGH_HZ,
-            stereo_width_on: false,
-            stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
-            plate_reverb_on: false,
-            plate_reverb_size: crate::music_dsp::PLATE_REVERB_SIZE_DEFAULT,
-            moog_ladder_on: false,
-            moog_ladder_cutoff: crate::music_dsp::MOOG_LADDER_CUTOFF_DEFAULT,
-            moog_ladder_resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_DEFAULT,
+            chain: ChainState::default(),
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1651,15 +1391,6 @@ impl DeckState {
     pub fn resonance_lift(&self) -> f32 {
         let rungs = crate::music_dsp::DeckEq::RESONANCE_RUNGS;
         rungs[self.resonance.min(rungs.len() - 1)]
-    }
-
-    /// The fraction the mixer's echo is sent for this deck's rung, or
-    /// none for off.
-    pub fn echo_fraction(&self) -> Option<(u32, u32)> {
-        (self.echo_rung > 0)
-            .then(|| crate::music_dsp::ECHO_RUNGS.get(self.echo_rung - 1))
-            .flatten()
-            .copied()
     }
 
     pub fn effective_gain(&self, normalise: bool) -> f32 {
@@ -1951,105 +1682,8 @@ pub enum DeckCmd {
     SetFilter { deck: DeckId, position: f32 },
     /// How hard the sweep rings, as the lift the mixer applies.
     SetResonance { deck: DeckId, lift: f32 },
-    /// The echo's rung, or none for off.
-    SetEcho { deck: DeckId, fraction: Option<(u32, u32)> },
-    /// Whether the echo's repeats cross channels.
-    SetEchoPingpong { deck: DeckId, on: bool },
-    /// How much of a repeat feeds the next one.
-    SetEchoFeedback { deck: DeckId, feedback: f32 },
-    /// The flanger's on/off switch.
-    SetFlanger { deck: DeckId, on: bool },
-    /// The flanger LFO's sweep speed, in Hz.
-    SetFlangerRate { deck: DeckId, hz: f32 },
-    /// How far the flanger's sweep reaches from its centre delay.
-    SetFlangerDepth { deck: DeckId, depth: f32 },
-    /// How much of the flanger's delayed tap feeds back into its line.
-    SetFlangerFeedback { deck: DeckId, feedback: f32 },
-    SetFlangerSyncUnits { deck: DeckId, units: u32 },
-    SetFlangerBeatOffset { deck: DeckId, offset: f32 },
-    /// The bitcrusher's on/off switch.
-    SetBitcrusher { deck: DeckId, on: bool },
-    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
-    SetBitcrusherRate { deck: DeckId, hz: f32 },
-    /// The bitcrusher's quantizer bit depth.
-    SetBitcrusherBits { deck: DeckId, bits: f32 },
-    /// The tremolo's on/off switch.
-    SetTremolo { deck: DeckId, on: bool },
-    /// The tremolo LFO's speed, in Hz.
-    SetTremoloRate { deck: DeckId, hz: f32 },
-    /// The tremolo LFO's swing.
-    SetTremoloDepth { deck: DeckId, depth: f32 },
-    SetTremoloSyncUnits { deck: DeckId, units: u32 },
-    SetTremoloBeatOffset { deck: DeckId, offset: f32 },
-    /// The distortion's on/off switch.
-    SetDistortion { deck: DeckId, on: bool },
-    /// The distortion's pre-gain into the soft clip.
-    SetDistortionDrive { deck: DeckId, drive: f32 },
-    /// The phaser's on/off switch.
-    SetPhaser { deck: DeckId, on: bool },
-    /// The phaser LFO's sweep speed, in Hz.
-    SetPhaserRate { deck: DeckId, hz: f32 },
-    /// How much of the phaser's own output feeds back into its first
-    /// stage.
-    SetPhaserFeedback { deck: DeckId, feedback: f32 },
-    SetPhaserSyncUnits { deck: DeckId, units: u32 },
-    SetPhaserBeatOffset { deck: DeckId, offset: f32 },
-    /// The autopan's on/off switch.
-    SetAutopan { deck: DeckId, on: bool },
-    /// The autopan LFO's sweep speed, in Hz.
-    SetAutopanRate { deck: DeckId, hz: f32 },
-    SetAutopanSyncUnits { deck: DeckId, units: u32 },
-    SetAutopanBeatOffset { deck: DeckId, offset: f32 },
-    /// The stereo width's on/off switch.
-    SetEchoMix { deck: DeckId, mix: f32 },
-    SetEchoLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetEchoCeiling { deck: DeckId, ceiling: f32 },
-    SetFlangerMix { deck: DeckId, mix: f32 },
-    SetFlangerLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetFlangerCeiling { deck: DeckId, ceiling: f32 },
-    SetBitcrusherMix { deck: DeckId, mix: f32 },
-    SetBitcrusherLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetBitcrusherCeiling { deck: DeckId, ceiling: f32 },
-    SetTremoloMix { deck: DeckId, mix: f32 },
-    SetTremoloLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetTremoloCeiling { deck: DeckId, ceiling: f32 },
-    SetDistortionMix { deck: DeckId, mix: f32 },
-    SetDistortionLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetDistortionCeiling { deck: DeckId, ceiling: f32 },
-    SetPhaserMix { deck: DeckId, mix: f32 },
-    SetPhaserLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetPhaserCeiling { deck: DeckId, ceiling: f32 },
-    SetAutopanMix { deck: DeckId, mix: f32 },
-    SetAutopanLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetAutopanCeiling { deck: DeckId, ceiling: f32 },
-    SetStereoWidthMix { deck: DeckId, mix: f32 },
-    SetStereoWidthLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetStereoWidthCeiling { deck: DeckId, ceiling: f32 },
-    SetPlateReverbMix { deck: DeckId, mix: f32 },
-    SetPlateReverbLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetPlateReverbCeiling { deck: DeckId, ceiling: f32 },
-    SetMoogLadderMix { deck: DeckId, mix: f32 },
-    SetMoogLadderLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetMoogLadderCeiling { deck: DeckId, ceiling: f32 },
-    SetLevelDefault { deck: DeckId, mode: crate::music_dsp::LevelMode },
-    SetCompressor { deck: DeckId, on: bool },
-    SetCompressorThreshold { deck: DeckId, db: f32 },
-    SetCompressorRatio { deck: DeckId, ratio: f32 },
-    SetCrossovers { deck: DeckId, low_hz: f32, high_hz: f32 },
-    SetStereoWidth { deck: DeckId, on: bool },
-    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
-    /// original image, above 1 widens further.
-    SetStereoWidthAmount { deck: DeckId, amount: f32 },
-    /// The plate reverb's on/off switch.
-    SetPlateReverb { deck: DeckId, on: bool },
-    /// How long the reverb tank's tail rings.
-    SetPlateReverbSize { deck: DeckId, size: f32 },
-    /// The Moog ladder's on/off switch.
-    SetMoogLadder { deck: DeckId, on: bool },
-    /// Where the ladder starts rolling off, in Hz.
-    SetMoogLadderCutoff { deck: DeckId, hz: f32 },
-    /// How much of the last stage feeds back into the first.
-    SetMoogLadderResonance { deck: DeckId, resonance: f32 },
+    /// One knob on one slot of this deck's chain.
+    Effect { deck: DeckId, param: EffectParam },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2229,6 +1863,15 @@ impl DeckEngine {
 
     fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
         &mut self.decks[id.index()]
+    }
+
+    /// The effect rack this deck's channel strip carries.
+    pub fn chain(&self, id: DeckId) -> &ChainState {
+        &self.deck(id).chain
+    }
+
+    pub fn chain_mut(&mut self, id: DeckId) -> &mut ChainState {
+        &mut self.deck_mut(id).chain
     }
 
     pub fn splat_set(&mut self, deck: DeckId, grid: Arc<SplatGrid>) -> Vec<DeckCmd> {
@@ -2508,81 +2151,8 @@ impl DeckEngine {
             DeckCmd::SetKeyShift { deck, semitones: state.key_shift },
             DeckCmd::SetFilter { deck, position: state.filter },
             DeckCmd::SetResonance { deck, lift: state.resonance_lift() },
-            DeckCmd::SetEcho { deck, fraction: state.echo_fraction() },
-            DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong },
-            DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback },
-            DeckCmd::SetFlanger { deck, on: state.flanger_on },
-            DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate },
-            DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth },
-            DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback },
-            DeckCmd::SetFlangerSyncUnits { deck, units: state.flanger_sync_units },
-            DeckCmd::SetFlangerBeatOffset { deck, offset: state.flanger_beat_offset },
-            DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on },
-            DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate },
-            DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits },
-            DeckCmd::SetTremolo { deck, on: state.tremolo_on },
-            DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate },
-            DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth },
-            DeckCmd::SetTremoloSyncUnits { deck, units: state.tremolo_sync_units },
-            DeckCmd::SetTremoloBeatOffset { deck, offset: state.tremolo_beat_offset },
-            DeckCmd::SetDistortion { deck, on: state.distortion_on },
-            DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive },
-            DeckCmd::SetPhaser { deck, on: state.phaser_on },
-            DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate },
-            DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback },
-            DeckCmd::SetPhaserSyncUnits { deck, units: state.phaser_sync_units },
-            DeckCmd::SetPhaserBeatOffset { deck, offset: state.phaser_beat_offset },
-            DeckCmd::SetAutopan { deck, on: state.autopan_on },
-            DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
-            DeckCmd::SetAutopanSyncUnits { deck, units: state.autopan_sync_units },
-            DeckCmd::SetAutopanBeatOffset { deck, offset: state.autopan_beat_offset },
-            DeckCmd::SetEchoMix { deck, mix: state.echo_mix },
-            DeckCmd::SetEchoLevelMode { deck, mode: state.echo_level_mode },
-            DeckCmd::SetEchoCeiling { deck, ceiling: state.echo_ceiling },
-            DeckCmd::SetFlangerMix { deck, mix: state.flanger_mix },
-            DeckCmd::SetFlangerLevelMode { deck, mode: state.flanger_level_mode },
-            DeckCmd::SetFlangerCeiling { deck, ceiling: state.flanger_ceiling },
-            DeckCmd::SetBitcrusherMix { deck, mix: state.bitcrusher_mix },
-            DeckCmd::SetBitcrusherLevelMode { deck, mode: state.bitcrusher_level_mode },
-            DeckCmd::SetBitcrusherCeiling { deck, ceiling: state.bitcrusher_ceiling },
-            DeckCmd::SetTremoloMix { deck, mix: state.tremolo_mix },
-            DeckCmd::SetTremoloLevelMode { deck, mode: state.tremolo_level_mode },
-            DeckCmd::SetTremoloCeiling { deck, ceiling: state.tremolo_ceiling },
-            DeckCmd::SetDistortionMix { deck, mix: state.distortion_mix },
-            DeckCmd::SetDistortionLevelMode { deck, mode: state.distortion_level_mode },
-            DeckCmd::SetDistortionCeiling { deck, ceiling: state.distortion_ceiling },
-            DeckCmd::SetPhaserMix { deck, mix: state.phaser_mix },
-            DeckCmd::SetPhaserLevelMode { deck, mode: state.phaser_level_mode },
-            DeckCmd::SetPhaserCeiling { deck, ceiling: state.phaser_ceiling },
-            DeckCmd::SetAutopanMix { deck, mix: state.autopan_mix },
-            DeckCmd::SetAutopanLevelMode { deck, mode: state.autopan_level_mode },
-            DeckCmd::SetAutopanCeiling { deck, ceiling: state.autopan_ceiling },
-            DeckCmd::SetStereoWidthMix { deck, mix: state.stereo_width_mix },
-            DeckCmd::SetStereoWidthLevelMode { deck, mode: state.stereo_width_level_mode },
-            DeckCmd::SetStereoWidthCeiling { deck, ceiling: state.stereo_width_ceiling },
-            DeckCmd::SetPlateReverbMix { deck, mix: state.plate_reverb_mix },
-            DeckCmd::SetPlateReverbLevelMode { deck, mode: state.plate_reverb_level_mode },
-            DeckCmd::SetPlateReverbCeiling { deck, ceiling: state.plate_reverb_ceiling },
-            DeckCmd::SetMoogLadderMix { deck, mix: state.moog_ladder_mix },
-            DeckCmd::SetMoogLadderLevelMode { deck, mode: state.moog_ladder_level_mode },
-            DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling },
-            DeckCmd::SetLevelDefault { deck, mode: state.level_default },
-            DeckCmd::SetCompressor { deck, on: state.compressor_on },
-            DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db },
-            DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio },
-            DeckCmd::SetCrossovers {
-                deck,
-                low_hz: state.eq_low_hz,
-                high_hz: state.eq_high_hz,
-            },
-            DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
-            DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
-            DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on },
-            DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size },
-            DeckCmd::SetMoogLadder { deck, on: state.moog_ladder_on },
-            DeckCmd::SetMoogLadderCutoff { deck, hz: state.moog_ladder_cutoff },
-            DeckCmd::SetMoogLadderResonance { deck, resonance: state.moog_ladder_resonance },
         ];
+        cmds.extend(state.chain.params().into_iter().map(|param| DeckCmd::Effect { deck, param }));
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
         }
@@ -5446,56 +5016,6 @@ impl DeckEngine {
 
     // ---- tone + stems -------------------------------------------------------
 
-    /// The compressor's on/off switch.
-    pub fn toggle_compressor(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.compressor_on = !state.compressor_on;
-        vec![DeckCmd::SetCompressor { deck, on: state.compressor_on }]
-    }
-
-    /// Set it to an explicit side, for a MIX-linked broadcast.
-    pub fn set_compressor(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).compressor_on = on;
-        vec![DeckCmd::SetCompressor { deck, on }]
-    }
-
-    /// Where it starts working, in decibels below full scale.
-    pub fn set_compressor_threshold(&mut self, deck: DeckId, db: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.compressor_threshold_db = db.clamp(
-            crate::music_dsp::COMPRESSOR_THRESHOLD_MIN_DB,
-            crate::music_dsp::COMPRESSOR_THRESHOLD_MAX_DB,
-        );
-        vec![DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db }]
-    }
-
-    /// How hard it works above that.
-    pub fn set_compressor_ratio(&mut self, deck: DeckId, ratio: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.compressor_ratio = ratio.clamp(
-            crate::music_dsp::COMPRESSOR_RATIO_MIN,
-            crate::music_dsp::COMPRESSOR_RATIO_MAX,
-        );
-        vec![DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio }]
-    }
-
-    /// Where this deck's bands are split. Clamped the same way the
-    /// engine clamps, so the stored value and the audible one agree, and
-    /// the gap between the corners is the engine's to keep.
-    pub fn set_crossovers(&mut self, deck: DeckId, low_hz: f32, high_hz: f32) -> Vec<DeckCmd> {
-        let Some((low, high)) = crate::music_dsp::eq_crossovers_for(low_hz, high_hz) else {
-            return Vec::new();
-        };
-        let state = self.deck_mut(deck);
-        state.eq_low_hz = low;
-        state.eq_high_hz = high;
-        vec![DeckCmd::SetCrossovers {
-            deck,
-            low_hz: state.eq_low_hz,
-            high_hz: state.eq_high_hz,
-        }]
-    }
-
     pub fn set_eq(&mut self, deck: DeckId, band: usize, gain: f32) -> Vec<DeckCmd> {
         if band >= 3 {
             return Vec::new();
@@ -5543,625 +5063,6 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.resonance = (state.resonance + 1) % rungs;
         vec![DeckCmd::SetResonance { deck, lift: state.resonance_lift() }]
-    }
-
-    /// Step the echo to its next rung, round and round: off, whole beat,
-    /// half, quarter, off.
-    pub fn cycle_echo(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let rungs = crate::music_dsp::ECHO_RUNGS.len() + 1; // + off
-        let state = self.deck_mut(deck);
-        state.echo_rung = (state.echo_rung + 1) % rungs;
-        vec![DeckCmd::SetEcho { deck, fraction: state.echo_fraction() }]
-    }
-
-    /// Put the echo on an explicit rung rather than stepping to the next
-    /// one -- what a dropdown sends, and what a MIX broadcast needs so
-    /// both decks land on the same rung rather than each stepping from
-    /// wherever it happened to be.
-    pub fn set_echo_rung(&mut self, deck: DeckId, rung: usize) -> Vec<DeckCmd> {
-        let rungs = crate::music_dsp::ECHO_RUNGS.len() + 1;
-        let state = self.deck_mut(deck);
-        state.echo_rung = rung.min(rungs - 1);
-        vec![DeckCmd::SetEcho { deck, fraction: state.echo_fraction() }]
-    }
-
-    /// Set the ping-pong to an explicit side, for the same reason.
-    pub fn set_echo_pingpong(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).echo_pingpong = on;
-        vec![DeckCmd::SetEchoPingpong { deck, on }]
-    }
-
-    /// Whether the echo's repeats land on the other channel.
-    pub fn toggle_echo_pingpong(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.echo_pingpong = !state.echo_pingpong;
-        vec![DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong }]
-    }
-
-    /// How much of a repeat feeds the next one. The same clamp the
-    /// mixer's own setter applies, so the stored state and the audible
-    /// one never disagree.
-    pub fn set_echo_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.echo_feedback = feedback.clamp(0.0, crate::music_dsp::ECHO_FEEDBACK_MAX);
-        vec![DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback }]
-    }
-
-    /// The flanger's on/off switch.
-    pub fn toggle_flanger(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_on = !state.flanger_on;
-        vec![DeckCmd::SetFlanger { deck, on: state.flanger_on }]
-    }
-
-    /// Set the flanger's on/off switch to an explicit value, rather than
-    /// flipping whatever it already was -- what a MIX-linked broadcast
-    /// needs, since two decks starting on different sides of the switch
-    /// must land on the SAME side, not each flip its own.
-    pub fn set_flanger(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).flanger_on = on;
-        vec![DeckCmd::SetFlanger { deck, on }]
-    }
-
-    /// The flanger LFO's sweep speed, in Hz.
-    pub fn set_flanger_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_rate =
-            hz.clamp(crate::music_dsp::FLANGER_RATE_MIN, crate::music_dsp::FLANGER_RATE_MAX);
-        vec![DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate }]
-    }
-
-    /// How far the flanger's sweep reaches from its centre delay.
-    pub fn set_flanger_depth(&mut self, deck: DeckId, depth: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_depth = depth.clamp(0.0, 1.0);
-        vec![DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth }]
-    }
-
-    /// How much of the flanger's delayed tap feeds back into its line.
-    pub fn set_flanger_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_feedback = feedback.clamp(0.0, crate::music_dsp::FLANGER_FEEDBACK_MAX);
-        vec![DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback }]
-    }
-
-    /// Which rung of the sync ladder the flanger sweep runs on. The dropdown
-    /// emits an explicit rung rather than a flip, so unlike the on/off
-    /// gestures beside it this needs no toggling twin: a MIX broadcast
-    /// simply sends the same rung to both decks.
-    pub fn set_flanger_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
-        vec![DeckCmd::SetFlangerSyncUnits { deck, units: state.flanger_sync_units }]
-    }
-
-    /// Where in the cycle the flanger sweep starts when it engages, 0..1.
-    pub fn set_flanger_beat_offset(&mut self, deck: DeckId, offset: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_beat_offset = offset.clamp(0.0, 1.0);
-        vec![DeckCmd::SetFlangerBeatOffset { deck, offset: state.flanger_beat_offset }]
-    }
-
-    /// The bitcrusher's on/off switch.
-    pub fn toggle_bitcrusher(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.bitcrusher_on = !state.bitcrusher_on;
-        vec![DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on }]
-    }
-
-    /// Set the bitcrusher's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_bitcrusher(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).bitcrusher_on = on;
-        vec![DeckCmd::SetBitcrusher { deck, on }]
-    }
-
-    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
-    pub fn set_bitcrusher_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.bitcrusher_rate = hz.clamp(
-            crate::music_dsp::BITCRUSHER_RATE_MIN,
-            crate::music_dsp::BITCRUSHER_RATE_MAX,
-        );
-        vec![DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate }]
-    }
-
-    /// The bitcrusher's quantizer bit depth.
-    pub fn set_bitcrusher_bits(&mut self, deck: DeckId, bits: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.bitcrusher_bits = bits.clamp(
-            crate::music_dsp::BITCRUSHER_BITS_MIN,
-            crate::music_dsp::BITCRUSHER_BITS_MAX,
-        );
-        vec![DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits }]
-    }
-
-    /// The tremolo's on/off switch.
-    pub fn toggle_tremolo(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_on = !state.tremolo_on;
-        vec![DeckCmd::SetTremolo { deck, on: state.tremolo_on }]
-    }
-
-    /// Set the tremolo's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_tremolo(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).tremolo_on = on;
-        vec![DeckCmd::SetTremolo { deck, on }]
-    }
-
-    /// The tremolo LFO's speed, in Hz.
-    pub fn set_tremolo_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_rate =
-            hz.clamp(crate::music_dsp::TREMOLO_RATE_MIN, crate::music_dsp::TREMOLO_RATE_MAX);
-        vec![DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate }]
-    }
-
-    /// The tremolo LFO's swing.
-    pub fn set_tremolo_depth(&mut self, deck: DeckId, depth: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_depth = depth.clamp(0.0, 1.0);
-        vec![DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth }]
-    }
-
-    /// Which rung of the sync ladder the tremolo runs on. The dropdown
-    /// emits an explicit rung rather than a flip, so unlike the on/off
-    /// gestures beside it this needs no toggling twin: a MIX broadcast
-    /// simply sends the same rung to both decks.
-    pub fn set_tremolo_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
-        vec![DeckCmd::SetTremoloSyncUnits { deck, units: state.tremolo_sync_units }]
-    }
-
-    /// Where in the cycle the tremolo starts when it engages, 0..1.
-    pub fn set_tremolo_beat_offset(&mut self, deck: DeckId, offset: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_beat_offset = offset.clamp(0.0, 1.0);
-        vec![DeckCmd::SetTremoloBeatOffset { deck, offset: state.tremolo_beat_offset }]
-    }
-
-    /// The distortion's on/off switch.
-    pub fn toggle_distortion(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.distortion_on = !state.distortion_on;
-        vec![DeckCmd::SetDistortion { deck, on: state.distortion_on }]
-    }
-
-    /// Set the distortion's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_distortion(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).distortion_on = on;
-        vec![DeckCmd::SetDistortion { deck, on }]
-    }
-
-    /// The distortion's pre-gain into the soft clip.
-    pub fn set_distortion_drive(&mut self, deck: DeckId, drive: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.distortion_drive = drive.clamp(
-            crate::music_dsp::DISTORTION_DRIVE_MIN,
-            crate::music_dsp::DISTORTION_DRIVE_MAX,
-        );
-        vec![DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive }]
-    }
-
-    /// The phaser's on/off switch.
-    pub fn toggle_phaser(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_on = !state.phaser_on;
-        vec![DeckCmd::SetPhaser { deck, on: state.phaser_on }]
-    }
-
-    /// Set the phaser's on/off switch to an explicit value, rather than
-    /// flipping whatever it already was -- what a MIX-linked broadcast
-    /// needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_phaser(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).phaser_on = on;
-        vec![DeckCmd::SetPhaser { deck, on }]
-    }
-
-    /// The phaser LFO's sweep speed, in Hz.
-    pub fn set_phaser_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_rate =
-            hz.clamp(crate::music_dsp::PHASER_RATE_MIN, crate::music_dsp::PHASER_RATE_MAX);
-        vec![DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate }]
-    }
-
-    /// How much of the phaser's own output feeds back into its first
-    /// stage.
-    pub fn set_phaser_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_feedback =
-            feedback.clamp(0.0, crate::music_dsp::PHASER_FEEDBACK_MAX);
-        vec![DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback }]
-    }
-
-    /// Which rung of the sync ladder the phaser sweep runs on. The dropdown
-    /// emits an explicit rung rather than a flip, so unlike the on/off
-    /// gestures beside it this needs no toggling twin: a MIX broadcast
-    /// simply sends the same rung to both decks.
-    pub fn set_phaser_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
-        vec![DeckCmd::SetPhaserSyncUnits { deck, units: state.phaser_sync_units }]
-    }
-
-    /// Where in the cycle the phaser sweep starts when it engages, 0..1.
-    pub fn set_phaser_beat_offset(&mut self, deck: DeckId, offset: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_beat_offset = offset.clamp(0.0, 1.0);
-        vec![DeckCmd::SetPhaserBeatOffset { deck, offset: state.phaser_beat_offset }]
-    }
-
-    /// The autopan's on/off switch.
-    pub fn toggle_autopan(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_on = !state.autopan_on;
-        vec![DeckCmd::SetAutopan { deck, on: state.autopan_on }]
-    }
-
-    /// Set the autopan's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_autopan(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).autopan_on = on;
-        vec![DeckCmd::SetAutopan { deck, on }]
-    }
-
-    /// The autopan LFO's sweep speed, in Hz.
-    pub fn set_autopan_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_rate =
-            hz.clamp(crate::music_dsp::AUTOPAN_RATE_MIN, crate::music_dsp::AUTOPAN_RATE_MAX);
-        vec![DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate }]
-    }
-
-    /// Which rung of the sync ladder the autopan swing runs on. The dropdown
-    /// emits an explicit rung rather than a flip, so unlike the on/off
-    /// gestures beside it this needs no toggling twin: a MIX broadcast
-    /// simply sends the same rung to both decks.
-    pub fn set_autopan_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
-        vec![DeckCmd::SetAutopanSyncUnits { deck, units: state.autopan_sync_units }]
-    }
-
-    /// Where in the cycle the autopan swing starts when it engages, 0..1.
-    pub fn set_autopan_beat_offset(&mut self, deck: DeckId, offset: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_beat_offset = offset.clamp(0.0, 1.0);
-        vec![DeckCmd::SetAutopanBeatOffset { deck, offset: state.autopan_beat_offset }]
-    }
-
-
-    /// How much of the echo is heard once it is engaged.
-    pub fn set_echo_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.echo_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetEchoMix { deck, mix: state.echo_mix }]
-    }
-
-    /// What the echo's slot does about the level it returns.
-    pub fn set_echo_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).echo_level_mode = mode;
-        vec![DeckCmd::SetEchoLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the echo holds under on Ceiling.
-    pub fn set_echo_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.echo_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetEchoCeiling { deck, ceiling: state.echo_ceiling }]
-    }
-    /// How much of the flanger is heard once it is engaged.
-    pub fn set_flanger_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetFlangerMix { deck, mix: state.flanger_mix }]
-    }
-
-    /// What the flanger's slot does about the level it returns.
-    pub fn set_flanger_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).flanger_level_mode = mode;
-        vec![DeckCmd::SetFlangerLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the flanger holds under on Ceiling.
-    pub fn set_flanger_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.flanger_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetFlangerCeiling { deck, ceiling: state.flanger_ceiling }]
-    }
-    /// How much of the bitcrusher is heard once it is engaged.
-    pub fn set_bitcrusher_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.bitcrusher_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetBitcrusherMix { deck, mix: state.bitcrusher_mix }]
-    }
-
-    /// What the bitcrusher's slot does about the level it returns.
-    pub fn set_bitcrusher_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).bitcrusher_level_mode = mode;
-        vec![DeckCmd::SetBitcrusherLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the bitcrusher holds under on Ceiling.
-    pub fn set_bitcrusher_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.bitcrusher_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetBitcrusherCeiling { deck, ceiling: state.bitcrusher_ceiling }]
-    }
-    /// How much of the tremolo is heard once it is engaged.
-    pub fn set_tremolo_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetTremoloMix { deck, mix: state.tremolo_mix }]
-    }
-
-    /// What the tremolo's slot does about the level it returns.
-    pub fn set_tremolo_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).tremolo_level_mode = mode;
-        vec![DeckCmd::SetTremoloLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the tremolo holds under on Ceiling.
-    pub fn set_tremolo_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.tremolo_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetTremoloCeiling { deck, ceiling: state.tremolo_ceiling }]
-    }
-    /// How much of the distortion is heard once it is engaged.
-    pub fn set_distortion_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.distortion_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetDistortionMix { deck, mix: state.distortion_mix }]
-    }
-
-    /// What the distortion's slot does about the level it returns.
-    pub fn set_distortion_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).distortion_level_mode = mode;
-        vec![DeckCmd::SetDistortionLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the distortion holds under on Ceiling.
-    pub fn set_distortion_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.distortion_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetDistortionCeiling { deck, ceiling: state.distortion_ceiling }]
-    }
-    /// How much of the phaser is heard once it is engaged.
-    pub fn set_phaser_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetPhaserMix { deck, mix: state.phaser_mix }]
-    }
-
-    /// What the phaser's slot does about the level it returns.
-    pub fn set_phaser_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).phaser_level_mode = mode;
-        vec![DeckCmd::SetPhaserLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the phaser holds under on Ceiling.
-    pub fn set_phaser_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.phaser_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetPhaserCeiling { deck, ceiling: state.phaser_ceiling }]
-    }
-    /// How much of the autopan is heard once it is engaged.
-    pub fn set_autopan_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetAutopanMix { deck, mix: state.autopan_mix }]
-    }
-
-    /// What the autopan's slot does about the level it returns.
-    pub fn set_autopan_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).autopan_level_mode = mode;
-        vec![DeckCmd::SetAutopanLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the autopan holds under on Ceiling.
-    pub fn set_autopan_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.autopan_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetAutopanCeiling { deck, ceiling: state.autopan_ceiling }]
-    }
-    /// How much of the stereo width is heard once it is engaged.
-    pub fn set_stereo_width_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.stereo_width_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetStereoWidthMix { deck, mix: state.stereo_width_mix }]
-    }
-
-    /// What the stereo width's slot does about the level it returns.
-    pub fn set_stereo_width_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).stereo_width_level_mode = mode;
-        vec![DeckCmd::SetStereoWidthLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the stereo width holds under on Ceiling.
-    pub fn set_stereo_width_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.stereo_width_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetStereoWidthCeiling { deck, ceiling: state.stereo_width_ceiling }]
-    }
-    /// How much of the plate reverb is heard once it is engaged.
-    pub fn set_plate_reverb_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.plate_reverb_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetPlateReverbMix { deck, mix: state.plate_reverb_mix }]
-    }
-
-    /// What the plate reverb's slot does about the level it returns.
-    pub fn set_plate_reverb_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).plate_reverb_level_mode = mode;
-        vec![DeckCmd::SetPlateReverbLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the plate reverb holds under on Ceiling.
-    pub fn set_plate_reverb_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.plate_reverb_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetPlateReverbCeiling { deck, ceiling: state.plate_reverb_ceiling }]
-    }
-    /// How much of the ladder filter is heard once it is engaged.
-    pub fn set_moog_ladder_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.moog_ladder_mix = mix.clamp(0.0, 1.0);
-        vec![DeckCmd::SetMoogLadderMix { deck, mix: state.moog_ladder_mix }]
-    }
-
-    /// What the ladder filter's slot does about the level it returns.
-    pub fn set_moog_ladder_level_mode(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).moog_ladder_level_mode = mode;
-        vec![DeckCmd::SetMoogLadderLevelMode { deck, mode }]
-    }
-
-    /// The amplitude the ladder filter holds under on Ceiling.
-    pub fn set_moog_ladder_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.moog_ladder_ceiling = ceiling.clamp(0.01, 1.0);
-        vec![DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling }]
-    }
-    /// The policy every effect that has not been pinned follows.
-    pub fn set_level_default(
-        &mut self,
-        deck: DeckId,
-        mode: crate::music_dsp::LevelMode,
-    ) -> Vec<DeckCmd> {
-        self.deck_mut(deck).level_default = mode;
-        vec![DeckCmd::SetLevelDefault { deck, mode }]
-    }
-    /// The stereo width's on/off switch.
-    pub fn toggle_stereo_width(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.stereo_width_on = !state.stereo_width_on;
-        vec![DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on }]
-    }
-
-    /// Set the stereo width's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_stereo_width(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).stereo_width_on = on;
-        vec![DeckCmd::SetStereoWidth { deck, on }]
-    }
-
-    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
-    /// original image, above 1 widens further.
-    pub fn set_stereo_width_amount(&mut self, deck: DeckId, amount: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.stereo_width_amount = amount.clamp(
-            crate::music_dsp::STEREO_WIDTH_MIN,
-            crate::music_dsp::STEREO_WIDTH_MAX,
-        );
-        vec![DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount }]
-    }
-
-    /// The plate reverb's on/off switch.
-    pub fn toggle_plate_reverb(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.plate_reverb_on = !state.plate_reverb_on;
-        vec![DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on }]
-    }
-
-    /// Set the plate reverb's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_plate_reverb(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).plate_reverb_on = on;
-        vec![DeckCmd::SetPlateReverb { deck, on }]
-    }
-
-    /// How long the reverb tank's tail rings.
-    pub fn set_plate_reverb_size(&mut self, deck: DeckId, size: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.plate_reverb_size = size.clamp(
-            crate::music_dsp::PLATE_REVERB_SIZE_MIN,
-            crate::music_dsp::PLATE_REVERB_SIZE_MAX,
-        );
-        vec![DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size }]
-    }
-
-    /// The Moog ladder's on/off switch.
-    pub fn toggle_moog_ladder(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.moog_ladder_on = !state.moog_ladder_on;
-        vec![DeckCmd::SetMoogLadder { deck, on: state.moog_ladder_on }]
-    }
-
-    /// Set the Moog ladder's on/off switch to an explicit value, rather
-    /// than flipping whatever it already was -- what a MIX-linked
-    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
-    pub fn set_moog_ladder(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).moog_ladder_on = on;
-        vec![DeckCmd::SetMoogLadder { deck, on }]
-    }
-
-    /// Where the ladder starts rolling off, in Hz.
-    pub fn set_moog_ladder_cutoff(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.moog_ladder_cutoff = hz.clamp(
-            crate::music_dsp::MOOG_LADDER_CUTOFF_MIN,
-            crate::music_dsp::MOOG_LADDER_CUTOFF_MAX,
-        );
-        vec![DeckCmd::SetMoogLadderCutoff { deck, hz: state.moog_ladder_cutoff }]
-    }
-
-    /// How much of the last stage feeds back into the first.
-    pub fn set_moog_ladder_resonance(&mut self, deck: DeckId, resonance: f32) -> Vec<DeckCmd> {
-        let state = self.deck_mut(deck);
-        state.moog_ladder_resonance = resonance.clamp(
-            crate::music_dsp::MOOG_LADDER_RESONANCE_MIN,
-            crate::music_dsp::MOOG_LADDER_RESONANCE_MAX,
-        );
-        vec![DeckCmd::SetMoogLadderResonance { deck, resonance: state.moog_ladder_resonance }]
     }
 
     /// Stem knob. Inert until the separated stems are loaded — the deck is
@@ -6666,494 +5567,136 @@ mod tests {
     }
 
     #[test]
-    fn echo_feedback_clamps_to_the_mixers_own_ceiling() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_echo_feedback(DeckId::A, 5.0),
-            vec![DeckCmd::SetEchoFeedback {
-                deck: DeckId::A,
-                feedback: crate::music_dsp::ECHO_FEEDBACK_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_echo_feedback(DeckId::A, -1.0),
-            vec![DeckCmd::SetEchoFeedback { deck: DeckId::A, feedback: 0.0 }]
-        );
-        assert_eq!(e.deck(DeckId::A).echo_feedback, 0.0);
-    }
-
-    #[test]
     fn a_load_carries_the_operators_echo_feedback() {
         let mut e = DeckEngine::new();
-        e.set_echo_feedback(DeckId::B, 0.8);
+        e.chain_mut(DeckId::B).set_echo_feedback(0.8);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetEchoFeedback { deck: DeckId::B, feedback: 0.8 }));
-    }
-
-    #[test]
-    fn flanger_rate_and_feedback_clamp_to_their_documented_ranges() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_flanger_rate(DeckId::A, 100.0),
-            vec![DeckCmd::SetFlangerRate { deck: DeckId::A, hz: crate::music_dsp::FLANGER_RATE_MAX }]
-        );
-        assert_eq!(
-            e.set_flanger_rate(DeckId::A, -1.0),
-            vec![DeckCmd::SetFlangerRate { deck: DeckId::A, hz: crate::music_dsp::FLANGER_RATE_MIN }]
-        );
-        assert_eq!(
-            e.set_flanger_feedback(DeckId::A, 5.0),
-            vec![DeckCmd::SetFlangerFeedback {
-                deck: DeckId::A,
-                feedback: crate::music_dsp::FLANGER_FEEDBACK_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_flanger_depth(DeckId::A, 5.0),
-            vec![DeckCmd::SetFlangerDepth { deck: DeckId::A, depth: 1.0 }]
-        );
-    }
-
-    #[test]
-    fn toggle_flanger_flips_and_set_flanger_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).flanger_on);
-        assert_eq!(
-            e.toggle_flanger(DeckId::A),
-            vec![DeckCmd::SetFlanger { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).flanger_on);
-        // A MIX broadcast lands both decks on the SAME explicit side
-        // rather than each toggling its own -- set_flanger is what that
-        // needs, distinct from the single-deck toggle.
-        assert_eq!(
-            e.set_flanger(DeckId::B, true),
-            vec![DeckCmd::SetFlanger { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).flanger_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::EchoFeedback(0.8) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_flanger_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_flanger(DeckId::B);
-        e.set_flanger_rate(DeckId::B, 2.0);
-        e.set_flanger_depth(DeckId::B, 0.9);
-        e.set_flanger_feedback(DeckId::B, 0.6);
+        e.chain_mut(DeckId::B).toggle_flanger();
+        e.chain_mut(DeckId::B).set_flanger_rate(2.0);
+        e.chain_mut(DeckId::B).set_flanger_depth(0.9);
+        e.chain_mut(DeckId::B).set_flanger_feedback(0.6);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetFlanger { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetFlangerRate { deck: DeckId::B, hz: 2.0 }));
-        assert!(cmds.contains(&DeckCmd::SetFlangerDepth { deck: DeckId::B, depth: 0.9 }));
-        assert!(cmds.contains(&DeckCmd::SetFlangerFeedback { deck: DeckId::B, feedback: 0.6 }));
-    }
-
-    #[test]
-    fn bitcrusher_rate_and_bits_clamp_to_their_documented_ranges() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_bitcrusher_rate(DeckId::A, 100_000.0),
-            vec![DeckCmd::SetBitcrusherRate {
-                deck: DeckId::A,
-                hz: crate::music_dsp::BITCRUSHER_RATE_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_bitcrusher_rate(DeckId::A, -1.0),
-            vec![DeckCmd::SetBitcrusherRate {
-                deck: DeckId::A,
-                hz: crate::music_dsp::BITCRUSHER_RATE_MIN,
-            }]
-        );
-        assert_eq!(
-            e.set_bitcrusher_bits(DeckId::A, 100.0),
-            vec![DeckCmd::SetBitcrusherBits {
-                deck: DeckId::A,
-                bits: crate::music_dsp::BITCRUSHER_BITS_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_bitcrusher_bits(DeckId::A, -1.0),
-            vec![DeckCmd::SetBitcrusherBits {
-                deck: DeckId::A,
-                bits: crate::music_dsp::BITCRUSHER_BITS_MIN,
-            }]
-        );
-    }
-
-    #[test]
-    fn toggle_bitcrusher_flips_and_set_bitcrusher_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).bitcrusher_on);
-        assert_eq!(
-            e.toggle_bitcrusher(DeckId::A),
-            vec![DeckCmd::SetBitcrusher { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).bitcrusher_on);
-        assert_eq!(
-            e.set_bitcrusher(DeckId::B, true),
-            vec![DeckCmd::SetBitcrusher { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).bitcrusher_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Flanger(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::FlangerRate(2.0) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::FlangerDepth(0.9) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::FlangerFeedback(0.6) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_bitcrusher_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_bitcrusher(DeckId::B);
-        e.set_bitcrusher_rate(DeckId::B, 2_000.0);
-        e.set_bitcrusher_bits(DeckId::B, 4.0);
+        e.chain_mut(DeckId::B).toggle_bitcrusher();
+        e.chain_mut(DeckId::B).set_bitcrusher_rate(2_000.0);
+        e.chain_mut(DeckId::B).set_bitcrusher_bits(4.0);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetBitcrusher { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetBitcrusherRate { deck: DeckId::B, hz: 2_000.0 }));
-        assert!(cmds.contains(&DeckCmd::SetBitcrusherBits { deck: DeckId::B, bits: 4.0 }));
-    }
-
-    #[test]
-    fn tremolo_rate_and_depth_clamp_to_their_documented_ranges() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_tremolo_rate(DeckId::A, 1_000.0),
-            vec![DeckCmd::SetTremoloRate {
-                deck: DeckId::A,
-                hz: crate::music_dsp::TREMOLO_RATE_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_tremolo_rate(DeckId::A, -1.0),
-            vec![DeckCmd::SetTremoloRate {
-                deck: DeckId::A,
-                hz: crate::music_dsp::TREMOLO_RATE_MIN,
-            }]
-        );
-        assert_eq!(
-            e.set_tremolo_depth(DeckId::A, 5.0),
-            vec![DeckCmd::SetTremoloDepth { deck: DeckId::A, depth: 1.0 }]
-        );
-        assert_eq!(
-            e.set_tremolo_depth(DeckId::A, -5.0),
-            vec![DeckCmd::SetTremoloDepth { deck: DeckId::A, depth: 0.0 }]
-        );
-    }
-
-    #[test]
-    fn toggle_tremolo_flips_and_set_tremolo_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).tremolo_on);
-        assert_eq!(
-            e.toggle_tremolo(DeckId::A),
-            vec![DeckCmd::SetTremolo { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).tremolo_on);
-        assert_eq!(
-            e.set_tremolo(DeckId::B, true),
-            vec![DeckCmd::SetTremolo { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).tremolo_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Bitcrusher(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::BitcrusherRate(2_000.0) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::BitcrusherBits(4.0) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_tremolo_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_tremolo(DeckId::B);
-        e.set_tremolo_rate(DeckId::B, 8.0);
+        e.chain_mut(DeckId::B).toggle_tremolo();
+        e.chain_mut(DeckId::B).set_tremolo_rate(8.0);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetTremolo { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetTremoloRate { deck: DeckId::B, hz: 8.0 }));
-    }
-
-    #[test]
-    fn distortion_drive_clamps_to_its_documented_range() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_distortion_drive(DeckId::A, 1_000.0),
-            vec![DeckCmd::SetDistortionDrive {
-                deck: DeckId::A,
-                drive: crate::music_dsp::DISTORTION_DRIVE_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_distortion_drive(DeckId::A, -1.0),
-            vec![DeckCmd::SetDistortionDrive {
-                deck: DeckId::A,
-                drive: crate::music_dsp::DISTORTION_DRIVE_MIN,
-            }]
-        );
-    }
-
-    #[test]
-    fn toggle_distortion_flips_and_set_distortion_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).distortion_on);
-        assert_eq!(
-            e.toggle_distortion(DeckId::A),
-            vec![DeckCmd::SetDistortion { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).distortion_on);
-        assert_eq!(
-            e.set_distortion(DeckId::B, true),
-            vec![DeckCmd::SetDistortion { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).distortion_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Tremolo(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::TremoloRate(8.0) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_distortion_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_distortion(DeckId::B);
-        e.set_distortion_drive(DeckId::B, 10.0);
+        e.chain_mut(DeckId::B).toggle_distortion();
+        e.chain_mut(DeckId::B).set_distortion_drive(10.0);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetDistortion { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetDistortionDrive { deck: DeckId::B, drive: 10.0 }));
-    }
-
-    #[test]
-    fn phaser_rate_and_feedback_clamp_to_their_documented_ranges() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_phaser_rate(DeckId::A, 1_000.0),
-            vec![DeckCmd::SetPhaserRate { deck: DeckId::A, hz: crate::music_dsp::PHASER_RATE_MAX }]
-        );
-        assert_eq!(
-            e.set_phaser_rate(DeckId::A, -1.0),
-            vec![DeckCmd::SetPhaserRate { deck: DeckId::A, hz: crate::music_dsp::PHASER_RATE_MIN }]
-        );
-        assert_eq!(
-            e.set_phaser_feedback(DeckId::A, 5.0),
-            vec![DeckCmd::SetPhaserFeedback {
-                deck: DeckId::A,
-                feedback: crate::music_dsp::PHASER_FEEDBACK_MAX,
-            }]
-        );
-        assert_eq!(
-            e.set_phaser_feedback(DeckId::A, -5.0),
-            vec![DeckCmd::SetPhaserFeedback { deck: DeckId::A, feedback: 0.0 }]
-        );
-    }
-
-    #[test]
-    fn toggle_phaser_flips_and_set_phaser_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).phaser_on);
-        assert_eq!(
-            e.toggle_phaser(DeckId::A),
-            vec![DeckCmd::SetPhaser { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).phaser_on);
-        assert_eq!(
-            e.set_phaser(DeckId::B, true),
-            vec![DeckCmd::SetPhaser { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).phaser_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Distortion(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::DistortionDrive(10.0) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_phaser_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_phaser(DeckId::B);
-        e.set_phaser_rate(DeckId::B, 1.5);
+        e.chain_mut(DeckId::B).toggle_phaser();
+        e.chain_mut(DeckId::B).set_phaser_rate(1.5);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetPhaser { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetPhaserRate { deck: DeckId::B, hz: 1.5 }));
-    }
-
-    #[test]
-    fn autopan_rate_clamps_to_its_documented_range() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_autopan_rate(DeckId::A, 1_000.0),
-            vec![DeckCmd::SetAutopanRate { deck: DeckId::A, hz: crate::music_dsp::AUTOPAN_RATE_MAX }]
-        );
-        assert_eq!(
-            e.set_autopan_rate(DeckId::A, -1.0),
-            vec![DeckCmd::SetAutopanRate { deck: DeckId::A, hz: crate::music_dsp::AUTOPAN_RATE_MIN }]
-        );
-    }
-
-    #[test]
-    fn toggle_autopan_flips_and_set_autopan_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).autopan_on);
-        assert_eq!(
-            e.toggle_autopan(DeckId::A),
-            vec![DeckCmd::SetAutopan { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).autopan_on);
-        assert_eq!(
-            e.set_autopan(DeckId::B, true),
-            vec![DeckCmd::SetAutopan { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).autopan_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Phaser(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::PhaserRate(1.5) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_autopan_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_autopan(DeckId::B);
-        e.set_autopan_rate(DeckId::B, 6.0);
+        e.chain_mut(DeckId::B).toggle_autopan();
+        e.chain_mut(DeckId::B).set_autopan_rate(6.0);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetAutopan { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetAutopanRate { deck: DeckId::B, hz: 6.0 }));
-    }
-
-    #[test]
-    fn stereo_width_amount_clamps_to_its_documented_range() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_stereo_width_amount(DeckId::A, 10.0),
-            vec![DeckCmd::SetStereoWidthAmount {
-                deck: DeckId::A,
-                amount: crate::music_dsp::STEREO_WIDTH_MAX
-            }]
-        );
-        assert_eq!(
-            e.set_stereo_width_amount(DeckId::A, -1.0),
-            vec![DeckCmd::SetStereoWidthAmount {
-                deck: DeckId::A,
-                amount: crate::music_dsp::STEREO_WIDTH_MIN
-            }]
-        );
-    }
-
-    #[test]
-    fn toggle_stereo_width_flips_and_set_stereo_width_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).stereo_width_on);
-        assert_eq!(
-            e.toggle_stereo_width(DeckId::A),
-            vec![DeckCmd::SetStereoWidth { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).stereo_width_on);
-        assert_eq!(
-            e.set_stereo_width(DeckId::B, true),
-            vec![DeckCmd::SetStereoWidth { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).stereo_width_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::Autopan(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::AutopanRate(6.0) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_stereo_width_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_stereo_width(DeckId::B);
-        e.set_stereo_width_amount(DeckId::B, 0.4);
+        e.chain_mut(DeckId::B).toggle_stereo_width();
+        e.chain_mut(DeckId::B).set_stereo_width_amount(0.4);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetStereoWidth { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetStereoWidthAmount { deck: DeckId::B, amount: 0.4 }));
-    }
-
-    #[test]
-    fn plate_reverb_size_clamps_to_its_documented_range() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_plate_reverb_size(DeckId::A, 10.0),
-            vec![DeckCmd::SetPlateReverbSize {
-                deck: DeckId::A,
-                size: crate::music_dsp::PLATE_REVERB_SIZE_MAX
-            }]
-        );
-        assert_eq!(
-            e.set_plate_reverb_size(DeckId::A, -1.0),
-            vec![DeckCmd::SetPlateReverbSize {
-                deck: DeckId::A,
-                size: crate::music_dsp::PLATE_REVERB_SIZE_MIN
-            }]
-        );
-    }
-
-    #[test]
-    fn toggle_plate_reverb_flips_and_set_plate_reverb_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).plate_reverb_on);
-        assert_eq!(
-            e.toggle_plate_reverb(DeckId::A),
-            vec![DeckCmd::SetPlateReverb { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).plate_reverb_on);
-        assert_eq!(
-            e.set_plate_reverb(DeckId::B, true),
-            vec![DeckCmd::SetPlateReverb { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).plate_reverb_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::StereoWidth(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::StereoWidthAmount(0.4) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_plate_reverb_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_plate_reverb(DeckId::B);
-        e.set_plate_reverb_size(DeckId::B, 0.7);
+        e.chain_mut(DeckId::B).toggle_plate_reverb();
+        e.chain_mut(DeckId::B).set_plate_reverb_size(0.7);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetPlateReverb { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetPlateReverbSize { deck: DeckId::B, size: 0.7 }));
-    }
-
-    #[test]
-    fn moog_ladder_cutoff_and_resonance_clamp_to_their_documented_ranges() {
-        let mut e = DeckEngine::new();
-        assert_eq!(
-            e.set_moog_ladder_cutoff(DeckId::A, 50_000.0),
-            vec![DeckCmd::SetMoogLadderCutoff {
-                deck: DeckId::A,
-                hz: crate::music_dsp::MOOG_LADDER_CUTOFF_MAX
-            }]
-        );
-        assert_eq!(
-            e.set_moog_ladder_cutoff(DeckId::A, -1.0),
-            vec![DeckCmd::SetMoogLadderCutoff {
-                deck: DeckId::A,
-                hz: crate::music_dsp::MOOG_LADDER_CUTOFF_MIN
-            }]
-        );
-        assert_eq!(
-            e.set_moog_ladder_resonance(DeckId::A, 5.0),
-            vec![DeckCmd::SetMoogLadderResonance {
-                deck: DeckId::A,
-                resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_MAX
-            }]
-        );
-        assert_eq!(
-            e.set_moog_ladder_resonance(DeckId::A, -5.0),
-            vec![DeckCmd::SetMoogLadderResonance {
-                deck: DeckId::A,
-                resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_MIN
-            }]
-        );
-    }
-
-    #[test]
-    fn toggle_moog_ladder_flips_and_set_moog_ladder_lands_on_an_explicit_side() {
-        let mut e = DeckEngine::new();
-        assert!(!e.deck(DeckId::A).moog_ladder_on);
-        assert_eq!(
-            e.toggle_moog_ladder(DeckId::A),
-            vec![DeckCmd::SetMoogLadder { deck: DeckId::A, on: true }]
-        );
-        assert!(e.deck(DeckId::A).moog_ladder_on);
-        assert_eq!(
-            e.set_moog_ladder(DeckId::B, true),
-            vec![DeckCmd::SetMoogLadder { deck: DeckId::B, on: true }]
-        );
-        assert!(e.deck(DeckId::B).moog_ladder_on);
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::PlateReverb(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::PlateReverbSize(0.7) }));
     }
 
     #[test]
     fn a_load_carries_the_operators_moog_ladder_settings() {
         let mut e = DeckEngine::new();
-        e.toggle_moog_ladder(DeckId::B);
-        e.set_moog_ladder_cutoff(DeckId::B, 3_000.0);
-        e.set_moog_ladder_resonance(DeckId::B, 0.6);
+        e.chain_mut(DeckId::B).toggle_moog_ladder();
+        e.chain_mut(DeckId::B).set_moog_ladder_cutoff(3_000.0);
+        e.chain_mut(DeckId::B).set_moog_ladder_resonance(0.6);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetMoogLadder { deck: DeckId::B, on: true }));
-        assert!(cmds.contains(&DeckCmd::SetMoogLadderCutoff { deck: DeckId::B, hz: 3_000.0 }));
-        assert!(cmds.contains(&DeckCmd::SetMoogLadderResonance { deck: DeckId::B, resonance: 0.6 }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::MoogLadder(true) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::MoogLadderCutoff(3_000.0) }));
+        assert!(cmds.contains(&DeckCmd::Effect { deck: DeckId::B, param: EffectParam::MoogLadderResonance(0.6) }));
+    }
+
+    /// The rack is part of the channel strip, so a swap takes each
+    /// deck's settings across with the record rather than leaving them
+    /// on the slot.
+    #[test]
+    fn a_swap_carries_each_decks_chain() {
+        let mut e = DeckEngine::new();
+        e.chain_mut(DeckId::A).toggle_flanger();
+        e.chain_mut(DeckId::A).set_flanger_rate(2.0);
+        e.chain_mut(DeckId::B).set_echo_rung(2);
+        e.swap();
+        assert!(e.chain(DeckId::B).flanger_on);
+        assert_eq!(e.chain(DeckId::B).flanger_rate, 2.0);
+        assert_eq!(e.chain(DeckId::B).echo_rung, 0);
+        assert!(!e.chain(DeckId::A).flanger_on);
+        assert_eq!(e.chain(DeckId::A).echo_rung, 2);
     }
 
     // -----------------------------------------------------------------
@@ -7169,38 +5712,6 @@ mod tests {
             cells: [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS],
             bars_per_col: [1; SPLAT_COLS],
         })
-    }
-
-    /// The corners an operator SEES are the corners the engine RUNS.
-    /// They go through one rule, so a push that moves the untouched one
-    /// moves it in the stored state too -- a readout that disagreed with
-    /// the audio would be worse than no readout.
-    #[test]
-    fn the_stored_crossovers_are_the_ones_the_engine_keeps() {
-        let mut e = DeckEngine::new();
-        // Pushed together: the state has to show the gap the engine keeps.
-        let cmds = e.set_crossovers(DeckId::A, 800.0, 1_000.0);
-        let state = e.deck(DeckId::A);
-        assert!(
-            state.eq_high_hz / state.eq_low_hz >= 2.0 - 1e-3,
-            "stored {} and {} are too close",
-            state.eq_low_hz,
-            state.eq_high_hz
-        );
-        // And the command carries exactly what was stored.
-        assert_eq!(
-            cmds,
-            vec![DeckCmd::SetCrossovers {
-                deck: DeckId::A,
-                low_hz: state.eq_low_hz,
-                high_hz: state.eq_high_hz,
-            }]
-        );
-        // A value that means nothing moves neither corner.
-        let before = (state.eq_low_hz, state.eq_high_hz);
-        assert!(e.set_crossovers(DeckId::A, f32::NAN, 2_000.0).is_empty());
-        let state = e.deck(DeckId::A);
-        assert_eq!((state.eq_low_hz, state.eq_high_hz), before);
     }
 
     /// The ladder steps from the loop that is RUNNING, not from a count

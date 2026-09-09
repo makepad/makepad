@@ -48,6 +48,7 @@ mod cue;
 mod deck_sections;
 mod deck_tabs;
 mod decks;
+mod chain_state;
 // Writing the operator's own work so that losing power cannot cost it.
 mod durable;
 // VJ effect renderstack: mesh-generating engines configured by splash
@@ -241,7 +242,7 @@ use crate::gen::{GenCmd, GenModel, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
-    TrackStems,
+    EffectParam, TrackStems,
     CueMode, CueReadState, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
     VideoTransitionPhase,
 };
@@ -16198,6 +16199,14 @@ p2 {}
         }
     }
 
+    /// What a rack setter returned, sent on to the deck it was turned
+    /// for. One door for every effect knob, so a handler names the deck
+    /// once and never spells out a command.
+    fn send_deck_effects(&mut self, cx: &mut Cx, deck: DeckId, params: Vec<EffectParam>) {
+        let cmds = params.into_iter().map(|param| DeckCmd::Effect { deck, param }).collect();
+        self.run_deck_cmds(cx, cmds);
+    }
+
     fn run_deck_cmds(&mut self, cx: &mut Cx, cmds: Vec<DeckCmd>) {
         for cmd in cmds {
             match cmd {
@@ -16384,193 +16393,8 @@ p2 {}
                 DeckCmd::SetResonance { deck, lift } => {
                     self.mixer.set_deck_resonance(deck, lift)
                 }
-                DeckCmd::SetEcho { deck, fraction } => self.mixer.set_deck_echo(deck, fraction),
-                DeckCmd::SetEchoPingpong { deck, on } => {
-                    self.mixer.set_deck_echo_pingpong(deck, on)
-                }
-                DeckCmd::SetEchoFeedback { deck, feedback } => {
-                    self.mixer.set_deck_echo_feedback(deck, feedback)
-                }
-                DeckCmd::SetFlanger { deck, on } => self.mixer.set_deck_flanger(deck, on),
-                DeckCmd::SetFlangerRate { deck, hz } => {
-                    self.mixer.set_deck_flanger_rate(deck, hz)
-                }
-                DeckCmd::SetFlangerDepth { deck, depth } => {
-                    self.mixer.set_deck_flanger_depth(deck, depth)
-                }
-                DeckCmd::SetFlangerFeedback { deck, feedback } => {
-                    self.mixer.set_deck_flanger_feedback(deck, feedback)
-                }
-                DeckCmd::SetFlangerSyncUnits { deck, units } => {
-                    self.mixer.set_deck_flanger_sync_units(deck, units)
-                }
-                DeckCmd::SetFlangerBeatOffset { deck, offset } => {
-                    self.mixer.set_deck_flanger_beat_offset(deck, offset)
-                }
-                DeckCmd::SetBitcrusher { deck, on } => self.mixer.set_deck_bitcrusher(deck, on),
-                DeckCmd::SetBitcrusherRate { deck, hz } => {
-                    self.mixer.set_deck_bitcrusher_rate(deck, hz)
-                }
-                DeckCmd::SetBitcrusherBits { deck, bits } => {
-                    self.mixer.set_deck_bitcrusher_bits(deck, bits)
-                }
-                DeckCmd::SetTremolo { deck, on } => self.mixer.set_deck_tremolo(deck, on),
-                DeckCmd::SetTremoloRate { deck, hz } => {
-                    self.mixer.set_deck_tremolo_rate(deck, hz)
-                }
-                DeckCmd::SetTremoloDepth { deck, depth } => {
-                    self.mixer.set_deck_tremolo_depth(deck, depth)
-                }
-                DeckCmd::SetTremoloSyncUnits { deck, units } => {
-                    self.mixer.set_deck_tremolo_sync_units(deck, units)
-                }
-                DeckCmd::SetTremoloBeatOffset { deck, offset } => {
-                    self.mixer.set_deck_tremolo_beat_offset(deck, offset)
-                }
-                DeckCmd::SetDistortion { deck, on } => self.mixer.set_deck_distortion(deck, on),
-                DeckCmd::SetDistortionDrive { deck, drive } => {
-                    self.mixer.set_deck_distortion_drive(deck, drive)
-                }
-                DeckCmd::SetPhaser { deck, on } => self.mixer.set_deck_phaser(deck, on),
-                DeckCmd::SetPhaserRate { deck, hz } => self.mixer.set_deck_phaser_rate(deck, hz),
-                DeckCmd::SetPhaserFeedback { deck, feedback } => {
-                    self.mixer.set_deck_phaser_feedback(deck, feedback)
-                }
-                DeckCmd::SetPhaserSyncUnits { deck, units } => {
-                    self.mixer.set_deck_phaser_sync_units(deck, units)
-                }
-                DeckCmd::SetPhaserBeatOffset { deck, offset } => {
-                    self.mixer.set_deck_phaser_beat_offset(deck, offset)
-                }
-                DeckCmd::SetAutopan { deck, on } => self.mixer.set_deck_autopan(deck, on),
-                DeckCmd::SetAutopanRate { deck, hz } => {
-                    self.mixer.set_deck_autopan_rate(deck, hz)
-                }
-                DeckCmd::SetAutopanSyncUnits { deck, units } => {
-                    self.mixer.set_deck_autopan_sync_units(deck, units)
-                }
-                DeckCmd::SetAutopanBeatOffset { deck, offset } => {
-                    self.mixer.set_deck_autopan_beat_offset(deck, offset)
-                }
-                DeckCmd::SetEchoMix { deck, mix } => {
-                    self.mixer.set_deck_echo_mix(deck, mix)
-                }
-                DeckCmd::SetEchoLevelMode { deck, mode } => {
-                    self.mixer.set_deck_echo_level_mode(deck, mode)
-                }
-                DeckCmd::SetEchoCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_echo_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetFlangerMix { deck, mix } => {
-                    self.mixer.set_deck_flanger_mix(deck, mix)
-                }
-                DeckCmd::SetFlangerLevelMode { deck, mode } => {
-                    self.mixer.set_deck_flanger_level_mode(deck, mode)
-                }
-                DeckCmd::SetFlangerCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_flanger_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetBitcrusherMix { deck, mix } => {
-                    self.mixer.set_deck_bitcrusher_mix(deck, mix)
-                }
-                DeckCmd::SetBitcrusherLevelMode { deck, mode } => {
-                    self.mixer.set_deck_bitcrusher_level_mode(deck, mode)
-                }
-                DeckCmd::SetBitcrusherCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_bitcrusher_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetTremoloMix { deck, mix } => {
-                    self.mixer.set_deck_tremolo_mix(deck, mix)
-                }
-                DeckCmd::SetTremoloLevelMode { deck, mode } => {
-                    self.mixer.set_deck_tremolo_level_mode(deck, mode)
-                }
-                DeckCmd::SetTremoloCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_tremolo_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetDistortionMix { deck, mix } => {
-                    self.mixer.set_deck_distortion_mix(deck, mix)
-                }
-                DeckCmd::SetDistortionLevelMode { deck, mode } => {
-                    self.mixer.set_deck_distortion_level_mode(deck, mode)
-                }
-                DeckCmd::SetDistortionCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_distortion_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetPhaserMix { deck, mix } => {
-                    self.mixer.set_deck_phaser_mix(deck, mix)
-                }
-                DeckCmd::SetPhaserLevelMode { deck, mode } => {
-                    self.mixer.set_deck_phaser_level_mode(deck, mode)
-                }
-                DeckCmd::SetPhaserCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_phaser_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetAutopanMix { deck, mix } => {
-                    self.mixer.set_deck_autopan_mix(deck, mix)
-                }
-                DeckCmd::SetAutopanLevelMode { deck, mode } => {
-                    self.mixer.set_deck_autopan_level_mode(deck, mode)
-                }
-                DeckCmd::SetAutopanCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_autopan_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetStereoWidthMix { deck, mix } => {
-                    self.mixer.set_deck_stereo_width_mix(deck, mix)
-                }
-                DeckCmd::SetStereoWidthLevelMode { deck, mode } => {
-                    self.mixer.set_deck_stereo_width_level_mode(deck, mode)
-                }
-                DeckCmd::SetStereoWidthCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_stereo_width_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetPlateReverbMix { deck, mix } => {
-                    self.mixer.set_deck_plate_reverb_mix(deck, mix)
-                }
-                DeckCmd::SetPlateReverbLevelMode { deck, mode } => {
-                    self.mixer.set_deck_plate_reverb_level_mode(deck, mode)
-                }
-                DeckCmd::SetPlateReverbCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_plate_reverb_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetMoogLadderMix { deck, mix } => {
-                    self.mixer.set_deck_moog_ladder_mix(deck, mix)
-                }
-                DeckCmd::SetMoogLadderLevelMode { deck, mode } => {
-                    self.mixer.set_deck_moog_ladder_level_mode(deck, mode)
-                }
-                DeckCmd::SetMoogLadderCeiling { deck, ceiling } => {
-                    self.mixer.set_deck_moog_ladder_ceiling(deck, ceiling)
-                }
-                DeckCmd::SetLevelDefault { deck, mode } => {
-                    self.mixer.set_deck_level_default(deck, mode)
-                }
-                DeckCmd::SetCompressor { deck, on } => {
-                    self.mixer.set_deck_compressor(deck, on)
-                }
-                DeckCmd::SetCompressorThreshold { deck, db } => {
-                    self.mixer.set_deck_compressor_threshold(deck, db)
-                }
-                DeckCmd::SetCompressorRatio { deck, ratio } => {
-                    self.mixer.set_deck_compressor_ratio(deck, ratio)
-                }
-                DeckCmd::SetCrossovers { deck, low_hz, high_hz } => {
-                    self.mixer.set_deck_crossovers(deck, low_hz, high_hz)
-                }
-                DeckCmd::SetStereoWidth { deck, on } => self.mixer.set_deck_stereo_width(deck, on),
-                DeckCmd::SetStereoWidthAmount { deck, amount } => {
-                    self.mixer.set_deck_stereo_width_amount(deck, amount)
-                }
-                DeckCmd::SetPlateReverb { deck, on } => self.mixer.set_deck_plate_reverb(deck, on),
-                DeckCmd::SetPlateReverbSize { deck, size } => {
-                    self.mixer.set_deck_plate_reverb_size(deck, size)
-                }
-                DeckCmd::SetMoogLadder { deck, on } => self.mixer.set_deck_moog_ladder(deck, on),
-                DeckCmd::SetMoogLadderCutoff { deck, hz } => {
-                    self.mixer.set_deck_moog_ladder_cutoff(deck, hz)
-                }
-                DeckCmd::SetMoogLadderResonance { deck, resonance } => {
-                    self.mixer.set_deck_moog_ladder_resonance(deck, resonance)
+                DeckCmd::Effect { deck, param } => {
+                    self.mixer.set_chain_effect(deck.into(), param)
                 }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
@@ -16717,58 +16541,58 @@ p2 {}
         self.paint_chip(cx, ids!(sfx_fx_a), self.sfx_fx_target == FxTarget::A, None);
         self.paint_chip(cx, ids!(sfx_fx_b), self.sfx_fx_target == FxTarget::B, None);
         self.paint_chip(cx, ids!(sfx_fx_mix), self.sfx_fx_target == FxTarget::Mix, None);
-        let deck = self.decks.deck(self.sfx_fx_deck());
+        let chain = self.decks.chain(self.sfx_fx_deck());
         let (feedback, flanger_on, flanger_rate, bitcrusher_on, bitcrusher_bits) = (
-            deck.echo_feedback as f64,
-            deck.flanger_on,
-            deck.flanger_rate as f64,
-            deck.bitcrusher_on,
-            deck.bitcrusher_bits as f64,
+            chain.echo_feedback as f64,
+            chain.flanger_on,
+            chain.flanger_rate as f64,
+            chain.bitcrusher_on,
+            chain.bitcrusher_bits as f64,
         );
         let (tremolo_on, tremolo_rate, distortion_on, distortion_drive) = (
-            deck.tremolo_on,
-            deck.tremolo_rate as f64,
-            deck.distortion_on,
-            deck.distortion_drive as f64,
+            chain.tremolo_on,
+            chain.tremolo_rate as f64,
+            chain.distortion_on,
+            chain.distortion_drive as f64,
         );
         let (phaser_on, phaser_rate, phaser_feedback) =
-            (deck.phaser_on, deck.phaser_rate as f64, deck.phaser_feedback as f64);
-        let (autopan_on, autopan_rate) = (deck.autopan_on, deck.autopan_rate as f64);
+            (chain.phaser_on, chain.phaser_rate as f64, chain.phaser_feedback as f64);
+        let (autopan_on, autopan_rate) = (chain.autopan_on, chain.autopan_rate as f64);
         let (stereo_width_on, stereo_width_amount) =
-            (deck.stereo_width_on, deck.stereo_width_amount as f64);
+            (chain.stereo_width_on, chain.stereo_width_amount as f64);
         let (plate_reverb_on, plate_reverb_size) =
-            (deck.plate_reverb_on, deck.plate_reverb_size as f64);
+            (chain.plate_reverb_on, chain.plate_reverb_size as f64);
         let (compressor_on, compressor_threshold_db, compressor_ratio) = (
-            deck.compressor_on,
-            deck.compressor_threshold_db as f64,
-            deck.compressor_ratio as f64,
+            chain.compressor_on,
+            chain.compressor_threshold_db as f64,
+            chain.compressor_ratio as f64,
         );
         let (moog_ladder_on, moog_ladder_cutoff, moog_ladder_resonance) = (
-            deck.moog_ladder_on,
-            deck.moog_ladder_cutoff as f64,
-            deck.moog_ladder_resonance as f64,
+            chain.moog_ladder_on,
+            chain.moog_ladder_cutoff as f64,
+            chain.moog_ladder_resonance as f64,
         );
-        let deck_level_default = deck.level_default;
-        let lvl_echo = (deck.echo_level_mode, deck.echo_mix as f64, deck.echo_ceiling as f64);
-        let (echo_rung, echo_pingpong) = (deck.echo_rung, deck.echo_pingpong);
-        let (eq_low_hz, eq_high_hz) = (deck.eq_low_hz as f64, deck.eq_high_hz as f64);
-        let lvl_flanger = (deck.flanger_level_mode, deck.flanger_mix as f64, deck.flanger_ceiling as f64);
-        let lvl_bitcrusher = (deck.bitcrusher_level_mode, deck.bitcrusher_mix as f64, deck.bitcrusher_ceiling as f64);
-        let lvl_tremolo = (deck.tremolo_level_mode, deck.tremolo_mix as f64, deck.tremolo_ceiling as f64);
-        let lvl_distortion = (deck.distortion_level_mode, deck.distortion_mix as f64, deck.distortion_ceiling as f64);
-        let lvl_phaser = (deck.phaser_level_mode, deck.phaser_mix as f64, deck.phaser_ceiling as f64);
-        let lvl_autopan = (deck.autopan_level_mode, deck.autopan_mix as f64, deck.autopan_ceiling as f64);
-        let lvl_stereo_width = (deck.stereo_width_level_mode, deck.stereo_width_mix as f64, deck.stereo_width_ceiling as f64);
-        let lvl_plate_reverb = (deck.plate_reverb_level_mode, deck.plate_reverb_mix as f64, deck.plate_reverb_ceiling as f64);
-        let lvl_moog_ladder = (deck.moog_ladder_level_mode, deck.moog_ladder_mix as f64, deck.moog_ladder_ceiling as f64);
+        let deck_level_default = chain.level_default;
+        let lvl_echo = (chain.echo_level_mode, chain.echo_mix as f64, chain.echo_ceiling as f64);
+        let (echo_rung, echo_pingpong) = (chain.echo_rung, chain.echo_pingpong);
+        let (eq_low_hz, eq_high_hz) = (chain.eq_low_hz as f64, chain.eq_high_hz as f64);
+        let lvl_flanger = (chain.flanger_level_mode, chain.flanger_mix as f64, chain.flanger_ceiling as f64);
+        let lvl_bitcrusher = (chain.bitcrusher_level_mode, chain.bitcrusher_mix as f64, chain.bitcrusher_ceiling as f64);
+        let lvl_tremolo = (chain.tremolo_level_mode, chain.tremolo_mix as f64, chain.tremolo_ceiling as f64);
+        let lvl_distortion = (chain.distortion_level_mode, chain.distortion_mix as f64, chain.distortion_ceiling as f64);
+        let lvl_phaser = (chain.phaser_level_mode, chain.phaser_mix as f64, chain.phaser_ceiling as f64);
+        let lvl_autopan = (chain.autopan_level_mode, chain.autopan_mix as f64, chain.autopan_ceiling as f64);
+        let lvl_stereo_width = (chain.stereo_width_level_mode, chain.stereo_width_mix as f64, chain.stereo_width_ceiling as f64);
+        let lvl_plate_reverb = (chain.plate_reverb_level_mode, chain.plate_reverb_mix as f64, chain.plate_reverb_ceiling as f64);
+        let lvl_moog_ladder = (chain.moog_ladder_level_mode, chain.moog_ladder_mix as f64, chain.moog_ladder_ceiling as f64);
         // The four beat-lockable LFOs, read together: each row shows
         // EITHER its free-Hz rate slider or its offset, never both, so
         // the rung the dropdown sits on drives visibility too.
         let sync_rungs = [
-            (deck.flanger_sync_units, deck.flanger_beat_offset as f64),
-            (deck.tremolo_sync_units, deck.tremolo_beat_offset as f64),
-            (deck.phaser_sync_units, deck.phaser_beat_offset as f64),
-            (deck.autopan_sync_units, deck.autopan_beat_offset as f64),
+            (chain.flanger_sync_units, chain.flanger_beat_offset as f64),
+            (chain.tremolo_sync_units, chain.tremolo_beat_offset as f64),
+            (chain.phaser_sync_units, chain.phaser_beat_offset as f64),
+            (chain.autopan_sync_units, chain.autopan_beat_offset as f64),
         ];
         self.ui.slider(cx, ids!(sfx_eq_low_hz)).set_value(cx, eq_low_hz);
         self.ui.slider(cx, ids!(sfx_eq_high_hz)).set_value(cx, eq_high_hz);
@@ -22859,71 +22683,71 @@ p2 {}
         let path = Self::fx_levels_settings_path();
         let mut store = crate::settings::Settings::new();
         for (tag, id) in [("a", DeckId::A), ("b", DeckId::B)] {
-            let deck = self.decks.deck(id);
+            let chain = self.decks.chain(id);
             store.set_usize(
                 &format!("fxlevel.{tag}.all.mode"),
-                deck.level_default.as_row() as usize,
+                chain.level_default.as_row() as usize,
             );
         store.set_usize(
             &format!("fxlevel.{tag}.echo.mode"),
-            deck.echo_level_mode.as_row() as usize,
+            chain.echo_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.echo.mix"), deck.echo_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.echo.cap"), deck.echo_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.echo.mix"), chain.echo_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.echo.cap"), chain.echo_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.flanger.mode"),
-            deck.flanger_level_mode.as_row() as usize,
+            chain.flanger_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.flanger.mix"), deck.flanger_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.flanger.cap"), deck.flanger_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.flanger.mix"), chain.flanger_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.flanger.cap"), chain.flanger_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.bitcrusher.mode"),
-            deck.bitcrusher_level_mode.as_row() as usize,
+            chain.bitcrusher_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.mix"), deck.bitcrusher_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.cap"), deck.bitcrusher_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.mix"), chain.bitcrusher_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.cap"), chain.bitcrusher_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.tremolo.mode"),
-            deck.tremolo_level_mode.as_row() as usize,
+            chain.tremolo_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.tremolo.mix"), deck.tremolo_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.tremolo.cap"), deck.tremolo_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.tremolo.mix"), chain.tremolo_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.tremolo.cap"), chain.tremolo_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.distortion.mode"),
-            deck.distortion_level_mode.as_row() as usize,
+            chain.distortion_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.distortion.mix"), deck.distortion_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.distortion.cap"), deck.distortion_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.distortion.mix"), chain.distortion_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.distortion.cap"), chain.distortion_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.phaser.mode"),
-            deck.phaser_level_mode.as_row() as usize,
+            chain.phaser_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.phaser.mix"), deck.phaser_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.phaser.cap"), deck.phaser_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.phaser.mix"), chain.phaser_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.phaser.cap"), chain.phaser_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.autopan.mode"),
-            deck.autopan_level_mode.as_row() as usize,
+            chain.autopan_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.autopan.mix"), deck.autopan_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.autopan.cap"), deck.autopan_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.autopan.mix"), chain.autopan_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.autopan.cap"), chain.autopan_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.stereo_width.mode"),
-            deck.stereo_width_level_mode.as_row() as usize,
+            chain.stereo_width_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.stereo_width.mix"), deck.stereo_width_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.stereo_width.cap"), deck.stereo_width_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.stereo_width.mix"), chain.stereo_width_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.stereo_width.cap"), chain.stereo_width_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.plate_reverb.mode"),
-            deck.plate_reverb_level_mode.as_row() as usize,
+            chain.plate_reverb_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.mix"), deck.plate_reverb_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.cap"), deck.plate_reverb_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.mix"), chain.plate_reverb_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.cap"), chain.plate_reverb_ceiling as f64);
         store.set_usize(
             &format!("fxlevel.{tag}.moog_ladder.mode"),
-            deck.moog_ladder_level_mode.as_row() as usize,
+            chain.moog_ladder_level_mode.as_row() as usize,
         );
-        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.mix"), deck.moog_ladder_mix as f64);
-        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.cap"), deck.moog_ladder_ceiling as f64);
+        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.mix"), chain.moog_ladder_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.cap"), chain.moog_ladder_ceiling as f64);
         }
         let _ = crate::durable::write_file(&path, store.to_text());
     }
@@ -22937,103 +22761,104 @@ p2 {}
         };
         let store = crate::settings::Settings::from_text(&body);
         for (tag, deck) in [("a", DeckId::A), ("b", DeckId::B)] {
-            let mut cmds = Vec::new();
+            let chain = self.decks.chain_mut(deck);
+            let mut params = Vec::new();
             let all = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.all.mode"),
                 1,
             ) as u32);
-            cmds.extend(self.decks.set_level_default(deck, all));
+            params.extend(chain.set_level_default(all));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.echo.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_echo_level_mode(deck, mode));
+            params.extend(chain.set_echo_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.echo.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_echo_mix(deck, mix));
+            params.extend(chain.set_echo_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.echo.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_echo_ceiling(deck, cap));
+            params.extend(chain.set_echo_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.flanger.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_flanger_level_mode(deck, mode));
+            params.extend(chain.set_flanger_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.flanger.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_flanger_mix(deck, mix));
+            params.extend(chain.set_flanger_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.flanger.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_flanger_ceiling(deck, cap));
+            params.extend(chain.set_flanger_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.bitcrusher.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_bitcrusher_level_mode(deck, mode));
+            params.extend(chain.set_bitcrusher_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.bitcrusher.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_bitcrusher_mix(deck, mix));
+            params.extend(chain.set_bitcrusher_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.bitcrusher.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_bitcrusher_ceiling(deck, cap));
+            params.extend(chain.set_bitcrusher_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.tremolo.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_tremolo_level_mode(deck, mode));
+            params.extend(chain.set_tremolo_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.tremolo.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_tremolo_mix(deck, mix));
+            params.extend(chain.set_tremolo_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.tremolo.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_tremolo_ceiling(deck, cap));
+            params.extend(chain.set_tremolo_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.distortion.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_distortion_level_mode(deck, mode));
+            params.extend(chain.set_distortion_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.distortion.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_distortion_mix(deck, mix));
+            params.extend(chain.set_distortion_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.distortion.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_distortion_ceiling(deck, cap));
+            params.extend(chain.set_distortion_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.phaser.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_phaser_level_mode(deck, mode));
+            params.extend(chain.set_phaser_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.phaser.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_phaser_mix(deck, mix));
+            params.extend(chain.set_phaser_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.phaser.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_phaser_ceiling(deck, cap));
+            params.extend(chain.set_phaser_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.autopan.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_autopan_level_mode(deck, mode));
+            params.extend(chain.set_autopan_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.autopan.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_autopan_mix(deck, mix));
+            params.extend(chain.set_autopan_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.autopan.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_autopan_ceiling(deck, cap));
+            params.extend(chain.set_autopan_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.stereo_width.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_stereo_width_level_mode(deck, mode));
+            params.extend(chain.set_stereo_width_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.stereo_width.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_stereo_width_mix(deck, mix));
+            params.extend(chain.set_stereo_width_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.stereo_width.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_stereo_width_ceiling(deck, cap));
+            params.extend(chain.set_stereo_width_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.plate_reverb.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_plate_reverb_level_mode(deck, mode));
+            params.extend(chain.set_plate_reverb_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.plate_reverb.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_plate_reverb_mix(deck, mix));
+            params.extend(chain.set_plate_reverb_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.plate_reverb.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_plate_reverb_ceiling(deck, cap));
+            params.extend(chain.set_plate_reverb_ceiling(cap));
             let mode = crate::music_dsp::LevelMode::from_row(store.usize(
                 &format!("fxlevel.{tag}.moog_ladder.mode"),
                 0,
             ) as u32);
-            cmds.extend(self.decks.set_moog_ladder_level_mode(deck, mode));
+            params.extend(chain.set_moog_ladder_level_mode(mode));
             let mix = store.f64(&format!("fxlevel.{tag}.moog_ladder.mix"), 1.0) as f32;
-            cmds.extend(self.decks.set_moog_ladder_mix(deck, mix));
+            params.extend(chain.set_moog_ladder_mix(mix));
             let cap = store.f64(&format!("fxlevel.{tag}.moog_ladder.cap"), 1.0) as f32;
-            cmds.extend(self.decks.set_moog_ladder_ceiling(deck, cap));
-            self.run_deck_cmds(cx, cmds);
+            params.extend(chain.set_moog_ladder_ceiling(cap));
+            self.send_deck_effects(cx, deck, params);
         }
     }
 
@@ -26888,8 +26713,8 @@ p2 {}
             let bend = state.bend;
             let synced = state.synced;
             let resonance = state.resonance;
-            let echo_rung = state.echo_rung;
-            let echo_pingpong = state.echo_pingpong;
+            let echo_rung = state.chain.echo_rung;
+            let echo_pingpong = state.chain.echo_pingpong;
             let loaded = state.is_loaded();
             // What a fresh press of the retire button would do. Read off
             // the ENGINE's own mirror, which is the one `eject_press`
@@ -33658,16 +33483,22 @@ impl MatchEvent for App {
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_feedback)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_echo_feedback(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_echo_feedback(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_echo_feedback(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_echo_feedback(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_levels)).clicked(actions) {
             // Paint it before it is shown: the rows read the deck the FX
@@ -33691,16 +33522,22 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_level_default(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_level_default(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_level_default(DeckId::A, mode);
-                        cmds.extend(self.decks.set_level_default(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_level_default(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_level_default(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_level_default(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_level_default(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
@@ -33718,44 +33555,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_echo_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_echo_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_echo_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_echo_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_echo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_echo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_echo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_echo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_echo_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_echo_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_echo_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_echo_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_echo_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_echo_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_echo_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_echo_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -33771,44 +33626,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_flanger_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_flanger_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_flanger_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_flanger_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_flanger_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_flanger_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_flanger_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_flanger_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_flanger_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_flanger_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_flanger_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_flanger_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_flanger_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_flanger_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_flanger_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_flanger_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -33824,44 +33697,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_bitcrusher_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_bitcrusher_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_bitcrusher_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_bitcrusher_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_bitcrusher_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_bitcrusher_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_bitcrusher_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_bitcrusher_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_bitcrusher_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_bitcrusher_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_bitcrusher_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_bitcrusher_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -33877,44 +33768,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_tremolo_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_tremolo_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_tremolo_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_tremolo_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_tremolo_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_tremolo_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_tremolo_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_tremolo_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_tremolo_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_tremolo_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_tremolo_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_tremolo_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -33930,44 +33839,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_distortion_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_distortion_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_distortion_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_distortion_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_distortion_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_distortion_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_distortion_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_distortion_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_distortion_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_distortion_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_distortion_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_distortion_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_distortion_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_distortion_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_distortion_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_distortion_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -33983,44 +33910,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_phaser_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_phaser_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_phaser_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_phaser_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_phaser_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_phaser_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_phaser_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_phaser_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_phaser_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_phaser_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_phaser_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_phaser_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_phaser_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_phaser_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_phaser_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_phaser_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -34036,44 +33981,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_autopan_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_autopan_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_autopan_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_autopan_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_autopan_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_autopan_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_autopan_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_autopan_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_autopan_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_autopan_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_autopan_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_autopan_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_autopan_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_autopan_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_autopan_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_autopan_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -34089,44 +34052,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_stereo_width_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_stereo_width_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_stereo_width_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_stereo_width_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_stereo_width_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_stereo_width_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_stereo_width_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_stereo_width_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_stereo_width_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_stereo_width_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_stereo_width_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_stereo_width_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_stereo_width_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_stereo_width_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_stereo_width_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_stereo_width_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -34142,44 +34123,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_plate_reverb_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_plate_reverb_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_plate_reverb_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_plate_reverb_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_plate_reverb_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_plate_reverb_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_plate_reverb_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_plate_reverb_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_plate_reverb_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_plate_reverb_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_plate_reverb_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_plate_reverb_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         {
@@ -34195,44 +34194,62 @@ impl MatchEvent for App {
                 }
             }
             if let Some(mode) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_moog_ladder_level_mode(DeckId::A, mode),
-                    FxTarget::B => self.decks.set_moog_ladder_level_mode(DeckId::B, mode),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_moog_ladder_level_mode(DeckId::A, mode);
-                        cmds.extend(self.decks.set_moog_ladder_level_mode(DeckId::B, mode));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_level_mode(mode);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_mix)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_moog_ladder_mix(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_moog_ladder_mix(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_moog_ladder_mix(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_moog_ladder_mix(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_mix(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_ceiling)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_moog_ladder_ceiling(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_moog_ladder_ceiling(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_moog_ladder_ceiling(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_moog_ladder_ceiling(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_ceiling(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.save_fx_levels_settings();
         }
         for (which, id) in [(0usize, ids!(sfx_eq_low_hz)), (1usize, ids!(sfx_eq_high_hz))] {
@@ -34242,43 +34259,48 @@ impl MatchEvent for App {
             // Both corners go every time: the engine holds them an octave
             // apart and may move the one that was not touched, so sending
             // only the dragged one would let the two disagree.
-            let send = |app: &mut Self, deck: DeckId| -> Vec<DeckCmd> {
-                let state = app.decks.deck(deck);
+            let send = |app: &mut Self, cx: &mut Cx, deck: DeckId| {
+                let chain = app.decks.chain(deck);
                 let (low, high) = match which {
-                    0 => (v as f32, state.eq_high_hz),
-                    _ => (state.eq_low_hz, v as f32),
+                    0 => (v as f32, chain.eq_high_hz),
+                    _ => (chain.eq_low_hz, v as f32),
                 };
-                app.decks.set_crossovers(deck, low, high)
+                let params = app.decks.chain_mut(deck).set_crossovers(low, high);
+                app.send_deck_effects(cx, deck, params);
             };
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => send(self, DeckId::A),
-                FxTarget::B => send(self, DeckId::B),
+            match self.sfx_fx_target {
+                FxTarget::A => send(self, cx, DeckId::A),
+                FxTarget::B => send(self, cx, DeckId::B),
                 FxTarget::Mix => {
-                    let mut cmds = send(self, DeckId::A);
-                    cmds.extend(send(self, DeckId::B));
-                    cmds
+                    send(self, cx, DeckId::A);
+                    send(self, cx, DeckId::B);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
             // The chip is the quick on/off the deck strip's E used to be:
             // off when it is sounding, and back to a beat when it is not.
-            let rung = match self.decks.deck(self.sfx_fx_deck()).echo_rung {
+            let rung = match self.decks.chain(self.sfx_fx_deck()).echo_rung {
                 0 => 1,
                 _ => 0,
             };
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_echo_rung(DeckId::A, rung),
-                FxTarget::B => self.decks.set_echo_rung(DeckId::B, rung),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_echo_rung(DeckId::A, rung);
-                    cmds.extend(self.decks.set_echo_rung(DeckId::B, rung));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         {
@@ -34294,62 +34316,86 @@ impl MatchEvent for App {
                 }
             }
             if let Some(rung) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_echo_rung(DeckId::A, rung),
-                    FxTarget::B => self.decks.set_echo_rung(DeckId::B, rung),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_echo_rung(DeckId::A, rung);
-                        cmds.extend(self.decks.set_echo_rung(DeckId::B, rung));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_echo_rung(rung);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_echo_rung(rung);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if self.ui.button(cx, ids!(sfx_fx_echo_ping)).clicked(actions) {
-            let on = !self.decks.deck(self.sfx_fx_deck()).echo_pingpong;
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_echo_pingpong(DeckId::A, on),
-                FxTarget::B => self.decks.set_echo_pingpong(DeckId::B, on),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_echo_pingpong(DeckId::A, on);
-                    cmds.extend(self.decks.set_echo_pingpong(DeckId::B, on));
-                    cmds
+            let on = !self.decks.chain(self.sfx_fx_deck()).echo_pingpong;
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_pingpong(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_pingpong(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_echo_pingpong(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_echo_pingpong(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_flanger(DeckId::A),
-                FxTarget::B => self.decks.toggle_flanger(DeckId::B),
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_flanger();
+                    self.send_deck_effects(cx, DeckId::A, params);
+                }
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_flanger();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
                 FxTarget::Mix => {
                     // Both land on the SAME new side of the switch, not
                     // each flip its own -- the pair could otherwise start
                     // this press on opposite sides and end on opposite
                     // sides too.
-                    let on = !self.decks.deck(DeckId::A).flanger_on;
-                    let mut cmds = self.decks.set_flanger(DeckId::A, on);
-                    cmds.extend(self.decks.set_flanger(DeckId::B, on));
-                    cmds
+                    let on = !self.decks.chain(DeckId::A).flanger_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_flanger_rate(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_flanger_rate(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_flanger_rate(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_flanger_rate(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_flanger_sync)).widget_uid();
@@ -34364,82 +34410,118 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_flanger_sync_units(DeckId::A, units),
-                    FxTarget::B => self.decks.set_flanger_sync_units(DeckId::B, units),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_flanger_sync_units(DeckId::A, units);
-                        cmds.extend(self.decks.set_flanger_sync_units(DeckId::B, units));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_flanger_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_flanger_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_flanger_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_flanger_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_flanger_beat_offset(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_flanger_beat_offset(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_flanger_beat_offset(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_flanger_beat_offset(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_flanger_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_flanger_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_bitcrusher)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_bitcrusher(DeckId::A),
-                FxTarget::B => self.decks.toggle_bitcrusher(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).bitcrusher_on;
-                    let mut cmds = self.decks.set_bitcrusher(DeckId::A, on);
-                    cmds.extend(self.decks.set_bitcrusher(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_bitcrusher();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_bitcrusher();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).bitcrusher_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_bitcrusher_bits(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_bitcrusher_bits(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_bitcrusher_bits(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_bitcrusher_bits(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_bits(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_bits(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_bitcrusher_bits(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_bitcrusher_bits(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_tremolo)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_tremolo(DeckId::A),
-                FxTarget::B => self.decks.toggle_tremolo(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).tremolo_on;
-                    let mut cmds = self.decks.set_tremolo(DeckId::A, on);
-                    cmds.extend(self.decks.set_tremolo(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_tremolo();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_tremolo();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).tremolo_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_tremolo_rate(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_tremolo_rate(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_tremolo_rate(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_tremolo_rate(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_tremolo_sync)).widget_uid();
@@ -34454,82 +34536,118 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_tremolo_sync_units(DeckId::A, units),
-                    FxTarget::B => self.decks.set_tremolo_sync_units(DeckId::B, units),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_tremolo_sync_units(DeckId::A, units);
-                        cmds.extend(self.decks.set_tremolo_sync_units(DeckId::B, units));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_tremolo_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_tremolo_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_tremolo_beat_offset(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_tremolo_beat_offset(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_tremolo_beat_offset(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_tremolo_beat_offset(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_tremolo_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_tremolo_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_distortion)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_distortion(DeckId::A),
-                FxTarget::B => self.decks.toggle_distortion(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).distortion_on;
-                    let mut cmds = self.decks.set_distortion(DeckId::A, on);
-                    cmds.extend(self.decks.set_distortion(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_distortion();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_distortion();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).distortion_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_distortion_drive(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_distortion_drive(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_distortion_drive(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_distortion_drive(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_drive(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_drive(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_distortion_drive(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_distortion_drive(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_phaser)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_phaser(DeckId::A),
-                FxTarget::B => self.decks.toggle_phaser(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).phaser_on;
-                    let mut cmds = self.decks.set_phaser(DeckId::A, on);
-                    cmds.extend(self.decks.set_phaser(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_phaser();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_phaser();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).phaser_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_phaser_rate(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_phaser_rate(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_phaser_rate(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_phaser_rate(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_phaser_sync)).widget_uid();
@@ -34544,68 +34662,98 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_phaser_sync_units(DeckId::A, units),
-                    FxTarget::B => self.decks.set_phaser_sync_units(DeckId::B, units),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_phaser_sync_units(DeckId::A, units);
-                        cmds.extend(self.decks.set_phaser_sync_units(DeckId::B, units));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_phaser_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_phaser_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_phaser_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_phaser_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_phaser_beat_offset(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_phaser_beat_offset(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_phaser_beat_offset(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_phaser_beat_offset(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_phaser_feedback(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_phaser_feedback(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_phaser_feedback(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_phaser_feedback(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_phaser_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_phaser_feedback(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_autopan)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_autopan(DeckId::A),
-                FxTarget::B => self.decks.toggle_autopan(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).autopan_on;
-                    let mut cmds = self.decks.set_autopan(DeckId::A, on);
-                    cmds.extend(self.decks.set_autopan(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_autopan();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_autopan();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).autopan_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_autopan_rate(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_autopan_rate(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_autopan_rate(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_autopan_rate(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_rate(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_autopan_sync)).widget_uid();
@@ -34620,158 +34768,230 @@ impl MatchEvent for App {
                 }
             }
             if let Some(units) = picked {
-                let cmds = match self.sfx_fx_target {
-                    FxTarget::A => self.decks.set_autopan_sync_units(DeckId::A, units),
-                    FxTarget::B => self.decks.set_autopan_sync_units(DeckId::B, units),
-                    FxTarget::Mix => {
-                        let mut cmds = self.decks.set_autopan_sync_units(DeckId::A, units);
-                        cmds.extend(self.decks.set_autopan_sync_units(DeckId::B, units));
-                        cmds
+                match self.sfx_fx_target {
+                    FxTarget::A => {
+                        let params = self.decks.chain_mut(DeckId::A).set_autopan_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
                     }
-                };
-                self.run_deck_cmds(cx, cmds);
+                    FxTarget::B => {
+                        let params = self.decks.chain_mut(DeckId::B).set_autopan_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                    FxTarget::Mix => {
+                        let params = self.decks.chain_mut(DeckId::A).set_autopan_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::A, params);
+                        let params = self.decks.chain_mut(DeckId::B).set_autopan_sync_units(units);
+                        self.send_deck_effects(cx, DeckId::B, params);
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_autopan_beat_offset(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_autopan_beat_offset(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_autopan_beat_offset(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_autopan_beat_offset(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_autopan_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_autopan_beat_offset(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_stereo_width)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_stereo_width(DeckId::A),
-                FxTarget::B => self.decks.toggle_stereo_width(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).stereo_width_on;
-                    let mut cmds = self.decks.set_stereo_width(DeckId::A, on);
-                    cmds.extend(self.decks.set_stereo_width(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_stereo_width();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_stereo_width();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).stereo_width_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_stereo_width_amount(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_stereo_width_amount(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_stereo_width_amount(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_stereo_width_amount(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_amount(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_amount(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_stereo_width_amount(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_stereo_width_amount(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_plate_reverb)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_plate_reverb(DeckId::A),
-                FxTarget::B => self.decks.toggle_plate_reverb(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).plate_reverb_on;
-                    let mut cmds = self.decks.set_plate_reverb(DeckId::A, on);
-                    cmds.extend(self.decks.set_plate_reverb(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_plate_reverb();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_plate_reverb();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).plate_reverb_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_plate_reverb_size(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_plate_reverb_size(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_plate_reverb_size(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_plate_reverb_size(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_size(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_size(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_plate_reverb_size(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_plate_reverb_size(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_moog_ladder)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_moog_ladder(DeckId::A),
-                FxTarget::B => self.decks.toggle_moog_ladder(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).moog_ladder_on;
-                    let mut cmds = self.decks.set_moog_ladder(DeckId::A, on);
-                    cmds.extend(self.decks.set_moog_ladder(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_moog_ladder();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_moog_ladder();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).moog_ladder_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_moog_ladder_cutoff(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_moog_ladder_cutoff(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_moog_ladder_cutoff(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_moog_ladder_cutoff(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_cutoff(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_cutoff(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_cutoff(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_cutoff(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_moog_ladder_resonance(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_moog_ladder_resonance(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_moog_ladder_resonance(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_moog_ladder_resonance(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_resonance(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_resonance(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_moog_ladder_resonance(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_moog_ladder_resonance(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if self.ui.button(cx, ids!(sfx_fx_compressor)).clicked(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.toggle_compressor(DeckId::A),
-                FxTarget::B => self.decks.toggle_compressor(DeckId::B),
-                FxTarget::Mix => {
-                    let on = !self.decks.deck(DeckId::A).compressor_on;
-                    let mut cmds = self.decks.set_compressor(DeckId::A, on);
-                    cmds.extend(self.decks.set_compressor(DeckId::B, on));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).toggle_compressor();
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).toggle_compressor();
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let on = !self.decks.chain(DeckId::A).compressor_on;
+                    let params = self.decks.chain_mut(DeckId::A).set_compressor(on);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_compressor(on);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_compressor_threshold(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_compressor_threshold(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_compressor_threshold(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_compressor_threshold(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_compressor_threshold(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_compressor_threshold(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_compressor_threshold(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_compressor_threshold(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).slided(actions) {
-            let cmds = match self.sfx_fx_target {
-                FxTarget::A => self.decks.set_compressor_ratio(DeckId::A, v as f32),
-                FxTarget::B => self.decks.set_compressor_ratio(DeckId::B, v as f32),
-                FxTarget::Mix => {
-                    let mut cmds = self.decks.set_compressor_ratio(DeckId::A, v as f32);
-                    cmds.extend(self.decks.set_compressor_ratio(DeckId::B, v as f32));
-                    cmds
+            match self.sfx_fx_target {
+                FxTarget::A => {
+                    let params = self.decks.chain_mut(DeckId::A).set_compressor_ratio(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
                 }
-            };
-            self.run_deck_cmds(cx, cmds);
+                FxTarget::B => {
+                    let params = self.decks.chain_mut(DeckId::B).set_compressor_ratio(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+                FxTarget::Mix => {
+                    let params = self.decks.chain_mut(DeckId::A).set_compressor_ratio(v as f32);
+                    self.send_deck_effects(cx, DeckId::A, params);
+                    let params = self.decks.chain_mut(DeckId::B).set_compressor_ratio(v as f32);
+                    self.send_deck_effects(cx, DeckId::B, params);
+                }
+            }
         }
 
         // ---- IMPORT: one quiet button, one live mini-panel ----
