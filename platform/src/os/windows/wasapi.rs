@@ -58,8 +58,34 @@ use {
         },
     },
     std::collections::HashSet,
+    std::sync::atomic::{AtomicU64, Ordering},
     std::sync::{Arc, Mutex},
 };
+
+/// Whether an output asked for needs a thread of its own: not while a live
+/// one is already open (or opening) for it, and not while it stands as
+/// failed. A terminated entry is one on its way out and does not count --
+/// a device asked for again while its old thread winds down gets a new
+/// one, which shared mode allows.
+///
+/// Pure, so the rule that decides a spawn can be pinned: the list it reads
+/// is published BEFORE the open (see `use_audio_outputs`), and reading it
+/// wrongly is how one device ends up with two threads.
+fn should_spawn(
+    known: impl Iterator<Item = (AudioDeviceId, bool)>,
+    failed: &HashSet<AudioDeviceId>,
+    device_id: AudioDeviceId,
+) -> bool {
+    let live = known.into_iter().any(|(id, terminated)| id == device_id && !terminated);
+    !live && !failed.contains(&device_id)
+}
+
+/// Every output thread is told apart from every other by this, not by its
+/// device: two threads for one device can exist for a moment -- one
+/// winding down, one opening -- and each must find and remove its OWN
+/// entry, or the old one's exit takes the new one's entry with it and the
+/// next scan opens the device a third time.
+static NEXT_OUTPUT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 /// Elevate the current thread to Pro Audio priority using Windows MMCSS
 /// Returns the task handle for later cleanup, or None if failed
@@ -275,24 +301,37 @@ impl WasapiAccess {
             let failed = self.failed_devices.lock().unwrap();
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_outputs
-                    .iter()
-                    .find(|v| v.device_id == *device_id)
-                    .is_none()
-                    && !failed.contains(device_id)
-                {
+                let known = audio_outputs.iter().map(|v| (v.device_id, v.is_terminated));
+                if should_spawn(known, &failed, *device_id) {
                     let channel_count = self
                         .descs
                         .iter()
                         .find(|d| d.device_id == *device_id)
                         .map(|d| d.channel_count)
                         .unwrap_or(2);
-                    new.push((index, *device_id, channel_count))
+                    // Published BEFORE the open, not after it: opening takes
+                    // long enough for a second device scan to land -- the
+                    // ordinary startup, where the endpoint watcher fires
+                    // right after the first enumeration -- and the scan
+                    // reads this same list to decide whether to spawn. An
+                    // entry that only appeared after the open let that
+                    // second scan open the device again, and two threads
+                    // then rendered the program into one endpoint at twice
+                    // the rate, garbled, for the rest of the set. It also
+                    // means a terminate arriving mid-open is not lost.
+                    let serial = NEXT_OUTPUT_SERIAL.fetch_add(1, Ordering::Relaxed);
+                    audio_outputs.push(WasapiBaseRef {
+                        device_id: *device_id,
+                        is_terminated: false,
+                        event: HANDLE(std::ptr::null_mut()),
+                        serial,
+                    });
+                    new.push((index, *device_id, channel_count, serial))
                 }
             }
             new
         };
-        for (index, device_id, channel_count) in new {
+        for (index, device_id, channel_count, serial) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
             let failed_devices = self.failed_devices.clone();
@@ -302,13 +341,27 @@ impl WasapiAccess {
                 let _mmcss_handle = elevate_audio_thread_priority();
                 if let Ok(mut wasapi) = WasapiOutput::new(device_id, channel_count) {
                     let sample_rate = wasapi.base.sample_rate;
-                    audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
-                    while let Ok(mut buffer) = wasapi.wait_for_buffer() {
+                    // The entry is already published; give it the event so
+                    // a terminate can wake this thread, and honour one that
+                    // arrived while the device was opening.
+                    let terminated_meanwhile = {
+                        let mut outputs = audio_outputs.lock().unwrap();
+                        match outputs.iter_mut().find(|v| v.serial == serial) {
+                            Some(entry) => {
+                                entry.event = wasapi.base.event;
+                                entry.is_terminated
+                            }
+                            // Nothing waits for a thread nobody is tracking.
+                            None => true,
+                        }
+                    };
+                    while !terminated_meanwhile {
+                        let Ok(mut buffer) = wasapi.wait_for_buffer() else { break };
                         // Use try_lock to avoid blocking the audio thread
                         if let Ok(outputs) = audio_outputs.try_lock() {
                             if outputs
                                 .iter()
-                                .find(|v| v.device_id == device_id && v.is_terminated)
+                                .find(|v| v.serial == serial && v.is_terminated)
                                 .is_some()
                             {
                                 break;
@@ -329,11 +382,16 @@ impl WasapiAccess {
                         }
                         wasapi.release_buffer(buffer);
                     }
+                    // Its OWN entry, by serial: a newer thread for the same
+                    // device may already have published its.
                     let mut audio_outputs = audio_outputs.lock().unwrap();
-                    audio_outputs.retain(|v| v.device_id != device_id);
+                    audio_outputs.retain(|v| v.serial != serial);
                     change_signal.set();
                 } else {
                     println!("Error opening wasapi output device");
+                    // The entry published for the open comes back out, or it
+                    // would block the device's own retry once it is cleared.
+                    audio_outputs.lock().unwrap().retain(|v| v.serial != serial);
                     failed_devices.lock().unwrap().insert(device_id);
                     change_signal.set();
                 }
@@ -532,7 +590,13 @@ impl WasapiAccess {
 struct WasapiBaseRef {
     device_id: AudioDeviceId,
     is_terminated: bool,
+    /// The wake event of the thread this entry stands for, or null while
+    /// that thread is still opening the device: an output's entry is
+    /// published before its open, so the scan that decides whether to
+    /// spawn can see it.
     event: HANDLE,
+    /// Which thread this entry is (outputs only; inputs leave it zero).
+    serial: u64,
 }
 
 unsafe impl Send for WasapiBaseRef {}
@@ -552,7 +616,11 @@ struct WasapiBase {
 impl WasapiBaseRef {
     pub fn signal_termination(&mut self) {
         self.is_terminated = true;
-        unsafe { SetEvent(self.event).unwrap() };
+        // A thread still opening its device has no event yet; it reads the
+        // flag the moment the open lands and leaves.
+        if !self.event.is_invalid() {
+            unsafe { SetEvent(self.event).unwrap() };
+        }
     }
 }
 
@@ -562,6 +630,7 @@ impl WasapiBase {
             is_terminated: false,
             device_id: self.device_id,
             event: self.event,
+            serial: 0,
         }
     }
 
@@ -988,5 +1057,73 @@ impl IMMNotificationClient_Impl for WasapiChangeListener_Impl {
         _key: &PROPERTYKEY,
     ) -> crate::windows::core::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::makepad_live_id::LiveId;
+
+    fn id(n: u64) -> AudioDeviceId {
+        AudioDeviceId(LiveId(n))
+    }
+
+    #[test]
+    fn a_device_already_open_or_opening_is_not_opened_again() {
+        let failed = HashSet::new();
+        let known = [(id(1), false), (id(2), true)];
+        assert!(!should_spawn(known.iter().copied(), &failed, id(1)), "live: no second thread");
+        assert!(should_spawn(known.iter().copied(), &failed, id(3)), "unknown: opened");
+        assert!(should_spawn(known.iter().copied(), &failed, id(2)), "winding down: opened again");
+        assert!(should_spawn(std::iter::empty(), &failed, id(1)), "nothing known: opened");
+    }
+
+    #[test]
+    fn a_device_that_failed_is_not_retried_until_cleared() {
+        let mut failed = HashSet::new();
+        failed.insert(id(1));
+        assert!(!should_spawn(std::iter::empty(), &failed, id(1)));
+        failed.clear();
+        assert!(should_spawn(std::iter::empty(), &failed, id(1)));
+    }
+
+    /// On this machine, against a real output: asked for twice back to
+    /// back -- inside the open's window -- the device is opened once, and
+    /// asked for by nobody it goes away.
+    /// `cargo test -p makepad-platform --lib wasapi::tests -- --ignored`
+    #[test]
+    #[ignore]
+    fn an_output_asked_for_twice_while_it_opens_is_opened_once() {
+        let access = WasapiAccess::new(SignalToUI::new());
+        let device = {
+            let mut access = access.lock().unwrap();
+            let descs = access.get_updated_descs();
+            let device = descs
+                .iter()
+                .find(|d| d.is_default && d.device_type.is_output())
+                .or_else(|| descs.iter().find(|d| d.device_type.is_output()))
+                .map(|d| d.device_id);
+            let Some(device) = device else {
+                eprintln!("no output device on this machine; nothing to prove");
+                return;
+            };
+            access.descs = descs;
+            access.use_audio_outputs(&[device]);
+            access.use_audio_outputs(&[device]);
+            device
+        };
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        {
+            let access = access.lock().unwrap();
+            let outputs = access.audio_outputs.lock().unwrap();
+            let mine: Vec<_> = outputs.iter().filter(|v| v.device_id == device).collect();
+            assert_eq!(mine.len(), 1, "one entry, one thread");
+            assert!(!mine[0].event.is_invalid(), "and its thread has opened the device");
+        }
+        access.lock().unwrap().use_audio_outputs(&[]);
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let gone = access.lock().unwrap().audio_outputs.lock().unwrap().iter().all(|v| v.device_id != device);
+        assert!(gone, "terminated, and its entry went with it");
     }
 }
