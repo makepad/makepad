@@ -23,6 +23,7 @@
 //! flags advance only inside `render`.
 
 use crate::cue::SlotId;
+use crate::verify_or;
 use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
@@ -4937,12 +4938,25 @@ impl MixEngine {
             MixCmd::DeckEffect { deck, param } => {
                 Self::apply_effect(&mut s.decks[deck.index()].chain, param)
             }
-            MixCmd::MasterEffect { slot, on } => Self::switch_master_effect(&mut s.master_chain, slot, on),
+            // The only slot number that reaches this thread as a raw
+            // index rather than as a typed enum, so it is the only one
+            // that can be wrong. It used to be wrong in two different ways
+            // in three neighbouring lines: the switch ignored an
+            // out-of-range slot in silence, and the other two CLAMPED it
+            // onto the last slot -- which does not do nothing, it applies
+            // the operator's setting to a different effect. One shape now,
+            // and it says so rather than guessing.
+            MixCmd::MasterEffect { slot, on } => {
+                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
+                Self::switch_master_effect(&mut s.master_chain, slot, on)
+            }
             MixCmd::MasterMix { slot, mix } => {
-                s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mix(mix)
+                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
+                s.master_chain.level_mut(slot).set_mix(mix)
             }
             MixCmd::MasterLevelMode { slot, mode } => {
-                s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mode(mode)
+                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
+                s.master_chain.level_mut(slot).set_mode(mode)
             }
             MixCmd::MasterClockDeck(deck) => s.master_clock_deck = deck.index(),
             MixCmd::MasterCrossovers { low_hz, high_hz } => {
@@ -5657,11 +5671,15 @@ impl MixEngine {
 
         for frame in 0..frames {
             let output_frame = buffer_start.saturating_add(frame as u64);
-            let starts_now = s.scheduled_video.is_some_and(|scheduled| {
+            // One expression decides AND binds. This used to be a bool,
+            // a block boundary, and then an `expect("checked above")` --
+            // true when it was written, and a panic on the audio callback
+            // the day anyone edits the gap between the two. There is no
+            // gap now, so there is nothing left to get wrong.
+            let starting = s.scheduled_video.filter(|scheduled| {
                 !scheduled.started && output_frame >= scheduled.target_frame
             });
-            if starts_now {
-                let mut scheduled = s.scheduled_video.expect("checked above");
+            if let Some(mut scheduled) = starting {
                 scheduled.started = true;
                 s.scheduled_video = Some(scheduled);
                 let fade_secs = if scheduled.fade_frames == 0 {
@@ -6202,13 +6220,15 @@ impl MixEngine {
             peaks[METER_SFX] = peaks[METER_SFX].max(sfx.0.abs()).max(sfx.1.abs());
 
             s.rendered_frames = output_frame.saturating_add(1);
-            let completes_now = s.scheduled_video.is_some_and(|scheduled| {
+            // Decided and bound together, for the same reason as the
+            // start above.
+            let completing = s.scheduled_video.filter(|scheduled| {
                 scheduled.started
                     && s.rendered_frames
                         >= scheduled.target_frame.saturating_add(scheduled.fade_frames.max(1))
             });
-            if completes_now {
-                let scheduled = s.scheduled_video.take().expect("checked above");
+            if let Some(scheduled) = completing {
+                s.scheduled_video = None;
                 if let Some(from) = scheduled.from {
                     s.video[from.index()].gain = Ramp::at(0.0);
                 }
@@ -7207,6 +7227,32 @@ mod tests {
                 "sample {index}: {got} vs {want} — an idle master chain must be transparent"
             );
         }
+    }
+
+    /// The master chain's slot is the only index that reaches the audio
+    /// thread as a raw number rather than as a typed enum, so it is the
+    /// only one that can be out of range. It used to be CLAMPED onto the
+    /// last slot, which is not "do nothing" -- it silently applies the
+    /// operator's setting to a different effect.
+    #[test]
+    fn a_master_slot_out_of_range_is_refused_rather_than_bent_onto_another() {
+        let mixer = TestMixer::new();
+        let last = DECK_CHAIN_SLOTS - 1;
+        let mix_of = |slot: usize| mixer.state().master_chain.level_mut(slot).mix();
+        let mode_of = |slot: usize| mixer.state().master_chain.level_mut(slot).mode();
+
+        let before = mix_of(last);
+        mixer.set_master_mix(DECK_CHAIN_SLOTS, 0.25);
+        mixer.set_master_mix(999, 0.25);
+        assert_eq!(mix_of(last), before, "the last slot is not a bin for bad numbers");
+        mixer.set_master_level_mode(DECK_CHAIN_SLOTS, LevelMode::MatchInput);
+        assert_eq!(mode_of(last), LevelMode::Follow, "nor for bad modes");
+
+        // Refused, not broken: a slot that exists still answers.
+        mixer.set_master_mix(last, 0.25);
+        assert_eq!(mix_of(last), 0.25);
+        mixer.set_master_level_mode(last, LevelMode::MatchInput);
+        assert_eq!(mode_of(last), LevelMode::MatchInput);
     }
 
     /// And an engaged one reaches the sum. The width sits at 1.5 by
