@@ -39,6 +39,7 @@ pub mod view;
 pub mod breadcrumb;
 pub mod field;
 pub mod chart;
+pub mod glass_controls;
 pub mod code_view;
 pub mod data_grid;
 pub mod dock;
@@ -88,6 +89,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
     chart::script_mod(vm);
+    glass_controls::script_mod(vm);
     code_view::script_mod(vm);
     data_grid::script_mod(vm);
     dock::script_mod(vm);
@@ -159,6 +161,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         breadcrumb::STORIES,
         field::STORIES,
         chart::STORIES,
+        glass_controls::STORIES,
         code_view::STORIES,
         data_grid::STORIES,
         dock::STORIES,
