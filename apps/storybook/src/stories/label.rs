@@ -53,10 +53,15 @@ script_mod! {
         H3italic{text: "H3 italic headline"}
         H4{text: "H4 headline"}
         H4italic{text: "H4 italic headline"}
+        H5{text: "H5 headline"}
+        H5italic{text: "H5 italic headline"}
+        H6{text: "H6 headline"}
+        H6italic{text: "H6 italic headline"}
         P{text: "P copy text"}
         Pitalic{text: "P italic copy text"}
         Pbold{text: "P bold copy text"}
         Pbolditalic{text: "P bold italic copy text"}
+        Labelbold{text: "Labelbold, the bold plain label"}
 
         Hr{}
         H4{text: "Styling Attributes Reference"}

@@ -27,6 +27,17 @@ script_mod! {
             draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
         }
 
+        Hr{}
+        H4{text: "Weights and rotation"}
+        View{
+            width: Fit height: Fit flow: Right spacing: 12.
+            align: Align{y: 0.5}
+            IconFilled{draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}}
+            IconLight{draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}}
+            IconOutline{draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}}
+            IconRotated{draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}}
+        }
+
         H4{text: "Styling Attributes Reference"}
         Icon{
             width: Fit

@@ -92,6 +92,15 @@ script_mod! {
                         padding: theme.mspace_2
                         Cap{text: "ClearPanel"}
                     }
+                    View{
+                        width: Fill height: Fit flow: Right spacing: theme.space_2
+                        align: Align{y: 0.5}
+                        mod.widgets.glass.CutButton{text: "CutButton"}
+                        mod.widgets.glass.ProminentButton{text: "ProminentButton"}
+                        mod.widgets.glass.IconButton{text: "Icon"}
+                        mod.widgets.glass.Body{text: "glass.Body"}
+                        mod.widgets.glass.ButtonLabel{text: "glass.ButtonLabel"}
+                    }
                     mod.widgets.glass.List{
                         width: Fill height: Fit
                         mod.widgets.glass.ListRow{Cap{text: "a glass list row"}}
@@ -129,7 +138,7 @@ pub const STORIES: &[Story] = &[Story {
         "LensSurface", "ButtonSurface", "ProminentButtonSurface", "ChipSurface",
         "IconSurface", "InputSurface", "RadioSurface",
         "LensButton", "LensButtonProminent", "LensChip", "ClearPanel",
-        "List", "ListRow",
+        "List", "ListRow", "CutButton", "ProminentButton", "IconButton", "Body", "ButtonLabel",
         "AppleGlassRoundedView", "GaussGradientRoundedView",
     ],
     name: "Surfaces",

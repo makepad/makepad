@@ -55,6 +55,14 @@ script_mod! {
             }
             picked := Label{text: "no colour chosen"}
         }
+        StoryRow{
+            Panel{
+                FabHeaderLabel{text: "FabHeaderLabel"}
+                FabLabel{text: "FabLabel"}
+                FabLabelDim{text: "FabLabelDim"}
+                FabLabelSmall{text: "FabLabelSmall"}
+            }
+        }
     }
 }
 
