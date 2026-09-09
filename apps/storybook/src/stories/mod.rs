@@ -40,6 +40,7 @@ pub mod breadcrumb;
 pub mod field;
 pub mod animated_gif;
 pub mod chart;
+pub mod glass_surfaces;
 pub mod view_shapes;
 pub mod splash;
 pub mod surfaces;
@@ -103,6 +104,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     field::script_mod(vm);
     animated_gif::script_mod(vm);
     chart::script_mod(vm);
+    glass_surfaces::script_mod(vm);
     view_shapes::script_mod(vm);
     splash::script_mod(vm);
     surfaces::script_mod(vm);
@@ -188,6 +190,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         field::STORIES,
         animated_gif::STORIES,
         chart::STORIES,
+        glass_surfaces::STORIES,
         view_shapes::STORIES,
         splash::STORIES,
         surfaces::STORIES,
