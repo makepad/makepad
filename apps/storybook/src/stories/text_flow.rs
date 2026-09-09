@@ -73,6 +73,12 @@ impl Widget for StoryTextFlow {
         self.flow.inline_code.push();
         self.flow.draw_text(cx, "this part is code");
         self.flow.inline_code.pop();
+        self.flow.draw_text(cx, ", and ");
+        // A link is a widget the flow instantiates from a template and lays
+        // out inline with the text around it - the one place in this widget
+        // where a real child appears mid-paragraph.
+        self.flow
+            .draw_link(cx, live_id!(link), live_id!(story_link), "this part is a link");
         self.flow.draw_text(
             cx,
             ". They nest, so bold inside italic is a matter of pushing both. \
@@ -110,7 +116,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "text/textflow/overview",
     category: "Text",
     component: "TextFlow",
-    also: &["MathView"],
+    also: &["MathView", "TextFlowLink"],
     name: "Overview",
     dsl: "TextFlowOverview",
     added: "2025-05-06",
@@ -122,6 +128,8 @@ A paragraph is not a `Label`. A label draws one string in one style. `TextFlow` 
 **It has no `text` property.** Unlike almost everything else in the library it is driven from Rust: a host derefs it, calls `begin`, pushes text and style, and calls `end`. That is why there is a small widget behind this page rather than a declaration — the same shape markdown uses.
 
 **The styles are counters, not settings.** `bold`, `italic`, `fixed`, `underline`, `strikethrough` and `inline_code` are each a stack: push one around a piece of the run, pop it, and the flow carries on laying out where it left off. They nest, so bold inside italic is a matter of pushing both. Nothing here creates a widget per style, which is what lets a selection cross a style boundary — try dragging across the paragraph.
+
+`draw_link` is the one place a real child appears mid-paragraph: the flow instantiates a `TextFlowLink` from a template and lays it out inline with the text either side of it, which is how markdown and html put a link in a sentence.
 
 `begin_quote`/`end_quote` and `begin_code`/`end_code` open blocks inside the same flow, and markdown's tables and list items work the same way — but **a block does not begin its own line.** The flow keeps laying out where it left off until the host breaks it with `new_line_collapsed_with_spacing`, which is why markdown breaks the line before every block it opens. Leave it out and the quote runs on at the end of the paragraph, which is how this page first drew it.
 

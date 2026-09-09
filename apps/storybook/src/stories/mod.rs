@@ -39,6 +39,7 @@ pub mod view;
 pub mod breadcrumb;
 pub mod field;
 pub mod chart;
+pub mod lists;
 pub mod value_input;
 pub mod window_chrome;
 pub mod moving_panels;
@@ -97,6 +98,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
     chart::script_mod(vm);
+    lists::script_mod(vm);
     value_input::script_mod(vm);
     window_chrome::script_mod(vm);
     moving_panels::script_mod(vm);
@@ -177,6 +179,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         breadcrumb::STORIES,
         field::STORIES,
         chart::STORIES,
+        lists::STORIES,
         value_input::STORIES,
         window_chrome::STORIES,
         moving_panels::STORIES,

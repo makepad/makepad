@@ -123,7 +123,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "containers/dock/overview",
     category: "Containers",
     component: "Dock",
-    also: &[],
+    also: &["Tab", "TabBar"],
     name: "Overview",
     dsl: "DockOverview",
     added: "2025-05-06",
