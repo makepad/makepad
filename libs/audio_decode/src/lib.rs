@@ -60,8 +60,10 @@ impl DecodedAudio {
     }
 
     /// One channel's samples, deinterleaved. Out-of-range channels give an
-    /// empty vector rather than an error: callers ask for `[0]` and
-    /// `[channels-1]` to fake stereo out of mono.
+    /// empty vector rather than an error. Callers wanting stereo take
+    /// channels 0 and 1, and channel 0 for both ears of a mono file --
+    /// never the last channel, which on a wide file is a rear or the
+    /// low-frequency send.
     pub fn channel(&self, index: usize) -> Vec<f32> {
         let ch = self.channels as usize;
         if ch == 0 || index >= ch {

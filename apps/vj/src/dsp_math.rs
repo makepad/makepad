@@ -58,10 +58,19 @@ pub fn mono_f64(frame: [i16; 2]) -> f64 {
 /// than a channel layout.
 #[inline]
 pub fn stereo_pair<T: Copy>(frame: &[T]) -> Option<[T; 2]> {
-    match (frame.first(), frame.get(1)) {
-        (Some(&left), Some(&right)) => Some([left, right]),
-        (Some(&mono), None) => Some([mono, mono]),
-        _ => None,
+    let [left, right] = stereo_pair_indices(frame.len())?;
+    Some([frame[left], frame[right]])
+}
+
+/// Which two channels of a `channels`-wide frame are the stereo pair: the
+/// first two, or the one channel twice. The same law as `stereo_pair`,
+/// for a parser that reads its samples by index rather than holding a
+/// frame. `None` for no channels at all.
+#[inline]
+pub fn stereo_pair_indices(channels: usize) -> Option<[usize; 2]> {
+    match channels {
+        0 => None,
+        n => Some([0, 1.min(n - 1)]),
     }
 }
 
@@ -100,6 +109,19 @@ pub fn hann_f64(index: usize, len: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pair a parser reading by index takes is the pair `stereo_pair`
+    /// takes from a frame: the first two, or the one there is.
+    #[test]
+    fn the_stereo_pair_is_the_first_two_channels_or_the_one_there_is() {
+        assert_eq!(stereo_pair_indices(6), Some([0, 1]));
+        assert_eq!(stereo_pair_indices(2), Some([0, 1]));
+        assert_eq!(stereo_pair_indices(1), Some([0, 0]));
+        assert_eq!(stereo_pair_indices(0), None);
+        assert_eq!(stereo_pair(&[1, 2, 3, 4, 5, 6]), Some([1, 2]));
+        assert_eq!(stereo_pair(&[7]), Some([7, 7]));
+        assert_eq!(stereo_pair::<i16>(&[]), None);
+    }
 
     #[test]
     fn a_ratio_becomes_decibels_and_comes_back() {

@@ -335,7 +335,11 @@ fn deck_frames(decoded: &DecodedAudio) -> Result<Vec<[i16; 2]>, String> {
         .chunks_exact(channels)
         .map(|frame| {
             let sample = |value: f32| (value.clamp(-1.0, 1.0) * 32767.0) as i16;
-            [sample(frame[0]), sample(frame[channels - 1])]
+            // The front pair, mono to both ears -- not the first channel
+            // with the last, which on a wide file is a rear or the
+            // low-frequency send. The app's own helper says the same and
+            // a tool cannot depend on the app.
+            [sample(frame[0]), sample(frame[1.min(channels - 1)])]
         })
         .collect())
 }

@@ -1908,6 +1908,11 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
         return Err("wav: no fmt chunk".into());
     }
     let ch = channels as usize;
+    // The front pair, and mono to both ears: the other decode paths took
+    // that law in 62ec728ae and this parser went on pairing the first
+    // channel with the LAST, which on a six-channel file is a rear or the
+    // low-frequency send.
+    let [left, right] = crate::dsp_math::stereo_pair_indices(ch).ok_or("wav: no channels")?;
     let mut frames: Vec<[i16; 2]> = Vec::new();
     let push = |frames: &mut Vec<[i16; 2]>, l: i16, r: i16| -> Result<(), String> {
         if frames.len() >= max_frames {
@@ -1922,7 +1927,7 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
                 let sample = |i: usize| {
                     i16::from_le_bytes(frame[i * 2..i * 2 + 2].try_into().unwrap())
                 };
-                push(&mut frames, sample(0), sample(ch - 1))?;
+                push(&mut frames, sample(left), sample(right))?;
             }
         }
         (3, 32) => {
@@ -1931,7 +1936,7 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
                     let v = f32::from_le_bytes(frame[i * 4..i * 4 + 4].try_into().unwrap());
                     (v.clamp(-1.0, 1.0) * 32767.0) as i16
                 };
-                push(&mut frames, sample(0), sample(ch - 1))?;
+                push(&mut frames, sample(left), sample(right))?;
             }
         }
         other => return Err(format!("wav: unsupported format {other:?}")),
@@ -4102,28 +4107,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn wav_pcm16(frames: &[(i16, i16)], rate: u32) -> Vec<u8> {
-        let mut data = Vec::new();
-        for (l, r) in frames {
-            data.extend_from_slice(&l.to_le_bytes());
-            data.extend_from_slice(&r.to_le_bytes());
-        }
+    /// A RIFF/WAVE file around `data`, with a plain sixteen-byte fmt chunk.
+    fn wav_bytes(format: u16, channels: u16, bits: u16, rate: u32, data: &[u8]) -> Vec<u8> {
+        let block = channels * bits / 8;
         let mut out = Vec::new();
         out.extend_from_slice(b"RIFF");
         out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
         out.extend_from_slice(b"WAVE");
         out.extend_from_slice(b"fmt ");
         out.extend_from_slice(&16u32.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes()); // pcm
-        out.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        out.extend_from_slice(&format.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
         out.extend_from_slice(&rate.to_le_bytes());
-        out.extend_from_slice(&(rate * 4).to_le_bytes());
-        out.extend_from_slice(&4u16.to_le_bytes());
-        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(&(rate * block as u32).to_le_bytes());
+        out.extend_from_slice(&block.to_le_bytes());
+        out.extend_from_slice(&bits.to_le_bytes());
         out.extend_from_slice(b"data");
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&data);
+        out.extend_from_slice(data);
         out
+    }
+
+    fn wav_pcm16(frames: &[(i16, i16)], rate: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        for (l, r) in frames {
+            data.extend_from_slice(&l.to_le_bytes());
+            data.extend_from_slice(&r.to_le_bytes());
+        }
+        wav_bytes(1, 2, 16, rate, &data)
+    }
+
+    /// One frame of `samples`, interleaved, one channel per sample.
+    fn wav_frame_pcm16(samples: &[i16], rate: u32) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        wav_bytes(1, samples.len() as u16, 16, rate, &data)
+    }
+
+    fn wav_frame_f32(samples: &[f32], rate: u32) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        wav_bytes(3, samples.len() as u16, 32, rate, &data)
+    }
+
+    /// The first pair, and mono to both ears -- never the last channel,
+    /// which on a six-channel file is a rear or the low-frequency send.
+    /// Each width is pinned on its own, so a parser that gets stereo and
+    /// mono right and six channels wrong is caught.
+    #[test]
+    fn a_wav_wider_than_stereo_gives_its_front_pair() {
+        let six = parse_wav(&wav_frame_pcm16(&[10, 20, 30, 40, 50, 60], 48_000), 10).unwrap();
+        assert_eq!(six.frames, vec![[10, 20]], "six channels, pcm");
+        let six = parse_wav(&wav_frame_f32(&[0.5, 0.25, 0.125, 0.0625, 1.0, -1.0], 48_000), 10).unwrap();
+        assert_eq!(six.frames, vec![[16383, 8191]], "six channels, float");
+        let mono = parse_wav(&wav_frame_pcm16(&[7], 48_000), 10).unwrap();
+        assert_eq!(mono.frames, vec![[7, 7]], "mono, pcm");
+        let mono = parse_wav(&wav_frame_f32(&[0.5], 48_000), 10).unwrap();
+        assert_eq!(mono.frames, vec![[16383, 16383]], "mono, float");
+        let stereo = parse_wav(&wav_frame_pcm16(&[1, 2], 48_000), 10).unwrap();
+        assert_eq!(stereo.frames, vec![[1, 2]], "stereo is what it was");
     }
 
     #[test]
