@@ -2661,7 +2661,7 @@ script_mod! {
                                         width: Fill height: Fill flow: Down spacing: 7
                                         synth_editors := PageFlip{
                                             width: Fill
-                                            height: 575
+                                            height: Fill
                                             active_page: @synth_piano_editor
                                             synth_piano_editor := View{
                                                 width: Fill height: Fill flow: Down spacing: 5
@@ -2945,6 +2945,70 @@ script_mod! {
                                         }
                                     }
                                 }
+                                // ============ SAMPLES ============
+                                // The pads: samples a synth can hold,
+                                // triggered by hand and by the controller's
+                                // pad surface, not by the clock. They share
+                                // the SFX strip on the mix page.
+                                RoundedView{
+                                    width: Fill
+                                    height: 300
+                                    flow: Down
+                                    spacing: 6
+                                    padding: 7
+                                    draw_bg +: {
+                                        color: #x181e25
+                                        border_color: #xffffff20
+                                        border_size: 1.0
+                                        border_radius: 3.0
+                                    }
+                                    View{
+                                        width: Fill height: 18 flow: Right
+                                        Tick{width: Fill text: "SAMPLES · ONE-SHOT PADS"}
+                                        Tick{width: Fit text: "TRIGGERED BY HAND · SHARE THE SFX STRIP IN MIX"}
+                                    }
+                                    SearchRow{
+                                        sfx_search := TextInput{
+                                            width: Fill
+                                            empty_text: "search sfx…"
+                                        }
+                                        sfx_category := TextInput{
+                                            width: 120
+                                            text: "sfx"
+                                        }
+                                        sfx_go := ChromeButton{text: "Search"}
+                                        sfx_more := ChromeButton{text: "More"}
+                                        sfx_count := PanelLabel{text: ""}
+                                        sfx_voices := PanelLabel{text: "voices 0"}
+                                    }
+                                    sfx_grid := VjTileGrid{}
+                                    // Selected-pad strip: pads themselves stay
+                                    // pure triggers (no per-pad transport).
+                                    View{
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        sfx_sel := ValueLabel{text: "pad: —"}
+                                        sfx_gain := Slider{
+                                            width: 170
+                                            text: "gain"
+                                            min: 0.0
+                                            max: 1.5
+                                            default: 1.0
+                                            taper: Audio
+                                            unit: "x"
+                                            precision: 2
+                                        }
+                                        PanelLabel{text: "choke"}
+                                        sfx_choke := DropDown{labels: ["off" "1" "2" "3" "4"]}
+                                        sfx_hold := Toggle{text: "hold"}
+                                        sfx_loop := Toggle{text: "loop"}
+                                        sfx_stop := ChromeButton{text: "stop pad"}
+                                        sfx_stop_all := ChromeButton{text: "stop all"}
+                                    }
+                                }
                             }
                             mix_page := View{
                                 width: Fill height: Fill flow: Down spacing: 6
@@ -2995,52 +3059,14 @@ script_mod! {
                             // ============ SFX ============
 
                             // ============ SFX ============
+                            // The pads moved in with the synth; what is
+                            // left here is the deck effects rack, until it
+                            // moves to the mix page.
                             sfx_page := View{
                                 width: Fill
                                 height: Fill
                                 flow: Down
                                 spacing: 8
-                                SearchRow{
-                                    sfx_search := TextInput{
-                                        width: Fill
-                                        empty_text: "search sfx…"
-                                    }
-                                    sfx_category := TextInput{
-                                        width: 120
-                                        text: "sfx"
-                                    }
-                                    sfx_go := ChromeButton{text: "Search"}
-                                    sfx_more := ChromeButton{text: "More"}
-                                    sfx_count := PanelLabel{text: ""}
-                                    sfx_voices := PanelLabel{text: "voices 0"}
-                                }
-                                sfx_grid := VjTileGrid{}
-                                // Selected-pad strip: pads themselves stay
-                                // pure triggers (no per-pad transport).
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 8
-                                    align: Align{x: 0.0, y: 0.5}
-                                    sfx_sel := ValueLabel{text: "pad: —"}
-                                    sfx_gain := Slider{
-                                        width: 170
-                                        text: "gain"
-                                        min: 0.0
-                                        max: 1.5
-                                        default: 1.0
-                                        taper: Audio
-                                        unit: "x"
-                                        precision: 2
-                                    }
-                                    PanelLabel{text: "choke"}
-                                    sfx_choke := DropDown{labels: ["off" "1" "2" "3" "4"]}
-                                    sfx_hold := Toggle{text: "hold"}
-                                    sfx_loop := Toggle{text: "loop"}
-                                    sfx_stop := ChromeButton{text: "stop pad"}
-                                    sfx_stop_all := ChromeButton{text: "stop all"}
-                                }
                                 // Deck FX: parameters with no home on the
                                 // deck header (the FILTER row is already
                                 // three chips wide) and the accordion is
@@ -5307,11 +5333,13 @@ impl ConsoleMode {
     }
 
     /// The page a controller surface shows when the hardware picks it.
+    /// The pad surface shows the synth page, because that is where the
+    /// pads are: the SFX tab holds only the effects rack now.
     fn for_surface(surface: ApcSurface) -> ConsoleMode {
         match surface {
             ApcSurface::Video => Self::Vj,
             ApcSurface::Music => Self::Dj,
-            ApcSurface::Sfx => Self::Sfx,
+            ApcSurface::Sfx => Self::Synth,
         }
     }
 }
@@ -5712,7 +5740,10 @@ mod console_mode_tests {
     fn the_hardware_surfaces_each_have_a_page() {
         assert_eq!(ConsoleMode::for_surface(ApcSurface::Video), ConsoleMode::Vj);
         assert_eq!(ConsoleMode::for_surface(ApcSurface::Music), ConsoleMode::Dj);
-        assert_eq!(ConsoleMode::for_surface(ApcSurface::Sfx), ConsoleMode::Sfx);
+        // The pads live on the synth page now, so that is where the
+        // controller's pad surface takes the screen.
+        assert_eq!(ConsoleMode::for_surface(ApcSurface::Sfx), ConsoleMode::Synth);
+        assert_eq!(ConsoleMode::for_surface(ApcSurface::Sfx).page(), live_id!(synth_page));
     }
 }
 
