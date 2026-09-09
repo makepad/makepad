@@ -1268,6 +1268,12 @@ const LOAD_SWAP_SECS: f32 = 0.040;
 
 const DECK_CHAIN_SLOTS: usize = 13;
 
+/// The sources whose voices have no chain of their own: video, the pads
+/// and the three synth tracks. Five and not seven, because the decks'
+/// chains are the decks' own -- they swap with the voice and are silenced
+/// on a load, which nothing else needs.
+const SOURCE_CHAINS: usize = 5;
+
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
 /// twelve slots are the whole roster and are permanently populated by
@@ -2190,16 +2196,38 @@ struct MixState {
     /// whole room, and before the limiter, so whatever it adds is still
     /// caught.
     master_chain: DeckChain,
-    /// Which deck's grid the master chain's beat-locked effects follow.
-    /// The mix has no tempo of its own, so it borrows one.
-    master_clock_deck: usize,
+    /// The chains of the five sources whose voices have none of their
+    /// own. Each runs on its source before the source enters the program
+    /// mix -- the same seat ahead of the fader that the deck chains have.
+    source_chains: [DeckChain; SOURCE_CHAINS],
+    /// Which deck's grid every chain with no tempo of its own follows.
+    /// The mix has none, and neither has a pad or a synth track; they
+    /// borrow deck A's until something asks otherwise.
+    chain_clock_deck: DeckId,
 }
 
 impl MixState {
-    /// Whether any master effect is sounding at all.
+    /// The chain a target names. Exhaustive and infallible on purpose:
+    /// the audio callback must not regain a way to unwind, so there is no
+    /// index to be out of range and no `Option` to unwrap.
+    fn chain_mut(&mut self, target: ChainTarget) -> &mut DeckChain {
+        match target {
+            ChainTarget::DeckA => &mut self.decks[0].chain,
+            ChainTarget::DeckB => &mut self.decks[1].chain,
+            ChainTarget::Master => &mut self.master_chain,
+            ChainTarget::Video => &mut self.source_chains[0],
+            ChainTarget::Sfx => &mut self.source_chains[1],
+            ChainTarget::Piano => &mut self.source_chains[2],
+            ChainTarget::Ironfish => &mut self.source_chains[3],
+            ChainTarget::Drums => &mut self.source_chains[4],
+        }
+    }
+
+    /// Whether any effect on one target's chain is sounding at all.
     #[cfg(test)]
-    fn master_chain_engaged(&mut self) -> bool {
-        (0..DECK_CHAIN_SLOTS).any(|slot| self.master_chain.slot_engaged(slot))
+    fn chain_engaged(&mut self, target: ChainTarget) -> bool {
+        let chain = self.chain_mut(target);
+        (0..DECK_CHAIN_SLOTS).any(|slot| chain.slot_engaged(slot))
     }
 
     fn new() -> MixState {
@@ -2223,7 +2251,8 @@ impl MixState {
             synth: SynthRack::new(48_000),
             program_mix: ProgramMix::new(),
             master_chain: DeckChain::new(48_000.0),
-            master_clock_deck: 0,
+            source_chains: std::array::from_fn(|_| DeckChain::new(48_000.0)),
+            chain_clock_deck: DeckId::A,
         }
     }
 }
@@ -2248,6 +2277,109 @@ const MAX_SFX_VOICES: usize = 64;
 /// Every change the UI can ask of the audio state. Payloads are moved in
 /// whole; the audio thread never allocates for one and never frees one —
 /// what a command replaces comes back to the UI as a [`Retired`] payload.
+/// Where an effect chain sits: one of the seven sources that meet at the
+/// mix, or the mix itself.
+///
+/// The two decks resolve to the chains their voices already own -- those
+/// run ahead of the fader and swap with the voice, and every golden
+/// reference is recorded through them. The other five sources get chains
+/// of their own. Flat rather than `Strip(..) | Master`: the file tags, the
+/// chip labels and `ALL` all want one enumeration, and `deck()` and
+/// `strip()` are its two projections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainTarget {
+    Video,
+    DeckA,
+    DeckB,
+    Sfx,
+    Piano,
+    Ironfish,
+    Drums,
+    Master,
+}
+
+impl ChainTarget {
+    pub const ALL: [ChainTarget; 8] = [
+        Self::Video,
+        Self::DeckA,
+        Self::DeckB,
+        Self::Sfx,
+        Self::Piano,
+        Self::Ironfish,
+        Self::Drums,
+        Self::Master,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// A number read from a file becomes a target, or nothing: never the
+    /// nearest one.
+    pub fn from_index(index: usize) -> Option<ChainTarget> {
+        Self::ALL.get(index).copied()
+    }
+
+    /// The word a settings file holds for this target. Frozen the way a
+    /// settings slug is; the decks keep the two letters they always had.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::DeckA => "a",
+            Self::DeckB => "b",
+            Self::Sfx => "sfx",
+            Self::Piano => "piano",
+            Self::Ironfish => "ironfish",
+            Self::Drums => "drums",
+            Self::Master => "master",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Video => "VIDEO",
+            Self::DeckA => "A",
+            Self::DeckB => "B",
+            Self::Sfx => "SFX",
+            Self::Piano => "PIANO",
+            Self::Ironfish => "IRON",
+            Self::Drums => "DRUMS",
+            Self::Master => "MASTER",
+        }
+    }
+
+    pub fn deck(self) -> Option<DeckId> {
+        match self {
+            Self::DeckA => Some(DeckId::A),
+            Self::DeckB => Some(DeckId::B),
+            _ => None,
+        }
+    }
+
+    /// The program strip this target's source feeds; the mix has none.
+    pub fn strip(self) -> Option<StripId> {
+        match self {
+            Self::Video => Some(StripId::Video),
+            Self::DeckA => Some(StripId::DjA),
+            Self::DeckB => Some(StripId::DjB),
+            Self::Sfx => Some(StripId::Sfx),
+            Self::Piano => Some(StripId::Piano),
+            Self::Ironfish => Some(StripId::Ironfish),
+            Self::Drums => Some(StripId::Drums),
+            Self::Master => None,
+        }
+    }
+}
+
+impl From<DeckId> for ChainTarget {
+    fn from(deck: DeckId) -> Self {
+        match deck {
+            DeckId::A => Self::DeckA,
+            DeckId::B => Self::DeckB,
+        }
+    }
+}
+
 /// One effect parameter, on its way to the audio thread.
 ///
 /// ONE command variant carries all of these rather than seventy of their
@@ -2374,14 +2506,11 @@ pub enum MixCmd {
     },
     SetMute { deck: DeckId, muted: bool },
     SetGain { deck: DeckId, gain: f32 },
-    /// One knob on one slot of a deck's effect chain. See
-    /// [`EffectParam`] for why they share a variant.
-    DeckEffect { deck: DeckId, param: EffectParam },
-    MasterEffect { slot: usize, on: bool },
-    MasterMix { slot: usize, mix: f32 },
-    MasterLevelMode { slot: usize, mode: LevelMode },
-    MasterClockDeck(DeckId),
-    MasterCrossovers { low_hz: f32, high_hz: f32 },
+    /// One knob on one slot of one chain -- a deck's, a source's or the
+    /// mix's. See [`EffectParam`] for why the knobs share a variant and
+    /// [`ChainTarget`] for why the chains do.
+    ChainEffect { target: ChainTarget, param: EffectParam },
+    ChainClockDeck(DeckId),
     SetGrid { deck: DeckId, grid: Option<TrackGrid> },
     SetSlip { deck: DeckId, on: bool, adopt: bool },
     SetCensor { deck: DeckId, on: bool },
@@ -3392,11 +3521,11 @@ impl Mixer {
         if fraction.is_some_and(|(num, den)| num == 0 || den == 0) {
             return;
         }
-        self.run_cmd(MixCmd::DeckEffect { deck, param: EffectParam::Echo(fraction) });
+        self.run_cmd(MixCmd::ChainEffect { target: deck.into(), param: EffectParam::Echo(fraction) });
     }
 
     pub fn set_blend_filter(&self, deck: DeckId, offset: f32) {
-        self.run_cmd(MixCmd::DeckEffect { deck, param: EffectParam::BlendFilter(offset) });
+        self.run_cmd(MixCmd::ChainEffect { target: deck.into(), param: EffectParam::BlendFilter(offset) });
     }
 
     /// The grid this record is ruled by. Everything beat-locked reads the
@@ -3508,491 +3637,491 @@ impl Mixer {
     }
 
     pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Resonance(lift),
         });
     }
 
     pub fn set_deck_echo_feedback(&self, deck: DeckId, feedback: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::EchoFeedback(feedback),
         });
     }
 
     pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::EchoPingpong(on),
         });
     }
 
     pub fn set_deck_flanger(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Flanger(on),
         });
     }
 
     pub fn set_deck_flanger_rate(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerRate(hz),
         });
     }
 
     pub fn set_deck_flanger_depth(&self, deck: DeckId, depth: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerDepth(depth),
         });
     }
 
     pub fn set_deck_flanger_feedback(&self, deck: DeckId, feedback: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerFeedback(feedback),
         });
     }
 
     pub fn set_deck_flanger_sync_units(&self, deck: DeckId, units: u32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerSyncUnits(units),
         });
     }
 
     pub fn set_deck_flanger_beat_offset(&self, deck: DeckId, offset: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerBeatOffset(offset),
         });
     }
 
     pub fn set_deck_bitcrusher(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Bitcrusher(on),
         });
     }
 
     pub fn set_deck_bitcrusher_rate(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::BitcrusherRate(hz),
         });
     }
 
     pub fn set_deck_bitcrusher_bits(&self, deck: DeckId, bits: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::BitcrusherBits(bits),
         });
     }
 
     pub fn set_deck_tremolo(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Tremolo(on),
         });
     }
 
     pub fn set_deck_tremolo_rate(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloRate(hz),
         });
     }
 
     pub fn set_deck_tremolo_depth(&self, deck: DeckId, depth: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloDepth(depth),
         });
     }
 
     pub fn set_deck_tremolo_sync_units(&self, deck: DeckId, units: u32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloSyncUnits(units),
         });
     }
 
     pub fn set_deck_tremolo_beat_offset(&self, deck: DeckId, offset: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloBeatOffset(offset),
         });
     }
 
     pub fn set_deck_distortion(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Distortion(on),
         });
     }
 
     pub fn set_deck_distortion_drive(&self, deck: DeckId, drive: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::DistortionDrive(drive),
         });
     }
 
     pub fn set_deck_phaser(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Phaser(on),
         });
     }
 
     pub fn set_deck_phaser_rate(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserRate(hz),
         });
     }
 
     pub fn set_deck_phaser_feedback(&self, deck: DeckId, feedback: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserFeedback(feedback),
         });
     }
 
     pub fn set_deck_phaser_sync_units(&self, deck: DeckId, units: u32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserSyncUnits(units),
         });
     }
 
     pub fn set_deck_phaser_beat_offset(&self, deck: DeckId, offset: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserBeatOffset(offset),
         });
     }
 
     pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Autopan(on),
         });
     }
 
     pub fn set_deck_compressor(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Compressor(on),
         });
     }
 
     pub fn set_deck_compressor_threshold(&self, deck: DeckId, db: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::CompressorThreshold(db),
         });
     }
 
     pub fn set_deck_compressor_ratio(&self, deck: DeckId, ratio: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::CompressorRatio(ratio),
         });
     }
 
     pub fn set_deck_autopan_rate(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanRate(hz),
         });
     }
 
     pub fn set_deck_echo_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::EchoMix(mix),
         });
     }
 
     pub fn set_deck_echo_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::EchoLevelMode(mode),
         });
     }
 
     pub fn set_deck_echo_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::EchoCeiling(ceiling),
         });
     }
 
     pub fn set_deck_flanger_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerMix(mix),
         });
     }
 
     pub fn set_deck_flanger_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerLevelMode(mode),
         });
     }
 
     pub fn set_deck_flanger_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::FlangerCeiling(ceiling),
         });
     }
 
     pub fn set_deck_bitcrusher_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::BitcrusherMix(mix),
         });
     }
 
     pub fn set_deck_bitcrusher_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::BitcrusherLevelMode(mode),
         });
     }
 
     pub fn set_deck_bitcrusher_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::BitcrusherCeiling(ceiling),
         });
     }
 
     pub fn set_deck_tremolo_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloMix(mix),
         });
     }
 
     pub fn set_deck_tremolo_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloLevelMode(mode),
         });
     }
 
     pub fn set_deck_tremolo_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::TremoloCeiling(ceiling),
         });
     }
 
     pub fn set_deck_distortion_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::DistortionMix(mix),
         });
     }
 
     pub fn set_deck_distortion_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::DistortionLevelMode(mode),
         });
     }
 
     pub fn set_deck_distortion_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::DistortionCeiling(ceiling),
         });
     }
 
     pub fn set_deck_phaser_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserMix(mix),
         });
     }
 
     pub fn set_deck_phaser_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserLevelMode(mode),
         });
     }
 
     pub fn set_deck_phaser_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PhaserCeiling(ceiling),
         });
     }
 
     pub fn set_deck_autopan_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanMix(mix),
         });
     }
 
     pub fn set_deck_autopan_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanLevelMode(mode),
         });
     }
 
     pub fn set_deck_autopan_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanCeiling(ceiling),
         });
     }
 
     pub fn set_deck_stereo_width_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::StereoWidthMix(mix),
         });
     }
 
     pub fn set_deck_stereo_width_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::StereoWidthLevelMode(mode),
         });
     }
 
     pub fn set_deck_stereo_width_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::StereoWidthCeiling(ceiling),
         });
     }
 
     pub fn set_deck_plate_reverb_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PlateReverbMix(mix),
         });
     }
 
     pub fn set_deck_plate_reverb_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PlateReverbLevelMode(mode),
         });
     }
 
     pub fn set_deck_plate_reverb_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PlateReverbCeiling(ceiling),
         });
     }
 
     pub fn set_deck_moog_ladder_mix(&self, deck: DeckId, mix: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadderMix(mix),
         });
     }
 
     pub fn set_deck_moog_ladder_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadderLevelMode(mode),
         });
     }
 
     pub fn set_deck_moog_ladder_ceiling(&self, deck: DeckId, ceiling: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadderCeiling(ceiling),
         });
     }
 
     pub fn set_deck_level_default(&self, deck: DeckId, mode: LevelMode) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::LevelDefault(mode),
         });
     }
 
     pub fn set_deck_autopan_sync_units(&self, deck: DeckId, units: u32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanSyncUnits(units),
         });
     }
 
     pub fn set_deck_autopan_beat_offset(&self, deck: DeckId, offset: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::AutopanBeatOffset(offset),
         });
     }
 
     pub fn set_deck_stereo_width(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::StereoWidth(on),
         });
     }
 
     pub fn set_deck_stereo_width_amount(&self, deck: DeckId, width: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::StereoWidthAmount(width),
         });
     }
 
     pub fn set_deck_plate_reverb(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PlateReverb(on),
         });
     }
 
     pub fn set_deck_plate_reverb_size(&self, deck: DeckId, size: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::PlateReverbSize(size),
         });
     }
 
     pub fn set_deck_moog_ladder(&self, deck: DeckId, on: bool) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadder(on),
         });
     }
 
     pub fn set_deck_moog_ladder_cutoff(&self, deck: DeckId, hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadderCutoff(hz),
         });
     }
 
     pub fn set_deck_moog_ladder_resonance(&self, deck: DeckId, resonance: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::MoogLadderResonance(resonance),
         });
     }
 
     pub fn set_deck_crossovers(&self, deck: DeckId, low_hz: f32, high_hz: f32) {
-        self.run_cmd(MixCmd::DeckEffect {
-            deck,
+        self.run_cmd(MixCmd::ChainEffect {
+            target: deck.into(),
             param: EffectParam::Crossovers(low_hz, high_hz),
         });
     }
@@ -4361,31 +4490,17 @@ impl Mixer {
         self.run_cmd(MixCmd::SetMasterDynamicsBypass(bypass));
     }
 
-    /// Which deck's grid the master chain's beat-locked effects follow.
-    /// The mix has no tempo of its own, so it borrows one.
-    pub fn set_master_clock_deck(&self, deck: DeckId) {
-        self.run_cmd(MixCmd::MasterClockDeck(deck));
+    /// Which deck's grid the chains with no tempo of their own follow:
+    /// the mix's, the pads', the synth tracks'. None of them has a tempo,
+    /// so they borrow one.
+    pub fn set_chain_clock_deck(&self, deck: DeckId) {
+        self.run_cmd(MixCmd::ChainClockDeck(deck));
     }
 
-    /// The master chain's on/off for one effect, by the same slot index
-    /// the deck chains use.
-    pub fn set_master_effect(&self, slot: usize, on: bool) {
-        self.run_cmd(MixCmd::MasterEffect { slot, on });
-    }
-
-    /// One master slot's wet/dry mix.
-    pub fn set_master_mix(&self, slot: usize, mix: f32) {
-        self.run_cmd(MixCmd::MasterMix { slot, mix });
-    }
-
-    /// What one master slot does about the level it returns.
-    pub fn set_master_level_mode(&self, slot: usize, mode: LevelMode) {
-        self.run_cmd(MixCmd::MasterLevelMode { slot, mode });
-    }
-
-    /// And the same crossovers for the mix's own chain.
-    pub fn set_master_crossovers(&self, low_hz: f32, high_hz: f32) {
-        self.run_cmd(MixCmd::MasterCrossovers { low_hz, high_hz });
+    /// One knob on one slot of any chain: a deck's, a source's or the
+    /// mix's. The per-deck setters above are this with the deck filled in.
+    pub fn set_chain_effect(&self, target: ChainTarget, param: EffectParam) {
+        self.run_cmd(MixCmd::ChainEffect { target, param });
     }
 
     pub fn synth_snapshot(&self) -> RackSnapshot {
@@ -4457,26 +4572,6 @@ impl MixEngine {
 
     /// Apply one effect parameter to a chain. The bodies are exactly what
     /// the old locked setters ran; only the way they arrive has changed.
-    /// The master chain's on/off for one effect, by the same slot index
-    /// the deck chains use.
-    fn switch_master_effect(chain: &mut DeckChain, slot: usize, on: bool) {
-        let wet = if on { 1.0 } else { 0.0 };
-        match slot {
-            // The echo has no wet of its own: its fraction IS its
-            // switch, off being no fraction at all.
-            2 => chain.echo_mut().set_fraction(on.then_some((1, 2))),
-            3 => chain.flanger_mut().set_wet(wet),
-            5 => chain.tremolo_mut().set_wet(wet),
-            6 => chain.distortion_mut().set_wet(wet),
-            7 => chain.phaser_mut().set_wet(wet),
-            8 => chain.autopan_mut().set_wet(wet),
-            9 => chain.stereo_width_mut().set_wet(wet),
-            10 => chain.plate_reverb_mut().set_wet(wet),
-            11 => chain.moog_ladder_mut().set_wet(wet),
-            _ => {}
-        }
-    }
-
     fn apply_effect(chain: &mut DeckChain, param: EffectParam) {
         match param {
             EffectParam::Echo(fraction) => chain.echo_mut().set_fraction(fraction),
@@ -4953,33 +5048,10 @@ impl MixEngine {
                     ScratchMotion::Release => d.scratch.release(deck_rate),
                 }
             }
-            MixCmd::DeckEffect { deck, param } => {
-                Self::apply_effect(&mut s.decks[deck.index()].chain, param)
+            MixCmd::ChainEffect { target, param } => {
+                Self::apply_effect(s.chain_mut(target), param)
             }
-            // The only slot number that reaches this thread as a raw
-            // index rather than as a typed enum, so it is the only one
-            // that can be wrong. It used to be wrong in two different ways
-            // in three neighbouring lines: the switch ignored an
-            // out-of-range slot in silence, and the other two CLAMPED it
-            // onto the last slot -- which does not do nothing, it applies
-            // the operator's setting to a different effect. One shape now,
-            // and it says so rather than guessing.
-            MixCmd::MasterEffect { slot, on } => {
-                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
-                Self::switch_master_effect(&mut s.master_chain, slot, on)
-            }
-            MixCmd::MasterMix { slot, mix } => {
-                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
-                s.master_chain.level_mut(slot).set_mix(mix)
-            }
-            MixCmd::MasterLevelMode { slot, mode } => {
-                verify_or!(slot < DECK_CHAIN_SLOTS, { return });
-                s.master_chain.level_mut(slot).set_mode(mode)
-            }
-            MixCmd::MasterClockDeck(deck) => s.master_clock_deck = deck.index(),
-            MixCmd::MasterCrossovers { low_hz, high_hz } => {
-                s.master_chain.eq_mut().set_crossovers(low_hz, high_hz)
-            }
+            MixCmd::ChainClockDeck(deck) => s.chain_clock_deck = deck,
             MixCmd::InstallOver { deck, pcm, keep_playing } => {
                 let d = &mut s.decks[deck.index()];
                 // Silent already: nothing is leaving, so nothing has to be
@@ -5232,7 +5304,13 @@ impl MixEngine {
             MixCmd::SetFilter { deck, position } => {
                 s.decks[deck.index()].chain.eq_mut().set_filter(position)
             }
+            // The stem is the one raw number that reaches this thread as an
+            // array index rather than a typed enum. The handle's setters
+            // check it; a command pushed raw -- which is what every test
+            // does -- did not, and the callback must not have a way to
+            // unwind. Refused here, and it says so.
             MixCmd::SetStemGain { deck, stem, gain } => {
+                verify_or!(stem < STEM_COUNT, { return });
                 s.decks[deck.index()].stem_gain[stem].slew(gain, SLEW_SECS * 2.0);
             }
             MixCmd::SetLoopSpan { deck, span, seek } => {
@@ -5288,6 +5366,7 @@ impl MixEngine {
                 s.decks[deck.index()].chain.eq_mut().set_blend_band(band, gain);
             }
             MixCmd::SetBlendStem { deck, stem, gain } => {
+                verify_or!(stem < STEM_COUNT, { return });
                 s.decks[deck.index()].blend_stem[stem].slew(gain, BLEND_SECS);
             }
             MixCmd::ClearBlend(deck) => {
@@ -5578,13 +5657,17 @@ impl MixEngine {
         let deck_stems: [Option<Arc<TrackStems>>; 2] =
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
         let mut deck_peaks = [0.0f32; 2];
-        // The master's chain gets the same once-a-buffer preparation its
-        // decks do, and borrows a deck's clock: the mix has no tempo of
-        // its own, so a beat-locked effect on it follows whichever deck
-        // is nominated -- deck A until something asks otherwise.
+        // Every chain that is not a deck's gets the same once-a-buffer
+        // preparation the decks' do, and borrows a deck's clock: the mix,
+        // the pads and the synth tracks have no tempo of their own, so a
+        // beat-locked effect on any of them follows whichever deck is
+        // nominated -- deck A until something asks otherwise.
         {
-            let clock = s.decks[s.master_clock_deck.min(1)].clock;
+            let clock = s.decks[s.chain_clock_deck.index()].clock;
             s.master_chain.prepare_block(&clock, rate, frames);
+            for chain in s.source_chains.iter_mut() {
+                chain.prepare_block(&clock, rate, frames);
+            }
         }
         for voice in s.decks.iter_mut() {
             // Where the beat will be at the END of this buffer. Read at the
@@ -5745,6 +5828,13 @@ impl MixEngine {
             let program_mute = s.video_mute.tick(rate);
             video.0 *= program_mute;
             video.1 *= program_mute;
+            // The video bus's own chain: after the program mute, so a
+            // muted bus does not keep a tail ringing, and before the strip,
+            // which is the seat ahead of the fader the deck chains have.
+            let video = {
+                let out = s.chain_mut(ChainTarget::Video).process([video.0, video.1], rate);
+                (out[0], out[1])
+            };
 
             // Decks under the crossfader.
             let position = s.fader.tick(rate);
@@ -6207,16 +6297,24 @@ impl MixEngine {
             }
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
+            // Each source's own chain, on the source alone and before it
+            // enters its strip. The pads' chain hears the pads and not the
+            // score preview: an audition should not come through whatever
+            // the operator has put on the pads, so the score joins after.
+            let sfx_strip = s.chain_mut(ChainTarget::Sfx).process([sfx.0, sfx.1], rate);
             let piano = s.synth.frame(SynthTrack::Piano, frame);
+            let piano = s.chain_mut(ChainTarget::Piano).process(piano, rate);
             let ironfish = s.synth.frame(SynthTrack::Ironfish, frame);
+            let ironfish = s.chain_mut(ChainTarget::Ironfish).process(ironfish, rate);
             let drums = s.synth.frame(SynthTrack::Drums, frame);
+            let drums = s.chain_mut(ChainTarget::Drums).process(drums, rate);
             let master = s.master.tick(rate);
             let mixed = s.program_mix.process_frame_with(
                 [
                     [video.0, video.1],
                     [deck_out[0].0, deck_out[0].1],
                     [deck_out[1].0, deck_out[1].1],
-                    [sfx.0 + score[0], sfx.1 + score[1]],
+                    [sfx_strip[0] + score[0], sfx_strip[1] + score[1]],
                     piano,
                     ironfish,
                     drums,
@@ -7277,7 +7375,7 @@ mod tests {
         mixer.install_deck(DeckId::A, pcm.clone());
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4_096);
-        assert!(!mixer.state().master_chain_engaged());
+        assert!(!mixer.state().chain_engaged(ChainTarget::Master));
         let start = deck_pos(&mixer, DeckId::A) as usize;
         let latency = mixer.output_latency_frames();
         let out = render(&mixer, 48_000.0, 256 + latency);
@@ -7291,30 +7389,28 @@ mod tests {
         }
     }
 
-    /// The master chain's slot is the only index that reaches the audio
-    /// thread as a raw number rather than as a typed enum, so it is the
-    /// only one that can be out of range. It used to be CLAMPED onto the
-    /// last slot, which is not "do nothing" -- it silently applies the
-    /// operator's setting to a different effect.
+    /// The stem index is the one raw number that reaches the audio thread
+    /// as an array index rather than a typed enum. The handle's setters
+    /// check it; nothing on the audio side did, so a command pushed raw --
+    /// which is what every test does -- could take the callback down.
+    /// Refused there now, and the last lane is not a bin for bad numbers.
     #[test]
-    fn a_master_slot_out_of_range_is_refused_rather_than_bent_onto_another() {
+    fn a_stem_index_out_of_range_is_refused_rather_than_bent_onto_another() {
         let mixer = TestMixer::new();
-        let last = DECK_CHAIN_SLOTS - 1;
-        let mix_of = |slot: usize| mixer.state().master_chain.level_mut(slot).mix();
-        let mode_of = |slot: usize| mixer.state().master_chain.level_mut(slot).mode();
-
-        let before = mix_of(last);
-        mixer.set_master_mix(DECK_CHAIN_SLOTS, 0.25);
-        mixer.set_master_mix(999, 0.25);
-        assert_eq!(mix_of(last), before, "the last slot is not a bin for bad numbers");
-        mixer.set_master_level_mode(DECK_CHAIN_SLOTS, LevelMode::MatchInput);
-        assert_eq!(mode_of(last), LevelMode::Follow, "nor for bad modes");
-
-        // Refused, not broken: a slot that exists still answers.
-        mixer.set_master_mix(last, 0.25);
-        assert_eq!(mix_of(last), 0.25);
-        mixer.set_master_level_mode(last, LevelMode::MatchInput);
-        assert_eq!(mode_of(last), LevelMode::MatchInput);
+        mixer.install_deck(DeckId::A, const_pcm(4_000, 48_000 * 2, 48_000));
+        let last = STEM_COUNT - 1;
+        let settled = |mixer: &TestMixer| {
+            let _ = render(mixer, 48_000.0, 48_000);
+            mixer.state().decks[0].stem_gain[last].current()
+        };
+        let before = settled(&mixer);
+        mixer.run_cmd(MixCmd::SetStemGain { deck: DeckId::A, stem: STEM_COUNT, gain: 0.25 });
+        mixer.run_cmd(MixCmd::SetStemGain { deck: DeckId::A, stem: 999, gain: 0.25 });
+        mixer.run_cmd(MixCmd::SetBlendStem { deck: DeckId::A, stem: STEM_COUNT, gain: 0.25 });
+        assert_eq!(settled(&mixer), before, "the last lane is not a bin for bad numbers");
+        // Refused, not broken: a lane that exists still answers.
+        mixer.run_cmd(MixCmd::SetStemGain { deck: DeckId::A, stem: last, gain: 0.25 });
+        assert!((settled(&mixer) - 0.25).abs() < 1e-3);
     }
 
     /// And an engaged one reaches the sum. The width sits at 1.5 by
@@ -7332,7 +7428,7 @@ mod tests {
             mixer.install_deck(DeckId::A, const_stereo_pcm(12_000, -12_000, 96_000, 48_000));
             mixer.set_deck_playing(DeckId::A, true);
             if on {
-                mixer.set_master_effect(9, true); // stereo width
+                mixer.set_chain_effect(ChainTarget::Master, EffectParam::StereoWidth(true));
             }
             render(&mixer, 48_000.0, 8_192);
             let out = render(&mixer, 48_000.0, 2_048);
@@ -7341,6 +7437,114 @@ mod tests {
         let off = quiet(false);
         let on = quiet(true);
         assert!(on > off * 1.2, "the master width did not reach the mix: {off} then {on}");
+    }
+
+    /// A pad voice through the pads' own chain, with nothing on it: the
+    /// chain costs the signal nothing until an effect is switched on. The
+    /// same contract the master's chain keeps, on the first of the five
+    /// sources that got a chain of their own.
+    #[test]
+    fn a_source_chain_is_transparent_until_asked() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.start_voice(
+            VoiceAlloc {
+                id: 1,
+                pad: PadKey::from_bytes([1; 16]),
+                choke_group: 0,
+                loop_on: true,
+                gain: 1.0,
+                started_ms: 0,
+            },
+            const_pcm(16_384, 48_000 * 2, 48_000), // 0.5 amp
+        );
+        render(&mixer, 48_000.0, 4_096);
+        assert!(!mixer.state().chain_engaged(ChainTarget::Sfx));
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, 48_000.0, 256 + latency);
+        for index in 0..200 {
+            let got = out.channel(0)[index + latency];
+            assert!(
+                (got - 0.5).abs() < 1e-5,
+                "sample {index}: {got} -- an idle source chain must be transparent"
+            );
+        }
+    }
+
+    /// An effect on one source reaches the mix, and an effect on a source
+    /// that is silent changes nothing: the decks' samples do not move when
+    /// the pads' chain is switched on.
+    #[test]
+    fn an_engaged_source_chain_reaches_the_mix_and_touches_nothing_else() {
+        let energy = |width_on_pads: bool, with_pads: bool| -> (f64, Vec<u32>) {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            mixer.set_crossfader(0.0);
+            if with_pads {
+                // Out of phase, so there is a side signal to widen.
+                mixer.start_voice(
+                    VoiceAlloc {
+                        id: 2,
+                        pad: PadKey::from_bytes([2; 16]),
+                        choke_group: 0,
+                        loop_on: true,
+                        gain: 1.0,
+                        started_ms: 0,
+                    },
+                    const_stereo_pcm(12_000, -12_000, 96_000, 48_000),
+                );
+            } else {
+                mixer.install_deck(DeckId::A, tone_pcm(1_000.0, 48_000, 2.0));
+                mixer.set_deck_playing(DeckId::A, true);
+            }
+            if width_on_pads {
+                mixer.set_chain_effect(ChainTarget::Sfx, EffectParam::StereoWidth(true));
+            }
+            render(&mixer, 48_000.0, 8_192);
+            let out = render(&mixer, 48_000.0, 2_048);
+            let bits = out.channel(0).iter().map(|s| s.to_bits()).collect();
+            (out.channel(0).iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>(), bits)
+        };
+        let (off, _) = energy(false, true);
+        let (on, _) = energy(true, true);
+        assert!(on > off * 1.2, "the pads' width did not reach the mix: {off} then {on}");
+        let (_, deck_alone) = energy(false, false);
+        let (_, deck_with_pad_width) = energy(true, false);
+        assert_eq!(deck_alone, deck_with_pad_width, "an effect on the pads moved the deck");
+    }
+
+    /// Eight targets, eight chains: a knob on one lands on that one only.
+    #[test]
+    fn every_target_has_a_chain_of_its_own() {
+        for target in ChainTarget::ALL {
+            let mixer = TestMixer::new();
+            mixer.set_chain_effect(target, EffectParam::Flanger(true));
+            for other in ChainTarget::ALL {
+                assert_eq!(
+                    mixer.state().chain_engaged(other),
+                    other == target,
+                    "{target:?} on: {other:?} engaged",
+                );
+            }
+        }
+    }
+
+    /// A number read from a file becomes a target, or nothing -- never the
+    /// nearest one -- and the words the file holds are all different.
+    #[test]
+    fn a_target_index_from_a_file_falls_back_rather_than_bending_onto_another() {
+        for target in ChainTarget::ALL {
+            assert_eq!(ChainTarget::from_index(target.index()), Some(target));
+        }
+        assert_eq!(ChainTarget::from_index(ChainTarget::ALL.len()), None);
+        assert_eq!(ChainTarget::from_index(usize::MAX), None);
+        let tags: Vec<&str> = ChainTarget::ALL.iter().map(|t| t.tag()).collect();
+        for (i, tag) in tags.iter().enumerate() {
+            assert!(!tags[..i].contains(tag), "two targets share the word {tag}");
+        }
+        assert_eq!(ChainTarget::from(DeckId::A), ChainTarget::DeckA);
+        assert_eq!(ChainTarget::from(DeckId::B).deck(), Some(DeckId::B));
+        assert_eq!(ChainTarget::Master.strip(), None);
     }
 
     #[test]
