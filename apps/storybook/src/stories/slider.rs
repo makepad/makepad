@@ -214,7 +214,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/slider/overview",
     category: "Inputs",
     component: "Slider",
-    also: &[],
+    also: &["SliderMinimal", "SliderMinimalFlat", "SliderRound", "SliderRoundFlat", "SliderRoundGradientX", "SliderRoundGradientY"],
     name: "Overview",
     dsl: "SliderOverview",
     added: "2026-02-16",

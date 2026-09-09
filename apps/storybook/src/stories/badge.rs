@@ -220,7 +220,7 @@ pub const STORIES: &[Story] = &[
         key: "data-display/badge/overview",
         category: "Data display",
         component: "Badge",
-        also: &["BadgeAnchor", "LabelValue", "Marker", "StatusDot"],
+        also: &["BadgeAnchor", "Caption", "LabelValue", "Marker", "StatusDot"],
         name: "Overview",
         dsl: "BadgeOverview",
         added: "2026-09-05",

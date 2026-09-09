@@ -111,7 +111,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "actions/button/variants",
     category: "Actions",
     component: "Button",
-    also: &[],
+    also: &["BurgerButton", "ButtonCompound", "ButtonDanger", "ButtonDashed", "ButtonLg", "ButtonOutline", "ButtonPrimary", "ButtonSecondary", "ButtonSm", "ButtonSubtleIcon", "ButtonTertiary", "ButtonTonalIcon", "ButtonXl", "ButtonXs", "CloseButton", "CloseButtonLg", "CloseButtonSm", "CopyButton"],
     name: "Variants",
     dsl: "ButtonVariants",
     added: "2026-09-05",

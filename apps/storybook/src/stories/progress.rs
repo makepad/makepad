@@ -147,7 +147,7 @@ pub const STORIES: &[Story] = &[
         key: "feedback/progress/overview",
         category: "Feedback",
         component: "Progress",
-        also: &["Gauge", "NavigationProgress", "ProgressBar", "ProgressRing"],
+        also: &["ActivityRings", "Gauge", "GaugeLinear", "NavigationProgress", "ProgressArc", "ProgressBar", "ProgressRing"],
         name: "Overview",
         dsl: "ProgressOverview",
         added: "2026-09-05",

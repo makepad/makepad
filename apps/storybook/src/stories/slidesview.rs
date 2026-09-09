@@ -28,7 +28,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "navigation/slidesview/overview",
     category: "Navigation",
     component: "SlidesView",
-    also: &[],
+    also: &["Slide", "SlideBody", "SlideChapter"],
     name: "Overview",
     dsl: "SlidesViewOverview",
     added: "2026-02-16",

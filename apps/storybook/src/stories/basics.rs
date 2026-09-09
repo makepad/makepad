@@ -80,7 +80,7 @@ pub const STORIES: &[Story] = &[
         key: "inputs/checkbox/basic",
         category: "Inputs",
         component: "CheckBox",
-        also: &[],
+        also: &["Toggle"],
         name: "Basic",
         dsl: "CheckBoxBasic",
         added: "2025-05-06",

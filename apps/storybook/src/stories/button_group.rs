@@ -185,7 +185,7 @@ pub const STORIES: &[Story] = &[
         key: "actions/buttongroup/overview",
         category: "Actions",
         component: "ButtonGroup",
-        also: &["MenuButton", "SplitButton"],
+        also: &["ButtonGroupSpaced", "MenuButton", "SegmentedControlVertical", "SplitButton", "ToggleGroup"],
         name: "Overview",
         dsl: "ButtonGroupOverview",
         added: "2026-09-05",

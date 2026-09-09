@@ -96,7 +96,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/checkbox/states",
     category: "Inputs",
     component: "CheckBox",
-    also: &[],
+    also: &["CheckBoxCircle"],
     name: "States",
     dsl: "CheckBoxStates",
     added: "2026-09-05",

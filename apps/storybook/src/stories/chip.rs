@@ -206,7 +206,7 @@ pub const STORIES: &[Story] = &[
         key: "inputs/chip/overview",
         category: "Inputs",
         component: "Chip",
-        also: &["ChipGroup"],
+        also: &["ChipGroup", "FilterSummary", "Tag"],
         name: "Overview",
         dsl: "ChipOverview",
         added: "2026-09-05",

@@ -26,7 +26,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "containers/scrollbar/overview",
     category: "Containers",
     component: "ScrollBar",
-    also: &[],
+    also: &["GradientYView"],
     name: "Overview",
     dsl: "ScrollBarOverview",
     added: "2026-04-16",

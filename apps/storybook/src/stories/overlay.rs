@@ -117,7 +117,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "overlay/nesting/overview",
     category: "Overlay",
     component: "Nesting",
-    also: &[],
+    also: &["PopoverToggle"],
     name: "Overview",
     dsl: "OverlayNesting",
     added: "2026-09-05",

@@ -123,7 +123,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/radiobutton/overview",
     category: "Inputs",
     component: "RadioButton",
-    also: &[],
+    also: &["RadioButtonTab", "RadioButtonTabFlat"],
     name: "Overview",
     dsl: "RadioButtonOverview",
     added: "2026-02-16",

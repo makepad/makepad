@@ -54,7 +54,7 @@ pub const STORIES: &[Story] = &[
         key: "layout/divider/overview",
         category: "Layout",
         component: "Divider",
-        also: &[],
+        also: &["DividerLabelled", "DividerVertical"],
         name: "Overview",
         dsl: "DividerOverview",
         added: "2026-09-05",

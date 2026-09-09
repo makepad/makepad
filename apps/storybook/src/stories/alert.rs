@@ -143,7 +143,7 @@ pub const STORIES: &[Story] = &[
         key: "feedback/alert/overview",
         category: "Feedback",
         component: "Alert",
-        also: &[],
+        also: &["Banner", "Callout", "InlineTip"],
         name: "Overview",
         dsl: "AlertOverview",
         added: "2026-09-05",

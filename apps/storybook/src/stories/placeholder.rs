@@ -95,7 +95,7 @@ pub const STORIES: &[Story] = &[
         key: "feedback/placeholder/overview",
         category: "Feedback",
         component: "Placeholder",
-        also: &["ContentPlaceholder"],
+        also: &["ContentPlaceholder", "PlaceholderButton", "PlaceholderCard", "PlaceholderCircle", "PlaceholderImage", "PlaceholderInput", "PlaceholderParagraph", "PlaceholderRow", "PlaceholderTable", "PlaceholderText"],
         name: "Overview",
         dsl: "PlaceholderOverview",
         added: "2026-09-05",
