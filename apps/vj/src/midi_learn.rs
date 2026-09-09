@@ -21,6 +21,7 @@
 //!     mapped tick when bound. Wrap a control, add one row to the app's
 //!     learnable table — nothing else.
 
+use crate::midi_binding::{Behaviour, Binding, Motion, Source, Transform};
 use makepad_widgets::*;
 use std::collections::HashMap;
 
@@ -92,6 +93,10 @@ pub enum LearnEvent {
     /// that is speaking now. Re-learn a pad onto a different button and the
     /// old level is not a previous state, it is a different pad.
     Value { control: String, channel: u8, cc: u8, value: f32 },
+    /// A bound control's turn -- from an encoder that sends changes rather
+    /// than positions -- in 0..1 units, signed. The caller knows where the
+    /// control is; this layer does not.
+    Turn { control: String, channel: u8, cc: u8, delta: f32 },
 }
 
 #[derive(Default)]
@@ -100,8 +105,10 @@ pub struct MidiLearn {
     pub picking: bool,
     /// The control waiting for its CC.
     pub armed: Option<String>,
-    bindings: HashMap<String, (u8, u8)>,
-    reverse: HashMap<(u8, u8), String>,
+    /// Each learned control's record: its source, and what it makes of
+    /// what arrives (midi_binding.rs).
+    bindings: HashMap<String, Binding>,
+    reverse: HashMap<Source, String>,
 }
 
 impl MidiLearn {
@@ -160,13 +167,51 @@ impl MidiLearn {
         self.bindings.contains_key(control)
     }
 
+    /// The source a control is driven from.
     pub fn binding(&self, control: &str) -> Option<(u8, u8)> {
+        self.bindings.get(control).map(|binding| binding.source)
+    }
+
+    /// The whole record: the source and what the control makes of it.
+    pub fn record(&self, control: &str) -> Option<Binding> {
         self.bindings.get(control).copied()
     }
 
+    /// How a bound control reads its number. False when it is not bound.
+    pub fn set_transform(&mut self, control: &str, transform: Transform) -> bool {
+        match self.bindings.get_mut(control) {
+            Some(binding) => {
+                binding.transform = transform;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_sensitivity(&mut self, control: &str, sensitivity: f32) -> bool {
+        match self.bindings.get_mut(control) {
+            Some(binding) if sensitivity.is_finite() && sensitivity > 0.0 => {
+                binding.sensitivity = sensitivity;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What a press does on a bound button; None is the button's own.
+    pub fn set_press(&mut self, control: &str, press: Option<Behaviour>) -> bool {
+        match self.bindings.get_mut(control) {
+            Some(binding) => {
+                binding.press = press;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn clear(&mut self, control: &str) {
-        if let Some(key) = self.bindings.remove(control) {
-            self.reverse.remove(&key);
+        if let Some(binding) = self.bindings.remove(control) {
+            self.reverse.remove(&binding.source);
         }
     }
 
@@ -198,28 +243,48 @@ impl MidiLearn {
         }
         let channel = data[0] & 0x0f;
         let cc = data[1] & 0x7f;
-        let value = (data[2] & 0x7f) as f32 / 127.0;
         if let Some(control) = self.armed.take() {
-            // Re-learn moves the control's old CC; stealing a CC another
-            // control held moves it here (last learn wins).
-            self.clear(&control);
+            // Re-learn moves the control's old CC and keeps what the
+            // control was told about reading it; stealing a CC another
+            // control held moves it here whole (last learn wins).
+            let kept = self.bindings.remove(&control);
+            if let Some(old) = kept {
+                self.reverse.remove(&old.source);
+            }
             if let Some(previous) = self.reverse.remove(&(channel, cc)) {
                 self.bindings.remove(&previous);
             }
-            self.bindings.insert(control.clone(), (channel, cc));
+            let binding = Binding { source: (channel, cc), ..kept.unwrap_or(Binding::new((channel, cc))) };
+            self.bindings.insert(control.clone(), binding);
             self.reverse.insert((channel, cc), control.clone());
             return Some(LearnEvent::Bound { control, channel, cc });
         }
         let control = self.reverse.get(&(channel, cc))?.clone();
-        Some(LearnEvent::Value { control, channel, cc, value })
+        // The one seam: what the number MEANS is the binding's to say.
+        let binding = self.bindings[&control];
+        match binding.transform.read(data[2], binding.sensitivity) {
+            Motion::At(value) => Some(LearnEvent::Value { control, channel, cc, value }),
+            Motion::By(delta) => Some(LearnEvent::Turn { control, channel, cc, delta }),
+        }
     }
 
-    /// `midi-map.txt` body: one `control channel cc` line per binding.
+    /// `midi-map.txt` body: one `control channel cc` line per binding,
+    /// followed by the words its record adds -- none at the defaults, so
+    /// a binding that was never told anything writes the line it always
+    /// wrote. The header stays `v1`: an older build reads the three
+    /// tokens and ignores the rest.
     pub fn encode(&self) -> String {
         let mut lines: Vec<String> = self
             .bindings
             .iter()
-            .map(|(control, (channel, cc))| format!("{control} {channel} {cc}"))
+            .map(|(control, binding)| {
+                let (channel, cc) = binding.source;
+                let words = binding.words();
+                match words.is_empty() {
+                    true => format!("{control} {channel} {cc}"),
+                    false => format!("{control} {channel} {cc} {words}"),
+                }
+            })
             .collect();
         lines.sort();
         let mut out = String::from("v1\n");
@@ -248,7 +313,8 @@ impl MidiLearn {
             if channel > 15 || cc > 127 {
                 continue;
             }
-            out.bindings.insert(control.to_string(), (channel, cc));
+            let binding = Binding::new((channel, cc)).with_words(it);
+            out.bindings.insert(control.to_string(), binding);
             out.reverse.insert((channel, cc), control.to_string());
         }
         out
@@ -544,5 +610,119 @@ mod tests {
         assert_eq!(m.binding("ghost_control"), None);
         assert_eq!(m.midi(cc(0, 21, 127)), None, "the CC is free for the surface");
         assert_eq!(m.binding("video_fade"), Some((0, 20)), "the real one is untouched");
+    }
+
+    /// The number a bound control is sent means what its record says.
+    #[test]
+    fn a_binding_reads_through_its_transform() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(0, 14, 0));
+        assert!(m.set_transform("master", Transform::Invert));
+        assert!(!m.set_transform("nobody", Transform::Invert), "an unbound control has no record");
+        assert_eq!(
+            m.midi(cc(0, 14, 127)),
+            Some(LearnEvent::Value { control: "master".into(), channel: 0, cc: 14, value: 0.0 })
+        );
+        assert_eq!(m.record("master").map(|b| b.transform), Some(Transform::Invert));
+    }
+
+    #[test]
+    fn a_turn_is_not_a_value() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(0, 14, 0));
+        m.set_transform("master", Transform::Relative);
+        match m.midi(cc(0, 14, 1)) {
+            Some(LearnEvent::Turn { control, channel, cc: number, delta }) => {
+                assert_eq!((control.as_str(), channel, number), ("master", 0, 14));
+                assert!((delta - 1.0 / 127.0).abs() < 1e-6);
+            }
+            other => panic!("a relative binding sends a turn, got {other:?}"),
+        }
+        assert!(m.set_sensitivity("master", 0.5));
+        assert!(!m.set_sensitivity("master", f32::NAN), "a sensitivity that is not a number is refused");
+        match m.midi(cc(0, 14, 1)) {
+            Some(LearnEvent::Turn { delta, .. }) => assert!((delta - 0.5 / 127.0).abs() < 1e-6),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Re-learning moves the source and keeps what the control was told;
+    /// a steal drops the loser's record whole.
+    #[test]
+    fn a_relearn_moves_the_source_and_keeps_what_the_control_was_told() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(0, 14, 0));
+        m.set_transform("master", Transform::Relative64);
+        m.set_sensitivity("master", 2.0);
+        m.set_press("master", Some(Behaviour::Trigger));
+        m.control_clicked("master", true);
+        m.midi(cc(1, 20, 0));
+        let record = m.record("master").expect("still bound");
+        assert_eq!(record.source, (1, 20));
+        assert_eq!(record.transform, Transform::Relative64);
+        assert_eq!(record.sensitivity, 2.0);
+        assert_eq!(record.press, Some(Behaviour::Trigger));
+        assert_eq!(m.midi(cc(0, 14, 64)), None, "the old source is nobody's");
+    }
+
+    #[test]
+    fn a_steal_drops_the_losers_record() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(0, 14, 0));
+        m.set_transform("master", Transform::Invert);
+        m.control_clicked("xfader", true);
+        m.midi(cc(0, 14, 0));
+        assert_eq!(m.record("master"), None, "the loser's record is gone, not orphaned");
+        assert_eq!(m.record("xfader").map(|b| b.transform), Some(Transform::Plain), "the winner starts fresh");
+    }
+
+    /// The words ride the map line after the three tokens, and a line
+    /// without them is the binding it always was.
+    #[test]
+    fn the_map_carries_the_words_and_reads_lines_without_them() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(0, 14, 0));
+        m.set_transform("master", Transform::Relative64);
+        m.set_sensitivity("master", 0.5);
+        m.control_clicked("xfader", true);
+        m.midi(cc(0, 15, 0));
+        let text = m.encode();
+        assert!(text.contains("master 0 14 read=relative64 sens=0.5\n"), "{text}");
+        assert!(text.contains("xfader 0 15\n"), "{text}");
+        let back = MidiLearn::decode(&text);
+        assert_eq!(back.record("master"), m.record("master"));
+        assert_eq!(back.record("xfader"), Some(Binding::new((0, 15))));
+    }
+
+    /// Today's reader -- the three tokens, the rest ignored -- reads every
+    /// CC line the new build writes as the plain binding it names.
+    #[test]
+    fn todays_reader_reads_every_cc_line_the_new_build_writes() {
+        let mut m = MidiLearn::default();
+        m.control_clicked("master", true);
+        m.midi(cc(2, 14, 0));
+        m.set_transform("master", Transform::Spread64);
+        m.set_press("master", Some(Behaviour::TapHold));
+        // A copy of the v1 parse as it stood before records had words.
+        let mut old: HashMap<String, (u8, u8)> = HashMap::new();
+        let text = m.encode();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("v1"));
+        for line in lines {
+            let mut it = line.split_whitespace();
+            let (Some(control), Some(channel), Some(number)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            let (Ok(channel), Ok(number)) = (channel.parse::<u8>(), number.parse::<u8>()) else {
+                continue;
+            };
+            old.insert(control.to_string(), (channel, number));
+        }
+        assert_eq!(old.get("master"), Some(&(2, 14)));
     }
 }

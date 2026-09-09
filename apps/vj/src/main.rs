@@ -237,6 +237,7 @@ use crate::effects::audio_tex::AudioTexBus;
 use crate::fx_slot::{
     FxSlotKind, FxSlotTileAction, FxSlotTileState, FxSlots, PremixJob, VjFxSlotHost, VjFxSlotTile,
 };
+use crate::midi_binding::{Behaviour, Learnable, Motion, Transform};
 use crate::midi_learn::{LearnEvent, LearnWrapAction, MidiLearn, VjLearnWrap};
 use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipelines::{PipeDone, PipeReq, Pipelines};
@@ -4167,6 +4168,8 @@ script_mod! {
                                 align: Align{x: 0.0, y: 0.5}
                                 Tick{width: Fill text: "CONTROL"}
                                 Tick{width: 84 text: "SOURCE"}
+                                Tick{width: 110 text: "READS"}
+                                Tick{width: 54 text: "SENS"}
                                 Tick{width: 26 text: ""}
                             }
                             midi_bindings := ScrollYView{
@@ -4182,6 +4185,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name0 := Tick{width: Fill}
                                     midi_bind_src0 := Tick{width: 84}
+                                    midi_bind_readbox0 := View{ width: Fit height: Fit
+                                        midi_bind_read0 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox0 := View{ width: Fit height: Fit
+                                        midi_bind_sens0 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear0 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row1 := View{
@@ -4192,6 +4201,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name1 := Tick{width: Fill}
                                     midi_bind_src1 := Tick{width: 84}
+                                    midi_bind_readbox1 := View{ width: Fit height: Fit
+                                        midi_bind_read1 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox1 := View{ width: Fit height: Fit
+                                        midi_bind_sens1 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear1 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row2 := View{
@@ -4202,6 +4217,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name2 := Tick{width: Fill}
                                     midi_bind_src2 := Tick{width: 84}
+                                    midi_bind_readbox2 := View{ width: Fit height: Fit
+                                        midi_bind_read2 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox2 := View{ width: Fit height: Fit
+                                        midi_bind_sens2 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear2 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row3 := View{
@@ -4212,6 +4233,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name3 := Tick{width: Fill}
                                     midi_bind_src3 := Tick{width: 84}
+                                    midi_bind_readbox3 := View{ width: Fit height: Fit
+                                        midi_bind_read3 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox3 := View{ width: Fit height: Fit
+                                        midi_bind_sens3 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear3 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row4 := View{
@@ -4222,6 +4249,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name4 := Tick{width: Fill}
                                     midi_bind_src4 := Tick{width: 84}
+                                    midi_bind_readbox4 := View{ width: Fit height: Fit
+                                        midi_bind_read4 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox4 := View{ width: Fit height: Fit
+                                        midi_bind_sens4 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear4 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row5 := View{
@@ -4232,6 +4265,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name5 := Tick{width: Fill}
                                     midi_bind_src5 := Tick{width: 84}
+                                    midi_bind_readbox5 := View{ width: Fit height: Fit
+                                        midi_bind_read5 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox5 := View{ width: Fit height: Fit
+                                        midi_bind_sens5 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear5 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row6 := View{
@@ -4242,6 +4281,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name6 := Tick{width: Fill}
                                     midi_bind_src6 := Tick{width: 84}
+                                    midi_bind_readbox6 := View{ width: Fit height: Fit
+                                        midi_bind_read6 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox6 := View{ width: Fit height: Fit
+                                        midi_bind_sens6 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear6 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row7 := View{
@@ -4252,6 +4297,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name7 := Tick{width: Fill}
                                     midi_bind_src7 := Tick{width: 84}
+                                    midi_bind_readbox7 := View{ width: Fit height: Fit
+                                        midi_bind_read7 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox7 := View{ width: Fit height: Fit
+                                        midi_bind_sens7 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear7 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row8 := View{
@@ -4262,6 +4313,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name8 := Tick{width: Fill}
                                     midi_bind_src8 := Tick{width: 84}
+                                    midi_bind_readbox8 := View{ width: Fit height: Fit
+                                        midi_bind_read8 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox8 := View{ width: Fit height: Fit
+                                        midi_bind_sens8 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear8 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row9 := View{
@@ -4272,6 +4329,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name9 := Tick{width: Fill}
                                     midi_bind_src9 := Tick{width: 84}
+                                    midi_bind_readbox9 := View{ width: Fit height: Fit
+                                        midi_bind_read9 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox9 := View{ width: Fit height: Fit
+                                        midi_bind_sens9 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear9 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row10 := View{
@@ -4282,6 +4345,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name10 := Tick{width: Fill}
                                     midi_bind_src10 := Tick{width: 84}
+                                    midi_bind_readbox10 := View{ width: Fit height: Fit
+                                        midi_bind_read10 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox10 := View{ width: Fit height: Fit
+                                        midi_bind_sens10 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear10 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row11 := View{
@@ -4292,6 +4361,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name11 := Tick{width: Fill}
                                     midi_bind_src11 := Tick{width: 84}
+                                    midi_bind_readbox11 := View{ width: Fit height: Fit
+                                        midi_bind_read11 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox11 := View{ width: Fit height: Fit
+                                        midi_bind_sens11 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear11 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row12 := View{
@@ -4302,6 +4377,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name12 := Tick{width: Fill}
                                     midi_bind_src12 := Tick{width: 84}
+                                    midi_bind_readbox12 := View{ width: Fit height: Fit
+                                        midi_bind_read12 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox12 := View{ width: Fit height: Fit
+                                        midi_bind_sens12 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear12 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row13 := View{
@@ -4312,6 +4393,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name13 := Tick{width: Fill}
                                     midi_bind_src13 := Tick{width: 84}
+                                    midi_bind_readbox13 := View{ width: Fit height: Fit
+                                        midi_bind_read13 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox13 := View{ width: Fit height: Fit
+                                        midi_bind_sens13 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear13 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row14 := View{
@@ -4322,6 +4409,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name14 := Tick{width: Fill}
                                     midi_bind_src14 := Tick{width: 84}
+                                    midi_bind_readbox14 := View{ width: Fit height: Fit
+                                        midi_bind_read14 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox14 := View{ width: Fit height: Fit
+                                        midi_bind_sens14 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear14 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row15 := View{
@@ -4332,6 +4425,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name15 := Tick{width: Fill}
                                     midi_bind_src15 := Tick{width: 84}
+                                    midi_bind_readbox15 := View{ width: Fit height: Fit
+                                        midi_bind_read15 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox15 := View{ width: Fit height: Fit
+                                        midi_bind_sens15 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear15 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row16 := View{
@@ -4342,6 +4441,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name16 := Tick{width: Fill}
                                     midi_bind_src16 := Tick{width: 84}
+                                    midi_bind_readbox16 := View{ width: Fit height: Fit
+                                        midi_bind_read16 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox16 := View{ width: Fit height: Fit
+                                        midi_bind_sens16 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear16 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row17 := View{
@@ -4352,6 +4457,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name17 := Tick{width: Fill}
                                     midi_bind_src17 := Tick{width: 84}
+                                    midi_bind_readbox17 := View{ width: Fit height: Fit
+                                        midi_bind_read17 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox17 := View{ width: Fit height: Fit
+                                        midi_bind_sens17 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear17 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row18 := View{
@@ -4362,6 +4473,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name18 := Tick{width: Fill}
                                     midi_bind_src18 := Tick{width: 84}
+                                    midi_bind_readbox18 := View{ width: Fit height: Fit
+                                        midi_bind_read18 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox18 := View{ width: Fit height: Fit
+                                        midi_bind_sens18 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear18 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row19 := View{
@@ -4372,6 +4489,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name19 := Tick{width: Fill}
                                     midi_bind_src19 := Tick{width: 84}
+                                    midi_bind_readbox19 := View{ width: Fit height: Fit
+                                        midi_bind_read19 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox19 := View{ width: Fit height: Fit
+                                        midi_bind_sens19 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear19 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row20 := View{
@@ -4382,6 +4505,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name20 := Tick{width: Fill}
                                     midi_bind_src20 := Tick{width: 84}
+                                    midi_bind_readbox20 := View{ width: Fit height: Fit
+                                        midi_bind_read20 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox20 := View{ width: Fit height: Fit
+                                        midi_bind_sens20 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear20 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row21 := View{
@@ -4392,6 +4521,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name21 := Tick{width: Fill}
                                     midi_bind_src21 := Tick{width: 84}
+                                    midi_bind_readbox21 := View{ width: Fit height: Fit
+                                        midi_bind_read21 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox21 := View{ width: Fit height: Fit
+                                        midi_bind_sens21 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear21 := ChromeButton{width: 26 text: "X"}
                                 }
                                 midi_bind_row22 := View{
@@ -4402,6 +4537,12 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     midi_bind_name22 := Tick{width: Fill}
                                     midi_bind_src22 := Tick{width: 84}
+                                    midi_bind_readbox22 := View{ width: Fit height: Fit
+                                        midi_bind_read22 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                    }
+                                    midi_bind_sensbox22 := View{ width: Fit height: Fit
+                                        midi_bind_sens22 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                    }
                                     midi_bind_clear22 := ChromeButton{width: 26 text: "X"}
                                 }
                             }
@@ -6329,32 +6470,130 @@ const LANE_CHIPS: [(&[LiveId], GridLane, &str); 6] = [
 
 /// Every MIDI-learnable control: wrapper widget path + stable persisted id.
 /// Making another control learnable = wrap it in `Learn{...}` in the DSL
-/// and add one row here (plus its value arm in `apply_learned`).
-const LEARNABLES: [(&[LiveId], &str); 23] = [
-    (ids!(video_fade_learn), "video_fade"),
-    (ids!(xfader_learn), "xfader"),
-    (ids!(master_learn), "master"),
-    (ids!(autofade_learn), "autofade"),
-    (ids!(deck_a_play_learn), "deck_a_play"),
-    (ids!(deck_a_rev_learn), "deck_a_rev"),
-    (ids!(deck_a_wheel_learn), "deck_a_wheel"),
-    (ids!(deck_b_play_learn), "deck_b_play"),
-    (ids!(deck_b_rev_learn), "deck_b_rev"),
-    (ids!(deck_b_wheel_learn), "deck_b_wheel"),
-    (ids!(fx_slot_a_spd_learn), "fx_a_spd"),
-    (ids!(fx_slot_a_d0_learn), "fx_a_d0"),
-    (ids!(fx_slot_a_d1_learn), "fx_a_d1"),
-    (ids!(fx_slot_a_d2_learn), "fx_a_d2"),
-    (ids!(fx_slot_t_spd_learn), "fx_t_spd"),
-    (ids!(fx_slot_t_d0_learn), "fx_t_d0"),
-    (ids!(fx_slot_t_d1_learn), "fx_t_d1"),
-    (ids!(fx_slot_t_d2_learn), "fx_t_d2"),
-    (ids!(fx_slot_b_spd_learn), "fx_b_spd"),
-    (ids!(fx_slot_b_d0_learn), "fx_b_d0"),
-    (ids!(fx_slot_b_d1_learn), "fx_b_d1"),
-    (ids!(fx_slot_b_d2_learn), "fx_b_d2"),
-    (ids!(fadeout_learn), "fadeout"),
+/// and add one row here (plus its value arm in `apply_learned` and its
+/// read side in `read_side`). The third column says what kind of thing
+/// it is: a knob reads its number as its binding says, a wheel is a
+/// knob whose turns are jogs, and a button carries the press that is
+/// its own until a binding says otherwise.
+const LEARNABLES: [(&[LiveId], &str, Learnable); 23] = [
+    (ids!(video_fade_learn), "video_fade", Learnable::Knob),
+    (ids!(xfader_learn), "xfader", Learnable::Knob),
+    (ids!(master_learn), "master", Learnable::Knob),
+    (ids!(autofade_learn), "autofade", Learnable::Button(Behaviour::Toggle)),
+    (ids!(deck_a_play_learn), "deck_a_play", Learnable::Button(Behaviour::Toggle)),
+    (ids!(deck_a_rev_learn), "deck_a_rev", Learnable::Button(Behaviour::Push)),
+    (ids!(deck_a_wheel_learn), "deck_a_wheel", Learnable::Wheel),
+    (ids!(deck_b_play_learn), "deck_b_play", Learnable::Button(Behaviour::Toggle)),
+    (ids!(deck_b_rev_learn), "deck_b_rev", Learnable::Button(Behaviour::Push)),
+    (ids!(deck_b_wheel_learn), "deck_b_wheel", Learnable::Wheel),
+    (ids!(fx_slot_a_spd_learn), "fx_a_spd", Learnable::Knob),
+    (ids!(fx_slot_a_d0_learn), "fx_a_d0", Learnable::Knob),
+    (ids!(fx_slot_a_d1_learn), "fx_a_d1", Learnable::Knob),
+    (ids!(fx_slot_a_d2_learn), "fx_a_d2", Learnable::Knob),
+    (ids!(fx_slot_t_spd_learn), "fx_t_spd", Learnable::Knob),
+    (ids!(fx_slot_t_d0_learn), "fx_t_d0", Learnable::Knob),
+    (ids!(fx_slot_t_d1_learn), "fx_t_d1", Learnable::Knob),
+    (ids!(fx_slot_t_d2_learn), "fx_t_d2", Learnable::Knob),
+    (ids!(fx_slot_b_spd_learn), "fx_b_spd", Learnable::Knob),
+    (ids!(fx_slot_b_d0_learn), "fx_b_d0", Learnable::Knob),
+    (ids!(fx_slot_b_d1_learn), "fx_b_d1", Learnable::Knob),
+    (ids!(fx_slot_b_d2_learn), "fx_b_d2", Learnable::Knob),
+    (ids!(fadeout_learn), "fadeout", Learnable::Knob),
 ];
+
+/// Which of a learned control's values a turn moves from. One row per
+/// shape of control, so a test can walk `LEARNABLES` and ask that every
+/// control has a read side, rather than trust a match arm nobody checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadSide {
+    VideoFade,
+    ProgramMix,
+    Fadeout,
+    Master,
+    FxSpeed(FxSlotKind),
+    FxParam(FxSlotKind, usize),
+    Wheel,
+    Button,
+}
+
+/// The `fx_{a|t|b}_{spd|d0|d1|d2}` parse, in one place so the read side
+/// and the write side of a slot knob cannot drift apart.
+fn fx_knob(control: &str) -> Option<(FxSlotKind, usize)> {
+    let rest = control.strip_prefix("fx_")?;
+    let (kind, knob) = match rest.split_once('_') {
+        Some(("a", knob)) => (FxSlotKind::EffectA, knob),
+        Some(("t", knob)) => (FxSlotKind::Transition, knob),
+        Some(("b", knob)) => (FxSlotKind::EffectB, knob),
+        _ => return None,
+    };
+    let index = match knob {
+        "spd" => 0,
+        "d0" => 1,
+        "d1" => 2,
+        "d2" => 3,
+        _ => return None,
+    };
+    Some((kind, index))
+}
+
+fn read_side(control: &str) -> Option<ReadSide> {
+    Some(match control {
+        "video_fade" => ReadSide::VideoFade,
+        "xfader" => ReadSide::ProgramMix,
+        "fadeout" => ReadSide::Fadeout,
+        "master" => ReadSide::Master,
+        "autofade" | "deck_a_play" | "deck_b_play" | "deck_a_rev" | "deck_b_rev" => ReadSide::Button,
+        "deck_a_wheel" | "deck_b_wheel" => ReadSide::Wheel,
+        _ => match fx_knob(control)? {
+            (kind, 0) => ReadSide::FxSpeed(kind),
+            (kind, index) => ReadSide::FxParam(kind, index),
+        },
+    })
+}
+
+#[cfg(test)]
+mod learnable_tests {
+    use super::*;
+
+    /// The five buttons are the five that press; nothing else does.
+    #[test]
+    fn every_learnable_button_names_its_own_behaviour_and_no_knob_does() {
+        let buttons: Vec<&str> = LEARNABLES
+            .iter()
+            .filter(|(_, _, kind)| matches!(kind, Learnable::Button(_)))
+            .map(|(_, name, _)| *name)
+            .collect();
+        assert_eq!(buttons, vec!["autofade", "deck_a_play", "deck_a_rev", "deck_b_play", "deck_b_rev"]);
+        for (_, name, kind) in LEARNABLES {
+            match kind {
+                Learnable::Button(_) => assert_eq!(read_side(name), Some(ReadSide::Button), "{name}"),
+                Learnable::Wheel => assert_eq!(read_side(name), Some(ReadSide::Wheel), "{name}"),
+                Learnable::Knob => assert!(
+                    !matches!(read_side(name), Some(ReadSide::Button) | Some(ReadSide::Wheel) | None),
+                    "{name}"
+                ),
+            }
+        }
+    }
+
+    /// Every learnable has somewhere a turn can read from, and the slot
+    /// knobs the parse accepts are exactly the twelve rows.
+    #[test]
+    fn every_learnable_has_a_current_value_arm() {
+        for (_, name, _) in LEARNABLES {
+            assert!(read_side(name).is_some(), "{name} has no read side");
+        }
+        let fx: Vec<&str> =
+            LEARNABLES.iter().map(|(_, name, _)| *name).filter(|name| fx_knob(name).is_some()).collect();
+        assert_eq!(fx.len(), 12, "{fx:?}");
+        assert_eq!(fx_knob("fx_a_spd"), Some((FxSlotKind::EffectA, 0)));
+        assert_eq!(fx_knob("fx_t_d2"), Some((FxSlotKind::Transition, 3)));
+        assert_eq!(fx_knob("fx_b_d1"), Some((FxSlotKind::EffectB, 2)));
+        assert_eq!(fx_knob("fx_c_d1"), None);
+        assert_eq!(fx_knob("fx_a_d3"), None);
+        assert_eq!(read_side("nobody"), None);
+    }
+}
 
 /// Snap a 7-bit control's position to a neutral it could not otherwise
 /// reach.
@@ -9504,6 +9743,11 @@ pub struct App {
     /// said once, on the next repaint.
     #[rust]
     midi_page_refused: bool,
+    /// A jog wheel driven by an encoder's turns is a pulse: it scratches
+    /// for the drain the turn arrived in and rests at the end of the next
+    /// drain that brought none. One flag per deck.
+    #[rust]
+    wheel_rest_due: [bool; 2],
     /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
     #[rust]
     midi_learn: MidiLearn,
@@ -11421,14 +11665,14 @@ impl App {
             // or clear it. Dropped in memory; the file is left alone, so an
             // older build cannot silently delete a newer one's work.
             self.midi_learn
-                .retain_controls(|control| LEARNABLES.iter().any(|(_, name)| *name == control));
+                .retain_controls(|control| LEARNABLES.iter().any(|(_, name, _)| *name == control));
         }
     }
 
     /// Mirror the learn state onto every wrapper: pick-mode hint outlines,
     /// the armed pulse, the mapped ticks, and the LEARN button's latch.
     fn sync_midi_learn_ui(&mut self, cx: &mut Cx) {
-        for (path, control) in LEARNABLES {
+        for (path, control, _) in LEARNABLES {
             let mode = if self.midi_learn.is_armed(control) {
                 2
             } else if self.midi_learn.picking {
@@ -11464,31 +11708,34 @@ impl App {
     ];
 
     /// The page's binding rows, one per learnable, in `LEARNABLES` order:
-    /// the row itself, the control's name, its source, the clear button.
-    const MIDI_BIND_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId]); 23] = [
-        (ids!(midi_bind_row0), ids!(midi_bind_name0), ids!(midi_bind_src0), ids!(midi_bind_clear0)),
-        (ids!(midi_bind_row1), ids!(midi_bind_name1), ids!(midi_bind_src1), ids!(midi_bind_clear1)),
-        (ids!(midi_bind_row2), ids!(midi_bind_name2), ids!(midi_bind_src2), ids!(midi_bind_clear2)),
-        (ids!(midi_bind_row3), ids!(midi_bind_name3), ids!(midi_bind_src3), ids!(midi_bind_clear3)),
-        (ids!(midi_bind_row4), ids!(midi_bind_name4), ids!(midi_bind_src4), ids!(midi_bind_clear4)),
-        (ids!(midi_bind_row5), ids!(midi_bind_name5), ids!(midi_bind_src5), ids!(midi_bind_clear5)),
-        (ids!(midi_bind_row6), ids!(midi_bind_name6), ids!(midi_bind_src6), ids!(midi_bind_clear6)),
-        (ids!(midi_bind_row7), ids!(midi_bind_name7), ids!(midi_bind_src7), ids!(midi_bind_clear7)),
-        (ids!(midi_bind_row8), ids!(midi_bind_name8), ids!(midi_bind_src8), ids!(midi_bind_clear8)),
-        (ids!(midi_bind_row9), ids!(midi_bind_name9), ids!(midi_bind_src9), ids!(midi_bind_clear9)),
-        (ids!(midi_bind_row10), ids!(midi_bind_name10), ids!(midi_bind_src10), ids!(midi_bind_clear10)),
-        (ids!(midi_bind_row11), ids!(midi_bind_name11), ids!(midi_bind_src11), ids!(midi_bind_clear11)),
-        (ids!(midi_bind_row12), ids!(midi_bind_name12), ids!(midi_bind_src12), ids!(midi_bind_clear12)),
-        (ids!(midi_bind_row13), ids!(midi_bind_name13), ids!(midi_bind_src13), ids!(midi_bind_clear13)),
-        (ids!(midi_bind_row14), ids!(midi_bind_name14), ids!(midi_bind_src14), ids!(midi_bind_clear14)),
-        (ids!(midi_bind_row15), ids!(midi_bind_name15), ids!(midi_bind_src15), ids!(midi_bind_clear15)),
-        (ids!(midi_bind_row16), ids!(midi_bind_name16), ids!(midi_bind_src16), ids!(midi_bind_clear16)),
-        (ids!(midi_bind_row17), ids!(midi_bind_name17), ids!(midi_bind_src17), ids!(midi_bind_clear17)),
-        (ids!(midi_bind_row18), ids!(midi_bind_name18), ids!(midi_bind_src18), ids!(midi_bind_clear18)),
-        (ids!(midi_bind_row19), ids!(midi_bind_name19), ids!(midi_bind_src19), ids!(midi_bind_clear19)),
-        (ids!(midi_bind_row20), ids!(midi_bind_name20), ids!(midi_bind_src20), ids!(midi_bind_clear20)),
-        (ids!(midi_bind_row21), ids!(midi_bind_name21), ids!(midi_bind_src21), ids!(midi_bind_clear21)),
-        (ids!(midi_bind_row22), ids!(midi_bind_name22), ids!(midi_bind_src22), ids!(midi_bind_clear22)),
+    /// the row itself, the control's name, its source, how it reads and
+    /// the sensitivity (each picker in a box, because a dropdown cannot be
+    /// hidden and a box can), the clear button.
+    const MIDI_BIND_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId],
+        &'static [LiveId], &'static [LiveId], &'static [LiveId], &'static [LiveId]); 23] = [
+        (ids!(midi_bind_row0), ids!(midi_bind_name0), ids!(midi_bind_src0), ids!(midi_bind_readbox0), ids!(midi_bind_read0), ids!(midi_bind_sensbox0), ids!(midi_bind_sens0), ids!(midi_bind_clear0)),
+        (ids!(midi_bind_row1), ids!(midi_bind_name1), ids!(midi_bind_src1), ids!(midi_bind_readbox1), ids!(midi_bind_read1), ids!(midi_bind_sensbox1), ids!(midi_bind_sens1), ids!(midi_bind_clear1)),
+        (ids!(midi_bind_row2), ids!(midi_bind_name2), ids!(midi_bind_src2), ids!(midi_bind_readbox2), ids!(midi_bind_read2), ids!(midi_bind_sensbox2), ids!(midi_bind_sens2), ids!(midi_bind_clear2)),
+        (ids!(midi_bind_row3), ids!(midi_bind_name3), ids!(midi_bind_src3), ids!(midi_bind_readbox3), ids!(midi_bind_read3), ids!(midi_bind_sensbox3), ids!(midi_bind_sens3), ids!(midi_bind_clear3)),
+        (ids!(midi_bind_row4), ids!(midi_bind_name4), ids!(midi_bind_src4), ids!(midi_bind_readbox4), ids!(midi_bind_read4), ids!(midi_bind_sensbox4), ids!(midi_bind_sens4), ids!(midi_bind_clear4)),
+        (ids!(midi_bind_row5), ids!(midi_bind_name5), ids!(midi_bind_src5), ids!(midi_bind_readbox5), ids!(midi_bind_read5), ids!(midi_bind_sensbox5), ids!(midi_bind_sens5), ids!(midi_bind_clear5)),
+        (ids!(midi_bind_row6), ids!(midi_bind_name6), ids!(midi_bind_src6), ids!(midi_bind_readbox6), ids!(midi_bind_read6), ids!(midi_bind_sensbox6), ids!(midi_bind_sens6), ids!(midi_bind_clear6)),
+        (ids!(midi_bind_row7), ids!(midi_bind_name7), ids!(midi_bind_src7), ids!(midi_bind_readbox7), ids!(midi_bind_read7), ids!(midi_bind_sensbox7), ids!(midi_bind_sens7), ids!(midi_bind_clear7)),
+        (ids!(midi_bind_row8), ids!(midi_bind_name8), ids!(midi_bind_src8), ids!(midi_bind_readbox8), ids!(midi_bind_read8), ids!(midi_bind_sensbox8), ids!(midi_bind_sens8), ids!(midi_bind_clear8)),
+        (ids!(midi_bind_row9), ids!(midi_bind_name9), ids!(midi_bind_src9), ids!(midi_bind_readbox9), ids!(midi_bind_read9), ids!(midi_bind_sensbox9), ids!(midi_bind_sens9), ids!(midi_bind_clear9)),
+        (ids!(midi_bind_row10), ids!(midi_bind_name10), ids!(midi_bind_src10), ids!(midi_bind_readbox10), ids!(midi_bind_read10), ids!(midi_bind_sensbox10), ids!(midi_bind_sens10), ids!(midi_bind_clear10)),
+        (ids!(midi_bind_row11), ids!(midi_bind_name11), ids!(midi_bind_src11), ids!(midi_bind_readbox11), ids!(midi_bind_read11), ids!(midi_bind_sensbox11), ids!(midi_bind_sens11), ids!(midi_bind_clear11)),
+        (ids!(midi_bind_row12), ids!(midi_bind_name12), ids!(midi_bind_src12), ids!(midi_bind_readbox12), ids!(midi_bind_read12), ids!(midi_bind_sensbox12), ids!(midi_bind_sens12), ids!(midi_bind_clear12)),
+        (ids!(midi_bind_row13), ids!(midi_bind_name13), ids!(midi_bind_src13), ids!(midi_bind_readbox13), ids!(midi_bind_read13), ids!(midi_bind_sensbox13), ids!(midi_bind_sens13), ids!(midi_bind_clear13)),
+        (ids!(midi_bind_row14), ids!(midi_bind_name14), ids!(midi_bind_src14), ids!(midi_bind_readbox14), ids!(midi_bind_read14), ids!(midi_bind_sensbox14), ids!(midi_bind_sens14), ids!(midi_bind_clear14)),
+        (ids!(midi_bind_row15), ids!(midi_bind_name15), ids!(midi_bind_src15), ids!(midi_bind_readbox15), ids!(midi_bind_read15), ids!(midi_bind_sensbox15), ids!(midi_bind_sens15), ids!(midi_bind_clear15)),
+        (ids!(midi_bind_row16), ids!(midi_bind_name16), ids!(midi_bind_src16), ids!(midi_bind_readbox16), ids!(midi_bind_read16), ids!(midi_bind_sensbox16), ids!(midi_bind_sens16), ids!(midi_bind_clear16)),
+        (ids!(midi_bind_row17), ids!(midi_bind_name17), ids!(midi_bind_src17), ids!(midi_bind_readbox17), ids!(midi_bind_read17), ids!(midi_bind_sensbox17), ids!(midi_bind_sens17), ids!(midi_bind_clear17)),
+        (ids!(midi_bind_row18), ids!(midi_bind_name18), ids!(midi_bind_src18), ids!(midi_bind_readbox18), ids!(midi_bind_read18), ids!(midi_bind_sensbox18), ids!(midi_bind_sens18), ids!(midi_bind_clear18)),
+        (ids!(midi_bind_row19), ids!(midi_bind_name19), ids!(midi_bind_src19), ids!(midi_bind_readbox19), ids!(midi_bind_read19), ids!(midi_bind_sensbox19), ids!(midi_bind_sens19), ids!(midi_bind_clear19)),
+        (ids!(midi_bind_row20), ids!(midi_bind_name20), ids!(midi_bind_src20), ids!(midi_bind_readbox20), ids!(midi_bind_read20), ids!(midi_bind_sensbox20), ids!(midi_bind_sens20), ids!(midi_bind_clear20)),
+        (ids!(midi_bind_row21), ids!(midi_bind_name21), ids!(midi_bind_src21), ids!(midi_bind_readbox21), ids!(midi_bind_read21), ids!(midi_bind_sensbox21), ids!(midi_bind_sens21), ids!(midi_bind_clear21)),
+        (ids!(midi_bind_row22), ids!(midi_bind_name22), ids!(midi_bind_src22), ids!(midi_bind_readbox22), ids!(midi_bind_read22), ids!(midi_bind_sensbox22), ids!(midi_bind_sens22), ids!(midi_bind_clear22)),
     ];
 
     /// Paint the MIDI page from the port list, the switches and the learn
@@ -11559,17 +11806,32 @@ impl App {
             false => "every message, in words, in the log",
         };
         self.ui.label(cx, ids!(midi_monitor_note)).set_text(cx, monitor_note);
-        // The learned controls, one row per learnable, shown while bound.
+        // The learned controls, one row per learnable, shown while bound:
+        // the source, and for a knob how it reads its number, with the
+        // sensitivity beside it while that reading is a turn.
         let mut any = false;
-        for (slot, (view, name, src, _clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
-            let control = LEARNABLES[slot].1;
-            let bound = self.midi_learn.binding(control);
-            self.ui.widget(cx, view).set_visible(cx, bound.is_some());
-            let Some((channel, cc)) = bound else { continue };
+        for (slot, (view, name, src, readbox, read, sensbox, sens, _clear)) in
+            Self::MIDI_BIND_ROWS.iter().enumerate()
+        {
+            let (_, control, kind) = LEARNABLES[slot];
+            let record = self.midi_learn.record(control);
+            self.ui.widget(cx, view).set_visible(cx, record.is_some());
+            let Some(record) = record else { continue };
             any = true;
+            let (channel, cc) = record.source;
             self.ui.label(cx, name).set_text(cx, control);
             // Zero-based, as the learn log and the monitor already are.
             self.ui.label(cx, src).set_text(cx, &format!("ch{channel} cc{cc}"));
+            let knob = !matches!(kind, Learnable::Button(_));
+            self.ui.widget(cx, readbox).set_visible(cx, knob);
+            self.ui.widget(cx, sensbox).set_visible(cx, knob && record.transform.is_relative());
+            if knob {
+                let index = Transform::ALL.iter().position(|t| *t == record.transform).unwrap_or(0);
+                self.ui.drop_down(cx, read).set_selected_item(cx, index);
+                self.ui
+                    .drop_down(cx, sens)
+                    .set_selected_item(cx, crate::midi_binding::sens_rung(record.sensitivity));
+            }
         }
         self.ui.widget(cx, ids!(midi_bind_note)).set_visible(cx, !any);
         self.ui.redraw(cx);
@@ -11638,12 +11900,28 @@ impl App {
             self.save_midi_settings();
             return;
         }
-        for (slot, (_, _, _, clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
+        for (slot, (_, _, _, _, read, _, sens, clear)) in Self::MIDI_BIND_ROWS.iter().enumerate() {
+            let control = LEARNABLES[slot].1;
             if self.ui.button(cx, clear).clicked(actions) {
                 // The same path the alt-click clear takes.
-                self.midi_learn.clear(LEARNABLES[slot].1);
+                self.midi_learn.clear(control);
                 self.save_midi_map();
                 self.sync_midi_learn_ui(cx);
+                return;
+            }
+            if let Some(index) = self.ui.drop_down(cx, read).selected(actions) {
+                if let Some(transform) = Transform::ALL.get(index) {
+                    self.midi_learn.set_transform(control, *transform);
+                    self.save_midi_map();
+                    self.sync_midi_page(cx);
+                }
+                return;
+            }
+            if let Some(index) = self.ui.drop_down(cx, sens).selected(actions) {
+                if let Some(rung) = crate::midi_binding::SENS_RUNGS.get(index) {
+                    self.midi_learn.set_sensitivity(control, *rung);
+                    self.save_midi_map();
+                }
                 return;
             }
         }
@@ -11681,7 +11959,40 @@ impl App {
         learned_press_begins(prev, source, v)
     }
 
-    fn apply_learned(&mut self, cx: &mut Cx, control: &str, source: (u8, u8), v: f32) {
+    /// Where a learned control is now, in its own 0..1 terms, for a turn
+    /// to move from. Dispatches on the read side, so a test can walk the
+    /// learnable table and ask that every row has one.
+    fn learned_current(&mut self, cx: &mut Cx, control: &str) -> f32 {
+        match read_side(control) {
+            Some(ReadSide::VideoFade) => ((self.fade_secs - 0.05) / (5.0 - 0.05)).clamp(0.0, 1.0),
+            Some(ReadSide::ProgramMix) => self.program_mix,
+            Some(ReadSide::Fadeout) => self.fadeout,
+            // The mixer's master is a command with no cell to read back;
+            // the on-screen slider is written by every route that sets it.
+            Some(ReadSide::Master) => {
+                self.ui
+                    .widget(cx, ids!(master_slider))
+                    .borrow::<makepad_widgets::drop_slider::DropSlider>()
+                    .map(|slider| slider.value() as f32)
+                    .unwrap_or(0.0)
+                    / crate::mixer::MAX_MASTER_GAIN
+            }
+            Some(ReadSide::FxSpeed(kind)) => self.fx_slots.slot(kind).speed,
+            Some(ReadSide::FxParam(kind, index)) => {
+                self.fx_slots.slot(kind).p[index - 1].unwrap_or(0.5)
+            }
+            // A wheel rests at its centre; a button has no position.
+            Some(ReadSide::Wheel) => 0.5,
+            Some(ReadSide::Button) | None => 0.0,
+        }
+    }
+
+    /// A learned control's new value lands on it. `absolute` says the
+    /// value is a position the hand reported rather than a turn settled
+    /// from where the control was: the pick-up rule and the 7-bit detent
+    /// only make sense for a position, and a wheel driven by turns is a
+    /// jog rather than a place on the platter.
+    fn apply_learned(&mut self, cx: &mut Cx, control: &str, source: (u8, u8), v: f32, absolute: bool) {
         match control {
             "video_fade" => {
                 let secs = 0.05 + v * (5.0 - 0.05);
@@ -11694,8 +12005,12 @@ impl App {
             "xfader" => {
                 // A learned fader is a physical fader too, and it is
                 // remembered under its own CC: two faders pointed at one
-                // value each have to pick it up for themselves.
-                if !self.fader_may_drive(source, self.program_mix, v) {
+                // value each have to pick it up for themselves. A turn is
+                // not a position and skips the rule -- and does not
+                // refresh the remembered position either, so a fader put
+                // back on PLAIN with the rule on reports its position
+                // first, as any fader nothing has heard from does.
+                if absolute && !self.fader_may_drive(source, self.program_mix, v) {
                     return;
                 }
                 // The hand always wins — a mapped fader IS the hand.
@@ -11740,39 +12055,39 @@ impl App {
                 }
             }
             "deck_a_wheel" | "deck_b_wheel" => {
-                // The hardware jog rides the same sprung scratch the
-                // on-screen wheel speaks: CC centre = rest, deflection
-                // scratches, a small dead zone reads as the release.
                 let slot = if control == "deck_a_wheel" { SlotId::A } else { SlotId::B };
-                if self.slot_media[slot.index()] != SlotMedia::Empty {
+                if self.slot_media[slot.index()] == SlotMedia::Empty {
+                    return;
+                }
+                if absolute {
+                    // The hardware jog rides the same sprung scratch the
+                    // on-screen wheel speaks: CC centre = rest, deflection
+                    // scratches, a small dead zone reads as the release.
                     let pos = (v * 2.0 - 1.0).clamp(-1.0, 1.0);
                     let pos = if pos.abs() < 0.06 { 0.0 } else { pos };
                     self.apply_scratch(cx, slot, pos);
+                } else {
+                    // An encoder's turn is a jog pulse: one step of
+                    // deflection for the drain it arrived in, rested by
+                    // the pump when the turns stop.
+                    let pos = ((v - 0.5) * 127.0 / 8.0).clamp(-1.0, 1.0);
+                    self.apply_scratch(cx, slot, pos);
+                    self.wheel_rest_due[slot.index()] = true;
                 }
             }
             "master" => {
-                let value = crate::mixer::master_from_control(seven_bit_detent(
-                    v,
-                    1.0 / crate::mixer::MAX_MASTER_GAIN,
-                ));
+                // The detent lands a 7-bit position on unity; a turn is
+                // already where it settled.
+                let control_value = match absolute {
+                    true => seven_bit_detent(v, 1.0 / crate::mixer::MAX_MASTER_GAIN),
+                    false => v,
+                };
+                let value = crate::mixer::master_from_control(control_value);
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
             _ => {
-                let Some(rest) = control.strip_prefix("fx_") else { return };
-                let (kind, knob) = match rest.split_once('_') {
-                    Some(("a", knob)) => (FxSlotKind::EffectA, knob),
-                    Some(("t", knob)) => (FxSlotKind::Transition, knob),
-                    Some(("b", knob)) => (FxSlotKind::EffectB, knob),
-                    _ => return,
-                };
-                let index = match knob {
-                    "spd" => 0,
-                    "d0" => 1,
-                    "d1" => 2,
-                    "d2" => 3,
-                    _ => return,
-                };
+                let Some((kind, index)) = fx_knob(control) else { return };
                 match index {
                     0 => self.fx_slots.slot_mut(kind).speed = v,
                     i => self.fx_slots.slot_mut(kind).p[i - 1] = Some(v),
@@ -16308,6 +16623,9 @@ p2 {}
         }
         let mut actions = Vec::new();
         let mut pad_touched = false;
+        // Which wheels a turn reached this drain; the others that were
+        // pulsed last drain come to rest below.
+        let mut wheel_turned = [false; 2];
         for _ in 0..256 {
             let Some((port, data)) = self.midi_input.receive() else { break };
             // LEARN layer first, on EVERY port: an armed control binds to
@@ -16322,8 +16640,28 @@ p2 {}
                     continue;
                 }
                 Some(LearnEvent::Value { control, channel, cc, value }) => {
-                    self.note_midi_in(port, data.data, &format!("learned {control}"));
-                    self.apply_learned(cx, &control, (channel, cc), value);
+                    // The value is on the line, because the monitor is the
+                    // read-back for a control with no snapshot cell.
+                    self.note_midi_in(port, data.data, &format!("learned {control} = {value:.4}"));
+                    self.apply_learned(cx, &control, (channel, cc), value, true);
+                    continue;
+                }
+                Some(LearnEvent::Turn { control, channel, cc, delta }) => {
+                    // A turn moves from where the control IS, which only
+                    // this side knows; the ends stop it.
+                    let current = self.learned_current(cx, &control);
+                    let next = crate::midi_binding::settle(Motion::By(delta), current);
+                    self.note_midi_in(
+                        port,
+                        data.data,
+                        &format!("learned {control} by {delta:+.4} -> {next:.4}"),
+                    );
+                    match control.as_str() {
+                        "deck_a_wheel" => wheel_turned[0] = true,
+                        "deck_b_wheel" => wheel_turned[1] = true,
+                        _ => {}
+                    }
+                    self.apply_learned(cx, &control, (channel, cc), next, false);
                     continue;
                 }
                 None => {}
@@ -16373,6 +16711,14 @@ p2 {}
         }
         for action in actions {
             self.dispatch_apc_action(cx, action);
+        }
+        // A wheel pulsed by an encoder last drain and not turned this one
+        // comes to rest, the way a lifted finger does.
+        for (index, slot) in [SlotId::A, SlotId::B].into_iter().enumerate() {
+            if self.wheel_rest_due[index] && !wheel_turned[index] {
+                self.wheel_rest_due[index] = false;
+                self.apply_scratch(cx, slot, 0.0);
+            }
         }
         // Generic mode momentarily owns pad LEDs while a finger is down.
         // Restore the authoritative VJ colors after both press and release.
@@ -34153,7 +34499,7 @@ impl MatchEvent for App {
             self.midi_learn.toggle_pick();
             self.sync_midi_learn_ui(cx);
         }
-        for (path, control) in LEARNABLES {
+        for (path, control, _) in LEARNABLES {
             let wrap = self.ui.widget(cx, path);
             if let Some(item) = actions.find_widget_action(wrap.widget_uid()) {
                 if let LearnWrapAction::Clicked { alt } = item.cast() {
