@@ -73,11 +73,42 @@ impl fmt::Display for ObjectId {
 /// Hash raw content with a git object header to produce an ObjectId.
 /// Format: "<type> <size>\0<data>" — SHA-1 of this produces the OID.
 pub fn hash_object(kind: &str, data: &[u8]) -> ObjectId {
-    let header = format!("{} {}\0", kind, data.len());
-    let mut hasher = Sha1::new();
-    hasher.update(header.as_bytes());
+    let mut hasher = ObjectHasher::new(kind, data.len());
     hasher.update(data);
-    ObjectId(hasher.finalize())
+    hasher.finish()
+}
+
+/// Incremental object hashing without a temporary header or content buffer.
+/// `size` is the total content byte length supplied to `update`.
+pub struct ObjectHasher(Sha1);
+
+impl ObjectHasher {
+    pub fn new(kind: &str, mut size: usize) -> Self {
+        let mut hash = Sha1::new();
+        hash.update(kind.as_bytes());
+        hash.update(b" ");
+        let mut decimal = [0u8; 20];
+        let mut start = decimal.len();
+        loop {
+            start -= 1;
+            decimal[start] = b'0' + (size % 10) as u8;
+            size /= 10;
+            if size == 0 {
+                break;
+            }
+        }
+        hash.update(&decimal[start..]);
+        hash.update(&[0]);
+        Self(hash)
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub fn finish(self) -> ObjectId {
+        ObjectId(self.0.finalize())
+    }
 }
 
 #[cfg(test)]

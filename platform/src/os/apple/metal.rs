@@ -209,7 +209,7 @@ impl Cx {
             self.draw_lists[draw_list_id].debug_dump_count -= 1;
         }
 
-        for order_index in 0..draw_order_len {
+        'draw_items: for order_index in 0..draw_order_len {
             let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
@@ -464,26 +464,34 @@ impl Cx {
                     //let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
 
                     if let Some(id) = shp.draw_call_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
+                        if !metal_cx.bind_inline_uniforms(encoder, id, draw_call_uniforms) {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                            continue 'draw_items;
+                        }
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_call_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.pass_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
+                        if !metal_cx.bind_inline_uniforms(encoder, id, pass_uniforms) {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                            continue 'draw_items;
+                        }
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((pass_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.draw_list_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
+                        if !metal_cx.bind_inline_uniforms(encoder, id, draw_list_uniforms) {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                            continue 'draw_items;
+                        }
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_list_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.dyn_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
+                        if !metal_cx.bind_inline_uniforms(encoder, id, &draw_call.dyn_uniforms) {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                            continue 'draw_items;
+                        }
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
                     }
@@ -518,8 +526,10 @@ impl Cx {
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
                         if !scope_buf.is_empty() {
-                            let () = msg_send![encoder, setVertexBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
-                            let () = msg_send![encoder, setFragmentBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                            if !metal_cx.bind_inline_uniforms(encoder, id, &scope_buf) {
+                                self.passes[draw_pass_id].paint_dirty = true;
+                                continue 'draw_items;
+                            }
                             uniform_bytes_uploaded = uniform_bytes_uploaded
                                 .saturating_add((scope_buf.len() * 4 * 2) as u64);
                         }
@@ -1533,6 +1543,16 @@ impl Cx {
     }
 
     pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        for shader in &mut self.draw_shaders.os_shaders {
+            if !shader.compile_queued {
+                shader.compile_queued = MetalPipelines::enqueue(
+                    metal_cx.device,
+                    shader.mtlsl.clone(),
+                    shader.color_format,
+                    shader.pipelines.clone(),
+                );
+            }
+        }
         let _mp_batch = (
             crate::startup_trace_enabled(),
             self.draw_shaders.compile_set.len(),
@@ -1714,6 +1734,7 @@ pub struct MetalCx {
     fallback_texture: ObjcId,
     render_setup: Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>,
     render_setup_queued: bool,
+    uniform_chunks: RefCell<Vec<MetalUniformChunk>>,
     /// Frame-batched command buffer: offscreen texture passes append their
     /// encoders here instead of committing one buffer each — a 12-pass
     /// blur pyramid was paying ~1ms commit/schedule latency PER PASS. The
@@ -2472,7 +2493,15 @@ impl MetalCx {
             tex
         };
         let (staging_tx, staging_returned) = std::sync::mpsc::sync_channel(STAGING_POOL_MAX_COUNT);
+        let mut uniform_chunks = Vec::with_capacity(METAL_UNIFORM_MAX_CHUNKS);
+        // Reserve two chunks per in-flight frame before any camera draw.
+        for _ in 0..6 {
+            if let Some(chunk) = MetalUniformChunk::request(device, METAL_UNIFORM_CHUNK_BYTES) {
+                uniform_chunks.push(chunk);
+            }
+        }
         MetalCx {
+            uniform_chunks: RefCell::new(uniform_chunks),
             command_queue: unsafe { msg_send![device, newCommandQueue] },
             device,
             fallback_texture,
@@ -2513,6 +2542,8 @@ impl Drop for MetalCx {
 pub struct CxOsDrawShader {
     // get() never waits; the driver completion handlers publish immutable PSOs.
     pipelines: Arc<MetalPipelines>,
+    compile_queued: bool,
+    color_format: crate::draw_shader::DrawShaderColorFormat,
     draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
@@ -2736,6 +2767,22 @@ struct MetalPipelines {
 }
 
 impl MetalPipelines {
+    fn enqueue(
+        device: ObjcId,
+        source: String,
+        color_format: crate::draw_shader::DrawShaderColorFormat,
+        ready: Arc<Self>,
+    ) -> bool {
+        metal_buffer_allocator()
+            .try_send(MetalAllocationRequest::Pipelines(
+                RcObjcId::from_unowned(NonNull::new(device).unwrap()),
+                source,
+                color_format,
+                ready,
+            ))
+            .is_ok()
+    }
+
     fn failure(&self, error: String) {
         crate::shader_error::note(error.clone());
         crate::error!("Metal shader: {}", error);
@@ -2889,7 +2936,12 @@ impl CxOsDrawShader {
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         let pipelines = Arc::new(MetalPipelines::default());
-        MetalPipelines::compile(metal_cx.device, mtlsl.clone(), mapping.color_format, pipelines.clone());
+        let compile_queued = MetalPipelines::enqueue(
+            metal_cx.device,
+            mtlsl.clone(),
+            mapping.color_format,
+            pipelines.clone(),
+        );
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
             .get_by_type_name(id!(DrawCallUniforms))
@@ -2912,6 +2964,8 @@ impl CxOsDrawShader {
 
         return Some(Self {
             pipelines,
+            compile_queued,
+            color_format: mapping.color_format,
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
@@ -2951,11 +3005,107 @@ struct MetalBuffer {
     inner: Option<MetalBufferInner>,
     pending: Option<MetalPendingInstances>,
     allocation: Option<Arc<MetalInstanceAllocation>>,
+    // The GPU can retain up to three frames. Recycle completed allocations
+    // instead of asking the driver for every immediate/chrome recording.
+    spares: [Option<MetalBufferInner>; 3],
 }
 
 struct MetalInstanceAllocation {
     capacity: usize,
     ready: std::sync::OnceLock<Option<RcObjcId>>,
+}
+
+const METAL_UNIFORM_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const METAL_UNIFORM_MAX_CHUNKS: usize = 32;
+
+struct MetalUniformChunk {
+    allocation: Arc<MetalInstanceAllocation>,
+    seq: u64,
+    used: usize,
+}
+
+impl MetalUniformChunk {
+    fn request(device: ObjcId, capacity: usize) -> Option<Self> {
+        let allocation = Arc::new(MetalInstanceAllocation {
+            capacity,
+            ready: std::sync::OnceLock::new(),
+        });
+        metal_buffer_allocator()
+            .try_send(MetalAllocationRequest::Instances(
+                RcObjcId::from_unowned(NonNull::new(device)?),
+                allocation.clone(),
+            ))
+            .ok()?;
+        Some(Self {
+            allocation,
+            seq: 0,
+            used: 0,
+        })
+    }
+}
+
+impl MetalCx {
+    // setVertexBytes/setFragmentBytes make the driver copy every uniform
+    // block into its command-encoding resource pool. Thousands of Atlas
+    // draws can grow that pool inside drawIndexedPrimitives on UI. Bind
+    // offsets in our preallocated shared buffers instead. No allocation or
+    // GPU wait is permitted here; exhausted capacity skips/retries the draw.
+    fn bind_inline_uniforms(&self, encoder: ObjcId, index: u64, data: &[f32]) -> bool {
+        let bytes = std::mem::size_of_val(data);
+        let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+        let mut chunks = self.uniform_chunks.borrow_mut();
+        for chunk in chunks.iter_mut() {
+            if chunk.seq != self.current_cb_seq && chunk.seq > completed {
+                continue;
+            }
+            let Some(Some(buffer)) = chunk.allocation.ready.get() else {
+                continue;
+            };
+            let offset = if chunk.seq == self.current_cb_seq {
+                (chunk.used + 255) & !255
+            } else {
+                0
+            };
+            if offset + bytes > chunk.allocation.capacity {
+                continue;
+            }
+            let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
+            if contents.is_null() {
+                continue;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().cast::<u8>(),
+                    contents.add(offset),
+                    bytes,
+                );
+                #[cfg(target_os = "macos")]
+                {
+                    let range = NSRange {
+                        location: offset as u64,
+                        length: bytes as u64,
+                    };
+                    let _: () = msg_send![buffer.as_id(), didModifyRange: range];
+                }
+                let _: () = msg_send![encoder, setVertexBuffer:buffer.as_id() offset:offset as u64 atIndex:index];
+                let _: () = msg_send![encoder, setFragmentBuffer:buffer.as_id() offset:offset as u64 atIndex:index];
+            }
+            chunk.seq = self.current_cb_seq;
+            chunk.used = offset + bytes;
+            return true;
+        }
+        if chunks.len() < METAL_UNIFORM_MAX_CHUNKS
+            && !chunks
+                .iter()
+                .any(|chunk| chunk.allocation.ready.get().is_none())
+        {
+            let capacity = bytes.next_power_of_two().max(METAL_UNIFORM_CHUNK_BYTES);
+            if let Some(chunk) = MetalUniformChunk::request(self.device, capacity) {
+                chunks.push(chunk);
+            }
+        }
+        false
+    }
 }
 
 // Published once; only the owning UI context mutates the descriptor after
@@ -3019,6 +3169,12 @@ impl MetalRenderSetup {
 }
 
 enum MetalAllocationRequest {
+    Pipelines(
+        RcObjcId,
+        String,
+        crate::draw_shader::DrawShaderColorFormat,
+        Arc<MetalPipelines>,
+    ),
     Instances(RcObjcId, Arc<MetalInstanceAllocation>),
     RenderSetup(RcObjcId, Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>),
 }
@@ -3033,11 +3189,22 @@ fn metal_buffer_allocator() -> &'static std::sync::mpsc::SyncSender<MetalAllocat
             while let Ok(request) = rx.recv() {
                 let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
                 match request {
+                    MetalAllocationRequest::Pipelines(device, source, color_format, ready) => {
+                        MetalPipelines::compile(device.as_id(), source, color_format, ready);
+                    }
                     MetalAllocationRequest::Instances(device, allocation) => {
                         if Arc::strong_count(&allocation) > 1 {
                             let buffer = NonNull::new(unsafe {
                                 msg_send![device.as_id(), newBufferWithLength: allocation.capacity as u64 options:nil]
                             }).map(RcObjcId::from_owned);
+                            if let Some(buffer) = &buffer {
+                                let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
+                                if !contents.is_null() {
+                                    for offset in (0..allocation.capacity).step_by(4096) {
+                                        unsafe { contents.add(offset).write_volatile(0); }
+                                    }
+                                }
+                            }
                             let _ = allocation.ready.set(buffer);
                         }
                     }
@@ -3085,8 +3252,30 @@ impl MetalBuffer {
             self.inner = None;
             return 0;
         }
-        if changed || self.pending.as_ref().is_some_and(|p| p.publication != publication || p.end != end) {
-            self.pending = None;
+        if changed
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.publication != publication || p.end != end)
+        {
+            let displayed = self.inner.as_ref().map(|inner| inner.buffer.as_id());
+            if let Some(pending) = self
+                .pending
+                .as_mut()
+                .filter(|p| p.inner.capacity >= end && Some(p.inner.buffer.as_id()) != displayed)
+            {
+                // Only independent pending storage is safe to restart. An
+                // append may share the displayed allocation and its live GPU
+                // readers; discard that pending state instead of overwriting
+                // its visible prefix. Restart copying an independent new
+                // recording into the same allocation, preserving progress's
+                // lifetime even when input arrives faster than the driver.
+                pending.publication = publication;
+                pending.copied = 0;
+                pending.end = end;
+            } else {
+                self.pending = None;
+            }
         }
         if budget.range(0..end, slots * 4).is_empty() {
             return self.pending.as_ref().map_or(end, |p| end - p.copied);
@@ -3099,11 +3288,23 @@ impl MetalBuffer {
             let append = self.inner.as_ref().filter(|inner| {
                 publication != 0 && start == inner.len && end <= inner.capacity
             });
+            let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+            let reusable = self.spares.iter().position(|slot| slot.as_ref()
+                .is_some_and(|inner| inner.capacity >= end && inner.last_bound_seq <= completed));
+            let replace_in_place = self.inner.as_ref().is_some_and(|inner|
+                inner.capacity >= end && inner.last_bound_seq <= completed)
+                && budget.range(0..end, slots * 4).end == end;
             let (inner, copied) = if let Some(inner) = append {
                 (MetalBufferInner {
                     buffer: inner.buffer.clone(), len: inner.len,
                     capacity: inner.capacity, last_bound_seq: inner.last_bound_seq,
                 }, start)
+            } else if let Some(index) = reusable {
+                (self.spares[index].take().unwrap(), 0)
+            } else if replace_in_place {
+                // Only take the displayed buffer when this frame can copy
+                // the whole replacement before any encoder binds it again.
+                (self.inner.take().unwrap(), 0)
             } else {
                 let capacity = end.next_power_of_two().max(256);
                 if self.allocation.as_ref().is_some_and(|a| a.capacity < capacity) {
@@ -3154,7 +3355,18 @@ impl MetalBuffer {
         if remaining == 0 {
             let mut complete = self.pending.take().unwrap().inner;
             complete.len = end;
-            self.inner = Some(complete);
+            if let Some(old) = self.inner.replace(complete) {
+                // An append shares the same buffer; keep only one owner in
+                // this pool so later reuse cannot overwrite a live prefix.
+                if old.buffer.as_id() != self.inner.as_ref().unwrap().buffer.as_id() {
+                    if let Some(slot) = self.spares.iter_mut().find(|slot| slot.is_none()) {
+                        *slot = Some(old);
+                    } else if let Some(slot) = self.spares.iter_mut().find(|slot|
+                        slot.as_ref().is_some_and(|inner| inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire))) {
+                        *slot = Some(old);
+                    }
+                }
+            }
         }
         remaining
     }
