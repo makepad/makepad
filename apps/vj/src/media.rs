@@ -1897,6 +1897,14 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
                 channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
                 sample_rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
                 bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+                // The extensible tag says the real format is in the
+                // sub-format that follows: two bytes of it name the same
+                // codes the plain tag would. Every file wider than stereo
+                // or deeper than sixteen bits is written this way, and the
+                // parser used to refuse them all as "unsupported 65534".
+                if format == 0xFFFE && body.len() >= 26 {
+                    format = u16::from_le_bytes(body[24..26].try_into().unwrap());
+                }
             }
             b"data" => data = Some(body),
             _ => {}
@@ -1913,33 +1921,34 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
     // channel with the LAST, which on a six-channel file is a rear or the
     // low-frequency send.
     let [left, right] = crate::dsp_math::stereo_pair_indices(ch).ok_or("wav: no channels")?;
+    // The sample law for the format the chunk names, decided once: eight
+    // bits are unsigned, twenty-four and thirty-two keep their top sixteen,
+    // float clamps to full scale. Sixteen-bit integer and float were the
+    // only two accepted, so a 24-bit export -- the common lossless case --
+    // failed on the deck. Anything else is still refused by name.
+    let bytes_per_sample = match (format, bits) {
+        (1, 8) | (1, 16) | (1, 24) | (1, 32) | (3, 32) => (bits / 8) as usize,
+        other => return Err(format!("wav: unsupported format {other:?}")),
+    };
+    let sample_at = |frame: &[u8], i: usize| -> i16 {
+        let s = &frame[i * bytes_per_sample..(i + 1) * bytes_per_sample];
+        match (format, bits) {
+            (1, 8) => ((s[0] as i16) - 128) << 8,
+            (1, 16) => i16::from_le_bytes([s[0], s[1]]),
+            (1, 24) => (i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 16) as i16,
+            (1, 32) => (i32::from_le_bytes([s[0], s[1], s[2], s[3]]) >> 16) as i16,
+            _ => {
+                let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+                (v.clamp(-1.0, 1.0) * 32767.0) as i16
+            }
+        }
+    };
     let mut frames: Vec<[i16; 2]> = Vec::new();
-    let push = |frames: &mut Vec<[i16; 2]>, l: i16, r: i16| -> Result<(), String> {
+    for frame in data.chunks_exact(bytes_per_sample * ch) {
         if frames.len() >= max_frames {
             return Err("audio clip exceeds the decode budget".into());
         }
-        frames.push([l, r]);
-        Ok(())
-    };
-    match (format, bits) {
-        (1, 16) => {
-            for frame in data.chunks_exact(2 * ch) {
-                let sample = |i: usize| {
-                    i16::from_le_bytes(frame[i * 2..i * 2 + 2].try_into().unwrap())
-                };
-                push(&mut frames, sample(left), sample(right))?;
-            }
-        }
-        (3, 32) => {
-            for frame in data.chunks_exact(4 * ch) {
-                let sample = |i: usize| {
-                    let v = f32::from_le_bytes(frame[i * 4..i * 4 + 4].try_into().unwrap());
-                    (v.clamp(-1.0, 1.0) * 32767.0) as i16
-                };
-                push(&mut frames, sample(left), sample(right))?;
-            }
-        }
-        other => return Err(format!("wav: unsupported format {other:?}")),
+        frames.push([sample_at(frame, left), sample_at(frame, right)]);
     }
     if frames.is_empty() {
         return Err("wav: empty data".into());
@@ -4146,6 +4155,77 @@ mod tests {
     fn wav_frame_f32(samples: &[f32], rate: u32) -> Vec<u8> {
         let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         wav_bytes(3, samples.len() as u16, 32, rate, &data)
+    }
+
+    /// The same file with the extensible tag: a forty-byte fmt chunk whose
+    /// sub-format carries the real code, the way every wide or deep export
+    /// is written.
+    fn wav_bytes_extensible(sub_format: u16, channels: u16, bits: u16, rate: u32, data: &[u8]) -> Vec<u8> {
+        let block = channels * bits / 8;
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&(rate * block as u32).to_le_bytes());
+        fmt.extend_from_slice(&block.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+        fmt.extend_from_slice(&bits.to_le_bytes()); // valid bits
+        fmt.extend_from_slice(&0u32.to_le_bytes()); // channel mask
+        fmt.extend_from_slice(&sub_format.to_le_bytes());
+        fmt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71]);
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(4 + 8 + fmt.len() as u32 + 8 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// A 24-bit export is the common lossless case and every wide or deep
+    /// file carries the extensible tag; both used to fail on the deck as
+    /// "unsupported format". Each depth is pinned at full scale either way,
+    /// and the extensible file decodes to the same frames as the plain one.
+    #[test]
+    fn a_deep_or_extensible_wav_decodes_and_an_unknown_one_is_still_refused_by_name() {
+        let plain = parse_wav(&wav_frame_pcm16(&[1000, -1000], 48_000), 10).unwrap();
+        let data: Vec<u8> = [1000i16, -1000].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let ext = parse_wav(&wav_bytes_extensible(1, 2, 16, 48_000, &data), 10).unwrap();
+        assert_eq!(ext.frames, plain.frames, "the extensible tag names the same samples");
+        assert_eq!(ext.sample_rate, 48_000);
+
+        let data = [0xFF, 0xFF, 0x7F, 0x00, 0x00, 0x80, 0x00, 0x01, 0x00];
+        let deep = parse_wav(&wav_bytes(1, 3, 24, 48_000, &data), 10).unwrap();
+        assert_eq!(deep.frames, vec![[32767, -32768]], "24-bit full scale either way");
+        let deep = parse_wav(&wav_bytes(1, 1, 24, 48_000, &[0x00, 0x01, 0x00]), 10).unwrap();
+        assert_eq!(deep.frames, vec![[1, 1]], "24-bit keeps its top sixteen");
+
+        let small = parse_wav(&wav_bytes(1, 3, 8, 48_000, &[0x80, 0xFF, 0x00]), 10).unwrap();
+        assert_eq!(small.frames, vec![[0, 32512]], "8-bit is unsigned around 128");
+        let small = parse_wav(&wav_bytes(1, 1, 8, 48_000, &[0x00]), 10).unwrap();
+        assert_eq!(small.frames, vec![[-32768, -32768]]);
+
+        let data: Vec<u8> = [0x7FFF_FFFFi32, 0x0001_0000, i32::MIN].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let wide = parse_wav(&wav_bytes(1, 3, 32, 48_000, &data), 10).unwrap();
+        assert_eq!(wide.frames, vec![[32767, 1]], "32-bit integer keeps its top sixteen");
+
+        let data: Vec<u8> = [0.5f32, -0.25].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let float = parse_wav(&wav_bytes_extensible(3, 2, 32, 48_000, &data), 10).unwrap();
+        assert_eq!(float.frames, vec![[16383, -8191]], "extensible float");
+
+        let refusal = |bytes: Vec<u8>| match parse_wav(&bytes, 10) {
+            Err(error) => error,
+            Ok(_) => panic!("a format nobody can decode was accepted"),
+        };
+        let refused = refusal(wav_bytes(2, 2, 4, 48_000, &[0; 8]));
+        assert!(refused.contains("unsupported format (2, 4)"), "{refused}");
+        let refused = refusal(wav_bytes_extensible(2, 2, 4, 48_000, &[0; 8]));
+        assert!(refused.contains("unsupported format (2, 4)"), "by the real code, not 65534: {refused}");
     }
 
     /// The first pair, and mono to both ears -- never the last channel,
