@@ -62,6 +62,26 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+/// As much of a device request as there are callback slots to serve it
+/// with.
+///
+/// A slot is a position: the request's own order picks the slot each
+/// thread reads its callback from, and there are `MAX_AUDIO_DEVICE_INDEX`
+/// of them. The app asks for every loopback device it can see, so a
+/// machine with more endpoints than slots indexed past the end -- a panic
+/// on the UI thread, on a machine nobody would call unusual.
+fn within_slots(devices: &[AudioDeviceId]) -> &[AudioDeviceId] {
+    let fits = devices.len().min(MAX_AUDIO_DEVICE_INDEX);
+    if fits < devices.len() {
+        crate::warning!(
+            "audio: {} devices asked for, {} slots to serve them with",
+            devices.len(),
+            fits
+        );
+    }
+    &devices[..fits]
+}
+
 /// Whether an output asked for needs a thread of its own: not while a live
 /// one is already open (or opening) for it, and not while it stands as
 /// failed. A terminated entry is one on its way out and does not count --
@@ -191,6 +211,7 @@ impl WasapiAccess {
     }
 
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        let devices = within_slots(devices);
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
@@ -318,6 +339,7 @@ impl WasapiAccess {
     }
 
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
+        let devices = within_slots(devices);
         let new = {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
@@ -457,10 +479,16 @@ impl WasapiAccess {
         }
     }
 
-    unsafe fn get_device_descs(device: &IMMDevice) -> (String, String) {
-        let dev_id = device.GetId().unwrap();
-        let props = device.OpenPropertyStore(STGM_READ).unwrap();
-        let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
+    /// A device's name and id, or nothing at all.
+    ///
+    /// Every call here is a question to a device that may have been
+    /// unplugged between the list being taken and this being asked --
+    /// which is ordinary, and used to end the app: this runs on the UI
+    /// thread, and it unwrapped.
+    unsafe fn get_device_descs(device: &IMMDevice) -> Option<(String, String)> {
+        let dev_id = device.GetId().ok()?;
+        let props = device.OpenPropertyStore(STGM_READ).ok()?;
+        let value = props.GetValue(&PKEY_Device_FriendlyName).ok()?;
         let dev_name = if value.Anonymous.Anonymous.vt.0 == 31 {
             value
                 .Anonymous
@@ -472,7 +500,7 @@ impl WasapiAccess {
         } else {
             String::new()
         };
-        (dev_name, dev_id.to_string().unwrap())
+        Some((dev_name, dev_id.to_string().ok()?))
     }
 
     /// Get the native channel count from the device's mix format
@@ -502,19 +530,23 @@ impl WasapiAccess {
             AudioDeviceType::Input => eCapture,
             AudioDeviceType::Loopback => eRender, // Loopback uses render devices
         };
-        let def_device = enumerator.GetDefaultAudioEndpoint(flow, eConsole);
-        if def_device.is_err() {
+        let Ok(def_device) = enumerator.GetDefaultAudioEndpoint(flow, eConsole) else {
             return;
-        }
-        let def_device = def_device.unwrap();
-        let (_, def_id) = Self::get_device_descs(&def_device);
-        let col = enumerator
-            .EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)
-            .unwrap();
-        let count = col.GetCount().unwrap();
+        };
+        let Some((_, def_id)) = Self::get_device_descs(&def_device) else {
+            return;
+        };
+        let Ok(col) = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) else {
+            return;
+        };
+        let Ok(count) = col.GetCount() else { return };
         for i in 0..count {
-            let device = col.Item(i).unwrap();
-            let (dev_name, dev_id) = Self::get_device_descs(&device);
+            // A device that went between the count and the question is
+            // one device missing from the list, not the end of the app.
+            let Ok(device) = col.Item(i) else { continue };
+            let Some((dev_name, dev_id)) = Self::get_device_descs(&device) else {
+                continue;
+            };
             let device_id = AudioDeviceId(LiveId::from_str(&dev_id));
             let channel_count = Self::get_device_channel_count(&device);
             out.push(AudioDeviceDesc {
@@ -533,19 +565,21 @@ impl WasapiAccess {
         enumerator: &IMMDeviceEnumerator,
         out: &mut Vec<AudioDeviceDesc>,
     ) {
-        let def_device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole);
-        if def_device.is_err() {
+        let Ok(def_device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) else {
             return;
-        }
-        let def_device = def_device.unwrap();
-        let (_, def_id) = Self::get_device_descs(&def_device);
-        let col = enumerator
-            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-            .unwrap();
-        let count = col.GetCount().unwrap();
+        };
+        let Some((_, def_id)) = Self::get_device_descs(&def_device) else {
+            return;
+        };
+        let Ok(col) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else {
+            return;
+        };
+        let Ok(count) = col.GetCount() else { return };
         for i in 0..count {
-            let device = col.Item(i).unwrap();
-            let (dev_name, dev_id) = Self::get_device_descs(&device);
+            let Ok(device) = col.Item(i) else { continue };
+            let Some((dev_name, dev_id)) = Self::get_device_descs(&device) else {
+                continue;
+            };
             // Create a distinct device_id for loopback by appending "_loopback" to the id
             let loopback_id = format!("{}_loopback", dev_id);
             let device_id = AudioDeviceId(LiveId::from_str(&loopback_id));
@@ -563,14 +597,12 @@ impl WasapiAccess {
 
     unsafe fn find_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-        let col = enumerator
-            .EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE)
-            .unwrap();
-        let count = col.GetCount().unwrap();
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let col = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).ok()?;
+        let count = col.GetCount().ok()?;
         for i in 0..count {
-            let device = col.Item(i).unwrap();
-            let (_, dev_id) = Self::get_device_descs(&device);
+            let Ok(device) = col.Item(i) else { continue };
+            let Some((_, dev_id)) = Self::get_device_descs(&device) else { continue };
             let device_id = AudioDeviceId(LiveId::from_str(&dev_id));
             if device_id == search_device_id {
                 return Some(device);
@@ -582,14 +614,12 @@ impl WasapiAccess {
     // Find the output device for a loopback device id (strips the "_loopback" suffix)
     unsafe fn find_loopback_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-        let col = enumerator
-            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-            .unwrap();
-        let count = col.GetCount().unwrap();
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let col = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).ok()?;
+        let count = col.GetCount().ok()?;
         for i in 0..count {
-            let device = col.Item(i).unwrap();
-            let (_, dev_id) = Self::get_device_descs(&device);
+            let Ok(device) = col.Item(i) else { continue };
+            let Some((_, dev_id)) = Self::get_device_descs(&device) else { continue };
             // Create the loopback id to match against
             let loopback_id = format!("{}_loopback", dev_id);
             let device_id = AudioDeviceId(LiveId::from_str(&loopback_id));
@@ -1211,6 +1241,45 @@ mod tests {
             .filter(|line| line.trim_start().starts_with("println!("))
             .collect();
         assert!(to_stdout.is_empty(), "printed past the log: {to_stdout:?}");
+    }
+
+    /// A request longer than there are slots is cut, not indexed off the
+    /// end of the array: the app asks for every loopback device it can
+    /// see, and a machine with more endpoints than slots is not unusual.
+    #[test]
+    fn a_request_longer_than_the_slots_is_cut_to_them() {
+        let many: Vec<AudioDeviceId> = (0..40).map(id).collect();
+        assert_eq!(within_slots(&many).len(), MAX_AUDIO_DEVICE_INDEX);
+        assert_eq!(within_slots(&many)[0], id(0), "and it keeps the ones asked for first");
+        let few: Vec<AudioDeviceId> = (0..3).map(id).collect();
+        assert_eq!(within_slots(&few).len(), 3);
+        assert_eq!(within_slots(&[]).len(), 0);
+    }
+
+    /// Enumeration runs on the UI thread and asks questions of devices
+    /// that may have been unplugged since the list was taken. It used to
+    /// unwrap those answers, so an ordinary unplug at an unlucky moment
+    /// ended the app.
+    #[test]
+    fn enumeration_does_not_unwrap_what_a_vanished_device_cannot_answer() {
+        let source = include_str!("wasapi.rs");
+        let body = source.split("mod tests {").next().unwrap_or(source);
+        for name in [
+            "fn get_device_descs",
+            "fn enumerate_devices",
+            "fn enumerate_loopback_devices",
+            "fn find_device_by_id",
+            "fn find_loopback_device_by_id",
+        ] {
+            let start = body.find(name).unwrap_or_else(|| panic!("{name} is gone"));
+            let rest = &body[start..];
+            let end = rest[1..].find("\n    unsafe fn ").map_or(rest.len(), |at| at + 1);
+            let unwraps: Vec<&str> = rest[..end]
+                .lines()
+                .filter(|line| line.contains(".unwrap()"))
+                .collect();
+            assert!(unwraps.is_empty(), "{name} unwraps: {unwraps:?}");
+        }
     }
 
     /// Every capture thread's exit tells the app, the way an output
