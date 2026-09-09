@@ -1976,6 +1976,40 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
     Ok(TrackPcm { frames, sample_rate })
 }
 
+/// What a local file's NAME says its container is -- the one table.
+///
+/// `None` is not "an MP4": it means the name names no decoder this app
+/// has. The two readers answer that differently and both are right. A deck
+/// turns it into [`MediaType::Mp4`], which is the arm below that looks at
+/// the file's own first bytes before asking the platform; the import
+/// scanner turns it into "not something the catalog publishes yet".
+///
+/// The extension is the whole answer HERE. Bytes are consulted in the
+/// `Mp4` arm of [`decode_audio_clip`], never in this table.
+///
+/// The deck side used to spell this out three times over and those copies
+/// had drifted from the import scanner's: `.wave` is a name the drop
+/// filter accepts and the importer publishes, and every deck-side copy
+/// dropped it through to the platform decoder, which said the RIFF file it
+/// was handed had no video stream.
+pub fn named_audio_media(extension: &str) -> Option<MediaType> {
+    match extension.to_ascii_lowercase().as_str() {
+        "wav" | "wave" => Some(MediaType::Wav),
+        "ogg" | "oga" => Some(MediaType::Ogg),
+        "mp3" => Some(MediaType::Mp3),
+        _ => None,
+    }
+}
+
+/// The container a local path is decoded as: the table, with the deck's
+/// own answer for a name it does not know.
+pub fn local_media_type(path: &Path) -> MediaType {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .and_then(named_audio_media)
+        .unwrap_or(MediaType::Mp4)
+}
+
 /// Decode an audio clip fully to memory. WAV parses directly, MP3 and Ogg
 /// Vorbis go through this repo's own decoders, and MP4/M4A pulls the platform
 /// decoder's audio track.
@@ -3762,6 +3796,49 @@ mod tests {
         std::fs::write(&stub, b"fLa").expect("write");
         assert!(audio_magic(&stub).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One table, and it knows both spellings of a RIFF file. The deck
+    /// side used to keep three copies of this and all three had lost
+    /// `.wave`, so a file the drop filter accepted and the importer
+    /// published was handed to the platform decoder, which said the RIFF
+    /// it was given had no video stream.
+    #[test]
+    fn one_table_says_what_a_file_name_means() {
+        for name in ["a.wav", "a.WAV", "a.wave", "a.WAVE"] {
+            assert_eq!(local_media_type(Path::new(name)), MediaType::Wav, "{name}");
+        }
+        for name in ["a.ogg", "a.oga", "a.OGA"] {
+            assert_eq!(local_media_type(Path::new(name)), MediaType::Ogg, "{name}");
+        }
+        for name in ["a.mp3", "a.MP3"] {
+            assert_eq!(local_media_type(Path::new(name)), MediaType::Mp3, "{name}");
+        }
+        // Everything else is the deck's own answer: the arm that looks at
+        // the bytes before it asks the platform.
+        for name in [
+            "a.mp4", "a.m4a", "a.aac", "a.flac", "a.aiff", "a.aif", "a.mov", "a", "a.", ".wav",
+        ] {
+            assert_eq!(local_media_type(Path::new(name)), MediaType::Mp4, "{name}");
+        }
+        assert_eq!(named_audio_media("wav"), Some(MediaType::Wav));
+        assert_eq!(named_audio_media("WAVE"), Some(MediaType::Wav));
+        assert_eq!(named_audio_media("flac"), None, "a name with no decoder of ours");
+        assert_eq!(named_audio_media(""), None);
+    }
+
+    /// The sixth copy lives in the importer library, which cannot call
+    /// back into this app, so the two are pinned to agree rather than
+    /// shared.
+    #[test]
+    fn the_importers_table_and_this_one_name_the_same_containers() {
+        use makepad_asset_importer::music_import::Container;
+        for word in [
+            "wav", "wave", "ogg", "oga", "mp3", "flac", "m4a", "aiff", "mp4", "mov", "",
+        ] {
+            let theirs = Container::from_name_mime(&format!("a.{word}"), "").map(Container::media);
+            assert_eq!(named_audio_media(word), theirs, "the two tables disagree about {word:?}");
+        }
     }
 
     fn test_dir(label: &str) -> PathBuf {

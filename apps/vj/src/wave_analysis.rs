@@ -30,7 +30,7 @@ use crate::decks::DeckId;
 use crate::mixer::TrackPcm;
 use makepad_ai_beats::BeatsModel;
 use crate::track_key::KeyEstimate;
-use makepad_asset_data::{BlobId, MediaType};
+use makepad_asset_data::BlobId;
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -3411,17 +3411,7 @@ pub const LOCAL_AUDIO_EXTENSIONS: [&str; 9] =
 /// platform decoder. That is how a `.flac` reaches the FLAC decoder this
 /// repo already has: there is no `MediaType` that names one.
 pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let media = match extension.as_str() {
-        "wav" => MediaType::Wav,
-        "ogg" | "oga" => MediaType::Ogg,
-        "mp3" => MediaType::Mp3,
-        _ => MediaType::Mp4,
-    };
+    let media = crate::media::local_media_type(path);
     crate::media::decode_audio_clip(&path.to_path_buf(), media, MAX_LOCAL_TRACK_FRAMES)
 }
 

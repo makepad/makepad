@@ -6746,6 +6746,53 @@ mod fault_level_tests {
 }
 
 #[cfg(test)]
+mod name_table_tests {
+    use super::*;
+
+    /// This file kept three copies of the table that says what a file's
+    /// name means, and all three had drifted from the importer's. An
+    /// extension arm spelled out here is the next copy, so there are none.
+    ///
+    /// The needles below are written with escaped quotes on purpose: what
+    /// stands in this file is the escaped form, and what the test looks
+    /// for is the unescaped one, which no line here contains. Spelling
+    /// either of them out in prose -- or tidying them into a `format!` --
+    /// makes this test match itself and pass for ever after.
+    const SOURCE: &str = include_str!("main.rs");
+
+    #[test]
+    fn the_deck_readers_ask_the_table_rather_than_keeping_a_copy() {
+        assert_eq!(SOURCE.matches("Some(\"wav\")").count(), 0, "a copy of the table grew back");
+        assert_eq!(SOURCE.matches("Some(\"oga\")").count(), 0, "a copy of the table grew back");
+        // And there is one forwarder rather than one per caller. Built at
+        // run time so the needle is not in the file.
+        const NAME: &str = "media_type_for_path";
+        assert_eq!(
+            SOURCE.matches(&format!("fn {NAME}")).count(),
+            1,
+            "one forwarder, not a re-grown copy",
+        );
+    }
+
+    /// The set of names a drop accepts is what it always was, now built
+    /// from the table plus the offered list rather than a hard-coded word.
+    /// `a.aif` is deliberately false: making it true is its own change,
+    /// on three surfaces at once.
+    #[test]
+    fn the_drop_filter_admits_what_it_always_did() {
+        for name in [
+            "a.wav", "a.wave", "a.WAVE", "a.mp3", "a.ogg", "a.oga", "a.m4a", "a.aac", "a.flac",
+            "a.aiff", "a.mp4",
+        ] {
+            assert!(App::is_playable_audio(Path::new(name)), "{name} must be playable");
+        }
+        for name in ["a.aif", "a.txt", "a.mov", "a"] {
+            assert!(!App::is_playable_audio(Path::new(name)), "{name} must not be");
+        }
+    }
+}
+
+#[cfg(test)]
 mod console_mode_tests {
     use super::*;
 
@@ -17829,17 +17876,7 @@ p2 {}
                     // A local file never goes near the store: it decodes
                     // straight off disk on the same worker pool.
                     if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
-                        let media = match path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| e.to_ascii_lowercase())
-                            .as_deref()
-                        {
-                            Some("wav") => MediaType::Wav,
-                            Some("ogg") | Some("oga") => MediaType::Ogg,
-                            Some("mp3") => MediaType::Mp3,
-                            _ => MediaType::Mp4,
-                        };
+                        let media = Self::media_type_for_path(&path);
                         self.decode.submit(DecodeJob::Deck { deck, gen, path, media });
                         continue;
                     }
@@ -20228,14 +20265,16 @@ p2 {}
     }
 
     /// Anything a deck can actually play. Wider than what the store can
-    /// publish: the platform decoder handles flac, m4a and the rest, and a
-    /// file on this machine never goes through the store to reach a deck.
+    /// publish and wider than the table names: a name the table does not
+    /// know still reaches the sniff-then-platform arm, and a file on this
+    /// machine never goes through the store to reach a deck.
     fn is_playable_audio(path: &Path) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .is_some_and(|e| {
-                e == "wave" || wave_analysis::LOCAL_AUDIO_EXTENSIONS.contains(&e.as_str())
+                media::named_audio_media(&e).is_some()
+                    || wave_analysis::LOCAL_AUDIO_EXTENSIONS.contains(&e.as_str())
             })
     }
 
@@ -24595,18 +24634,10 @@ p2 {}
 
     // ---- the pre-listen player ------------------------------------------
 
+    /// The one table (`media::local_media_type`), reached by the name the
+    /// deck-side callers already use.
     fn media_type_for_path(path: &std::path::Path) -> MediaType {
-        match path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("wav") => MediaType::Wav,
-            Some("ogg") | Some("oga") => MediaType::Ogg,
-            Some("mp3") => MediaType::Mp3,
-            _ => MediaType::Mp4,
-        }
+        media::local_media_type(path)
     }
 
     /// The row key a pre-listen press refers to — the explorer keeps its
@@ -26942,17 +26973,7 @@ p2 {}
         // A file on this machine decodes straight off disk, exactly as a
         // deck load of the same track would.
         if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
-            let media = match path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .as_deref()
-            {
-                Some("wav") => MediaType::Wav,
-                Some("ogg") | Some("oga") => MediaType::Ogg,
-                Some("mp3") => MediaType::Mp3,
-                _ => MediaType::Mp4,
-            };
+            let media = Self::media_type_for_path(&path);
             self.decode.submit(DecodeJob::Deck {
                 deck: DeckId::A,
                 gen: stems::PREFETCH_GEN,

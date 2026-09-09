@@ -137,6 +137,12 @@ pub struct MediaScan {
 /// because both platform demuxers read it and the content contract has no
 /// separate tag — the same choice asset-ui's drop import makes.
 fn classify(ext: &str) -> Option<(MediaClass, MediaType)> {
+    // What an audio name MEANS comes from the one table; WHICH of those
+    // names the catalog can publish is this function's own question, and
+    // the answer happens to be all of them.
+    if let Some(media) = crate::media::named_audio_media(ext) {
+        return Some((MediaClass::Audio, media));
+    }
     Some(match ext {
         "mp4" | "mov" | "m4v" => (MediaClass::Video, MediaType::Mp4),
         "png" => (MediaClass::Image, MediaType::Png),
@@ -145,9 +151,6 @@ fn classify(ext: &str) -> Option<(MediaClass, MediaType)> {
         // the catalog has no webp media type and the draw path no webp
         // decode, so the conversion happens once, here.
         "webp" => (MediaClass::Image, MediaType::Png),
-        "wav" | "wave" => (MediaClass::Audio, MediaType::Wav),
-        "mp3" => (MediaClass::Audio, MediaType::Mp3),
-        "ogg" | "oga" => (MediaClass::Audio, MediaType::Ogg),
         _ => return None,
     })
 }
@@ -792,6 +795,24 @@ mod tests {
         assert!(skipped.contains(&"e.mkv"), "a video format we cannot publish must be reported");
         assert!(!skipped.contains(&"f.txt"), "a text file is not a failed import");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What an audio name means comes from the one table; which of those
+    /// names the catalog publishes stays this function's own question.
+    /// Both halves are pinned as literals, so a change to either shows up
+    /// here rather than agreeing with itself.
+    #[test]
+    fn the_scanner_takes_an_audio_files_meaning_from_the_one_table() {
+        assert_eq!(classify("wav"), Some((MediaClass::Audio, MediaType::Wav)));
+        assert_eq!(classify("wave"), Some((MediaClass::Audio, MediaType::Wav)));
+        assert_eq!(classify("mp3"), Some((MediaClass::Audio, MediaType::Mp3)));
+        assert_eq!(classify("ogg"), Some((MediaClass::Audio, MediaType::Ogg)));
+        assert_eq!(classify("oga"), Some((MediaClass::Audio, MediaType::Ogg)));
+        // And the publish policy did not widen with it.
+        assert_eq!(classify("flac"), None);
+        assert_eq!(classify("aiff"), None);
+        assert_eq!(classify("mp4"), Some((MediaClass::Video, MediaType::Mp4)));
+        assert_eq!(classify("webp"), Some((MediaClass::Image, MediaType::Png)));
     }
 
     #[test]
