@@ -324,10 +324,15 @@ pub struct CxFingers {
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     xr_poke_locks: Vec<DigitId>,
-    sweep_lock: Option<Area>,
-    /// * If `Some`, scrolling is currently blocked *except* within the contained area.
-    /// * If `None`, scrolling is not blocked anywhere.
-    block_scrolling_except_within: Option<Area>,
+    /// Owners of the sweep lock, outermost first. Only the LAST entry is the
+    /// live lock: while it is held, `hits()` answers `Hit::Nothing` to any
+    /// area whose sweep area is not that owner. Nested overlays (a menu in a
+    /// popover in a dialog) each hold their own level, and removing an owner
+    /// hands the lock back to the one beneath it.
+    sweep_locks: Vec<Area>,
+    /// Owners of the scroll block, outermost first. Only the LAST entry is
+    /// live: while it is held, scrolling is allowed only within that area.
+    scroll_blocks: Vec<Area>,
 }
 
 impl CxFingers {
@@ -371,8 +376,15 @@ impl CxFingers {
                 capture.sweep_area = new_area;
             }
         }
-        if self.sweep_lock == Some(old_area) {
-            self.sweep_lock = Some(new_area);
+        for lock in &mut self.sweep_locks {
+            if *lock == old_area {
+                *lock = new_area;
+            }
+        }
+        for block in &mut self.scroll_blocks {
+            if *block == old_area {
+                *block = new_area;
+            }
         }
     }
 
@@ -634,35 +646,85 @@ impl CxFingers {
     }
 
     pub(crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
-        if let Some(lock) = self.sweep_lock {
-            if lock != sweep_area {
-                return true;
-            }
+        match self.sweep_locks.last() {
+            Some(lock) => !same_owner(*lock, sweep_area),
+            None => false,
         }
-        false
     }
 
+    /// The area holding the sweep lock right now — the innermost of the
+    /// owners pushed by [`Self::sweep_lock`] — if any.
+    pub fn sweep_lock_area(&self) -> Option<Area> {
+        self.sweep_locks.last().copied()
+    }
+
+    /// Take the sweep lock for `area`. While it is the innermost owner,
+    /// `hits()` answers nothing to any area whose sweep area is not `area`.
+    /// An owner already in the stack keeps its one entry and its level (the
+    /// entry takes the newest handle, so a re-assertion after a redraw is
+    /// not a second owner); a new owner goes on top and holds the lock
+    /// until it unlocks.
     pub fn sweep_lock(&mut self, area: Area) {
-        if self.sweep_lock.is_none() {
-            self.sweep_lock = Some(area);
+        match self.sweep_locks.iter_mut().find(|lock| same_owner(**lock, area)) {
+            Some(lock) => *lock = area,
+            None => self.sweep_locks.push(area),
         }
     }
 
+    /// Release `area`'s sweep lock wherever it sits in the stack. Releasing
+    /// an outer owner while an inner one is held leaves the inner one on
+    /// top; an area that holds no lock is a no-op.
     pub fn sweep_unlock(&mut self, area: Area) {
-        if self.sweep_lock == Some(area) {
-            self.sweep_lock = None;
-        }
+        self.sweep_locks.retain(|lock| !same_owner(*lock, area));
     }
 
-    /// Returns the excepted area in which scrolling is currently allowed.
+    /// Returns the excepted area in which scrolling is currently allowed:
+    /// the innermost owner of the scroll block.
     /// * If `Some`, scrolling is currently blocked *except* within the contained area.
     /// * If `None`, scrolling is not blocked anywhere.
     pub fn blocked_scrolling_exception_area(&self) -> Option<Area> {
-        self.block_scrolling_except_within
+        self.scroll_blocks.last().copied()
     }
 
+    /// `Some(area)` blocks scrolling everywhere but within `area`, on top of
+    /// any block already held. An owner already in the stack keeps its one
+    /// entry, so a modal may re-assert its area on every draw. `None`
+    /// releases the innermost block only; an owner that knows its area
+    /// should use [`Self::unblock_scrolling_within_area`] instead.
     pub fn block_scrolling_within_area(&mut self, area: Option<Area>) {
-        self.block_scrolling_except_within = area;
+        match area {
+            Some(area) => match self.scroll_blocks.iter_mut().find(|block| same_owner(**block, area)) {
+                Some(block) => *block = area,
+                None => self.scroll_blocks.push(area),
+            },
+            None => {
+                self.scroll_blocks.pop();
+            }
+        }
+    }
+
+    /// Release the scroll block owned by `area` wherever it sits in the
+    /// stack, leaving every other owner's block in place.
+    pub fn unblock_scrolling_within_area(&mut self, area: Area) {
+        self.scroll_blocks.retain(|block| !same_owner(*block, area));
+    }
+}
+
+/// Two areas name the same lock owner when they address the same rect or
+/// the same instance run on the same draw list. The `redraw_id` a draw
+/// stamps on an area is left out on purpose: an owner that re-asserts its
+/// lock after every draw hands over a fresh handle each time, and it must
+/// still find its own entry.
+fn same_owner(a: Area, b: Area) -> bool {
+    match (a, b) {
+        (Area::Instance(a), Area::Instance(b)) => {
+            a.draw_list_id == b.draw_list_id
+                && a.draw_item_id == b.draw_item_id
+                && a.instance_offset == b.instance_offset
+        }
+        (Area::Rect(a), Area::Rect(b)) => a.draw_list_id == b.draw_list_id && a.rect_id == b.rect_id,
+        (Area::Empty, Area::Empty) => true,
+        _ => false,
     }
 }
 
@@ -1597,5 +1659,192 @@ impl Event {
             _ => (),
         };
         Hit::Nothing
+    }
+}
+
+#[cfg(test)]
+mod lock_nest_tests {
+    use super::*;
+    use crate::area::RectArea;
+    use crate::draw_list::CxDrawListPool;
+
+    /// Three distinct, non-empty areas on one draw list.
+    fn areas() -> (Area, Area, Area) {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let rect = |rect_id| {
+            Area::Rect(RectArea {
+                draw_list_id: list.id(),
+                rect_id,
+                redraw_id: 0,
+            })
+        };
+        (rect(0), rect(1), rect(2))
+    }
+
+    #[test]
+    fn a_single_owner_locks_and_unlocks() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        assert_eq!(fingers.sweep_lock_area(), None);
+        assert!(!fingers.test_sweep_lock(b));
+        fingers.sweep_lock(a);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        assert!(!fingers.test_sweep_lock(a));
+        assert!(fingers.test_sweep_lock(b));
+        // Not the owner: nothing changes.
+        fingers.sweep_unlock(b);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        assert!(!fingers.test_sweep_lock(b));
+    }
+
+    #[test]
+    fn an_inner_unlock_keeps_the_outer_lock() {
+        let (outer, inner, other) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(outer);
+        fingers.sweep_lock(inner);
+        assert_eq!(fingers.sweep_lock_area(), Some(inner));
+        assert!(fingers.test_sweep_lock(outer));
+        assert!(!fingers.test_sweep_lock(inner));
+        fingers.sweep_unlock(inner);
+        assert_eq!(fingers.sweep_lock_area(), Some(outer));
+        assert!(!fingers.test_sweep_lock(outer));
+        assert!(fingers.test_sweep_lock(other));
+    }
+
+    #[test]
+    fn an_outer_unlock_leaves_the_inner_lock_on_top() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(outer);
+        fingers.sweep_lock(inner);
+        fingers.sweep_unlock(outer);
+        assert_eq!(fingers.sweep_lock_area(), Some(inner));
+        assert!(fingers.test_sweep_lock(outer));
+        fingers.sweep_unlock(inner);
+        assert_eq!(fingers.sweep_lock_area(), None);
+    }
+
+    #[test]
+    fn a_repeated_lock_by_one_owner_is_one_entry() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(a);
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        // An outer owner re-asserting under an inner one changes nothing.
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(b);
+        fingers.sweep_lock(a);
+        assert_eq!(fingers.sweep_lock_area(), Some(b));
+        fingers.sweep_unlock(b);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+    }
+
+    #[test]
+    fn a_redrawn_owner_keeps_its_entry() {
+        let (a, b, c) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.block_scrolling_within_area(Some(b));
+        fingers.update_area(a, c);
+        assert_eq!(fingers.sweep_lock_area(), Some(c));
+        fingers.update_area(b, a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        // The re-assertion a modal makes every draw is still one entry.
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_fresh_handle_after_a_redraw_is_the_same_owner() {
+        let (a, b, _) = areas();
+        let Area::Rect(rect) = a else { unreachable!() };
+        let a_redrawn = Area::Rect(RectArea { redraw_id: rect.redraw_id + 1, ..rect });
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(a_redrawn);
+        assert_eq!(fingers.sweep_lock_area(), Some(a_redrawn));
+        assert!(!fingers.test_sweep_lock(a));
+        assert!(!fingers.test_sweep_lock(a_redrawn));
+        assert!(fingers.test_sweep_lock(b));
+        // Either handle releases the one entry.
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(a_redrawn));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a_redrawn));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_single_scroll_block_is_released_by_its_owner() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+        fingers.block_scrolling_within_area(Some(a));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.unblock_scrolling_within_area(b);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn nested_scroll_blocks_unwind_from_the_inside() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(outer));
+        fingers.block_scrolling_within_area(Some(inner));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(inner));
+        fingers.unblock_scrolling_within_area(inner);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(outer));
+        fingers.unblock_scrolling_within_area(outer);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn an_outer_scroll_block_released_first_leaves_the_inner_on_top() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(outer));
+        fingers.block_scrolling_within_area(Some(inner));
+        fingers.unblock_scrolling_within_area(outer);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(inner));
+        fingers.unblock_scrolling_within_area(inner);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_re_asserted_scroll_block_stays_one_entry() {
+        let (a, _, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_plain_unblock_pops_the_innermost() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(b));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+        // Popping an empty stack is harmless.
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
     }
 }

@@ -97,6 +97,11 @@ where
             .unwrap_or(false)
     }
 
+    /// The slots currently in the free list, as they stand now.
+    pub fn free_ids(&self) -> Vec<usize> {
+        self.free.0.borrow().free.clone()
+    }
+
     pub fn live_count(&self) -> usize {
         self.slot_count().saturating_sub(self.free_count())
     }

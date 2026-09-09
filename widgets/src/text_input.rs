@@ -2240,6 +2240,10 @@ impl Widget for TextInput {
         self.text.clone()
     }
 
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(self.text.clone())
+    }
+
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);
         self.set_selection(

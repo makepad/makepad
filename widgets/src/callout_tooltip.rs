@@ -68,9 +68,18 @@ script_mod! {
                         vertex2 = vec2(vertex1.x + triangle_height, vertex1.y - triangle_height);
                         vertex3 = vec2(vertex1.x + triangle_height * 2.0, vertex1.y);
                     } else if self.callout_position == 90.0 {
-                        // Point rightwards
-                        // Triangle points to the right from the left edge of the tooltip
-                        vertex1 = vec2(rect_size.x - 2.0, rect_size.y * 0.5);
+                        // Point rightwards, at the TARGET's middle rather than at
+                        // this tooltip's own. The two agree only while the tooltip
+                        // is centred on the target; the moment it is clamped
+                        // inboard, or is shorter than the thing it names, a point
+                        // nailed to half the tooltip's height stops aiming at
+                        // anything. Clamped to the tooltip's own edges, as the up
+                        // and down cases already are.
+                        let diff_y = self.target_pos.y + self.target_size.y / 2.0 - self.tooltip_pos.y;
+                        vertex1 = vec2(
+                            rect_size.x - 2.0,
+                            min(max(triangle_height + 2.0, diff_y), rect_size.y - triangle_height - 2.0)
+                        );
                         vertex2 = vec2(vertex1.x - triangle_height, vertex1.y + triangle_height);
                         vertex3 = vec2(vertex1.x - triangle_height, vertex1.y - triangle_height);
                     } else if self.callout_position == 180.0 {
@@ -85,8 +94,13 @@ script_mod! {
                         vertex3 = vec2(vertex1.x - triangle_height * 2.0, vertex1.y);
                     } else {
                         // Point leftwards
-                        // Triangle points to the left from the right edge of the tooltip
-                        vertex1 = vec2(2.0, rect_size.y * 0.5);
+                        // Triangle points to the left from the right edge of the
+                        // tooltip, at the TARGET's middle, for the same reason.
+                        let diff_y = self.target_pos.y + self.target_size.y / 2.0 - self.tooltip_pos.y;
+                        vertex1 = vec2(
+                            2.0,
+                            min(max(triangle_height + 2.0, diff_y), rect_size.y - triangle_height - 2.0)
+                        );
                         vertex2 = vec2(vertex1.x + triangle_height, vertex1.y - triangle_height);
                         vertex3 = vec2(vertex1.x + triangle_height, vertex1.y + triangle_height);
                     }
@@ -339,7 +353,11 @@ impl CalloutTooltip {
                 // Choose vertical placement. For `Top` we go above the widget
                 // (flipping below if there isn't room). For `Bottom` we go
                 // below (flipping above if there isn't room).
-                let y_above = pos.y - max(expected_dimension.y, size.y);
+                // Lifted by the TOOLTIP's height, not by the taller of the two:
+                // measuring against the target's height puts the tooltip that far
+                // above the target's top, so the point stops short of the thing it
+                // names by exactly the amount the target is taller.
+                let y_above = pos.y - expected_dimension.y;
                 let y_below = pos.y + size.y;
                 let fits_above = y_above >= avail_top;
                 let fits_below = y_below + expected_dimension.y <= avail_bottom;

@@ -262,7 +262,13 @@ mod tests {
 
     #[test]
     fn test_animated_image_gif_struct_has_inner_image_field() {
-        let source = include_str!("animated_image_gif.rs");
+        // Normalised first: include_str! hands back the bytes exactly as
+        // they sit on disk. On a checkout that stores Windows line endings
+        // every line in this file ends with a carriage return, so a pattern
+        // written with a bare newline could never match: this test has
+        // failed here since the day it was written.
+        let source = include_str!("animated_image_gif.rs")
+            .replace("\r\n", "\n");
         assert!(source.contains("#[live]\n    inner: Image"));
     }
 

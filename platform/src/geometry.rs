@@ -67,6 +67,22 @@ impl CxGeometryPool {
     pub fn alloc(&mut self) -> Geometry {
         Geometry(self.0.alloc())
     }
+
+    /// True when `id` no longer names the mesh it was made for: the slot was
+    /// freed, and may already have been handed to another owner.
+    ///
+    /// A draw call records only a `GeometryId`, and a draw list that is not
+    /// rebuilt keeps its calls. So a widget can go away while a live list
+    /// still holds a call naming the slot that widget uploaded into. The
+    /// generation catches exactly that, and every renderer asks before it
+    /// draws: a mesh that is gone must draw nothing, never whatever shape
+    /// took its place.
+    pub fn is_id_stale(&self, id: GeometryId) -> bool {
+        match self.0.pool.get(id.0) {
+            Some(slot) => slot.generation != id.1 || self.0.is_free(id.0),
+            None => true,
+        }
+    }
 }
 
 impl Cx {
@@ -634,6 +650,27 @@ pub struct CxGeometry {
     pub os: CxOsGeometry,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The generation is what tells a live handle from one whose mesh has
+    /// been reclaimed, including the case that used to paint the wrong
+    /// shape: the slot handed straight on to the next owner.
+    #[test]
+    fn a_handle_goes_stale_when_its_slot_is_freed_or_reused() {
+        let mut pool = CxGeometryPool::default();
+        let first = pool.alloc();
+        let id = first.geometry_id();
+        assert!(!pool.is_id_stale(id));
+        drop(first);
+        assert!(pool.is_id_stale(id), "a freed slot is stale");
+        let second = pool.alloc();
+        assert_eq!(second.geometry_id().slot_index(), id.slot_index(), "the slot is reused");
+        assert!(pool.is_id_stale(id), "the old handle must not name the new mesh");
+        assert!(!pool.is_id_stale(second.geometry_id()));
+    }
+}
 impl Default for CxGeometry {
     fn default() -> Self {
         Self {

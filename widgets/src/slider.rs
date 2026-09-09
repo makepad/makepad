@@ -1443,7 +1443,7 @@ pub enum SliderTaper {
     /// Falls back to Linear without a step.
     Stepped,
     /// Two positions: `min` below half travel, `max` from half.
-    Toggle,
+    Binary,
 }
 
 /// Travel to value. `Linear` is the map every slider had before there
@@ -1491,7 +1491,7 @@ pub fn taper_to_value(
             }
             (min + (travel_in * (max - min) / step).round() * step).min(max)
         }
-        SliderTaper::Toggle => {
+        SliderTaper::Binary => {
             if travel_in >= 0.5 {
                 max
             } else {
@@ -1542,7 +1542,7 @@ pub fn taper_to_travel(
             }
             linear(value).clamp(0.0, 1.0)
         }
-        SliderTaper::Toggle => {
+        SliderTaper::Binary => {
             if value >= (min + max) * 0.5 {
                 1.0
             } else {
@@ -2007,6 +2007,16 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
 
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        // The number the readout shows, unit and all, so a test waits on
+        // what a person reads rather than on a raw f64.
+        Some(format_readout(
+            self.to_external() * self.display_scale,
+            self.precision,
+            &self.unit,
+        ))
+    }
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>() {
             self.set_internal(v);
@@ -2159,11 +2169,11 @@ mod taper_tests {
         assert_eq!(at(0.49), 1.0);
         assert_eq!(at(1.0), 3.0, "the top detent is reachable");
         assert_eq!(taper_to_travel(SliderTaper::Stepped, 2.0, 0.0, 3.0, 0.0, 1.0), 2.0 / 3.0);
-        let toggle = |t| taper_to_value(SliderTaper::Toggle, t, 0.0, 1.0, 0.0, 0.0);
+        let toggle = |t| taper_to_value(SliderTaper::Binary, t, 0.0, 1.0, 0.0, 0.0);
         assert_eq!(toggle(0.49), 0.0);
         assert_eq!(toggle(0.5), 1.0);
-        assert_eq!(taper_to_travel(SliderTaper::Toggle, 1.0, 0.0, 1.0, 0.0, 0.0), 1.0);
-        assert_eq!(taper_to_travel(SliderTaper::Toggle, 0.0, 0.0, 1.0, 0.0, 0.0), 0.0);
+        assert_eq!(taper_to_travel(SliderTaper::Binary, 1.0, 0.0, 1.0, 0.0, 0.0), 1.0);
+        assert_eq!(taper_to_travel(SliderTaper::Binary, 0.0, 0.0, 1.0, 0.0, 0.0), 0.0);
     }
 
     #[test]

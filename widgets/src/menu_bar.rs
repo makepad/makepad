@@ -1463,12 +1463,24 @@ mod tests {
             "Edit",
             vec![MenuEntry::item(live_id!(undo), "Undo", Some("Cmd+Z"))],
         )];
-        let event = Event::KeyDown(KeyEvent {
-            key_code: KeyCode::KeyZ,
-            modifiers: KeyModifiers {
+        // `Cmd` in a shortcut string is the logo modifier on macOS and Ctrl
+        // everywhere else, so the press that fires this item is a different
+        // key on different platforms. Pressing logo unconditionally meant
+        // this test could pass on one platform only.
+        let modifiers = if cfg!(target_vendor = "apple") {
+            KeyModifiers {
                 logo: true,
                 ..Default::default()
-            },
+            }
+        } else {
+            KeyModifiers {
+                control: true,
+                ..Default::default()
+            }
+        };
+        let event = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::KeyZ,
+            modifiers,
             ..Default::default()
         });
         assert!(!bar.handle_shortcut(&mut cx, &event, true));

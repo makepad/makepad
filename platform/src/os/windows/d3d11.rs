@@ -3288,8 +3288,13 @@ impl DrawVars {
                 );
             }
 
-            // Don't proceed if shader compilation had errors
+            // Don't proceed if shader compilation had errors — and SAY SO.
+            // Every other backend logs here (opengl.rs, metal.rs, the headless
+            // raster and draw_vars itself); this one returned in silence, so on
+            // Windows a widget could stop drawing entirely with nothing in the
+            // log to say why, and the error sat unread in `output.errors`.
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 

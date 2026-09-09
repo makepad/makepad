@@ -32,6 +32,36 @@ script_mod! {
         capture_overload: true
         scroll_bar: mod.widgets.ScrollBar {}
         flow: Down
+
+        // The kinetic knobs, restated here so the design overlay can reach
+        // them. A `#[live]` default alone gives the panel a value with no
+        // bounds, so it renders as a bare number with no scrubber; the
+        // bounds live in the annotation, and the annotation lives in the
+        // DSL. These are the only such knobs the overlay can reach at all:
+        // it expands an object one level, so a View's `scroll_bars.` rows
+        // stop at the bar itself, while this list's are its own fields.
+        /** the slowest release that still throws the list 0.05..2 step 0.05 */
+        flick_scroll_minimum: 0.2
+        /** the fastest a hard flick may throw it 20..600 step 10 */
+        flick_scroll_maximum: 240.0
+        // Interpolated rather than copied: the default is one number in
+        // scroll_motion.rs and restating it here by hand is how the two
+        // quietly stop agreeing.
+        /** how fast a flick runs down, per millisecond 0.98..0.9999 step 0.0005 */
+        fling_decel: #(crate::scroll_motion::FLING_DECEL_RATE_PER_MS)
+        /** rubber-band past the top edge 0..1 step 1 */
+        bounce_at_start: true
+        /** rubber-band past the bottom edge 0..1 step 1 */
+        bounce_at_end: true
+        /** how fast the tail follows new content 0.05..1 step 0.05 */
+        smooth_tail_speed: 0.25
+        // Named here only so the panel can say what they are. Both are read
+        // by nothing: a knob that silently does nothing is worse than one
+        // that says it does nothing.
+        /** DEAD: the fling speed comes from the measured release now */
+        flick_scroll_scaling: 0.005
+        /** DEAD: the run-down rate is fling_decel now */
+        flick_scroll_decay: 0.97
     }
 }
 

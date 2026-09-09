@@ -1478,6 +1478,11 @@ impl Cx {
                 Some(id) => id,
                 None => continue,
             };
+            if self.geometries.skip_stale(geometry_id) {
+                // The widget that uploaded this mesh is gone; its slot
+                // belongs to someone else now.
+                continue;
+            }
             if !crate::geometry::geometry_layout_matches_shader(
                 &mut self.geometries[geometry_id],
                 &sh.mapping.geometries,

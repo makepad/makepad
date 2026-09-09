@@ -982,7 +982,6 @@ pub struct App {
     menu_state_initialized: bool,
     /// Splitter position remembered while the left pane is collapsed.
     #[rust]
-    left_panel_align: Option<SplitterAlign>,
     #[rust]
     asset_store: Option<makepad_app_asset_server::embed::LocalStore>,
 }
@@ -1908,7 +1907,7 @@ impl App {
                                 if let Some(mut queue) =
                                     self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
                                 {
-                                    queue.select(cx, &first.run_id);
+                                    QueueList::select(&mut queue, cx, &first.run_id);
                                 }
                                 self.fetch_run_snapshot();
                             }
@@ -3486,15 +3485,13 @@ impl App {
         self.ui
             .view(cx, ids!(source_overlay))
             .set_visible(cx, self.source_mode);
-        let left_split = self.ui.widget(cx, ids!(column_split));
-        if self.left_hidden {
-            if self.left_panel_align.is_none() {
-                self.left_panel_align = left_split.borrow::<Splitter>().map(|splitter| splitter.align());
-            }
-            left_split.as_splitter().set_align(cx, SplitterAlign::FromA(0.0));
-        } else if let Some(align) = self.left_panel_align.take() {
-            left_split.as_splitter().set_align(cx, align);
-        }
+        // The splitter keeps the fold as a state and never writes the
+        // align, so what comes back is the bar that went away — no
+        // remembered width here, and nothing to put back.
+        self.ui.widget(cx, ids!(column_split)).as_splitter().set_collapse(
+            cx,
+            if self.left_hidden { SplitterCollapse::A } else { SplitterCollapse::None },
+        );
         self.ui.view(cx, ids!(left_panel)).set_visible(cx, !self.left_hidden);
 
         self.ui.button(cx, ids!(side_btn)).set_text(
@@ -3799,7 +3796,7 @@ impl App {
                 };
                 if let Some(edit) = edit {
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, None);
+                        FlowCanvas::select(&mut canvas, cx, None);
                     }
                     self.selected_node = None;
                     self.apply_edit(cx, edit);
@@ -3813,7 +3810,7 @@ impl App {
                     .current_graph()
                     .and_then(|graph| graph.nodes.first().map(|node| node.id.clone()));
                 if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                    canvas.select(cx, first.clone());
+                    FlowCanvas::select(&mut canvas, cx, first.clone());
                 }
                 self.selected_node = first;
                 self.refresh_inspector(cx);
@@ -3924,7 +3921,7 @@ impl App {
         self.preview_bytes = None;
         self.preview_digest = Some((value.digest.clone(), format!("{node}.{port}")));
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.select(cx, Some(node.to_string()));
+            FlowCanvas::select(&mut canvas, cx, Some(node.to_string()));
         }
         self.selected_node = Some(node.to_string());
         self.source_mode = false;
@@ -3970,7 +3967,7 @@ impl MatchEvent for App {
                         if let Some(mut canvas) =
                             self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
                         {
-                            canvas.select(cx, Some(node.clone()));
+                            FlowCanvas::select(&mut canvas, cx, Some(node.clone()));
                         }
                         self.refresh_inspector(cx);
                         self.refresh_models(true);
@@ -4107,12 +4104,6 @@ impl MatchEvent for App {
             .widget(cx, ids!(canvas_right_split))
             .borrow::<Splitter>()
             .is_some_and(|splitter| splitter.changed(actions).is_some());
-        if column_changed && self.left_hidden {
-            self.ui
-                .widget(cx, ids!(column_split))
-                .as_splitter()
-                .set_align(cx, SplitterAlign::FromA(0.0));
-        }
         if column_changed || right_changed {
             self.update_canvas_fit_insets(cx);
         }
@@ -4301,7 +4292,7 @@ impl MatchEvent for App {
                     }
                     self.selected_node = Some(new_id.clone());
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, Some(new_id));
+                        FlowCanvas::select(&mut canvas, cx, Some(new_id));
                     }
                     self.put_graph(cx, graph);
                 }
@@ -4333,7 +4324,7 @@ impl MatchEvent for App {
                 InspectorAction::SelectNode(node) => {
                     self.selected_node = Some(node.clone());
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                        canvas.select(cx, Some(node));
+                        FlowCanvas::select(&mut canvas, cx, Some(node));
                     }
                     self.refresh_inspector(cx);
                     self.refresh_models(true);
@@ -5420,7 +5411,7 @@ mod layout_tests {
             assert!(test.camera().pan.length() > 1.0);
             assert!(test.input_rect().contains(test.title()));
             assert!(test.input_rect().contains(test.entry()));
-            test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+            test.app.with_canvas(&mut test.cx, |cx, canvas| FlowCanvas::select(canvas, cx, None));
             test.cx.new_actions.clear();
             test.menu_actions.clear();
             test.content_actions = 0;
@@ -5620,7 +5611,7 @@ mod layout_tests {
         let outside = test.input_rect().pos + test.input_rect().size - dvec2(10.0, 2.0);
         test.click(outside);
         assert_eq!(test.cx.key_focus(), test.input.area());
-        test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+        test.app.with_canvas(&mut test.cx, |cx, canvas| FlowCanvas::select(canvas, cx, None));
         test.cx.new_actions.clear();
         test.content_actions = 0;
         test.click(test.title());

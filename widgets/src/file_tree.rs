@@ -52,7 +52,12 @@ script_mod! {
         color_new: #x58c26d
         color_modified: #FA0
         color_deleted: #xd86464
-        color_mixed: #xd86464
+        // Not the deleted red. Every kind draws the same circle, so a shared
+        // colour left Mixed and Deleted pixel-identical and the dot could not
+        // do the one thing it is for. Mixed is a FOLDER whose children
+        // disagree, which is its own fact rather than a louder version of one
+        // of theirs, so it reads as its own colour.
+        color_mixed: #x7a9cf0
         pixel: fn() {
             let dot_color = match self.status_kind {
                 GitStatusDotKind.New => self.color_new
@@ -64,6 +69,7 @@ script_mod! {
             let dot_blend = match self.status_kind {
                 GitStatusDotKind.New => 1f
                 GitStatusDotKind.Modified => 1f
+                GitStatusDotKind.Deleted => 1f
                 GitStatusDotKind.Mixed => 1f
                 _ => 0f
             }

@@ -275,29 +275,6 @@ script_mod! {
         }
     }
 
-    let Crumb = View{
-        width: Fit
-        height: 24
-        padding: Inset{left: 8 right: 8}
-        align: Align{y: 0.5}
-        cursor: MouseCursor.Hand
-        crumb_title := Label{
-            max_lines: 1
-            draw_text +: {
-                color: mod.mpf.fg
-                text_style: theme.font_regular{font_size: 10.0}
-            }
-        }
-    }
-
-    let CrumbSep = Label{
-        text: "›"
-        draw_text +: {
-            color: mod.mpf.fg_dim
-            text_style: theme.font_regular{font_size: 10.0}
-        }
-    }
-
     // One tab. Square, flat, filled when active — the strip only appears once
     // there is more than one of them.
     let TabItem = SolidView{
@@ -448,27 +425,6 @@ script_mod! {
         }
     }
 
-    mod.widgets.BreadcrumbsBase = #(Breadcrumbs::register_widget(vm))
-    mod.widgets.Breadcrumbs = set_type_default() do mod.widgets.BreadcrumbsBase{
-        width: Fit
-        height: Fill
-        flow: Right
-        spacing: 1
-        align: Align{y: 0.5}
-        clip_x: true
-        c0 := Crumb{}
-        s0 := CrumbSep{}
-        c1 := Crumb{}
-        s1 := CrumbSep{}
-        c2 := Crumb{}
-        s2 := CrumbSep{}
-        c3 := Crumb{}
-        s3 := CrumbSep{}
-        c4 := Crumb{}
-        s4 := CrumbSep{}
-        c5 := Crumb{}
-    }
-
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -546,7 +502,22 @@ script_mod! {
                                     height: Fill
                                     align: Align{y: 0.5}
                                     cursor: MouseCursor.Text
-                                    breadcrumbs := mod.widgets.Breadcrumbs{}
+                                    breadcrumbs := Breadcrumb{
+                                        width: Fit
+                                        height: Fill
+                                        draw_text +: {
+                                            color: mod.mpf.fg_dim
+                                            text_style: theme.font_regular{font_size: 10.0}
+                                        }
+                                        draw_text_current +: {
+                                            color: mod.mpf.fg
+                                            text_style: theme.font_regular{font_size: 10.0}
+                                        }
+                                        draw_text_hover +: {
+                                            color: mod.mpf.fg_bright
+                                            text_style: theme.font_regular{font_size: 10.0}
+                                        }
+                                    }
                                 }
                                 path_edit_box := View{
                                     visible: false
@@ -1351,81 +1322,6 @@ script_mod! {
     }
 }
 
-/// The 6 crumb slots of the path bar; deeper paths show their tail.
-const CRUMB_IDS: [&[LiveId]; 6] = [
-    ids!(c0),
-    ids!(c1),
-    ids!(c2),
-    ids!(c3),
-    ids!(c4),
-    ids!(c5),
-];
-const CRUMB_TITLE_IDS: [&[LiveId]; 6] = [
-    ids!(c0.crumb_title),
-    ids!(c1.crumb_title),
-    ids!(c2.crumb_title),
-    ids!(c3.crumb_title),
-    ids!(c4.crumb_title),
-    ids!(c5.crumb_title),
-];
-const CRUMB_SEP_IDS: [&[LiveId]; 5] =
-    [ids!(s0), ids!(s1), ids!(s2), ids!(s3), ids!(s4)];
-
-/// The path bar: the tail of the current path, each part clickable.
-#[derive(Script, ScriptHook, Widget)]
-pub struct Breadcrumbs {
-    #[deref]
-    view: View,
-    #[rust]
-    paths: Vec<PathBuf>,
-}
-
-impl Breadcrumbs {
-    fn set_path(&mut self, cx: &mut Cx, path: &Path) {
-        let mut paths: Vec<PathBuf> = path.ancestors().map(Path::to_path_buf).collect();
-        paths.reverse();
-        if paths.len() > CRUMB_IDS.len() {
-            paths = paths.split_off(paths.len() - CRUMB_IDS.len());
-        }
-        self.paths = paths;
-        for (index, crumb) in CRUMB_IDS.iter().enumerate() {
-            let visible = index < self.paths.len();
-            self.view.view(cx, *crumb).set_visible(cx, visible);
-            if visible {
-                let title = display_name(&self.paths[index]);
-                self.view
-                    .label(cx, CRUMB_TITLE_IDS[index])
-                    .set_text(cx, &title);
-            }
-            if let Some(sep) = CRUMB_SEP_IDS.get(index) {
-                self.view
-                    .widget(cx, *sep)
-                    .set_visible(cx, index + 1 < self.paths.len());
-            }
-        }
-        self.view.redraw(cx);
-    }
-
-    fn clicked_path(&self, cx: &mut Cx, actions: &Actions) -> Option<PathBuf> {
-        for (index, crumb) in CRUMB_IDS.iter().enumerate() {
-            if self.view.view(cx, *crumb).finger_down(actions).is_some() {
-                return self.paths.get(index).cloned();
-            }
-        }
-        None
-    }
-}
-
-impl Widget for Breadcrumbs {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.draw_walk(cx, scope, walk)
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
-    }
-}
-
 /// One browser tab: its folder, its own history, and its own view mode. GNOME
 /// Files keeps all three per tab, and anything less makes tabs a lie —
 /// switching back would land you somewhere you never were.
@@ -1636,6 +1532,10 @@ fn is_wake_input(event: &Event) -> bool {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    /// What each crumb of the path bar stands for, root first. The trail
+    /// widget knows the names; only this knows where they lead.
+    #[rust]
+    crumb_paths: Vec<PathBuf>,
     #[rust]
     tabs: Vec<Tab>,
     #[rust]
@@ -2181,10 +2081,13 @@ impl App {
         let current = self.current_dir();
         let title = display_name(&current);
         self.ui.label(cx, ids!(folder_title)).set_text(cx, &title);
-        let widget = self.ui.widget(cx, ids!(breadcrumbs));
-        if let Some(mut breadcrumbs) = widget.borrow_mut::<Breadcrumbs>() {
-            breadcrumbs.set_path(cx, &current);
-        }
+        // The whole trail, root first — no six-slot ceiling. The widget
+        // folds the middle when it will not fit and keeps the end, so a deep
+        // path stops quietly claiming to be six deep.
+        self.crumb_paths = current.ancestors().map(Path::to_path_buf).collect();
+        self.crumb_paths.reverse();
+        let trail: Vec<String> = self.crumb_paths.iter().map(|p| display_name(p)).collect();
+        self.ui.breadcrumb(cx, ids!(breadcrumbs)).set_trail(cx, trail);
         // Light up the place the current folder belongs to. Recent and
         // Starred are Home shortcuts, not places of their own, so they never
         // claim the highlight.
@@ -5265,10 +5168,11 @@ impl MatchEvent for App {
         }
 
         // ---- path bar: a crumb navigates, the empty space opens the editor
-        let widget = self.ui.widget(cx, ids!(breadcrumbs));
-        let crumb = widget
-            .borrow::<Breadcrumbs>()
-            .and_then(|breadcrumbs| breadcrumbs.clicked_path(cx, actions));
+        let crumb = self
+            .ui
+            .breadcrumb(cx, ids!(breadcrumbs))
+            .picked(actions)
+            .and_then(|index| self.crumb_paths.get(index).cloned());
         if let Some(path) = crumb {
             self.navigate(cx, path, true);
         } else if !self.search_visible

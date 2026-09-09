@@ -25,6 +25,7 @@ workspace.members = [
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",
+    "apps/storybook",
     "libs/asset/importer",
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",

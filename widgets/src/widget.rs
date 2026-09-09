@@ -341,6 +341,28 @@ pub trait Widget: WidgetNode {
         false
     }
 
+    /// What a checkbox-like widget reports to the test tree: `Some(true)`
+    /// while it is on, `Some(false)` while it is off. A widget with no
+    /// on/off state leaves the default `None`, and the snapshot then falls
+    /// back to the tree's own downcasts.
+    fn snapshot_checked(&self, _cx: &Cx) -> Option<bool> {
+        None
+    }
+
+    /// What a value-carrying widget reports to the test tree: the value the
+    /// viewer sees, spelled the way the widget shows it (a slider gives its
+    /// readout, an input its text). `None` when the widget carries no value.
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        None
+    }
+
+    /// What a selection-carrying widget reports to the test tree: the label
+    /// of the current choice. `None` when nothing is selectable. A reported
+    /// selection also becomes the row's `text`, as a drop-down's does.
+    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
+        None
+    }
+
     fn ref_cast_type_id(&self) -> TypeId
     where
         Self: 'static,
@@ -1235,6 +1257,27 @@ impl WidgetRef {
             return inner.widget.disabled(cx);
         }
         true
+    }
+
+    pub fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_checked(cx);
+        }
+        None
+    }
+
+    pub fn snapshot_value(&self, cx: &Cx) -> Option<String> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_value(cx);
+        }
+        None
+    }
+
+    pub fn snapshot_selected(&self, cx: &Cx) -> Option<String> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_selected(cx);
+        }
+        None
     }
 
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {

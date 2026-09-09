@@ -35,7 +35,13 @@
 //! floor, and a bit with no row behind it is never counted, never lights the
 //! chip, and comes back if the labels that own it come back.
 
-use crate::{event::TouchState, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    event::TouchState,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    overlay_place::{place, PlaceRequest, Placement, Side},
+    widget::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum DropTogglesAction {
@@ -293,6 +299,13 @@ pub struct DropToggles {
     /// side has no `Cx2d` to ask, so the draw side leaves it here.
     #[rust]
     pass_size: DVec2,
+    /// The widest label as actually LAID OUT, left here by the draw pass.
+    /// Zero until an open panel has been drawn once, and then the size is
+    /// measured rather than guessed. Here for the same reason `pass_size`
+    /// is: text cannot be measured without a `Cx2d`, and the panel's offset
+    /// has to be worked out on the event side.
+    #[rust]
+    label_w: f64,
     /// The chip's FINAL rect, captured on the event side. Mid-draw the chip
     /// only knows its pre-alignment position — a chip in a right-aligned row
     /// has not been moved yet — and the flip/clamp decision needs the place
@@ -451,6 +464,10 @@ impl DropToggles {
     fn panel_size(&self) -> DVec2 {
         let rows = self.item_count().max(1) as f64;
         let font = (self.draw_label.text_style.font_size as f64).max(6.0);
+        // Measured if a draw has happened, guessed only before the first
+        // one. The guess is a per-character average with no slack in it, so
+        // capitals and digits, whose advances run wider than the average,
+        // were sliced off at the panel's edge with no ellipsis to say so.
         let chars = self
             .labels
             .iter()
@@ -458,7 +475,8 @@ impl DropToggles {
             .map(|label| label.chars().count())
             .max()
             .unwrap_or(1) as f64;
-        let w = (chars * font * 0.62 + PANEL_PAD_X * 2.0 + MARK + MARK_GAP)
+        let text_w = if self.label_w > 0.0 { self.label_w } else { chars * font * 0.62 };
+        let w = (text_w + PANEL_PAD_X * 2.0 + MARK + MARK_GAP)
             .clamp(PANEL_MIN_W, PANEL_MAX_W);
         dvec2(w, rows * ROW_H + PANEL_PAD_Y * 2.0)
     }
@@ -470,6 +488,23 @@ impl DropToggles {
     fn panel_offset(&self, chip: Rect) -> DVec2 {
         let size = self.panel_size();
         let pass = self.pass_size;
+        // The shared placement rule decides the side (below, or above when
+        // there is room up there and none down) and the x (pulled back
+        // inboard of an EDGE inset, left edge winning). A pass of zero — the
+        // first event after opening, before a draw has measured it — makes
+        // both axes unbounded, so the panel simply hangs below until the
+        // next draw, as it always did.
+        let placed = place(&PlaceRequest {
+            anchor: chip,
+            size,
+            bounds: Rect {
+                pos: dvec2(EDGE, EDGE),
+                size: pass - dvec2(EDGE * 2.0, EDGE * 2.0),
+            },
+            gap: PANEL_GAP,
+            placement: Placement::BOTTOM_START,
+            match_anchor_width: false,
+        });
         // The only two vertical places the panel is ever allowed to be. It is
         // never pinned to the WINDOW instead: a panel pulled back over the
         // chip would take a press as a row toggle and then hand the same
@@ -477,27 +512,14 @@ impl DropToggles {
         // this widget promises cannot happen. Overrunning the window edge is
         // the lesser fault, so in the degenerate case (taller than the window
         // has room for on either side) the panel keeps its edge against the
-        // chip and lets the roomier side show what it can.
-        let below = chip.size.y + PANEL_GAP;
-        let above = -(size.y + PANEL_GAP);
-        let mut offset = dvec2(0.0, below);
-        if pass.x > 0.0 {
-            let right = pass.x - EDGE - size.x;
-            if chip.pos.x > right {
-                offset.x = (right - chip.pos.x).min(0.0);
-            }
-            if chip.pos.x + offset.x < EDGE {
-                offset.x = EDGE - chip.pos.x;
-            }
-        }
-        if pass.y > 0.0 && chip.pos.y + below + size.y > pass.y - EDGE {
-            let room_below = (pass.y - EDGE) - (chip.pos.y + below);
-            let room_above = (chip.pos.y - PANEL_GAP) - EDGE;
-            // Fitting above implies room_above >= size.y > room_below, so the
-            // one comparison covers both the flip and the fallback.
-            offset.y = if room_above > room_below { above } else { below };
-        }
-        offset
+        // chip and lets the roomier side show what it can. That is why only
+        // the SIDE is read off the placement here, not its rect: the helper
+        // shortens a popup to the room, and this panel keeps its full height.
+        let y = match placed.side {
+            Side::Top => -(size.y + PANEL_GAP),
+            _ => chip.size.y + PANEL_GAP,
+        };
+        dvec2(placed.rect.pos.x - chip.pos.x, y)
     }
 
     /// Which row a WINDOW-absolute point lands on. `None` for anything off
@@ -631,6 +653,16 @@ impl Widget for DropToggles {
                 },
                 size: drawn.size,
             };
+            // Measure the real advances now that there is a Cx2d to do it
+            // in, every open frame, so a label swap cannot leave a stale
+            // width behind.
+            let mut widest: f64 = 0.0;
+            for label in self.labels.iter().take(MAX_ITEMS) {
+                if let Some(run) = self.draw_label.prepare_single_line_run(cx, label) {
+                    widest = widest.max(run.width_in_lpxs as f64);
+                }
+            }
+            self.label_w = widest.ceil();
             let panel_size = self.panel_size();
             let offset = self.panel_offset(anchor);
             let mask = self.active;

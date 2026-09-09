@@ -408,8 +408,13 @@ script_mod! {
                 // past that the SDF used to degenerate into a rotated diamond
                 // (e.g. a 22px disc with r=11), instead of saturating at a circle.
                 let k = min(2. * r, min(size.x, size.y));
-                let bp = max(abs(p - size.xy) - (size.xy - vec2(k, k).xy), vec2(0., 0.));
-                self.dist = (length(bp) - k) / self.scale_factor;
+                // The same interior term box_x and box_y already carry. Without
+                // it the inside of the shape sits at a constant -k, so a square
+                // corner (r = 0) leaves the whole interior at distance zero:
+                // fill() paints nothing and stroke() paints everything, and a
+                // square box drew as one flat slab of its border colour.
+                let q = abs(p - size.xy) - size.xy + vec2(k, k).xy;
+                self.dist = (min(max(q.x, q.y), 0.) + length(max(q, vec2(0., 0.))) - k) / self.scale_factor;
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
             }
@@ -446,14 +451,18 @@ script_mod! {
                 // saturate at a capsule instead of degenerating into a diamond.
                 let k_left = min(2. * r_left, min(size.x, size.y));
                 let k_right = min(2. * r_right, min(size.x, size.y));
-                let bp_left = max(p + vec2(k_left, k_left).xy, vec2(0., 0.));
-                let bp_right = max(p + vec2(k_right, k_right).xy, vec2(0., 0.));
+                let q_left = p + vec2(k_left, k_left).xy;
+                let q_right = p + vec2(k_right, k_right).xy;
 
-                self.dist = mix(
-                    (length(bp_left) - k_left),
-                    (length(bp_right) - k_right),
-                    step(0.5 * w, p_r.x)
-                ) / self.scale_factor;
+                // The min(max(q.x,q.y),0) interior term, as in box_y: without it the
+                // interior distance is -2r, which is ZERO for a square corner, so the
+                // stroke's abs(dist) test passes everywhere inside and paints that half
+                // of the shape with the bevel. A row of joined buttons then looks cut
+                // in half down the middle.
+                let dist_left = min(max(q_left.x, q_left.y), 0.) + length(max(q_left, vec2(0., 0.))) - k_left;
+                let dist_right = min(max(q_right.x, q_right.y), 0.) + length(max(q_right, vec2(0., 0.))) - k_right;
+
+                self.dist = mix(dist_left, dist_right, step(0.5 * w, p_r.x)) / self.scale_factor;
 
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
@@ -479,22 +488,24 @@ script_mod! {
                 let k_rt = min(2. * r_right_top, min(size.x, size.y));
                 let k_rb = min(2. * r_right_bottom, min(size.x, size.y));
                 let k_lb = min(2. * r_left_bottom, min(size.x, size.y));
-                let bp_lt = max(p + vec2(k_lt, k_lt).xy, vec2(0., 0.));
-                let bp_rt = max(p + vec2(k_rt, k_rt).xy, vec2(0., 0.));
-                let bp_rb = max(p + vec2(k_rb, k_rb).xy, vec2(0., 0.));
-                let bp_lb = max(p + vec2(k_lb, k_lb).xy, vec2(0., 0.));
+                let q_lt = p + vec2(k_lt, k_lt).xy;
+                let q_rt = p + vec2(k_rt, k_rt).xy;
+                let q_rb = p + vec2(k_rb, k_rb).xy;
+                let q_lb = p + vec2(k_lb, k_lb).xy;
+
+                // The min(max(q.x,q.y),0) interior term, as in box_y: without it the
+                // interior distance is -2r, which is ZERO for a square corner, so the
+                // stroke's abs(dist) test passes everywhere inside and paints that
+                // quadrant with the bevel. A row of joined buttons, where the outer
+                // ends are round and the joints square, then looks cut in half.
+                let d_lt = min(max(q_lt.x, q_lt.y), 0.) + length(max(q_lt, vec2(0., 0.))) - k_lt;
+                let d_rt = min(max(q_rt.x, q_rt.y), 0.) + length(max(q_rt, vec2(0., 0.))) - k_rt;
+                let d_rb = min(max(q_rb.x, q_rb.y), 0.) + length(max(q_rb, vec2(0., 0.))) - k_rb;
+                let d_lb = min(max(q_lb.x, q_lb.y), 0.) + length(max(q_lb, vec2(0., 0.))) - k_lb;
 
                 self.dist = mix(
-                    mix(
-                        (length(bp_lt) - k_lt),
-                        (length(bp_lb) - k_lb),
-                        step(0.5 * h, p_r.y)
-                    ),
-                    mix(
-                        (length(bp_rt) - k_rt),
-                        (length(bp_rb) - k_rb),
-                        step(0.5 * h, p_r.y)
-                    ),
+                    mix(d_lt, d_lb, step(0.5 * h, p_r.y)),
+                    mix(d_rt, d_rb, step(0.5 * h, p_r.y)),
                     step(0.5 * w, p_r.x)
                 ) / self.scale_factor;
 

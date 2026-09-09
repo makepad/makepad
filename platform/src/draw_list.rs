@@ -259,6 +259,9 @@ impl Cx {
             let Some(geometry_id) = draw_call.geometry_id else {
                 continue;
             };
+            if self.geometries.is_id_stale(geometry_id) {
+                continue;
+            }
             let geometry = &self.geometries[geometry_id];
             let index_count = geometry.index_count as u64;
 

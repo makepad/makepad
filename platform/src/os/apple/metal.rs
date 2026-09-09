@@ -340,6 +340,8 @@ impl Cx {
                 if self.geometries.skip_stale(geometry_id) {
                     continue;
                 }
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
                 if !crate::geometry::geometry_layout_matches_shader(
                     geometry,

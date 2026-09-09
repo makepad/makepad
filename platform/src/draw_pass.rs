@@ -80,31 +80,50 @@ pub struct DrawPassId(pub(crate) usize);
 pub struct CxDrawPassPool(pub(crate) IdPool<CxDrawPass>);
 impl CxDrawPassPool {
     fn alloc(&mut self) -> DrawPass {
-        DrawPass(self.0.alloc())
+        let handle = self.0.alloc();
+        // A recycled slot starts the way a new one does. The previous
+        // owner's parent, main draw list and dirty flag would otherwise
+        // outlive it, and the repaint loop would encode the pass from a
+        // draw list that is gone before the new owner ever begins it.
+        self.0.pool[handle.id].item = CxDrawPass::default();
+        DrawPass(handle)
     }
 
+    /// Every pass that has an owner, in slot order. A slot whose handle was
+    /// dropped is left out: nothing may paint it, and the draw list it was
+    /// last begun with may be gone.
     pub fn id_iter(&self) -> DrawPassIterator {
         DrawPassIterator {
             cur: 0,
             len: self.0.pool.len(),
+            free: self.0.free_ids(),
         }
+    }
+
+    /// The number of slots ever allocated, live or free: a bound on any
+    /// walk through the parent chain.
+    pub fn slot_count(&self) -> usize {
+        self.0.pool.len()
     }
 }
 
 pub struct DrawPassIterator {
     cur: usize,
     len: usize,
+    free: Vec<usize>,
 }
 
 impl Iterator for DrawPassIterator {
     type Item = DrawPassId;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur >= self.len {
-            return None;
+        while self.cur < self.len {
+            let cur = self.cur;
+            self.cur += 1;
+            if !self.free.contains(&cur) {
+                return Some(DrawPassId(cur));
+            }
         }
-        let cur = self.cur;
-        self.cur += 1;
-        Some(DrawPassId(cur))
+        None
     }
 }
 
@@ -698,5 +717,28 @@ mod depth_attachment_size_tests {
             depth_attachment_size(Some((1024, 512)), dvec2(1126.0, 680.0), 2.0),
             (1024, 512)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_pass_is_not_iterated_and_its_slot_comes_back_clean() {
+        let mut passes = CxDrawPassPool::default();
+        let first = passes.alloc();
+        let id = first.draw_pass_id();
+        passes[id].paint_dirty = true;
+        passes[id].live_with_parent = true;
+        assert_eq!(passes.id_iter().collect::<Vec<_>>(), vec![id]);
+        drop(first);
+        assert!(passes.id_iter().next().is_none());
+        assert_eq!(passes.slot_count(), 1);
+        let second = passes.alloc();
+        assert_eq!(second.draw_pass_id(), id);
+        assert!(!passes[id].paint_dirty);
+        assert!(!passes[id].live_with_parent);
+        assert_eq!(passes.id_iter().collect::<Vec<_>>(), vec![id]);
     }
 }

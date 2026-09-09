@@ -16,6 +16,10 @@ script_mod! {
     mod.widgets.SplitterAlign = #(SplitterAlign::script_api(vm))
     mod.widgets.splat(mod.widgets.SplitterAlign)
 
+    // Not splatted: `None` as a bare exported name would shadow the one
+    // every other module means by it. Written out as SplitterCollapse.A.
+    mod.widgets.SplitterCollapse = #(SplitterCollapse::script_api(vm))
+
     set_type_default() do #(DrawSplitter::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
@@ -31,6 +35,11 @@ script_mod! {
         max_horizontal: 50.0
         min_vertical: 50.0
         max_vertical: 50.0
+        // Written out in full: this block's `use mod.widgets.*` is a
+        // snapshot taken before the registration above it, so the bare name
+        // is not in scope here however plainly it reads.
+        /** fold one pane away: SplitterCollapse.None A B */
+        collapse: mod.widgets.SplitterCollapse.None
 
         draw_bg +: {
             drag: instance(0.0)
@@ -166,6 +175,79 @@ impl SplitterAlign {
     }
 }
 
+/// Which pane, if either, is folded away.
+///
+/// Folding is a STATE and not a position. Three apps in this repo fold a
+/// panel by writing zero into the align and remembering the old value in a
+/// field of their own, which means each of them also has to put the value
+/// back, guard against a stray drag undoing it, and decide where to keep it.
+/// Said as a state instead, `align` is never written at all, so unfolding
+/// restores the exact bar the user left without anyone having remembered it.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum SplitterCollapse {
+    #[pick]
+    None = 0,
+    /// The first pane is folded away; the second has the room.
+    A = 1,
+    /// The second is folded away.
+    B = 2,
+}
+
+/// Where the bar sits this pass: folded hard to an edge, or wherever the
+/// align says within the room.
+///
+/// The floors are not consulted when a pane is folded — that is the whole
+/// point of folding, and applying them here is the bug that made a folded
+/// panel leave a gutter the width of its own floor.
+fn resolve_split_position(
+    align_pos: f64,
+    room: f64,
+    min_a: f64,
+    min_b: f64,
+    collapse: SplitterCollapse,
+    bar: f64,
+) -> f64 {
+    match collapse {
+        SplitterCollapse::A => 0.0,
+        // The room LESS the bar, not the whole room. The bar is laid out
+        // after the first pane and takes its width from what is left, so a
+        // first pane given everything leaves the bar nothing and it is not
+        // drawn at all: the panel closes and the handle that would open it
+        // again goes with it. Folding the first pane never had this problem
+        // because a zero-width pane leaves the bar its width by itself.
+        SplitterCollapse::B => (room - bar).max(0.0),
+        SplitterCollapse::None => clamp_split_position(align_pos, room, min_a, min_b),
+    }
+}
+
+/// Clamp a dragged split position into the room both panes' floors allow.
+///
+/// **A floor governs the hand, not the host.** This is applied to a drag and
+/// to nothing else. A host that sets the align itself is making a decision,
+/// not sliding a bar, and the commonest such decision is collapsing a panel
+/// to nothing — which three apps in this repo do by setting the position to
+/// zero on a splitter that also declares a floor. Applying the floor to
+/// that too does not enforce a rule, it overrules the caller: the panel
+/// stops collapsing and leaves a gutter the width of its own floor. The
+/// layout pass therefore clamps only into the room that exists (see
+/// `begin`), and the floor lives here, where a finger is on the bar.
+///
+/// If the two floors do not both fit in the room at all (a pane squeezed
+/// narrower than either floor demands), the floors lose rather than the
+/// caller: the position lands in the middle of whatever room is left,
+/// because a pane that cannot exist is a worse outcome than one that is
+/// merely below its own floor.
+fn clamp_split_position(position: f64, room: f64, min_a: f64, min_b: f64) -> f64 {
+    let room = room.max(0.0);
+    let ceiling = room - min_b;
+    if min_a <= ceiling {
+        position.clamp(min_a, ceiling)
+    } else {
+        room * 0.5
+    }
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSplitter {
@@ -198,6 +280,10 @@ pub struct Splitter {
     pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))]
     pub align: SplitterAlign,
+    /// Which pane is folded away, if either. Kept apart from `align` so
+    /// unfolding restores the bar the user left, with nobody remembering it.
+    #[live(SplitterCollapse::None)]
+    pub collapse: SplitterCollapse,
 
     #[rust]
     rect: Rect,
@@ -248,6 +334,8 @@ pub enum SplitterAction {
         axis: SplitterAxis,
         align: SplitterAlign,
     },
+    /// A pane was folded away, or brought back.
+    Collapsed(SplitterCollapse),
 }
 
 impl Widget for Splitter {
@@ -275,6 +363,10 @@ impl Widget for Splitter {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
+            // A folded splitter has no bar: a press that landed on where it
+            // used to be must not drag it back, which is why three callers
+            // currently have to force the align back to zero every pass.
+            Hit::FingerDown(_) if self.collapse != SplitterCollapse::None => {}
             Hit::FingerDown(fe) if self.drag_start_align.is_none() && fe.is_primary_hit() => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
@@ -297,16 +389,20 @@ impl Widget for Splitter {
                         SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,
                         SplitterAxis::Vertical => f.abs.y - f.abs_start.y,
                     };
-                    let new_position = drag_start_align.to_position(self.axis, self.rect) + delta;
+                    let raw_position = drag_start_align.to_position(self.axis, self.rect) + delta;
+                    let room = match self.axis {
+                        SplitterAxis::Horizontal => self.rect.size.x,
+                        SplitterAxis::Vertical => self.rect.size.y,
+                    };
+                    let (min_a, min_b) = self.axis_min_max();
+                    let new_position = clamp_split_position(raw_position, room, min_a, min_b);
                     self.align = match self.axis {
                         SplitterAxis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromA(new_position.max(self.min_vertical))
+                                SplitterAlign::FromA(new_position)
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromB(
-                                    (self.rect.size.x - new_position).max(self.max_vertical),
-                                )
+                                SplitterAlign::FromB(self.rect.size.x - new_position)
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.x)
                             }
@@ -314,11 +410,9 @@ impl Widget for Splitter {
                         SplitterAxis::Vertical => {
                             let center = self.rect.size.y / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromA(new_position.max(self.min_horizontal))
+                                SplitterAlign::FromA(new_position)
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromB(
-                                    (self.rect.size.y - new_position).max(self.max_horizontal),
-                                )
+                                SplitterAlign::FromB(self.rect.size.y - new_position)
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.y)
                             }
@@ -387,7 +481,24 @@ impl Splitter {
         }
 
         self.rect = cx.turtle().inner_rect();
-        self.position = self.align.to_position(self.axis, self.rect);
+        let room = match self.axis {
+            SplitterAxis::Horizontal => self.rect.size.x,
+            SplitterAxis::Vertical => self.rect.size.y,
+        };
+        // Folded hard to an edge, or into the room and no further. NOT the
+        // floors: a host that has set the align itself — restoring a
+        // remembered width, say — has said what it wants, and the floors
+        // are for the drag. Clamping here as well is what turned a folded
+        // panel into an empty gutter the width of its own floor.
+        let (min_a, min_b) = self.axis_min_max();
+        self.position = resolve_split_position(
+            self.align.to_position(self.axis, self.rect),
+            room,
+            min_a,
+            min_b,
+            self.collapse,
+            self.size,
+        );
 
         let walk = match self.axis {
             SplitterAxis::Horizontal => Walk::new(Size::Fixed(self.position), Size::fill()),
@@ -418,6 +529,18 @@ impl Splitter {
         cx.end_turtle();
     }
 
+    /// The floor for pane A and the floor for pane B, on this instance's own
+    /// axis. Named for the bar's orientation (`_vertical` for the vertical
+    /// bar a `Horizontal` axis draws), which is the pairing every existing
+    /// caller in this repo already relies on — this reads the same fields
+    /// the drag handler always has, it just now reads them from one place.
+    fn axis_min_max(&self) -> (f64, f64) {
+        match self.axis {
+            SplitterAxis::Horizontal => (self.min_vertical, self.max_vertical),
+            SplitterAxis::Vertical => (self.min_horizontal, self.max_horizontal),
+        }
+    }
+
     pub fn axis(&self) -> SplitterAxis {
         self.axis
     }
@@ -436,6 +559,22 @@ impl Splitter {
 
     pub fn align(&self) -> SplitterAlign {
         self.align
+    }
+
+    /// Which pane is folded away, if either.
+    pub fn collapse(&self) -> SplitterCollapse {
+        self.collapse
+    }
+
+    /// Fold a pane away, or bring it back. `align` is left alone, so what
+    /// comes back is the bar that went away.
+    pub fn set_collapse(&mut self, cx: &mut Cx, collapse: SplitterCollapse) {
+        if self.collapse != collapse {
+            self.collapse = collapse;
+            let uid = self.widget_uid();
+            cx.widget_action(uid, SplitterAction::Collapsed(collapse));
+            self.redraw(cx);
+        }
     }
 
     pub fn position(&self) -> f64 {
@@ -511,7 +650,131 @@ impl SplitterRef {
         self.borrow().map(|inner| inner.align())
     }
 
+    pub fn collapse(&self) -> SplitterCollapse {
+        self.borrow()
+            .map(|inner| inner.collapse())
+            .unwrap_or(SplitterCollapse::None)
+    }
+
+    pub fn set_collapse(&self, cx: &mut Cx, collapse: SplitterCollapse) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_collapse(cx, collapse);
+        }
+    }
+
+    /// The fold this splitter reports this pass, if it changed.
+    pub fn collapsed(&self, actions: &Actions) -> Option<SplitterCollapse> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<SplitterAction>() {
+            SplitterAction::Collapsed(collapse) => Some(collapse),
+            _ => None,
+        }
+    }
+
     pub fn position(&self) -> Option<f64> {
         self.borrow().map(|inner| inner.position())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Room to spare: the position is already inside both floors, so it is
+    /// returned unchanged.
+    #[test]
+    fn a_position_inside_both_floors_is_untouched() {
+        assert_eq!(clamp_split_position(200.0, 500.0, 50.0, 50.0), 200.0);
+    }
+
+    /// Below pane A's floor, the floor wins.
+    #[test]
+    fn a_position_below_a_floor_is_raised_to_it() {
+        assert_eq!(clamp_split_position(10.0, 500.0, 50.0, 50.0), 50.0);
+    }
+
+    /// Close enough to the far edge that pane B would be squeezed under its
+    /// own floor: the position is pulled back to leave B exactly its floor.
+    #[test]
+    fn a_position_that_would_starve_b_is_pulled_back() {
+        assert_eq!(clamp_split_position(490.0, 500.0, 50.0, 50.0), 450.0);
+    }
+
+    /// The two floors do not fit in the room at all (a window squeezed
+    /// narrower than both floors combined): the floors lose and the split
+    /// lands in the middle of what room there is, rather than handing one
+    /// pane a negative size or the other the whole strip.
+    #[test]
+    fn floors_that_do_not_both_fit_land_in_the_middle_instead() {
+        assert_eq!(clamp_split_position(999.0, 80.0, 50.0, 50.0), 40.0);
+        assert_eq!(clamp_split_position(-999.0, 80.0, 50.0, 50.0), 40.0);
+    }
+
+    /// No room at all is the same degenerate case, not a division or a
+    /// negative width.
+    #[test]
+    fn no_room_at_all_still_answers() {
+        assert_eq!(clamp_split_position(50.0, 0.0, 50.0, 50.0), 0.0);
+    }
+
+    /// Folding puts the bar hard against an edge, whatever the floors say —
+    /// that is what folding means, and it is the case a floor applied at
+    /// layout time got wrong.
+    #[test]
+    fn a_folded_pane_goes_to_the_edge_past_any_floor() {
+        let (room, min_a, min_b) = (900.0, 180.0, 50.0);
+        let bar = 6.0;
+        assert_eq!(
+            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::A, bar),
+            0.0,
+            "folding the first pane leaves it nothing, floor or no floor"
+        );
+        assert_eq!(
+            resolve_split_position(244.0, room, min_a, min_b, SplitterCollapse::B, bar),
+            room - bar,
+            "folding the second gives the first everything except the bar,              which has to stay: it is the only way back"
+        );
+    }
+
+    /// Unfolded, the floors are back in force and the align decides — and
+    /// the align was never written, so this is the bar the user left.
+    #[test]
+    fn unfolding_returns_to_the_bar_that_was_left() {
+        let (room, min_a, min_b) = (900.0, 180.0, 50.0);
+        let left_at = 244.0;
+        // Folded and unfolded, with the align untouched throughout: the
+        // position that comes back is the one that went away. This is what
+        // three apps each keep a remembered-width field to achieve.
+        assert_eq!(
+            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::A, 6.0),
+            0.0
+        );
+        assert_eq!(
+            resolve_split_position(left_at, room, min_a, min_b, SplitterCollapse::None, 6.0),
+            left_at
+        );
+    }
+
+    /// A host collapsing a panel to nothing is honoured, and the floor is
+    /// not applied to it. Three apps in this repo collapse a panel by
+    /// setting the position to zero on a splitter that also declares a
+    /// floor; running the drag clamp over that as well left an empty
+    /// gutter the width of the floor instead of a collapsed panel. The
+    /// layout pass clamps into the room and stops there — this test is
+    /// that division, written down.
+    #[test]
+    fn a_host_may_collapse_past_a_floor_that_a_drag_may_not() {
+        let room = 900.0;
+        // What the layout pass does with a deliberate collapse.
+        assert_eq!(0.0_f64.clamp(0.0, room), 0.0, "a host asking for nothing gets nothing");
+        // What a DRAG to the same place does, on the same splitter.
+        assert_eq!(
+            clamp_split_position(0.0, room, 180.0, 50.0),
+            180.0,
+            "a finger on the bar still stops at the floor"
+        );
+        // And the layout pass still refuses a pane wider than the window,
+        // which is the case that made a clamp there worth having at all.
+        assert_eq!(2000.0_f64.clamp(0.0, room), room);
     }
 }

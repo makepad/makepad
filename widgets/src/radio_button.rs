@@ -242,6 +242,17 @@ script_mod! {
         }
         padding: theme.mspace_2{left: -2.}
 
+        // A tab is a radio button WITHOUT the circle, so the room the circle
+        // needed has to be given back. The inherited walk carried that room
+        // as a left margin and no size at all, which a tab cannot survive:
+        // an icon in one collapsed the whole tab to a sliver rather than
+        // merely sitting too far in.
+        icon_walk: Walk{
+            width: theme.size_icon_s
+            height: theme.size_icon_s
+            margin: Inset{left: 0.}
+        }
+
         draw_bg +: {
             color: theme.color_inset
             color_active: theme.color_outset_active
@@ -323,6 +334,13 @@ pub struct RadioButton {
     #[live(false)]
     independent: bool,
 
+    /// Whether this radio is its own stop in the tab order. On for a radio
+    /// standing alone; a group that owns its rows turns it off and offers
+    /// ONE stop for the whole set, so Tab does not have to walk every
+    /// option to get past them.
+    #[live(true)]
+    nav_stop: bool,
+
     #[live]
     icon_walk: Walk,
     #[live]
@@ -359,7 +377,14 @@ impl RadioButton {
         self.draw_text
             .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        // A radio standing on its own is a tab stop. A row inside a group
+        // is not: the group is the one stop, and five rows would otherwise
+        // be five stops to walk past. Nor is a DISABLED one — it draws no
+        // focus ring, so a stop there is a press where the focus simply
+        // disappears with nothing on screen to say where it went.
+        if self.nav_stop && !self.disabled(cx.cx.cx) {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        }
         DrawStep::done()
     }
 
@@ -403,6 +428,10 @@ impl Widget for RadioButton {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
+        Some(self.active(cx))
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -411,6 +440,14 @@ impl Widget for RadioButton {
 
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
+        }
+
+        // A disabled radio is not an answer. Checked after the animator so a
+        // radio disabled mid-press still settles, and before any hit so it
+        // cannot be pressed: without this it TAKES the choice off whichever
+        // enabled option had it, which is what it did.
+        if self.disabled(cx) {
+            return;
         }
 
         match event.hits(cx, self.draw_bg.area()) {
@@ -447,6 +484,22 @@ impl Widget for RadioButton {
                     cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
                 }
                 // A radio in a GROUP does not toggle off when clicked again.
+            }
+            // A radio registers a tab stop and draws a focus ring, and until
+            // now no key did anything once you were standing on it: Space,
+            // Return and the arrows were all dead, so it could be reached and
+            // never answered. Space and Return do exactly what a release
+            // does, down to the toggle-off an independent one allows.
+            Hit::KeyDown(ke)
+                if matches!(ke.key_code, KeyCode::Space | KeyCode::ReturnKey) =>
+            {
+                if self.animator_in_state(cx, ids!(active.off)) {
+                    self.animator_play(cx, ids!(active.on));
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                } else if self.independent {
+                    self.animator_play(cx, ids!(active.off));
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                }
             }
             Hit::FingerMove(_fe) => {}
             _ => (),
@@ -492,6 +545,16 @@ impl RadioButtonRef {
                     RadioButtonAction::Clicked,
                 );
             }
+        }
+    }
+
+    /// Take this radio out of the tab order, or put it back. A group that
+    /// offers one stop for the whole set calls this on every row it owns —
+    /// it is not left to the caller's template to remember, because a
+    /// template that forgets silently restores a stop per row.
+    pub fn set_nav_stop(&self, nav_stop: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.nav_stop = nav_stop;
         }
     }
 

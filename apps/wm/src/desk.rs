@@ -406,10 +406,8 @@ script_mod! {
         angle: 0.0
         /** ring thickness in pixels 1..8 step 0.5 */
         border_size: 2.0
-        // A hard square ring, measured straight off the quad edges. NOT an
-        // Sdf2d box + stroke: with radius 0 that box has no interior
-        // distance (it saturates at 0), so the stroke floods the whole
-        // tile — which only showed wherever the child did not cover it.
+        // A hard square ring, measured straight off the quad edges rather
+        // than as an Sdf2d box and stroke.
         pixel: fn() {
             let p = self.pos * self.rect_size
             let bs = self.border_size

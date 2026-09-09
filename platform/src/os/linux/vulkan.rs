@@ -5615,6 +5615,12 @@ impl CxVulkan {
                 }
             };
 
+            if cx.geometries.skip_stale(packet.geometry_id) {
+                // The mesh this call names is gone; its slot belongs to
+                // someone else now, and drawing it would paint that mesh
+                // with this call's instance count.
+                continue;
+            }
             let shader_layout = cx.draw_shaders.shaders[packet.shader_index]
                 .mapping
                 .geometries

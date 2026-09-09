@@ -2,6 +2,7 @@ use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
+    overlay_place::span_inboard,
     widget::*,
     widget_async::CxSplashVmExt,
     widget_tree::CxWidgetExt,
@@ -621,6 +622,23 @@ impl PopupMenu {
 
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
         self.draw_bg.end(cx);
+
+        // The caller's shift is a WANT, not an answer. The turtle translates
+        // the menu by trigger.pos + shift and never asks whether the result
+        // is still on screen, so a dropdown low in a window opened a menu
+        // whose last rows fell past the bottom edge — not merely clipped,
+        // unreachable, since this menu has no scroll and never flips.
+        // Pull the span back inside the pass on both axes first.
+        const MENU_MARGIN: f64 = 4.0;
+        let menu = self.draw_bg.area().rect(cx);
+        let trigger = shift_area.rect(cx);
+        let pass = cx.current_pass_size();
+        let want = menu.pos + trigger.pos + shift;
+        let placed = dvec2(
+            span_inboard(want.x, menu.size.x, MENU_MARGIN, pass.x - MENU_MARGIN * 2.0),
+            span_inboard(want.y, menu.size.y, MENU_MARGIN, pass.y - MENU_MARGIN * 2.0),
+        );
+        let shift = shift + (placed - want);
 
         cx.end_pass_sized_turtle_with_shift(shift_area, shift);
         self.draw_list.end(cx);
