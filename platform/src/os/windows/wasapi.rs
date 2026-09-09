@@ -260,8 +260,12 @@ impl WasapiAccess {
                             }
                             wasapi.release_buffer(buffer);
                         }
-                        let mut audio_inputs = audio_inputs.lock().unwrap();
-                        audio_inputs.retain(|v| v.device_id != device_id);
+                        audio_inputs.lock().unwrap().retain(|v| v.device_id != device_id);
+                        // The app is told, the way it is told when an
+                        // output thread ends: a capture that died and said
+                        // nothing leaves the monitor switch claiming a
+                        // device that is not there any more.
+                        change_signal.set();
                     } else {
                         crate::error!("audio: could not open loopback device {device_id:?}");
                         failed_devices.lock().unwrap().insert(device_id);
@@ -301,8 +305,8 @@ impl WasapiAccess {
                             }
                             wasapi.release_buffer(buffer);
                         }
-                        let mut audio_inputs = audio_inputs.lock().unwrap();
-                        audio_inputs.retain(|v| v.device_id != device_id);
+                        audio_inputs.lock().unwrap().retain(|v| v.device_id != device_id);
+                        change_signal.set();
                     } else {
                         crate::error!("audio: could not open input device {device_id:?}");
                         failed_devices.lock().unwrap().insert(device_id);
@@ -1207,6 +1211,32 @@ mod tests {
             .filter(|line| line.trim_start().starts_with("println!("))
             .collect();
         assert!(to_stdout.is_empty(), "printed past the log: {to_stdout:?}");
+    }
+
+    /// Every capture thread's exit tells the app, the way an output
+    /// thread's does: a device that died in silence leaves the app's
+    /// switch claiming a device that is not there. There is no harness
+    /// for a device thread, so the pin is that each `retain` on the input
+    /// list is followed by the signal.
+    #[test]
+    fn a_capture_thread_that_ends_tells_the_app_it_did() {
+        // The tests below are not the code above: read only the module.
+        let source = include_str!("wasapi.rs");
+        let body = source.split("mod tests {").next().unwrap_or(source);
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let mut exits = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("audio_inputs.lock().unwrap().retain(") {
+                continue;
+            }
+            exits += 1;
+            let told = lines[index + 1..]
+                .iter()
+                .find(|next| !next.is_empty() && !next.starts_with("//"))
+                .copied();
+            assert_eq!(told, Some("change_signal.set();"), "an exit that says nothing");
+        }
+        assert_eq!(exits, 2, "both capture kinds end this way");
     }
 
     #[test]
