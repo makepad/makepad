@@ -741,6 +741,17 @@ script_mod! {
         align: Align{x: 0.5, y: 0.0}
     }
 
+    // One rack row's routing: a chip per chain saying whether the row's
+    // effect is on it. As wide as the strips above, so the chips sit
+    // under the channels they route.
+    let FxRoute = View{
+        width: 470
+        height: Fit
+        flow: Right
+        spacing: 6
+        align: Align{x: 0.0, y: 0.5}
+    }
+
     let ApcXfader = Slider{
         width: Fill
         height: 44
@@ -3029,7 +3040,11 @@ script_mod! {
                                     }
                                 }
                                 View{
-                                    width: Fill height: Fit flow: Right spacing: 10
+                                    width: Fill height: Fit flow: Right spacing: 8
+                                    // The strips, as wide as the routing chips under
+                                    // them, and the final bus beside them.
+                                    View{
+                                    width: 470 height: Fit flow: Right spacing: 10
                                     FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
@@ -3037,42 +3052,45 @@ script_mod! {
                                     FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
                                     FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    }
+                                    RoundedView{
+                                        width: Fill height: Fit flow: Down spacing: 3 padding: 8
+                                        draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
+                                        View{width: Fill height: Fit flow: Right
+                                            Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
+                                            mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
+                                        }
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
+                                        Label{
+                                            width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
+                                            draw_text.color: #x657383
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                    }
                                 }
-                                View{
-                                    width: Fill height: Fill flow: Right spacing: 8
-                                    mix_rack := ScrollYView{
+                                mix_rack := ScrollYView{
                                         width: Fill height: Fill flow: Down spacing: 4
                                         // The effects rack, on the page where every
-                                        // audio source meets: the chips say which
-                                        // source the knobs below are on -- one of the
-                                        // seven strips above, both decks at once, or
-                                        // the final mix. The A, B and BOTH chips keep
-                                        // the ids they had on the SFX page.
+                                        // audio source meets. Each row opens with its
+                                        // routing -- a chip per chain, under the strip
+                                        // it belongs to, lit while that effect is on
+                                        // that chain -- and the knobs to its right are
+                                        // the effect's own, turning it wherever it is
+                                        // on. The name chip is the effect's master
+                                        // switch.
                                         View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
-                                            PanelLabel{text: "fx on"}
-                                            fx_target_video := PillButton{width: 52 text: "VIDEO"}
-                                            sfx_fx_a := PillButton{width: 32 text: "A"}
-                                            sfx_fx_b := PillButton{width: 32 text: "B"}
-                                            sfx_fx_mix := PillButton{width: 48 text: "BOTH"}
-                                            fx_target_sfx := PillButton{width: 40 text: "SFX"}
-                                            fx_target_piano := PillButton{width: 52 text: "PIANO"}
-                                            fx_target_ironfish := PillButton{width: 44 text: "IRON"}
-                                            fx_target_drums := PillButton{width: 56 text: "DRUMS"}
-                                            fx_target_master := PillButton{width: 64 text: "MASTER"}
-                                            View{width: Fill height: 1}
-                                            sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
-                                        }
-                                        View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
-                                            spacing: 8
-                                            align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                PanelLabel{text: "fx on"}
+                                                View{width: Fill height: 1}
+                                                sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
+                                            }
                                             PanelLabel{width: 62 text: "EQ SPLIT"}
                                             sfx_eq_low_hz := Slider{
                                                 width: 170
@@ -3101,6 +3119,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_echo_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_echo_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_echo_a := PillButton{width: 32 text: "A"}
+                                                fx_on_echo_b := PillButton{width: 32 text: "B"}
+                                                fx_on_echo_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_echo_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_echo_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_echo_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_echo_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
                                             sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
                                             sfx_fx_feedback := Slider{
@@ -3121,6 +3150,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_flanger_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_flanger_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_flanger_a := PillButton{width: 32 text: "A"}
+                                                fx_on_flanger_b := PillButton{width: 32 text: "B"}
+                                                fx_on_flanger_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_flanger_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_flanger_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_flanger_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_flanger_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_flanger := PillButton{width: 78 text: "FLANGER"}
                                             sfx_fx_flanger_free := View{
                                                 width: Fit
@@ -3162,6 +3202,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_bitcrusher_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_bitcrusher_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_bitcrusher_a := PillButton{width: 32 text: "A"}
+                                                fx_on_bitcrusher_b := PillButton{width: 32 text: "B"}
+                                                fx_on_bitcrusher_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_bitcrusher_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_bitcrusher_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_bitcrusher_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_bitcrusher_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_bitcrusher := PillButton{width: 92 text: "BITCRUSH"}
                                             sfx_fx_bitcrusher_bits := Slider{
                                                 width: 170
@@ -3181,6 +3232,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_tremolo_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_tremolo_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_tremolo_a := PillButton{width: 32 text: "A"}
+                                                fx_on_tremolo_b := PillButton{width: 32 text: "B"}
+                                                fx_on_tremolo_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_tremolo_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_tremolo_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_tremolo_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_tremolo_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_tremolo := PillButton{width: 78 text: "TREMOLO"}
                                             sfx_fx_tremolo_free := View{
                                                 width: Fit
@@ -3222,6 +3284,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_distortion_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_distortion_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_distortion_a := PillButton{width: 32 text: "A"}
+                                                fx_on_distortion_b := PillButton{width: 32 text: "B"}
+                                                fx_on_distortion_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_distortion_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_distortion_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_distortion_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_distortion_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_distortion := PillButton{width: 92 text: "DISTORT"}
                                             sfx_fx_distortion_drive := Slider{
                                                 width: 170
@@ -3240,6 +3313,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_phaser_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_phaser_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_phaser_a := PillButton{width: 32 text: "A"}
+                                                fx_on_phaser_b := PillButton{width: 32 text: "B"}
+                                                fx_on_phaser_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_phaser_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_phaser_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_phaser_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_phaser_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_phaser := PillButton{width: 70 text: "PHASER"}
                                             sfx_fx_phaser_free := View{
                                                 width: Fit
@@ -3291,6 +3375,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_autopan_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_autopan_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_autopan_a := PillButton{width: 32 text: "A"}
+                                                fx_on_autopan_b := PillButton{width: 32 text: "B"}
+                                                fx_on_autopan_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_autopan_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_autopan_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_autopan_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_autopan_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_autopan := PillButton{width: 78 text: "AUTOPAN"}
                                             sfx_fx_autopan_free := View{
                                                 width: Fit
@@ -3332,6 +3427,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_stereo_width_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_stereo_width_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_stereo_width_a := PillButton{width: 32 text: "A"}
+                                                fx_on_stereo_width_b := PillButton{width: 32 text: "B"}
+                                                fx_on_stereo_width_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_stereo_width_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_stereo_width_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_stereo_width_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_stereo_width_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_stereo_width := PillButton{width: 56 text: "WIDTH"}
                                             sfx_fx_stereo_width_amount := Slider{
                                                 width: 170
@@ -3350,6 +3456,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_plate_reverb_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_plate_reverb_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_plate_reverb_a := PillButton{width: 32 text: "A"}
+                                                fx_on_plate_reverb_b := PillButton{width: 32 text: "B"}
+                                                fx_on_plate_reverb_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_plate_reverb_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_plate_reverb_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_plate_reverb_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_plate_reverb_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_plate_reverb := PillButton{width: 70 text: "REVERB"}
                                             sfx_fx_plate_reverb_size := Slider{
                                                 width: 170
@@ -3368,6 +3485,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_moog_ladder_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_moog_ladder_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_moog_ladder_a := PillButton{width: 32 text: "A"}
+                                                fx_on_moog_ladder_b := PillButton{width: 32 text: "B"}
+                                                fx_on_moog_ladder_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_moog_ladder_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_moog_ladder_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_moog_ladder_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_moog_ladder_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_moog_ladder := PillButton{width: 70 text: "LADDER"}
                                             sfx_fx_moog_ladder_cutoff := Slider{
                                                 width: 170
@@ -3406,6 +3534,17 @@ script_mod! {
                                             flow: Right
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
+                                            FxRoute{
+                                                fx_on_compressor_master := PillButton{width: 64 text: "MASTER"}
+                                                fx_on_compressor_video := PillButton{width: 52 text: "VIDEO"}
+                                                fx_on_compressor_a := PillButton{width: 32 text: "A"}
+                                                fx_on_compressor_b := PillButton{width: 32 text: "B"}
+                                                fx_on_compressor_both := PillButton{width: 48 text: "BOTH"}
+                                                fx_on_compressor_sfx := PillButton{width: 40 text: "SFX"}
+                                                fx_on_compressor_piano := PillButton{width: 52 text: "PIANO"}
+                                                fx_on_compressor_ironfish := PillButton{width: 44 text: "IRON"}
+                                                fx_on_compressor_drums := PillButton{width: 56 text: "DRUMS"}
+                                            }
                                             sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
                                             sfx_fx_compressor_threshold := Slider{
                                                 width: 170
@@ -3428,24 +3567,6 @@ script_mod! {
                                             }
                                         }
                                     }
-                                    RoundedView{
-                                        width: 300 height: Fill flow: Down spacing: 3 padding: 8
-                                        draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
-                                        View{width: Fill height: Fit flow: Right
-                                            Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
-                                            mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
-                                        }
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
-                                        View{width: Fill height: Fill}
-                                        Label{
-                                            width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
-                                            draw_text.color: #x657383
-                                            draw_text.text_style.font_size: 9
-                                        }
-                                    }
-                                }
                             }
 
                             // ============ MESH ============
@@ -5355,18 +5476,100 @@ impl ConsoleMode {
     }
 }
 
-/// The rack's target row, in the order the strips stand above it. The
-/// A, B and BOTH chips keep the ids they had on the SFX page.
-const FX_TARGET_CHIPS: [(&[LiveId], FxTarget); 9] = [
-    (ids!(fx_target_video), FxTarget::One(ChainTarget::Video)),
-    (ids!(sfx_fx_a), FxTarget::One(ChainTarget::DeckA)),
-    (ids!(sfx_fx_b), FxTarget::One(ChainTarget::DeckB)),
-    (ids!(sfx_fx_mix), FxTarget::Both),
-    (ids!(fx_target_sfx), FxTarget::One(ChainTarget::Sfx)),
-    (ids!(fx_target_piano), FxTarget::One(ChainTarget::Piano)),
-    (ids!(fx_target_ironfish), FxTarget::One(ChainTarget::Ironfish)),
-    (ids!(fx_target_drums), FxTarget::One(ChainTarget::Drums)),
-    (ids!(fx_target_master), FxTarget::One(ChainTarget::Master)),
+/// The columns of the routing, left to right: the mix first, then the
+/// seven strips in the order they stand above, with BOTH between the
+/// decks it names.
+const FX_ROUTE: [FxTarget; 9] = [
+    FxTarget::One(ChainTarget::Master),
+    FxTarget::One(ChainTarget::Video),
+    FxTarget::One(ChainTarget::DeckA),
+    FxTarget::One(ChainTarget::DeckB),
+    FxTarget::Both,
+    FxTarget::One(ChainTarget::Sfx),
+    FxTarget::One(ChainTarget::Piano),
+    FxTarget::One(ChainTarget::Ironfish),
+    FxTarget::One(ChainTarget::Drums),
+];
+
+/// One rack row that can be switched on or off: its name chip, its nine
+/// routing chips in `FX_ROUTE`'s order, how a chain answers whether the
+/// effect is on it, and how it is switched. The echo's switch is its
+/// rung. The EQ split has no row here: it is a pair of crossovers, not
+/// something that is on or off.
+struct FxRow {
+    name: &'static [LiveId],
+    route: [&'static [LiveId]; 9],
+    on: fn(&ChainState) -> bool,
+    set: fn(&mut ChainState, bool) -> Vec<EffectParam>,
+}
+
+const FX_ROWS: [FxRow; 11] = [
+    FxRow {
+        name: ids!(sfx_fx_echo),
+        route: [ids!(fx_on_echo_master), ids!(fx_on_echo_video), ids!(fx_on_echo_a), ids!(fx_on_echo_b), ids!(fx_on_echo_both), ids!(fx_on_echo_sfx), ids!(fx_on_echo_piano), ids!(fx_on_echo_ironfish), ids!(fx_on_echo_drums)],
+        on: |chain| chain.echo_rung > 0,
+        set: |chain, on| chain.set_echo_rung(if on { 1 } else { 0 }),
+    },
+    FxRow {
+        name: ids!(sfx_fx_flanger),
+        route: [ids!(fx_on_flanger_master), ids!(fx_on_flanger_video), ids!(fx_on_flanger_a), ids!(fx_on_flanger_b), ids!(fx_on_flanger_both), ids!(fx_on_flanger_sfx), ids!(fx_on_flanger_piano), ids!(fx_on_flanger_ironfish), ids!(fx_on_flanger_drums)],
+        on: |chain| chain.flanger_on,
+        set: |chain, on| chain.set_flanger(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_bitcrusher),
+        route: [ids!(fx_on_bitcrusher_master), ids!(fx_on_bitcrusher_video), ids!(fx_on_bitcrusher_a), ids!(fx_on_bitcrusher_b), ids!(fx_on_bitcrusher_both), ids!(fx_on_bitcrusher_sfx), ids!(fx_on_bitcrusher_piano), ids!(fx_on_bitcrusher_ironfish), ids!(fx_on_bitcrusher_drums)],
+        on: |chain| chain.bitcrusher_on,
+        set: |chain, on| chain.set_bitcrusher(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_tremolo),
+        route: [ids!(fx_on_tremolo_master), ids!(fx_on_tremolo_video), ids!(fx_on_tremolo_a), ids!(fx_on_tremolo_b), ids!(fx_on_tremolo_both), ids!(fx_on_tremolo_sfx), ids!(fx_on_tremolo_piano), ids!(fx_on_tremolo_ironfish), ids!(fx_on_tremolo_drums)],
+        on: |chain| chain.tremolo_on,
+        set: |chain, on| chain.set_tremolo(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_distortion),
+        route: [ids!(fx_on_distortion_master), ids!(fx_on_distortion_video), ids!(fx_on_distortion_a), ids!(fx_on_distortion_b), ids!(fx_on_distortion_both), ids!(fx_on_distortion_sfx), ids!(fx_on_distortion_piano), ids!(fx_on_distortion_ironfish), ids!(fx_on_distortion_drums)],
+        on: |chain| chain.distortion_on,
+        set: |chain, on| chain.set_distortion(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_phaser),
+        route: [ids!(fx_on_phaser_master), ids!(fx_on_phaser_video), ids!(fx_on_phaser_a), ids!(fx_on_phaser_b), ids!(fx_on_phaser_both), ids!(fx_on_phaser_sfx), ids!(fx_on_phaser_piano), ids!(fx_on_phaser_ironfish), ids!(fx_on_phaser_drums)],
+        on: |chain| chain.phaser_on,
+        set: |chain, on| chain.set_phaser(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_autopan),
+        route: [ids!(fx_on_autopan_master), ids!(fx_on_autopan_video), ids!(fx_on_autopan_a), ids!(fx_on_autopan_b), ids!(fx_on_autopan_both), ids!(fx_on_autopan_sfx), ids!(fx_on_autopan_piano), ids!(fx_on_autopan_ironfish), ids!(fx_on_autopan_drums)],
+        on: |chain| chain.autopan_on,
+        set: |chain, on| chain.set_autopan(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_stereo_width),
+        route: [ids!(fx_on_stereo_width_master), ids!(fx_on_stereo_width_video), ids!(fx_on_stereo_width_a), ids!(fx_on_stereo_width_b), ids!(fx_on_stereo_width_both), ids!(fx_on_stereo_width_sfx), ids!(fx_on_stereo_width_piano), ids!(fx_on_stereo_width_ironfish), ids!(fx_on_stereo_width_drums)],
+        on: |chain| chain.stereo_width_on,
+        set: |chain, on| chain.set_stereo_width(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_plate_reverb),
+        route: [ids!(fx_on_plate_reverb_master), ids!(fx_on_plate_reverb_video), ids!(fx_on_plate_reverb_a), ids!(fx_on_plate_reverb_b), ids!(fx_on_plate_reverb_both), ids!(fx_on_plate_reverb_sfx), ids!(fx_on_plate_reverb_piano), ids!(fx_on_plate_reverb_ironfish), ids!(fx_on_plate_reverb_drums)],
+        on: |chain| chain.plate_reverb_on,
+        set: |chain, on| chain.set_plate_reverb(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_moog_ladder),
+        route: [ids!(fx_on_moog_ladder_master), ids!(fx_on_moog_ladder_video), ids!(fx_on_moog_ladder_a), ids!(fx_on_moog_ladder_b), ids!(fx_on_moog_ladder_both), ids!(fx_on_moog_ladder_sfx), ids!(fx_on_moog_ladder_piano), ids!(fx_on_moog_ladder_ironfish), ids!(fx_on_moog_ladder_drums)],
+        on: |chain| chain.moog_ladder_on,
+        set: |chain, on| chain.set_moog_ladder(on),
+    },
+    FxRow {
+        name: ids!(sfx_fx_compressor),
+        route: [ids!(fx_on_compressor_master), ids!(fx_on_compressor_video), ids!(fx_on_compressor_a), ids!(fx_on_compressor_b), ids!(fx_on_compressor_both), ids!(fx_on_compressor_sfx), ids!(fx_on_compressor_piano), ids!(fx_on_compressor_ironfish), ids!(fx_on_compressor_drums)],
+        on: |chain| chain.compressor_on,
+        set: |chain, on| chain.set_compressor(on),
+    },
 ];
 
 const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 4] = [
@@ -6189,88 +6392,53 @@ enum LowerTab {
     Archive,
 }
 
-/// Which chain the rack's knobs are on: one of the eight, or both decks
-/// at once. BOTH is a gesture and not a chain -- it writes the same value
-/// to both decks rather than reading a blend of them, so the rack shows
-/// deck A while it is up, and a toggle lands both on the side deck A was
-/// not on.
+/// A column of the routing: one chain, or both decks at once. BOTH is
+/// a gesture and not a chain -- it lands the same switch on both decks,
+/// so a pair that started on opposite sides ends on the same one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FxTarget {
     One(ChainTarget),
     Both,
 }
 
-impl Default for FxTarget {
-    fn default() -> Self {
-        Self::Both
-    }
-}
-
 impl FxTarget {
-    /// Every chain an edit on this row goes to.
+    /// Every chain a press on this column goes to.
     fn chains(self) -> Vec<ChainTarget> {
         match self {
             Self::One(target) => vec![target],
             Self::Both => vec![ChainTarget::DeckA, ChainTarget::DeckB],
         }
     }
-
-    /// The chain whose settings the rack displays.
-    fn shown(self) -> ChainTarget {
-        match self {
-            Self::One(target) => target,
-            Self::Both => ChainTarget::DeckA,
-        }
-    }
-
-    /// The word the levels file holds for the row: a target's own word,
-    /// or `both`. Self-describing, so a build that gains a target does not
-    /// renumber the ones an older file already names.
-    fn tag(self) -> &'static str {
-        match self {
-            Self::One(target) => target.tag(),
-            Self::Both => "both",
-        }
-    }
-
-    fn from_tag(tag: &str) -> Option<FxTarget> {
-        if tag.trim() == "both" {
-            return Some(Self::Both);
-        }
-        ChainTarget::ALL.into_iter().find(|target| target.tag() == tag.trim()).map(Self::One)
-    }
 }
 
 #[cfg(test)]
-mod fx_target_tests {
+mod fx_route_tests {
     use super::*;
 
-    /// BOTH edits two chains and shows one; a single target edits and
-    /// shows itself. A row that edited what it did not show would make
-    /// every knob a lie.
+    /// BOTH reaches two chains and a single column reaches itself, and
+    /// the routing names every chain exactly once besides BOTH.
     #[test]
-    fn both_edits_the_decks_and_shows_deck_a() {
+    fn the_routing_reaches_every_chain_once_and_both_decks_together() {
         assert_eq!(FxTarget::Both.chains(), vec![ChainTarget::DeckA, ChainTarget::DeckB]);
-        assert_eq!(FxTarget::Both.shown(), ChainTarget::DeckA);
         for target in ChainTarget::ALL {
             assert_eq!(FxTarget::One(target).chains(), vec![target]);
-            assert_eq!(FxTarget::One(target).shown(), target);
+            let columns = FX_ROUTE.iter().filter(|c| **c == FxTarget::One(target)).count();
+            assert_eq!(columns, 1, "{target:?}");
         }
-        assert_eq!(FxTarget::default(), FxTarget::Both, "as the old MIX chip was");
+        assert_eq!(FX_ROWS.len(), 11, "every switchable slot has a row");
     }
 
-    /// The row's word round-trips, and a word this build does not know
-    /// leaves the default standing rather than landing on a neighbour.
+    /// Each row's switch answers to its own getter, on a bare chain.
     #[test]
-    fn fx_target_tag_round_trips_and_a_stranger_reads_as_nothing() {
-        assert_eq!(FxTarget::from_tag(FxTarget::Both.tag()), Some(FxTarget::Both));
-        for target in ChainTarget::ALL {
-            let row = FxTarget::One(target);
-            assert_eq!(FxTarget::from_tag(row.tag()), Some(row));
-            assert_eq!(FxTarget::from_tag(&format!(" {}\n", row.tag())), Some(row));
+    fn every_row_switches_what_it_reads() {
+        for row in FX_ROWS.iter() {
+            let mut chain = ChainState::default();
+            assert!(!(row.on)(&chain), "a fresh chain has nothing on");
+            let params = (row.set)(&mut chain, true);
+            assert!((row.on)(&chain) && !params.is_empty(), "{:?}", row.name);
+            (row.set)(&mut chain, false);
+            assert!(!(row.on)(&chain), "{:?}", row.name);
         }
-        assert_eq!(FxTarget::from_tag("mix"), None, "the old chip's label was never a word");
-        assert_eq!(FxTarget::from_tag(""), None);
     }
 }
 
@@ -8364,9 +8532,11 @@ pub struct App {
     music_model: BrowseModel,
     #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
     sfx_model: BrowseModel,
-    /// Which chain the rack's knobs are on.
-    #[rust]
-    sfx_fx_target: FxTarget,
+    /// The echo's rung: the row's knob, and what the routing switches
+    /// the echo on with. A chain's own `echo_rung` is zero while the echo
+    /// is off it, so the knob has to live above the chains.
+    #[rust(1)]
+    fx_echo_rung: usize,
     /// The standing settings of the six chains that are not a deck's:
     /// video, the pads, the three synth tracks and the mix. The decks'
     /// live with the decks, where a swap carries them.
@@ -16375,14 +16545,54 @@ p2 {}
         }
     }
 
-    /// One edit, applied to every chain the target row points at, and
-    /// what changed sent to the engine. The one door for every knob on
-    /// the rack, so a handler says what to turn and never which chain.
+    /// One edit, applied to one chain, and what changed sent to the
+    /// engine.
+    fn edit_chain(&mut self, target: ChainTarget, edit: impl Fn(&mut ChainState) -> Vec<EffectParam>) {
+        let params = edit(self.chain_state_mut(target));
+        for param in params {
+            self.mixer.set_chain_effect(target, param);
+        }
+    }
+
+    /// One edit, applied to every chain. The one door for every knob on
+    /// the rack: a knob is the effect's, not a channel's -- the routing
+    /// says where the effect is on, and its settings are the same
+    /// wherever that is -- so a handler says what to turn and never
+    /// which chain.
     fn edit_rack(&mut self, edit: impl Fn(&mut ChainState) -> Vec<EffectParam>) {
-        for target in self.sfx_fx_target.chains() {
-            let params = edit(self.chain_state_mut(target));
-            for param in params {
-                self.mixer.set_chain_effect(target, param);
+        for target in ChainTarget::ALL {
+            self.edit_chain(target, &edit);
+        }
+    }
+
+    /// The chain the rack's knobs show. Every knob writes every chain,
+    /// so any one of them is the truth; deck A is the one that always
+    /// exists.
+    fn rack_chain(&self) -> &ChainState {
+        self.chain_state(ChainTarget::DeckA)
+    }
+
+    /// Switch one row's effect on one chain. The echo's switch is its
+    /// rung and the rung is the row's knob, so switching the echo on
+    /// lands it on the rung the knob shows rather than always the first.
+    fn switch_row(&mut self, row: &FxRow, target: ChainTarget, on: bool) {
+        if on && row.name == ids!(sfx_fx_echo) {
+            let rung = self.fx_echo_rung;
+            self.edit_chain(target, |chain| chain.set_echo_rung(rung));
+        } else {
+            self.edit_chain(target, |chain| (row.set)(chain, on));
+        }
+    }
+
+    /// The routing: each row's name lit while its effect is on anywhere,
+    /// and each of its chips lit while every chain the chip names has it.
+    fn sync_fx_routes(&mut self, cx: &mut Cx) {
+        for row in FX_ROWS.iter() {
+            let anywhere = ChainTarget::ALL.into_iter().any(|t| (row.on)(self.chain_state(t)));
+            self.paint_chip(cx, row.name, anywhere, None);
+            for (chip, route) in row.route.iter().zip(FX_ROUTE) {
+                let lit = route.chains().into_iter().all(|t| (row.on)(self.chain_state(t)));
+                self.paint_chip(cx, chip, lit, None);
             }
         }
     }
@@ -16712,50 +16922,36 @@ p2 {}
         self.ui.slider(cx, ids!(xfader)).set_value(cx, pos);
     }
 
-    /// The deck the SFX page's echo-feedback slider currently reads and
-    /// writes for target `A`/`B`; MIX reads deck A as its anchor, since
-    /// there is nothing to blend -- moving the slider is what makes the
-    /// two agree.
-    /// Put the target chips and every knob on the rack back in step with
-    /// `self.sfx_fx_target` and the chain it shows.
+    /// Repaint the rack from the chain it shows, and the routing from
+    /// every chain.
     fn sync_sfx_fx_ui(&mut self, cx: &mut Cx) {
-        for (chip, target) in FX_TARGET_CHIPS {
-            self.paint_chip(cx, chip, self.sfx_fx_target == target, None);
-        }
-        let chain = self.chain_state(self.sfx_fx_target.shown()).clone();
-        let (feedback, flanger_on, flanger_rate, bitcrusher_on, bitcrusher_bits) = (
+        self.sync_fx_routes(cx);
+        let chain = self.rack_chain().clone();
+        // The switches are the routing's, painted above from every chain;
+        // what follows is the knobs, read from the one on show.
+        let (feedback, flanger_rate, bitcrusher_bits) = (
             chain.echo_feedback as f64,
-            chain.flanger_on,
             chain.flanger_rate as f64,
-            chain.bitcrusher_on,
             chain.bitcrusher_bits as f64,
         );
-        let (tremolo_on, tremolo_rate, distortion_on, distortion_drive) = (
-            chain.tremolo_on,
-            chain.tremolo_rate as f64,
-            chain.distortion_on,
-            chain.distortion_drive as f64,
-        );
-        let (phaser_on, phaser_rate, phaser_feedback) =
-            (chain.phaser_on, chain.phaser_rate as f64, chain.phaser_feedback as f64);
-        let (autopan_on, autopan_rate) = (chain.autopan_on, chain.autopan_rate as f64);
-        let (stereo_width_on, stereo_width_amount) =
-            (chain.stereo_width_on, chain.stereo_width_amount as f64);
-        let (plate_reverb_on, plate_reverb_size) =
-            (chain.plate_reverb_on, chain.plate_reverb_size as f64);
-        let (compressor_on, compressor_threshold_db, compressor_ratio) = (
-            chain.compressor_on,
-            chain.compressor_threshold_db as f64,
-            chain.compressor_ratio as f64,
-        );
-        let (moog_ladder_on, moog_ladder_cutoff, moog_ladder_resonance) = (
-            chain.moog_ladder_on,
-            chain.moog_ladder_cutoff as f64,
-            chain.moog_ladder_resonance as f64,
-        );
+        let (tremolo_rate, distortion_drive) =
+            (chain.tremolo_rate as f64, chain.distortion_drive as f64);
+        let (phaser_rate, phaser_feedback) = (chain.phaser_rate as f64, chain.phaser_feedback as f64);
+        let autopan_rate = chain.autopan_rate as f64;
+        let stereo_width_amount = chain.stereo_width_amount as f64;
+        let plate_reverb_size = chain.plate_reverb_size as f64;
+        let (compressor_threshold_db, compressor_ratio) =
+            (chain.compressor_threshold_db as f64, chain.compressor_ratio as f64);
+        let (moog_ladder_cutoff, moog_ladder_resonance) =
+            (chain.moog_ladder_cutoff as f64, chain.moog_ladder_resonance as f64);
         let deck_level_default = chain.level_default;
         let lvl_echo = (chain.echo_level_mode, chain.echo_mix as f64, chain.echo_ceiling as f64);
-        let (echo_rung, echo_pingpong) = (chain.echo_rung, chain.echo_pingpong);
+        // The rung is the echo's knob: shown wherever the echo is on, and
+        // "off" while it is on nowhere.
+        let echo_anywhere =
+            ChainTarget::ALL.into_iter().any(|target| self.chain_state(target).echo_rung > 0);
+        let echo_rung = if echo_anywhere { self.fx_echo_rung } else { 0 };
+        let echo_pingpong = chain.echo_pingpong;
         let (eq_low_hz, eq_high_hz) = (chain.eq_low_hz as f64, chain.eq_high_hz as f64);
         let lvl_flanger = (chain.flanger_level_mode, chain.flanger_mix as f64, chain.flanger_ceiling as f64);
         let lvl_bitcrusher = (chain.bitcrusher_level_mode, chain.bitcrusher_mix as f64, chain.bitcrusher_ceiling as f64);
@@ -16785,9 +16981,7 @@ p2 {}
         {
             drop.set_value(cx, echo_rung as u32);
         }
-        self.paint_chip(cx, ids!(sfx_fx_echo), echo_rung > 0, None);
         self.paint_chip(cx, ids!(sfx_fx_echo_ping), echo_pingpong, None);
-        self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
         let (flanger_units, flanger_offset) = sync_rungs[0];
         let flanger_locked = flanger_units != crate::music_dsp::LFO_SYNC_FREE;
@@ -16802,9 +16996,7 @@ p2 {}
         self.ui.view(cx, ids!(sfx_fx_flanger_free)).set_visible(cx, !flanger_locked);
         self.ui.view(cx, ids!(sfx_fx_flanger_locked)).set_visible(cx, flanger_locked);
         self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).set_value(cx, flanger_offset);
-        self.paint_chip(cx, ids!(sfx_fx_bitcrusher), bitcrusher_on, None);
         self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).set_value(cx, bitcrusher_bits);
-        self.paint_chip(cx, ids!(sfx_fx_tremolo), tremolo_on, None);
         self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).set_value(cx, tremolo_rate);
         let (tremolo_units, tremolo_offset) = sync_rungs[1];
         let tremolo_locked = tremolo_units != crate::music_dsp::LFO_SYNC_FREE;
@@ -16819,9 +17011,7 @@ p2 {}
         self.ui.view(cx, ids!(sfx_fx_tremolo_free)).set_visible(cx, !tremolo_locked);
         self.ui.view(cx, ids!(sfx_fx_tremolo_locked)).set_visible(cx, tremolo_locked);
         self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).set_value(cx, tremolo_offset);
-        self.paint_chip(cx, ids!(sfx_fx_distortion), distortion_on, None);
         self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).set_value(cx, distortion_drive);
-        self.paint_chip(cx, ids!(sfx_fx_phaser), phaser_on, None);
         self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_value(cx, phaser_rate);
         self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).set_value(cx, phaser_feedback);
         let (phaser_units, phaser_offset) = sync_rungs[2];
@@ -16837,7 +17027,6 @@ p2 {}
         self.ui.view(cx, ids!(sfx_fx_phaser_free)).set_visible(cx, !phaser_locked);
         self.ui.view(cx, ids!(sfx_fx_phaser_locked)).set_visible(cx, phaser_locked);
         self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).set_value(cx, phaser_offset);
-        self.paint_chip(cx, ids!(sfx_fx_autopan), autopan_on, None);
         self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
         let (autopan_units, autopan_offset) = sync_rungs[3];
         let autopan_locked = autopan_units != crate::music_dsp::LFO_SYNC_FREE;
@@ -16852,14 +17041,10 @@ p2 {}
         self.ui.view(cx, ids!(sfx_fx_autopan_free)).set_visible(cx, !autopan_locked);
         self.ui.view(cx, ids!(sfx_fx_autopan_locked)).set_visible(cx, autopan_locked);
         self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).set_value(cx, autopan_offset);
-        self.paint_chip(cx, ids!(sfx_fx_stereo_width), stereo_width_on, None);
         self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).set_value(cx, stereo_width_amount);
-        self.paint_chip(cx, ids!(sfx_fx_plate_reverb), plate_reverb_on, None);
         self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).set_value(cx, plate_reverb_size);
-        self.paint_chip(cx, ids!(sfx_fx_moog_ladder), moog_ladder_on, None);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).set_value(cx, moog_ladder_cutoff);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).set_value(cx, moog_ladder_resonance);
-        self.paint_chip(cx, ids!(sfx_fx_compressor), compressor_on, None);
         self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).set_value(cx, compressor_threshold_db);
         self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).set_value(cx, compressor_ratio);
 
@@ -22857,8 +23042,7 @@ p2 {}
         service::session_config_from_env().cache_parent.join("fx-levels.txt")
     }
 
-    /// Every target's level policies, and which target the rack is on.
-    /// Written whenever one changes: the panel is a settings surface, and
+    /// Every target's level policies. Written whenever one changes: the panel is a settings surface, and
     /// a setting that does not survive the app is not a setting.
     fn save_fx_levels_settings(&self) {
         let path = Self::fx_levels_settings_path();
@@ -22866,7 +23050,6 @@ p2 {}
         for target in ChainTarget::ALL {
             self.chain_state(target).write_levels(&mut store, target.tag());
         }
-        store.set_text("fx.target", self.sfx_fx_target.tag());
         let _ = crate::durable::write_file(&path, store.to_text());
     }
 
@@ -22884,10 +23067,8 @@ p2 {}
                 self.mixer.set_chain_effect(target, param);
             }
         }
-        self.sfx_fx_target =
-            FxTarget::from_tag(&store.text("fx.target", "both")).unwrap_or_default();
-        // The chips repaint here rather than on the next sync: at boot the
-        // rack is painted before its file is read.
+        // The rack repaints here rather than on the next sync: at boot it
+        // is painted before its file is read.
         self.sync_sfx_fx_ui(cx);
     }
 
@@ -33505,21 +33686,41 @@ impl MatchEvent for App {
                 self.run_pad_cmds(cmds);
             }
         }
-        for (chip, target) in FX_TARGET_CHIPS {
-            if self.ui.button(cx, chip).clicked(actions) {
-                self.sfx_fx_target = target;
+        for row in FX_ROWS.iter() {
+            if self.ui.button(cx, row.name).clicked(actions) {
+                // The name is the effect's master switch: lit while the
+                // effect is on anywhere, a press takes it off everywhere
+                // -- and puts it on both decks when it was nowhere, which
+                // is where the rack's one target row used to put it.
+                let anywhere = ChainTarget::ALL.into_iter().any(|t| (row.on)(self.chain_state(t)));
+                let targets = match anywhere {
+                    true => ChainTarget::ALL.to_vec(),
+                    false => FxTarget::Both.chains(),
+                };
+                for target in targets {
+                    self.switch_row(row, target, !anywhere);
+                }
                 self.sync_sfx_fx_ui(cx);
-                // The row is a setting too: the rack comes back on the
-                // source it was left on.
-                self.save_fx_levels_settings();
+            }
+            for (chip, route) in row.route.iter().zip(FX_ROUTE) {
+                if self.ui.button(cx, chip).clicked(actions) {
+                    // Lit while every chain the chip names has the effect
+                    // on; a press lands them all on the other side, so a
+                    // pair that started apart ends together.
+                    let all_on = route.chains().into_iter().all(|t| (row.on)(self.chain_state(t)));
+                    for target in route.chains() {
+                        self.switch_row(row, target, !all_on);
+                    }
+                    self.sync_sfx_fx_ui(cx);
+                }
             }
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_feedback)).slided(actions) {
             self.edit_rack(|chain| chain.set_echo_feedback(v as f32));
         }
         if self.ui.button(cx, ids!(sfx_fx_levels)).clicked(actions) {
-            // Paint it before it is shown: the rows read the deck the FX
-            // target points at, which may have moved since it last opened.
+            // Paint it before it is shown: the rows may have moved since
+            // it last opened.
             self.sync_sfx_fx_ui(cx);
             self.ui.modal(cx, ids!(sfx_levels_modal)).open(cx);
         }
@@ -33820,16 +34021,6 @@ impl MatchEvent for App {
             });
             self.sync_sfx_fx_ui(cx);
         }
-        if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
-            // The chip is the quick on/off the deck strip's E used to be:
-            // off when it is sounding, and back to a beat when it is not.
-            let rung = match self.chain_state(self.sfx_fx_target.shown()).echo_rung {
-                0 => 1,
-                _ => 0,
-            };
-            self.edit_rack(|chain| chain.set_echo_rung(rung));
-            self.sync_sfx_fx_ui(cx);
-        }
         {
             let uid = self.ui.widget(cx, ids!(sfx_fx_echo_rung)).widget_uid();
             let mut picked = None;
@@ -33843,22 +34034,27 @@ impl MatchEvent for App {
                 }
             }
             if let Some(rung) = picked {
-                self.edit_rack(|chain| chain.set_echo_rung(rung));
+                // The rung is the echo's knob: it moves wherever the echo
+                // is on, and is what the routing switches it on with. The
+                // dropdown's first row is off, and off is everywhere, as
+                // the name chip's is.
+                match rung {
+                    0 => self.edit_rack(|chain| chain.set_echo_rung(0)),
+                    rung => {
+                        self.fx_echo_rung = rung;
+                        for target in ChainTarget::ALL {
+                            if self.chain_state(target).echo_rung > 0 {
+                                self.edit_chain(target, |chain| chain.set_echo_rung(rung));
+                            }
+                        }
+                    }
+                }
                 self.sync_sfx_fx_ui(cx);
             }
         }
         if self.ui.button(cx, ids!(sfx_fx_echo_ping)).clicked(actions) {
-            let on = !self.chain_state(self.sfx_fx_target.shown()).echo_pingpong;
+            let on = !self.rack_chain().echo_pingpong;
             self.edit_rack(|chain| chain.set_echo_pingpong(on));
-            self.sync_sfx_fx_ui(cx);
-        }
-        if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).flanger_on;
-            self.edit_rack(|chain| chain.set_flanger(on));
             self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).slided(actions) {
@@ -33884,26 +34080,8 @@ impl MatchEvent for App {
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).slided(actions) {
             self.edit_rack(|chain| chain.set_flanger_beat_offset(v as f32));
         }
-        if self.ui.button(cx, ids!(sfx_fx_bitcrusher)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).bitcrusher_on;
-            self.edit_rack(|chain| chain.set_bitcrusher(on));
-            self.sync_sfx_fx_ui(cx);
-        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).slided(actions) {
             self.edit_rack(|chain| chain.set_bitcrusher_bits(v as f32));
-        }
-        if self.ui.button(cx, ids!(sfx_fx_tremolo)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).tremolo_on;
-            self.edit_rack(|chain| chain.set_tremolo(on));
-            self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).slided(actions) {
             self.edit_rack(|chain| chain.set_tremolo_rate(v as f32));
@@ -33928,26 +34106,8 @@ impl MatchEvent for App {
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).slided(actions) {
             self.edit_rack(|chain| chain.set_tremolo_beat_offset(v as f32));
         }
-        if self.ui.button(cx, ids!(sfx_fx_distortion)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).distortion_on;
-            self.edit_rack(|chain| chain.set_distortion(on));
-            self.sync_sfx_fx_ui(cx);
-        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).slided(actions) {
             self.edit_rack(|chain| chain.set_distortion_drive(v as f32));
-        }
-        if self.ui.button(cx, ids!(sfx_fx_phaser)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).phaser_on;
-            self.edit_rack(|chain| chain.set_phaser(on));
-            self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).slided(actions) {
             self.edit_rack(|chain| chain.set_phaser_rate(v as f32));
@@ -33975,15 +34135,6 @@ impl MatchEvent for App {
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).slided(actions) {
             self.edit_rack(|chain| chain.set_phaser_feedback(v as f32));
         }
-        if self.ui.button(cx, ids!(sfx_fx_autopan)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).autopan_on;
-            self.edit_rack(|chain| chain.set_autopan(on));
-            self.sync_sfx_fx_ui(cx);
-        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).slided(actions) {
             self.edit_rack(|chain| chain.set_autopan_rate(v as f32));
         }
@@ -34007,53 +34158,17 @@ impl MatchEvent for App {
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).slided(actions) {
             self.edit_rack(|chain| chain.set_autopan_beat_offset(v as f32));
         }
-        if self.ui.button(cx, ids!(sfx_fx_stereo_width)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).stereo_width_on;
-            self.edit_rack(|chain| chain.set_stereo_width(on));
-            self.sync_sfx_fx_ui(cx);
-        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).slided(actions) {
             self.edit_rack(|chain| chain.set_stereo_width_amount(v as f32));
         }
-        if self.ui.button(cx, ids!(sfx_fx_plate_reverb)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).plate_reverb_on;
-            self.edit_rack(|chain| chain.set_plate_reverb(on));
-            self.sync_sfx_fx_ui(cx);
-        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).slided(actions) {
             self.edit_rack(|chain| chain.set_plate_reverb_size(v as f32));
-        }
-        if self.ui.button(cx, ids!(sfx_fx_moog_ladder)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).moog_ladder_on;
-            self.edit_rack(|chain| chain.set_moog_ladder(on));
-            self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).slided(actions) {
             self.edit_rack(|chain| chain.set_moog_ladder_cutoff(v as f32));
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).slided(actions) {
             self.edit_rack(|chain| chain.set_moog_ladder_resonance(v as f32));
-        }
-        if self.ui.button(cx, ids!(sfx_fx_compressor)).clicked(actions) {
-            // Every chain the row points at lands on the SAME new side of the
-            // switch, read from the one on show, rather than each flipping
-            // its own: a pair could otherwise start this press on opposite
-            // sides and end on opposite sides too.
-            let on = !self.chain_state(self.sfx_fx_target.shown()).compressor_on;
-            self.edit_rack(|chain| chain.set_compressor(on));
-            self.sync_sfx_fx_ui(cx);
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).slided(actions) {
             self.edit_rack(|chain| chain.set_compressor_threshold(v as f32));
