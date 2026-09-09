@@ -1982,13 +1982,16 @@ pub fn decode_audio_clip(
             if let Some(format) = repo_audio_format(&audio_magic(path).unwrap_or_default()) {
                 return decode_repo_audio(path, format, max_frames);
             }
-            // Cache objects are digest-only names; AVURLAsset keys off the
-            // extension. Lease a typed hard link the same way video slots do.
+            // Cache objects are digest-only names, and the platform
+            // demuxers key off the extension. Lease a typed hard link the
+            // same way video slots do.
             let input = DecoderInput::prepare(path, MediaType::Mp4)?;
-            let mut decoder = VideoFileDecoder::open(&input.path).map_err(|e| e.to_string())?;
-            if !decoder.info().has_audio {
-                return Err("mp4 has no audio track".into());
-            }
+            // Opened for its SOUND. This arm never wanted a picture, and
+            // every platform opener refuses a file that has none before it
+            // looks at the audio -- which is why an audio-only container
+            // could not be loaded at all.
+            let mut decoder =
+                VideoFileDecoder::open_audio(&input.path).map_err(|e| e.to_string())?;
             let mut frames: Vec<[i16; 2]> = Vec::new();
             let mut sample_rate = decoder.info().audio_sample_rate.max(1);
             loop {
@@ -4069,6 +4072,87 @@ mod tests {
         );
         assert_eq!(player.mixer.deck_position(DeckId::A), deck_before);
         assert_eq!(player.set_playback_rate(0.0), MIN_VIDEO_PLAYBACK_RATE);
+    }
+
+    /// The audio arm opens a container for its SOUND. Every platform
+    /// opener refuses a file with no picture before it looks at the audio,
+    /// so this arm asking the picture door is why an audio-only container
+    /// could not be loaded at all. Runs on both desktop platforms: the
+    /// machine where that was found is not the one the neighbouring
+    /// encoder tests run on.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn the_audio_arm_opens_a_file_for_its_sound_not_its_picture() {
+        use makepad_widgets::makepad_platform::video_file::{
+            PcmAudioTrackOptions, VideoFileCodec, VideoFileDecoder, VideoFileEncoder,
+            VideoFileEncoderOptions,
+        };
+
+        let root = test_dir("audio-arm");
+        std::fs::create_dir_all(&root).unwrap();
+        let clip = |name: &str, with_audio: bool| {
+            let path = root.join(name);
+            let mut encoder = VideoFileEncoder::new(
+                path.to_str().unwrap(),
+                VideoFileEncoderOptions {
+                    codec: VideoFileCodec::H264,
+                    width: 64,
+                    height: 48,
+                    fps_num: 30,
+                    fps_den: 1,
+                    video_bitrate_bps: 2_000_000,
+                    audio: with_audio.then_some(PcmAudioTrackOptions {
+                        sample_rate: 48_000,
+                        channels: 2,
+                        aac_bitrate_bps: 128_000,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let frame = vec![128u8; 64 * 48 * 3];
+            for _ in 0..30 {
+                encoder.push_frame_rgb8(&frame, None).unwrap();
+            }
+            if with_audio {
+                let samples: Vec<i16> =
+                    (0..48_000 * 2).map(|i| ((i / 2) % 200) as i16 * 160 - 16_000).collect();
+                encoder.push_audio_i16(&samples).unwrap();
+            }
+            encoder.finish().unwrap();
+            path
+        };
+
+        // A picture with no sound: the refusal names what is missing.
+        let silent = clip("silent.mp4", false);
+        let refused = decode_audio_clip(&silent, MediaType::Mp4, MAX_TRACK_FRAMES)
+            .err()
+            .expect("a picture with no sound has nothing to decode");
+        assert!(
+            refused.contains("no audio stream in file"),
+            "the refusal says what is missing: {refused}",
+        );
+
+        // A container with both: the arm still decodes everything it did.
+        let both = clip("both.mp4", true);
+        assert!(
+            repo_audio_format(&audio_magic(&both).unwrap_or_default()).is_none(),
+            "and it really took the platform path, not the byte sniff",
+        );
+        let pcm = decode_audio_clip(&both, MediaType::Mp4, MAX_TRACK_FRAMES)
+            .expect("a container with sound decodes");
+        assert_eq!(pcm.sample_rate, 48_000);
+        assert!(
+            (40_000..=60_000).contains(&pcm.frames.len()),
+            "about a second, head and tail padding allowed: {}",
+            pcm.frames.len(),
+        );
+
+        // And it took the sound door to do it.
+        let sound = VideoFileDecoder::open_audio(both.to_str().unwrap()).unwrap();
+        assert_eq!(sound.info().width, 0, "no picture was negotiated");
+        assert!(sound.info().has_audio);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(target_os = "macos")]
