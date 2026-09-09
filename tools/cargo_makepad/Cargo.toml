@@ -21,7 +21,6 @@ makepad-filesystem-watcher = { path = "../../libs/filesystem_watcher", version =
 makepad-live-reload-core = { path = "../../libs/live_reload_core", version = "0.1.0" }
 makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 brotli = "8.0"
-plist = { version = "1", default-features = false }
 
 [features]
 nightly = []
