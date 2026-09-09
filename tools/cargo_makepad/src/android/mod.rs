@@ -129,6 +129,9 @@ impl AndroidVariant {
                 <intent>
                 <action android:name="android.intent.action.MAIN" />
                 </intent>
+                <intent>
+                <action android:name="android.speech.RecognitionService" />
+                </intent>
                 </queries>
                 </manifest>
                 "#

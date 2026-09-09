@@ -335,6 +335,8 @@ impl PlistValues {
                 <string>This app needs access to the camera for video capture functionality.</string>
                 <key>NSMicrophoneUsageDescription</key>
                 <string>This app needs access to the microphone for audio recording functionality.</string>
+                <key>NSSpeechRecognitionUsageDescription</key>
+                <string>This app uses speech recognition to turn your voice into text.</string>
             </dict>
             </plist>"#,
             identifier = self.identifier,
