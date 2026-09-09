@@ -233,7 +233,21 @@ impl StoryCoverage {
                         || s.component == short
                         || s.also.iter().any(|a| *a == short || *a == family)
                 });
-                let storyable = widget_types.contains(&kind);
+                // `XBase` is the registration half of the library's universal
+                // `mod.widgets.X = ... do mod.widgets.XBase{...}` pair. It is
+                // a widget by the registry's reckoning and cannot have a page
+                // of its own: X is the thing a caller writes. Excluded only
+                // when the X it is the base OF actually exists, so a widget
+                // that genuinely ends in Base keeps its place.
+                let is_registration_base = short
+                    .strip_suffix("Base")
+                    .is_some_and(|stem| {
+                        !stem.is_empty()
+                            && entries.iter().any(|(other, _)| {
+                                other.rsplit('.').next().unwrap_or(other) == stem
+                            })
+                    });
+                let storyable = widget_types.contains(&kind) && !is_registration_base;
                 rows.push(Declaration {
                     name: name.clone(),
                     kind,
@@ -254,7 +268,7 @@ impl StoryCoverage {
             .map(|r| family_of(r.name.rsplit('.').next().unwrap_or(&r.name)))
             .collect();
         let summary = format!(
-            "{} of {} declarations a story could show have one, in {} families \u{2014} and {} more no story could show: shaders, enums and the property types the DSL names",
+            "{} of {} declarations a story could show have one, in {} families \u{2014} and {} more no story could show: shaders, enums, the property types the DSL names, and the XBase half of every widget's registration pair",
             shown,
             total,
             families.len(),

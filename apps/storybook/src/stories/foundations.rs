@@ -286,12 +286,19 @@ impl Widget for TokenTable {
     }
 }
 
-const fn story(key: &'static str, component: &'static str, name: &'static str, dsl: &'static str, doc: &'static str) -> Story {
+const fn story(
+    key: &'static str,
+    component: &'static str,
+    name: &'static str,
+    dsl: &'static str,
+    doc: &'static str,
+    also: &'static [&'static str],
+) -> Story {
     Story {
         key,
         category: "Foundations",
         component,
-        also: &[],
+        also,
         name,
         dsl,
         added: "2026-09-05",
@@ -311,6 +318,7 @@ pub const STORIES: &[Story] = &[
         "Roles",
         "FoundationsColorRoles",
         "# Colour roles\n\nSeven accent families: primary, secondary, tertiary and the four intents. Each family is four tokens: the base, `color_on_<family>` for what reads on it, a container, and what reads on the container. The values are generated from the house seed by the rule in the token registry; a unit test regenerates them and diffs against the theme files.",
+        &[],
     ),
     story(
         "foundations/colour/surfaces",
@@ -318,6 +326,7 @@ pub const STORIES: &[Story] = &[
         "Surfaces",
         "FoundationsColorSurfaces",
         "# Surfaces\n\nThe surface ladder sits on the opaque ladder the legacy tokens already define: `color_surface` is the app background, the containers step up or down from it. Outlines are translucent tints, surfaces never are. The scrim and the inverse pair are here too.",
+        &[],
     ),
     story(
         "foundations/colour/status",
@@ -325,6 +334,7 @@ pub const STORIES: &[Story] = &[
         "Status",
         "FoundationsColorStatus",
         "# Status colours\n\nPresence dots and the placeholder shimmer. A status is shown with a shape as well as a colour, so it is never colour alone.",
+        &[],
     ),
     story(
         "foundations/colour/palette",
@@ -332,6 +342,7 @@ pub const STORIES: &[Story] = &[
         "Palette",
         "FoundationsColorPalette",
         "# Palette\n\nEvery colour token in the running theme, roles and legacy alike, in the order the theme file declares them. This is what the design overlay's palette strip reads.",
+        &[],
     ),
     story(
         "foundations/shape/radius",
@@ -339,6 +350,7 @@ pub const STORIES: &[Story] = &[
         "Radius",
         "FoundationsShapeRadius",
         "# Radius\n\nSeven corner sizes from none to a full pill. Widgets take one of these rather than a number of their own.",
+        &[],
     ),
     story(
         "foundations/elevation/levels",
@@ -346,6 +358,7 @@ pub const STORIES: &[Story] = &[
         "Levels",
         "FoundationsElevationLevels",
         "# Elevation\n\nFive levels, each a blur radius, a vertical drop and a shadow colour. `ElevatedView1` to `ElevatedView5` apply them to a rounded shadow view.",
+        &["ElevatedView1", "ElevatedView2", "ElevatedView3", "ElevatedView4", "ElevatedView5"],
     ),
     story(
         "foundations/motion/overview",
@@ -353,6 +366,7 @@ pub const STORIES: &[Story] = &[
         "Overview",
         "FoundationsMotionOverview",
         "# Motion\n\nSixteen durations in four bands and seven easings. An easing token is an `Ease` object, so an animator state says `ease: theme.motion_ease_standard`; the buttons above use exactly that.",
+        &[],
     ),
     story(
         "foundations/state/layers",
@@ -360,6 +374,7 @@ pub const STORIES: &[Story] = &[
         "Layers",
         "FoundationsStateLayers",
         "# State layers\n\nA state is shown by laying the content colour over the surface at a fixed opacity. These are the opacities.",
+        &[],
     ),
     story(
         "foundations/spacing/scale",
@@ -367,6 +382,7 @@ pub const STORIES: &[Story] = &[
         "Scale",
         "FoundationsSpacingScale",
         "# Spacing\n\nSix steps built on `space_factor`. The insets (`mspace_*`) are objects and are not listed here.",
+        &[],
     ),
     story(
         "foundations/size/scale",
@@ -374,6 +390,7 @@ pub const STORIES: &[Story] = &[
         "Scale",
         "FoundationsSizeScale",
         "# Sizes\n\nThree control heights, three icon sizes, the touch target and the hairline widths.",
+        &[],
     ),
     story(
         "foundations/type/scale",
@@ -381,5 +398,6 @@ pub const STORIES: &[Story] = &[
         "Scale",
         "FoundationsTypeScale",
         "# Type scale\n\nTitle, body and label in three sizes each. The sizes are expressed on `font_size_base` and `font_size_contrast`, so the scale follows the theme's knob; `font_size_5` and `font_size_6` fill the gap between the headings and the paragraph size.",
+        &[],
     ),
 ];
