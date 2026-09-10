@@ -91,7 +91,7 @@ script_mod! {
     }
 
     mod.stories.FoundationsMotionOverview = StoryPage{
-        StoryNote{text: "Press an easing and the sixteen bars below run out from nothing, each over its own duration. The short ones are done before the long ones start to look like they are moving, which is the point of having sixteen of them. Hovering a button fades it over the long duration with the same easing, so the curve can be read twice."}
+        StoryNote{text: "Press an easing and the sixteen bars below run out from nothing, each over its own duration. The short ones are done before the long ones start to look like they are moving, which is the point of having sixteen of them. Spring goes past its length and comes back; bounce arrives, rebounds off it and settles without ever passing it. Hovering a button fades it over the long duration with the same easing, so the curve can be read twice."}
         StoryHeading{text: "Easings"}
         StoryRow{
             ease_standard := Button{text: "standard" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
@@ -103,15 +103,20 @@ script_mod! {
             ease_emphasized_accelerate := Button{text: "emphasized accelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_emphasized_accelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
             ease_linear := Button{text: "linear" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_linear apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
             ease_spring := Button{text: "spring" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_spring apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_bounce := Button{text: "bounce" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_bounce apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
         }
         StoryHeading{text: "Durations"}
         // A wide bar column and a big scale: the bars are the thing on
-        // this page that moves, so they are given room to move in.
-        // Every other table leaves both at their defaults.
+        // this page that moves, so they are given room to move in. The
+        // scale stops well short of the column because two of the
+        // easings go PAST the value they are heading for, and a bar
+        // clamped at the edge of its column would hide the overshoot
+        // that is the whole point of them. Every other table leaves
+        // both at their defaults.
         durations := mod.storybook.TokenTable{
             prefixes: ["motion_"]
             swatch_width: 300.
-            bar_scale: 280.
+            bar_scale: 230.
         }
     }
 
@@ -403,6 +408,7 @@ fn motion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
         (ids!(ease_emphasized_accelerate), "motion_ease_emphasized_accelerate"),
         (ids!(ease_linear), "motion_ease_linear"),
         (ids!(ease_spring), "motion_ease_spring"),
+        (ids!(ease_bounce), "motion_ease_bounce"),
     ];
     for (id, token) in BUTTONS {
         if root.button(cx, id).clicked(actions) {
@@ -500,7 +506,7 @@ Sixteen durations in four bands and seven easings.
 
 An easing token is an `Ease` object, not a number, so the reflection surface that lists the theme's colours and numbers does not carry it and the table below has none of them. An animator state names one directly: `ease: theme.motion_ease_standard`, which is what the seven buttons do to their own hover.
 
-Press one and the bars run out from nothing, each over its own duration and along that curve. They arrive at different times because they are different lengths of time, which is the only thing sixteen durations are for: `short_1` is over before `extra_long_4` has visibly started. The bar never goes to nothing, it floors at two points, so a row that is about to move still says where it is.",
+Press one and the bars run out from nothing, each over its own duration and along that curve. Two of them do not simply arrive: `spring` overshoots its length and settles back onto it, and `bounce` rebounds off it two or three times without ever going past. The bar column is wider than the longest bar so there is somewhere for an overshoot to go; clamp the two together and the difference between those two curves disappears. They arrive at different times because they are different lengths of time, which is the only thing sixteen durations are for: `short_1` is over before `extra_long_4` has visibly started. The bar never goes to nothing, it floors at two points, so a row that is about to move still says where it is.",
             &[],
         )
     },

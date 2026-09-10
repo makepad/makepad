@@ -95,7 +95,15 @@ script_mod! {
         motion_ease_emphasized_decelerate: Ease.Bezier{cp0: 0.05 cp1: 0.7 cp2: 0.1 cp3: 1.0}
         motion_ease_emphasized_accelerate: Ease.Bezier{cp0: 0.3 cp1: 0.0 cp2: 0.8 cp3: 0.15}
         motion_ease_linear: Ease.Linear
-        motion_ease_spring: Ease.ExpDecay{d1: 0.82 d2: 0.97 max: 20}
+        // Overshoots and settles, which is what a spring does and what the
+        // exponential decay that used to be here did not: that one only
+        // crawled up to its value from below, so nothing on screen ever
+        // read as sprung.
+        motion_ease_spring: Ease.OutElastic
+        // Arrives, rebounds off its own value, and comes back, twice more,
+        // smaller. It never goes past what it is animating to, which is
+        // the whole difference from the spring above.
+        motion_ease_bounce: Ease.OutBounce
         // State layer opacities.
         state_hover_opacity: 0.08
         state_focus_opacity: 0.10
