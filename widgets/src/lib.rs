@@ -83,6 +83,7 @@ pub mod field;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
+pub mod range_slider;
 pub mod slider;
 pub mod text_input;
 pub mod drop_slider;
@@ -252,6 +253,7 @@ pub use crate::{
     scroll_bars::ScrollBars,
     scroll_shadow::*,
     slide_panel::*,
+    range_slider::*,
     slider::*,
     slides_view::*,
     marquee::*,
@@ -437,6 +439,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
+    crate::range_slider::script_mod(vm);
     crate::drop_slider::script_mod(vm);
     crate::drop_toggles::script_mod(vm);
     // The badge first: it owns the role palette and the intent names, and

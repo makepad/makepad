@@ -32,6 +32,7 @@ pub mod checkbox;
 pub mod combobox;
 pub mod dropdown;
 pub mod label;
+pub mod range_slider;
 pub mod slider;
 pub mod textinput;
 pub mod radiobutton;
@@ -98,6 +99,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     dropdown::script_mod(vm);
     label::script_mod(vm);
     slider::script_mod(vm);
+    range_slider::script_mod(vm);
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     view::script_mod(vm);
@@ -184,6 +186,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         dropdown::STORIES,
         label::STORIES,
         slider::STORIES,
+        range_slider::STORIES,
         textinput::STORIES,
         radiobutton::STORIES,
         view::STORIES,
