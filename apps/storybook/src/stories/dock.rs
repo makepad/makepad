@@ -37,8 +37,14 @@ script_mod! {
                         b: @right_panel
                     }
 
-                    left_panel := DockTabs{tabs: [@tab_one @tab_two] selected: 0 closable: false}
-                    right_panel := DockTabs{tabs: [@tab_three] selected: 0 closable: false}
+                    // `closable` is the panel's own word, and it does not
+                    // mean what the tabs' crosses mean: it is whether this
+                    // panel goes away when its last tab leaves, handing its
+                    // room back to whatever it was sharing with. Declared
+                    // false, the room stays empty after the last tab is
+                    // dragged out, which reads as a bug and is a setting.
+                    left_panel := DockTabs{tabs: [@tab_one @tab_two] selected: 0 closable: true}
+                    right_panel := DockTabs{tabs: [@tab_three] selected: 0 closable: true}
 
                     // `template` picks the tab's chrome, and it is the ONLY
                     // thing that decides whether a tab has a cross.
@@ -148,19 +154,23 @@ Of the eight docks in this repository, exactly one wires them. Every other one, 
 
 **The close button does not close.** `TabCloseWasPressed` is a request too; the cross animates and the tab stays until the host calls `close_tab`.
 
-**`closable` is not what makes the cross.** On a `DockTabs` panel, `closable` means *when the last tab leaves, collapse this panel and heal the splitter*. The cross comes from the tab's `template` — `@CloseableTab` has one, `@PermanentTab` does not. Note the spelling: `closable` on the panel, `closeable` on the tab. The third tab above is permanent, and has no cross.
+**`closable` is not what makes the cross.** On a `DockTabs` panel, `closable` means *when the last tab leaves, collapse this panel and hand its room back to whatever it was sharing with*. Declare it false and an emptied panel stays on screen as a blank half, which reads as a bug and is a setting. The cross comes from the tab's `template` — `@CloseableTab` has one, `@PermanentTab` does not. Note the spelling: `closable` on the panel, `closeable` on the tab. The third tab above is permanent, and has no cross.
 
 ## Where a drop lands
 
-A drop is read in three passes, and the order between them is the behaviour.
+A drop is read in five passes, and the order between them is the behaviour.
 
-**A tab, or a tab bar.** Joining a panel that is already there wins over everything else, so the topmost panel's bar is still a place to drop even though it runs along the outside of the dock.
+**A tab.** Dropping on one puts the newcomer beside it, wherever that tab happens to be.
 
 **The outside of the dock**, within 24 points of it. This splits the *root*, so the panel arriving lies across whatever is already in there rather than beside one member of it. Two panels sharing a square top and bottom, and a drop down the far left: the newcomer takes the whole left half and the pair stay stacked in the right one. The preview says which it will be — half the whole dock, not half a panel.
 
 **The bar between two panels**, within a few points of it — the same slop the bar's own drag uses. This puts the newcomer BETWEEN them rather than inside either, and moves both bars so everything sharing that direction ends up the same size: two panels and a newcomer become three thirds. A bar somebody pinned a fixed distance from one side is left where it was pinned and the newcomer goes on the other side of the seam, because a pinned pane is one whose size was decided on purpose.
 
+**The empty part of a tab bar**, which joins that panel.
+
 **The edges and middle of the panel under the pointer.** The outer tenth of a body splits that panel alone and nests a splitter inside it; the middle joins its tabs.
+
+The outside of the dock has to beat the tab bars, and that is not a preference. The topmost panels' bars run along the top edge, so a tab-bar pass in front of the outer one meant a drop could take the bottom half of the dock and never the top. Nothing is lost by the order: dropping in the middle of a panel joins that panel exactly as dropping on its bar does.
 
 The bar of a new split starts where everything sharing that direction ends up the same size: beside one panel that is the middle, and under a pair already stacked it is a third. Every bar can be dragged afterwards, so those fractions are only where it opens.
 

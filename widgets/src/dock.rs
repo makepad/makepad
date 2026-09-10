@@ -1028,13 +1028,23 @@ impl Dock {
     /// Where a drop at `abs` would land: which part of which container,
     /// and the region to preview.
     ///
-    /// Read in three passes, because the answers overlap and the order
-    /// between them is the whole behaviour. A tab or a tab bar first, so
-    /// joining a panel that is already there is always possible even when
-    /// its bar runs along the outside of the dock. Then the outside of the
-    /// dock, which splits everything in it. Then the edges and middle of
-    /// whichever panel is under the pointer, which splits or joins that
-    /// one alone.
+    /// Read in five passes. The answers overlap, and the order between
+    /// them IS the behaviour:
+    ///
+    /// 1. A tab. Dropping on one puts the newcomer beside it, and that
+    ///    has to be possible wherever the tab happens to be.
+    /// 2. The outside of the whole dock, which lays the newcomer across
+    ///    everything in it. This has to beat the tab bars, or the top
+    ///    edge is unreachable: the topmost panels' bars run along it, so
+    ///    a tab-bar pass in front of this one meant a drop could take
+    ///    the bottom half of the dock and never the top. Nothing is
+    ///    lost by it — dropping in the middle of a panel joins that
+    ///    panel just as its bar does.
+    /// 3. The bar between two panels, which puts the newcomer between
+    ///    them.
+    /// 4. The empty part of a tab bar, which joins that panel.
+    /// 5. The edges and middle of whichever panel is under the pointer,
+    ///    which splits or joins that one alone.
     fn find_drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
             if self.hides_its_tab_bar(*tab_bar_id) {
@@ -1043,20 +1053,22 @@ impl Dock {
             if let Some((tab_id, rect)) = tab_bar.tab_bar.is_over_tab(cx, abs) {
                 return Some(DropPosition { part: DropPart::Tab, id: tab_id, rect });
             }
-            if let Some(rect) = tab_bar.tab_bar.is_over_tab_bar(cx, abs) {
-                return Some(DropPosition { part: DropPart::TabBar, id: *tab_bar_id, rect });
-            }
         }
-        // The seam between two panels, before the outside of the dock:
-        // a bar is a smaller and more deliberate thing to aim at than
-        // a whole edge, and near a corner both are in reach.
+        if let Some((part, rect)) = outer_band(self.area.rect(cx), abs) {
+            return Some(DropPosition { part, id: id!(root), rect });
+        }
         if let Some(split_id) = self.bar_under(cx, abs) {
             if let Some(rect) = self.bar_slot(cx, split_id) {
                 return Some(DropPosition { part: DropPart::Bar, id: split_id, rect });
             }
         }
-        if let Some((part, rect)) = outer_band(self.area.rect(cx), abs) {
-            return Some(DropPosition { part, id: id!(root), rect });
+        for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
+            if self.hides_its_tab_bar(*tab_bar_id) {
+                continue;
+            }
+            if let Some(rect) = tab_bar.tab_bar.is_over_tab_bar(cx, abs) {
+                return Some(DropPosition { part: DropPart::TabBar, id: *tab_bar_id, rect });
+            }
         }
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
             if self.hides_its_tab_bar(*tab_bar_id) {
