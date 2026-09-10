@@ -217,6 +217,16 @@ impl MatchEvent for App {
         navigator.set_baseline(cx, &baseline);
         if settings::get(settings::NEW_ONLY).as_deref() == Some("1") {
             navigator.set_new_only(cx, true);
+            // The switch has to be told as well as the navigator. Setting
+            // only the navigator leaves the filter running behind a control
+            // that reads OFF: two thirds of the catalogue is missing, the
+            // search finds nothing for any widget older than the baseline,
+            // and there is nothing on screen to say why. The first press
+            // then sets it to the value it already had, so it takes two to
+            // get out.
+            self.ui
+                .check_box(cx, ids!(new_only))
+                .set_active(cx, true, Animate::No);
         }
         self.ui
             .drop_down(cx, ids!(theme_select))
