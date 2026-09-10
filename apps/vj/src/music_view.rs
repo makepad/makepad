@@ -2852,6 +2852,10 @@ script_mod! {
                             // on its way out loses its bass, so two kicks never
                             // stack in the middle of a blend.
                             music_eqfade := MusicButton{width: 34 height: 22 text: "EQ"}
+                            // The travel turned round: the left end answers
+                            // to the deck that was on the right, and the
+                            // letters beside the sweep follow it.
+                            xfade_rev := MusicButton{width: 40 height: 22 text: "REV"}
                         }
                         // The sweep and its two cue keys are three children, not
                         // one: the strip flanks the sweep with them while there
@@ -3582,6 +3586,17 @@ script_mod! {
                                 deck_over_playing := DropDown{
                                     height: 22
                                     labels: ["Refuse" "Stop" "Play in"]
+                                }
+                                // Which end of the crossfader each deck answers
+                                // to, or THRU: out from under it, at full
+                                // wherever the fader stands.
+                                xf_side_a := DropDown{
+                                    height: 22
+                                    labels: ["A left" "A thru" "A right"]
+                                }
+                                xf_side_b := DropDown{
+                                    height: 22
+                                    labels: ["B left" "B thru" "B right"]
                                 }
                                 // Latched, the deck a picked track lands on starts as
                                 // soon as its decode finishes — "select and it plays".

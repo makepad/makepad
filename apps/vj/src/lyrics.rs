@@ -1288,14 +1288,16 @@ impl KaraokeSchedule {
     }
 }
 
-/// Which deck the program should be quoting. The crossfader decides between
-/// two playing decks; a lone playing deck always wins, because a performer
-/// cueing the other side is not what the room is hearing.
-pub fn live_deck(crossfader: f32, playing_a: bool, playing_b: bool) -> DeckId {
+/// Which deck the program should be quoting. The crossfader's gains decide
+/// between two playing decks; a lone playing deck always wins, because a
+/// performer cueing the other side is not what the room is hearing.
+pub fn live_deck(gains: (f32, f32), playing_a: bool, playing_b: bool) -> DeckId {
     match (playing_a, playing_b) {
         (true, false) => DeckId::A,
         (false, true) => DeckId::B,
-        _ if crossfader <= 0.5 => DeckId::A,
+        // At dead centre the equal-power pair differ by ulps only: the
+        // centre favours A, as it always did.
+        _ if gains.0 + 1e-5 >= gains.1 => DeckId::A,
         _ => DeckId::B,
     }
 }
@@ -3141,14 +3143,20 @@ mod tests {
 
     #[test]
     fn the_lyrics_follow_the_deck_the_room_is_hearing() {
+        let at = |position: f32| {
+            crate::decks::crossfader_gains(position, crate::decks::FadeCurve::EqualPower)
+        };
         // One deck playing wins whatever the fader says — the other is cued.
-        assert_eq!(live_deck(1.0, true, false), DeckId::A);
-        assert_eq!(live_deck(0.0, false, true), DeckId::B);
+        assert_eq!(live_deck(at(1.0), true, false), DeckId::A);
+        assert_eq!(live_deck(at(0.0), false, true), DeckId::B);
         // Both playing: the fader decides, and the centre favours A.
-        assert_eq!(live_deck(0.2, true, true), DeckId::A);
-        assert_eq!(live_deck(0.5, true, true), DeckId::A);
-        assert_eq!(live_deck(0.8, true, true), DeckId::B);
+        assert_eq!(live_deck(at(0.2), true, true), DeckId::A);
+        assert_eq!(live_deck(at(0.5), true, true), DeckId::A);
+        assert_eq!(live_deck(at(0.8), true, true), DeckId::B);
         // Neither playing: still the fader, so a paused deck shows its words.
-        assert_eq!(live_deck(0.9, false, false), DeckId::B);
+        assert_eq!(live_deck(at(0.9), false, false), DeckId::B);
+        // A deck out from under the fader is the one the room hears.
+        assert_eq!(live_deck((1.0, 0.3), true, true), DeckId::A);
+        assert_eq!(live_deck((0.3, 1.0), true, true), DeckId::B);
     }
 }

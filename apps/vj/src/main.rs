@@ -205,7 +205,7 @@ use crate::set_history::SetHistory;
 use crate::set_lists::SetLists;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, FaderRouting, FaderSide, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
     SyncVerb, SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -18452,6 +18452,7 @@ p2 {}
                     self.mixer.fade_crossfader(position, secs)
                 }
                 DeckCmd::SetCurve { curve } => self.mixer.set_curve(curve),
+                DeckCmd::SetFaderRouting { routing } => self.mixer.set_fader_routing(routing),
                 // ---- music mode: tempo, scratch, tone, stems ----
                 DeckCmd::SetRate { deck, rate } => self.mixer.set_deck_rate(deck, rate),
                 DeckCmd::SetGrid { deck, grid } => self.mixer.set_deck_grid(deck, grid),
@@ -20858,12 +20859,22 @@ p2 {}
     /// console would rather finish its journey than answer the hand.
     fn fade_to_other_side(&mut self, cx: &mut Cx, secs: f32) {
         let heading = self.xfade_target.unwrap_or(self.decks.crossfader);
-        let deck = if heading <= 0.5 { DeckId::B } else { DeckId::A };
+        // In travel, not in gains: at dead centre the two gains differ by
+        // ulps, and the fader parked there has always gone to B.
+        let Some(deck) = self.decks.routing.deck_across(heading) else { return };
+        self.fade_to_deck(cx, deck, secs);
+        self.autoplay_side(cx, deck);
+    }
+
+    /// A timed fade to the end that hears `deck`, with the on-screen fader
+    /// following the mixer's. Nothing when no end does: both decks out
+    /// from under the fader.
+    fn fade_to_deck(&mut self, cx: &mut Cx, deck: DeckId, secs: f32) {
+        let Some(end) = self.decks.routing.end_for(deck) else { return };
         self.deck_hands_on();
         let cmds = self.decks.fade_to(deck, secs);
         self.run_deck_cmds(cx, cmds);
-        self.start_crossfade_tracking(cx, if deck == DeckId::A { 0.0 } else { 1.0 });
-        self.autoplay_side(cx, deck);
+        self.start_crossfade_tracking(cx, end);
     }
 
     /// EQ FADE: the crossfader sweeps tone as well as level.
@@ -20877,7 +20888,7 @@ p2 {}
     fn apply_eq_fade(&mut self) {
         let position = self.decks.crossfader.clamp(0.0, 1.0);
         for deck in [DeckId::A, DeckId::B] {
-            let presence = if deck == DeckId::A { 1.0 - position } else { position };
+            let presence = self.decks.routing.presence(position, deck);
             let low = if self.eq_fade { (presence * 2.0).clamp(0.0, 1.0) } else { 1.0 };
             self.mixer.set_blend_band(deck, 0, low);
         }
@@ -20940,9 +20951,7 @@ p2 {}
         self.run_deck_cmds(cx, cmds);
         if mix {
             let secs = self.xfade_secs;
-            let cmds = self.decks.fade_to(deck, secs);
-            self.run_deck_cmds(cx, cmds);
-            self.start_crossfade_tracking(cx, if deck == DeckId::A { 0.0 } else { 1.0 });
+            self.fade_to_deck(cx, deck, secs);
         }
     }
 
@@ -25805,6 +25814,9 @@ p2 {}
                 .position(|(curve, _)| *curve == self.decks.curve)
                 .unwrap_or(0),
         );
+        // Which end each deck answers to, and whether the travel is turned
+        // round: the fader's routing beside its law.
+        self.decks.routing.write_settings(&mut store);
         let path = Self::autopilot_settings_path();
         let _ = crate::durable::write_file(&path, store.to_text());
     }
@@ -25872,7 +25884,35 @@ p2 {}
         let (fade, _) = crate::decks::FADE_CURVES[fade.min(crate::decks::FADE_CURVES.len() - 1)];
         // Handed back rather than run here: this reader has no context to
         // run a deck command with, and the caller is one line away.
-        self.decks.set_curve(fade)
+        let mut cmds = self.decks.set_curve(fade);
+        cmds.extend(self.decks.set_fader_routing(FaderRouting::read_settings(&store)));
+        cmds
+    }
+
+    /// The fader strip says which deck each end is and whether the travel
+    /// is turned round; the gear rows say where each deck sits.
+    fn sync_fader_routing_ui(&mut self, cx: &mut Cx) {
+        let routing = self.decks.routing;
+        let (left, right) = routing.end_labels();
+        self.ui.label(cx, ids!(xfade_label_a)).set_text(cx, &left);
+        self.ui.label(cx, ids!(xfade_label_b)).set_text(cx, &right);
+        self.paint_lit(cx, ids!(xfade_rev), routing.reverse);
+        self.ui
+            .drop_down(cx, ids!(xf_side_a))
+            .set_selected_item(cx, routing.side[0].index());
+        self.ui
+            .drop_down(cx, ids!(xf_side_b))
+            .set_selected_item(cx, routing.side[1].index());
+    }
+
+    /// A routing change reaches the mixer at once, the EQ fade re-reads
+    /// the presence it sweeps, and the file and the surface follow.
+    fn apply_fader_routing(&mut self, cx: &mut Cx, routing: FaderRouting) {
+        let cmds = self.decks.set_fader_routing(routing);
+        self.run_deck_cmds(cx, cmds);
+        self.apply_eq_fade();
+        self.save_autopilot_settings();
+        self.sync_fader_routing_ui(cx);
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -25892,6 +25932,7 @@ p2 {}
             OverPlaying::Keep => 2,
         };
         self.ui.drop_down(cx, ids!(deck_over_playing)).set_selected_item(cx, over);
+        self.sync_fader_routing_ui(cx);
         let body = self.autopilot.style() == AutoStyle::Body;
         self.ui
             .check_box(cx, ids!(auto_style))
@@ -28481,7 +28522,8 @@ p2 {}
         }
         let (_, _, playing_a) = self.mixer.deck_position(DeckId::A);
         let (_, _, playing_b) = self.mixer.deck_position(DeckId::B);
-        let deck = crate::lyrics::live_deck(self.decks.crossfader, playing_a, playing_b);
+        let gains = self.decks.routing.gains(self.decks.crossfader, self.decks.curve);
+        let deck = crate::lyrics::live_deck(gains, playing_a, playing_b);
         let schedule = self.deck_karaoke[deck.index()].as_ref()?;
         let (position, _, _) = self.mixer.deck_position(deck);
         let frame = schedule.at(position + crate::lyrics::display_offset_secs());
@@ -33237,7 +33279,9 @@ p2 {}
         }
         let obs = AutoObs {
             decks,
-            fader: self.mixer.crossfader_position(),
+            // As the planner reads it: A's end at 0 and B's at 1 whatever
+            // the routing, and its landings come back through `end_for`.
+            fader: self.decks.routing.canonical(self.mixer.crossfader_position()),
             queue_len: self.decks.queue().len(),
             fade_secs_knob: self.xfade_secs,
             leader_hint: self.decks.sync_leader(),
@@ -33492,16 +33536,27 @@ p2 {}
                 // arm the mirror so the on-screen fader travels — the fade
                 // itself lives on the mixer.
                 self.decks.begin_auto_fade(to.other());
-                let target = match to {
-                    DeckId::A => 0.0,
-                    DeckId::B => 1.0,
-                };
-                // `fade_over`, never `fade_to`: the length is a duration the
-                // planner measured, not a travel speed, and the blend
-                // choreography is scheduled against that same number.
-                let cmds = self.decks.fade_over(to, secs);
-                self.run_deck_cmds(cx, cmds);
-                self.start_crossfade_tracking(cx, target);
+                match self.decks.routing.end_for(to) {
+                    Some(target) => {
+                        // `fade_over`, never `fade_to`: the length is a
+                        // duration the planner measured, not a travel
+                        // speed, and the blend choreography is scheduled
+                        // against that same number.
+                        let cmds = self.decks.fade_over(to, secs);
+                        self.run_deck_cmds(cx, cmds);
+                        self.start_crossfade_tracking(cx, target);
+                    }
+                    // Both decks out from under the fader: nothing to fade,
+                    // so the fader is put where the planner will read its
+                    // landing and the blend goes on without it.
+                    None => {
+                        let travel = if to == DeckId::A { 0.0 } else { 1.0 };
+                        let side = self.decks.routing.position(travel);
+                        let cmds = self.decks.set_crossfader(side);
+                        self.run_deck_cmds(cx, cmds);
+                        self.ui.slider(cx, ids!(xfader)).set_value(cx, side as f64);
+                    }
+                }
             }
             AutoCmd::HandBack { retire, requeue } => {
                 // Capture the retiring item first: eject clears it.
@@ -33530,10 +33585,9 @@ p2 {}
                 // the mirror that was tracking it must let go too, or it
                 // waits forever for a landing that can no longer happen.
                 self.xfade_target = None;
-                let side = match deck {
-                    DeckId::A => 0.0,
-                    DeckId::B => 1.0,
-                };
+                let side = self.decks.routing.end_for(deck).unwrap_or_else(|| {
+                    self.decks.routing.position(if deck == DeckId::A { 0.0 } else { 1.0 })
+                });
                 let cmds = self.decks.set_crossfader(side);
                 self.run_deck_cmds(cx, cmds);
                 self.ui.slider(cx, ids!(xfader)).set_value(cx, side as f64);
@@ -35345,6 +35399,22 @@ impl MatchEvent for App {
             };
             self.save_autopilot_settings();
         }
+        for (deck, id) in [(DeckId::A, ids!(xf_side_a)), (DeckId::B, ids!(xf_side_b))] {
+            if let Some(index) = self.ui.drop_down(cx, id).selected(actions) {
+                let mut routing = self.decks.routing;
+                let side = FaderSide::from_index(index);
+                // Two decks on one end would leave the fader nothing to
+                // cross: the other deck keeps its end and the row snaps back.
+                if side != FaderSide::Thru && side == routing.side[deck.other().index()] {
+                    self.ui
+                        .drop_down(cx, id)
+                        .set_selected_item(cx, routing.side[deck.index()].index());
+                    continue;
+                }
+                routing.side[deck.index()] = side;
+                self.apply_fader_routing(cx, routing);
+            }
+        }
         self.handle_deck_controls(cx, actions);
         if let Some(v) = self.ui.slider(cx, ids!(xfader)).slided(actions) {
             // A hand on the fader outranks a running fade, exactly as it
@@ -35633,19 +35703,13 @@ impl MatchEvent for App {
             self.xfade_secs = v as f32;
         }
         if self.ui.button(cx, ids!(fade_to_a)).clicked(actions) {
-            self.deck_hands_on();
             let secs = self.xfade_secs;
-            let cmds = self.decks.fade_to(DeckId::A, secs);
-            self.run_deck_cmds(cx, cmds);
-            self.start_crossfade_tracking(cx, 0.0);
+            self.fade_to_deck(cx, DeckId::A, secs);
             self.autoplay_side(cx, DeckId::A);
         }
         if self.ui.button(cx, ids!(fade_to_b)).clicked(actions) {
-            self.deck_hands_on();
             let secs = self.xfade_secs;
-            let cmds = self.decks.fade_to(DeckId::B, secs);
-            self.run_deck_cmds(cx, cmds);
-            self.start_crossfade_tracking(cx, 1.0);
+            self.fade_to_deck(cx, DeckId::B, secs);
             self.autoplay_side(cx, DeckId::B);
         }
         if self.ui.button(cx, ids!(xfade_now)).clicked(actions) {
@@ -35661,6 +35725,11 @@ impl MatchEvent for App {
             let cmds = self.decks.set_normalise(on);
             self.run_deck_cmds(cx, cmds);
             self.paint_lit(cx, ids!(music_normalise), on);
+        }
+        if self.ui.button(cx, ids!(xfade_rev)).clicked(actions) {
+            let mut routing = self.decks.routing;
+            routing.reverse = !routing.reverse;
+            self.apply_fader_routing(cx, routing);
         }
         if self.ui.button(cx, ids!(music_eqfade)).clicked(actions) {
             self.eq_fade = !self.eq_fade;

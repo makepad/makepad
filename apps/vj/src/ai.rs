@@ -79,7 +79,7 @@ pub fn manifest() -> ServiceManifest {
     ))
     .with_tool(ToolDef::new(
         "crossfade",
-        "Move the music-deck crossfader: 0 is deck A and 1 is deck B.",
+        "Move the music-deck crossfader: 0 is the left end and 1 is the right end.",
         r#"{"type":"object","properties":{"value":{"type":"number","minimum":0,"maximum":1}},"required":["value"]}"#,
         Risk::Act,
     ))

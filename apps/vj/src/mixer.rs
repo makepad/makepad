@@ -24,7 +24,7 @@
 
 use crate::cue::SlotId;
 use crate::verify_or;
-use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
+use crate::decks::{crossfader_gains, DeckId, FadeCurve, FaderRouting, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
@@ -2293,6 +2293,9 @@ struct MixState {
     decks: [DeckVoice; 2],
     fader: Ramp,
     curve: FadeCurve,
+    /// Which end each deck answers to, and whether the travel is turned
+    /// round. Read beside the curve, once per frame.
+    routing: FaderRouting,
     sfx: Vec<SfxVoice>,
     master: Ramp,
     rendered_frames: u64,
@@ -2386,6 +2389,7 @@ impl MixState {
             decks: [DeckVoice::new(), DeckVoice::new()],
             fader: Ramp::at(0.0),
             curve: FadeCurve::EqualPower,
+            routing: FaderRouting::default(),
             sfx: Vec::with_capacity(MAX_SFX_VOICES),
             master: Ramp::at(0.9),
             rendered_frames: 0,
@@ -2687,6 +2691,7 @@ pub enum MixCmd {
     SetBlendStem { deck: DeckId, stem: usize, gain: f32 },
     ClearBlend(DeckId),
     SetCurve(FadeCurve),
+    SetFaderRouting(FaderRouting),
     SetMaster(f32),
     StartVoice { alloc: VoiceAlloc, pcm: Arc<TrackPcm> },
     StopVoice(VoiceId),
@@ -4393,6 +4398,12 @@ impl Mixer {
         self.run_cmd(MixCmd::SetCurve(curve));
     }
 
+    /// Which end each deck answers to, and whether the travel is turned
+    /// round. A hard switch, like the curve.
+    pub fn set_fader_routing(&self, routing: FaderRouting) {
+        self.run_cmd(MixCmd::SetFaderRouting(routing));
+    }
+
     pub fn set_master(&self, gain: f32) {
         let Some(gain) = knob(gain, 0.0, MAX_MASTER_GAIN) else { return };
         self.run_cmd(MixCmd::SetMaster(gain));
@@ -5606,6 +5617,7 @@ impl MixEngine {
                 }
             }
             MixCmd::SetCurve(curve) => s.curve = curve,
+            MixCmd::SetFaderRouting(routing) => s.routing = routing,
             MixCmd::SetMaster(gain) => s.master.slew(gain, SLEW_SECS),
             MixCmd::StartVoice { alloc, pcm } => {
                 if s.sfx.len() >= MAX_SFX_VOICES {
@@ -6073,7 +6085,7 @@ impl MixEngine {
 
             // Decks under the crossfader.
             let position = s.fader.tick(rate);
-            let fader = crossfader_gains(position, s.curve);
+            let fader = s.routing.gains(position, s.curve);
             let mut deck_out = [(0.0f32, 0.0f32); 2];
             let mut cue = (0.0f32, 0.0f32);
             for (i, d) in s.decks.iter_mut().enumerate() {
@@ -9118,6 +9130,31 @@ mod tests {
         assert_eq!(mixer.phones_mix(), -1.0);
         mixer.set_phones_mix(0.5);
         assert_eq!(mixer.phones_mix(), 0.5, "a number moves it");
+    }
+
+    /// The room hears the routing: turned round, the deck at the left end is
+    /// the other one; a thru deck is heard wherever the fader stands.
+    #[test]
+    fn the_fader_turned_round_and_a_deck_out_from_under_it() {
+        let level = |routing: FaderRouting, position: f32| {
+            let mixer = TestMixer::new();
+            mixer.set_master(1.0);
+            mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000 * 4, 48_000)); // 0.5 amp
+            mixer.set_deck_playing(DeckId::A, true);
+            mixer.set_deck_gain(DeckId::A, 0.5);
+            mixer.set_crossfader(position);
+            mixer.set_fader_routing(routing);
+            render(&mixer, 48_000.0, 8_192);
+            render(&mixer, 48_000.0, 512).channel(0)[256]
+        };
+        let plain = FaderRouting::default();
+        assert!((level(plain, 0.0) - 0.25).abs() < 0.01, "as it was: A at the left end");
+        assert!(level(plain, 1.0).abs() < 0.001);
+        let turned = FaderRouting { reverse: true, ..FaderRouting::default() };
+        assert!(level(turned, 0.0).abs() < 0.001, "turned round: the left end is B's");
+        assert!((level(turned, 1.0) - 0.25).abs() < 0.01);
+        let thru = FaderRouting { reverse: false, side: [crate::decks::FaderSide::Thru, crate::decks::FaderSide::Right] };
+        assert!((level(thru, 1.0) - 0.25).abs() < 0.01, "thru: heard at the far end too");
     }
 
     #[test]

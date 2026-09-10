@@ -153,6 +153,183 @@ pub const FADE_CURVES: [(FadeCurve, &str); 7] = [
     (FadeCurve::Transition, "Transition"),
 ];
 
+/// Which end of the crossfader a deck answers to. Thru is neither: the
+/// deck stands at full wherever the fader is, stepped out from under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaderSide {
+    Left,
+    Thru,
+    Right,
+}
+
+impl FaderSide {
+    /// The dropdown's order, and the number the settings file keeps.
+    pub fn index(self) -> usize {
+        match self {
+            FaderSide::Left => 0,
+            FaderSide::Thru => 1,
+            FaderSide::Right => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> FaderSide {
+        match index {
+            1 => FaderSide::Thru,
+            2 => FaderSide::Right,
+            _ => FaderSide::Left,
+        }
+    }
+}
+
+/// How the fader's travel reaches the two decks: whether the travel is
+/// turned round, and which end each deck answers to. The default is the
+/// fader as it always was, A on the left and B on the right. Every reader
+/// of the gain law goes through here, so the law itself stays the one the
+/// curve dropdown plots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaderRouting {
+    pub reverse: bool,
+    /// Per SLOT, like the cue: a swap moves the records, not the ends.
+    pub side: [FaderSide; 2],
+}
+
+impl Default for FaderRouting {
+    fn default() -> Self {
+        FaderRouting { reverse: false, side: [FaderSide::Left, FaderSide::Right] }
+    }
+}
+
+impl FaderRouting {
+    /// The fader's travel for a position: the position itself, or its
+    /// mirror when the fader is turned round. Travel 0 is the left end of
+    /// the law and travel 1 the right.
+    pub fn travel(&self, position: f32) -> f32 {
+        let position = position.clamp(0.0, 1.0);
+        if self.reverse { 1.0 - position } else { position }
+    }
+
+    /// The position for a travel: the same mirror, which is its own inverse.
+    pub fn position(&self, travel: f32) -> f32 {
+        self.travel(travel)
+    }
+
+    /// Per-deck gains: the law at the travel, each deck reading its own
+    /// end, a thru deck at full.
+    pub fn gains(&self, position: f32, curve: FadeCurve) -> (f32, f32) {
+        let (left, right) = crossfader_gains(self.travel(position), curve);
+        let of = |side: FaderSide| match side {
+            FaderSide::Left => left,
+            FaderSide::Right => right,
+            FaderSide::Thru => 1.0,
+        };
+        (of(self.side[0]), of(self.side[1]))
+    }
+
+    /// How present a deck is along the travel, before any curve: what the
+    /// EQ fade sweeps. Full for a thru deck.
+    pub fn presence(&self, position: f32, deck: DeckId) -> f32 {
+        let travel = self.travel(position);
+        match self.side[deck.index()] {
+            FaderSide::Left => 1.0 - travel,
+            FaderSide::Right => travel,
+            FaderSide::Thru => 1.0,
+        }
+    }
+
+    /// The position that hears `deck`: its own end, or for a thru deck the
+    /// end that fades the other out. None when both are thru and the fader
+    /// has nothing under it.
+    pub fn end_for(&self, deck: DeckId) -> Option<f32> {
+        let travel = match (self.side[deck.index()], self.side[deck.other().index()]) {
+            (FaderSide::Left, _) => 0.0,
+            (FaderSide::Right, _) => 1.0,
+            (FaderSide::Thru, FaderSide::Left) => 1.0,
+            (FaderSide::Thru, FaderSide::Right) => 0.0,
+            (FaderSide::Thru, FaderSide::Thru) => return None,
+        };
+        Some(self.position(travel))
+    }
+
+    /// The deck answering to a travel end, A first.
+    fn deck_at(&self, travel_end: f32) -> Option<DeckId> {
+        let want = if travel_end <= 0.5 { FaderSide::Left } else { FaderSide::Right };
+        [DeckId::A, DeckId::B].into_iter().find(|deck| self.side[deck.index()] == want)
+    }
+
+    /// FADE from a heading: the deck on the far side of the travel, which
+    /// is the deck the fade goes to hear. With nobody at the far end, the
+    /// deck that is not at the near one; with no deck under the fader at
+    /// all, nothing.
+    pub fn deck_across(&self, heading: f32) -> Option<DeckId> {
+        let far = if self.travel(heading) <= 0.5 { 1.0 } else { 0.0 };
+        self.deck_at(far).or_else(|| self.deck_at(1.0 - far).map(DeckId::other))
+    }
+
+    /// The fader as the autopilot reads it: A's end at 0 and B's end at 1
+    /// whatever the routing, so its plans name ends and the host puts them
+    /// back in position through `end_for`.
+    pub fn canonical(&self, position: f32) -> f32 {
+        let travel = self.travel(position);
+        let mirrored = match self.side {
+            [FaderSide::Left, _] | [_, FaderSide::Right] => false,
+            [FaderSide::Right, _] | [_, FaderSide::Left] => true,
+            _ => false,
+        };
+        if mirrored { 1.0 - travel } else { travel }
+    }
+
+    /// Whether a swap of the records can keep the programme by mirroring
+    /// the fader: only while the two decks answer to opposite ends.
+    pub fn sides_mirror(&self) -> bool {
+        matches!(
+            self.side,
+            [FaderSide::Left, FaderSide::Right] | [FaderSide::Right, FaderSide::Left]
+        )
+    }
+
+    /// The letters beside the sweep: which deck answers to the left end
+    /// and which to the right, as the hand sees them, a dot for an end
+    /// nobody is on.
+    pub fn end_labels(&self) -> (String, String) {
+        let letters = |want: FaderSide| {
+            let mut out = String::new();
+            for deck in [DeckId::A, DeckId::B] {
+                if self.side[deck.index()] == want {
+                    out.push(match deck {
+                        DeckId::A => 'A',
+                        DeckId::B => 'B',
+                    });
+                }
+            }
+            if out.is_empty() {
+                out.push('·');
+            }
+            out
+        };
+        let (left_end, right_end) = (letters(FaderSide::Left), letters(FaderSide::Right));
+        if self.reverse { (right_end, left_end) } else { (left_end, right_end) }
+    }
+
+    /// The keys in the deck settings file. A file from before them, at any
+    /// version, reads as the fader as it always was.
+    pub fn read_settings(store: &crate::settings::Settings) -> FaderRouting {
+        let fallback = FaderRouting::default();
+        FaderRouting {
+            reverse: store.bool("fader.reverse", fallback.reverse),
+            side: [
+                FaderSide::from_index(store.usize("fader.side_a", fallback.side[0].index())),
+                FaderSide::from_index(store.usize("fader.side_b", fallback.side[1].index())),
+            ],
+        }
+    }
+
+    pub fn write_settings(&self, store: &mut crate::settings::Settings) {
+        store.set_bool("fader.reverse", self.reverse);
+        store.set_usize("fader.side_a", self.side[0].index());
+        store.set_usize("fader.side_b", self.side[1].index());
+    }
+}
+
 /// A ramp from 0 to 1 across `[from, to]`, eased at both ends. The cut
 /// curves are this ramp with the shoulders pulled in.
 fn shoulder(x: f32, from: f32, to: f32) -> f32 {
@@ -1641,6 +1818,8 @@ pub enum DeckCmd {
     /// Ramp the crossfader to `position` over `secs`.
     FadeCrossfader { position: f32, secs: f32 },
     SetCurve { curve: FadeCurve },
+    /// Which end each deck answers to, and whether the travel is turned round.
+    SetFaderRouting { routing: FaderRouting },
     /// Swap the two mixer deck voices (contents, transport, everything).
     SwapVoices,
     /// Put the record on `from` onto `to` as well, on the same sample.
@@ -1725,13 +1904,17 @@ pub const SNAP_DEFAULT_BEATS: u32 = 1;
 pub struct DeckEngine {
     decks: [DeckState; 2],
     next_gen: DeckGen,
-    /// Crossfader position intent (0 = A, 1 = B).
+    /// Crossfader position intent, 0 the left end and 1 the right; which
+    /// deck that is, `routing` says.
     pub crossfader: f32,
     /// Level-matching: every deck is sent its trim as well as its fader, so
     /// a quiet master does not vanish beside a loud one. Off by default —
     /// the fader means what it says until the operator asks for this.
     pub normalise: bool,
     pub curve: FadeCurve,
+    /// Which end each deck answers to, and whether the travel is turned
+    /// round. The default is the fader as it always was.
+    pub routing: FaderRouting,
     /// Deck that most recently received a load, for Auto tie-breaks.
     last_loaded: Option<DeckId>,
     /// Hold the non-leading deck to the leader's grid without being asked.
@@ -1822,6 +2005,7 @@ impl Default for DeckEngine {
             crossfader: 0.0,
             normalise: false,
             curve: FadeCurve::EqualPower,
+            routing: FaderRouting::default(),
             last_loaded: None,
             auto_sync: true,
             over_playing: OverPlaying::default(),
@@ -1967,9 +2151,17 @@ impl DeckEngine {
             (true, false) => return DeckId::B,
             _ => {}
         }
+        // A thru deck cannot be faded out, so it is the one to keep: the
+        // other is the target wherever the fader stands.
+        let thru = |deck: DeckId| self.routing.side[deck.index()] == FaderSide::Thru;
+        match (thru(DeckId::A), thru(DeckId::B)) {
+            (true, false) => return DeckId::B,
+            (false, true) => return DeckId::A,
+            _ => {}
+        }
         // Epsilon comparison: at dead center cos/sin differ by ulps only,
         // and that must be a tie, not a side.
-        let (gain_a, gain_b) = crossfader_gains(self.crossfader, self.curve);
+        let (gain_a, gain_b) = self.routing.gains(self.crossfader, self.curve);
         if gain_b - gain_a > 1e-5 {
             return DeckId::A;
         }
@@ -3147,10 +3339,9 @@ impl DeckEngine {
     /// still crossing — the move looked instant and untrusted even though it
     /// was running. The host walks it across (`track_crossfade`) instead.
     pub fn fade_to(&mut self, deck: DeckId, secs: f32) -> Vec<DeckCmd> {
-        let position = match deck {
-            DeckId::A => 0.0,
-            DeckId::B => 1.0,
-        };
+        // The end that hears the deck; with both decks out from under the
+        // fader there is nothing to fade.
+        let Some(position) = self.routing.end_for(deck) else { return Vec::new() };
         let distance = (position - self.crossfader).abs().clamp(0.0, 1.0);
         vec![DeckCmd::FadeCrossfader { position, secs: secs.max(0.0) * distance }]
     }
@@ -3165,16 +3356,19 @@ impl DeckEngine {
     /// land the bass swap in the wrong bar whenever the fader was not parked
     /// at one end, and drop every step past the early landing.
     pub fn fade_over(&mut self, deck: DeckId, secs: f32) -> Vec<DeckCmd> {
-        let position = match deck {
-            DeckId::A => 0.0,
-            DeckId::B => 1.0,
-        };
+        let Some(position) = self.routing.end_for(deck) else { return Vec::new() };
         vec![DeckCmd::FadeCrossfader { position, secs: secs.max(0.0) }]
     }
 
     pub fn set_curve(&mut self, curve: FadeCurve) -> Vec<DeckCmd> {
         self.curve = curve;
         vec![DeckCmd::SetCurve { curve }]
+    }
+
+    /// Turn the fader round, or move a deck to an end or out from under it.
+    pub fn set_fader_routing(&mut self, routing: FaderRouting) -> Vec<DeckCmd> {
+        self.routing = routing;
+        vec![DeckCmd::SetFaderRouting { routing }]
     }
 
     /// Start a deck if it can start: a start, never a toggle, so a caller
@@ -3437,7 +3631,9 @@ impl DeckEngine {
     }
 
     /// Swap deck contents AND invert the fader so the audible program is
-    /// unchanged by the swap.
+    /// unchanged by the swap -- while the two decks answer to opposite
+    /// ends. A deck out from under the fader has no mirror image, so with
+    /// one the records swap and the fader stays where it is.
     pub fn swap(&mut self) -> Vec<DeckCmd> {
         // A held freeze belongs to the VOICE (`SwapVoices` swaps the
         // whole thing), but `frozen` here is the engine's own mirror,
@@ -3452,7 +3648,9 @@ impl DeckEngine {
         // The undo window belongs to the deck's CONTENTS, which is what a
         // swap moves. Left behind, it arms the undo on the wrong side.
         self.last_eject_ms.swap(0, 1);
-        self.crossfader = 1.0 - self.crossfader;
+        if self.routing.sides_mirror() {
+            self.crossfader = 1.0 - self.crossfader;
+        }
         cmds.push(DeckCmd::SwapVoices);
         cmds.push(DeckCmd::SetCrossfader { position: self.crossfader });
         cmds
@@ -3663,7 +3861,7 @@ impl DeckEngine {
         if !state.is_loaded() || state.muted {
             return 0.0;
         }
-        let (side_a, side_b) = crossfader_gains(self.crossfader, self.curve);
+        let (side_a, side_b) = self.routing.gains(self.crossfader, self.curve);
         let side = match deck {
             DeckId::A => side_a,
             DeckId::B => side_b,
@@ -5356,6 +5554,149 @@ mod tests {
                 _ => None,
             })
             .expect("load command")
+    }
+
+    /// The default routing IS the law: every curve at every position, the
+    /// same numbers the fader always produced, and the ends where they were.
+    #[test]
+    fn the_default_routing_is_the_fader_as_it_was() {
+        let routing = FaderRouting::default();
+        for (curve, _) in FADE_CURVES {
+            for step in 0..=20 {
+                let position = step as f32 / 20.0;
+                assert_eq!(routing.gains(position, curve), crossfader_gains(position, curve));
+            }
+        }
+        assert_eq!(routing.end_for(DeckId::A), Some(0.0));
+        assert_eq!(routing.end_for(DeckId::B), Some(1.0));
+        // FADE from a fader parked at dead centre goes to B, as it always did.
+        assert_eq!(routing.deck_across(0.5), Some(DeckId::B));
+        assert_eq!(routing.deck_across(0.51), Some(DeckId::A));
+        assert_eq!(routing.canonical(0.3), 0.3);
+        assert_eq!(routing.end_labels(), ("A".to_string(), "B".to_string()));
+    }
+
+    #[test]
+    fn reversed_puts_a_on_the_right() {
+        let routing = FaderRouting { reverse: true, ..FaderRouting::default() };
+        for (curve, _) in FADE_CURVES {
+            for step in 0..=20 {
+                let position = step as f32 / 20.0;
+                let (a, b) = routing.gains(position, curve);
+                let (left, right) = crossfader_gains(1.0 - position, curve);
+                assert_eq!((a, b), (left, right), "{curve:?} at {position}");
+            }
+        }
+        let (a, b) = routing.gains(0.0, FadeCurve::Linear);
+        assert_eq!((a, b), (0.0, 1.0), "the left end is B's now");
+        assert_eq!(routing.end_for(DeckId::A), Some(1.0));
+        assert_eq!(routing.end_for(DeckId::B), Some(0.0));
+        assert_eq!(routing.deck_across(0.0), Some(DeckId::A), "from B's end, FADE goes to A");
+        assert_eq!(routing.canonical(0.0), 1.0, "the autopilot still sees B's end as 1");
+        assert_eq!(routing.end_labels(), ("B".to_string(), "A".to_string()));
+    }
+
+    #[test]
+    fn thru_is_full_anywhere() {
+        let routing = FaderRouting { reverse: false, side: [FaderSide::Thru, FaderSide::Right] };
+        for (curve, _) in FADE_CURVES {
+            for step in 0..=20 {
+                let position = step as f32 / 20.0;
+                let (a, b) = routing.gains(position, curve);
+                assert_eq!(a, 1.0, "{curve:?} at {position}: a thru deck is at full");
+                assert_eq!(b, crossfader_gains(position, curve).1, "B still rides its end");
+            }
+        }
+        assert_eq!(routing.presence(0.9, DeckId::A), 1.0, "and the EQ fade leaves its bass");
+        assert_eq!(routing.end_labels(), ("·".to_string(), "B".to_string()));
+    }
+
+    /// A fade goes to the end that hears the deck: a thru deck is heard
+    /// everywhere, so the fade for it goes where the OTHER deck is out.
+    /// Two thru decks leave the fader nothing to do.
+    #[test]
+    fn a_fade_goes_to_the_end_that_hears_the_deck() {
+        let mut e = DeckEngine::new();
+        e.set_fader_routing(FaderRouting { reverse: false, side: [FaderSide::Thru, FaderSide::Right] });
+        e.set_crossfader(0.5);
+        assert_eq!(
+            e.fade_to(DeckId::A, 8.0),
+            vec![DeckCmd::FadeCrossfader { position: 0.0, secs: 4.0 }],
+            "hearing A alone means fading B out at the left end"
+        );
+        assert_eq!(
+            e.fade_over(DeckId::B, 8.0),
+            vec![DeckCmd::FadeCrossfader { position: 1.0, secs: 8.0 }],
+        );
+        assert_eq!(e.routing.deck_across(0.0), Some(DeckId::B), "the far end is B's");
+        assert_eq!(e.routing.deck_across(1.0), Some(DeckId::A), "nobody at the left: the other deck");
+
+        e.set_fader_routing(FaderRouting { reverse: false, side: [FaderSide::Thru, FaderSide::Thru] });
+        assert!(e.fade_to(DeckId::A, 8.0).is_empty(), "two thru decks: no command");
+        assert!(e.fade_over(DeckId::B, 8.0).is_empty());
+        assert_eq!(e.routing.deck_across(0.5), None);
+        assert_eq!(e.routing.end_labels(), ("·".to_string(), "·".to_string()));
+    }
+
+    /// A playing thru deck cannot be faded out, so a pick never lands on it.
+    #[test]
+    fn the_auto_target_never_lands_on_a_playing_thru_deck() {
+        let mut e = DeckEngine::new();
+        let (d1, g1) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(d1, g1, 60.0);
+        let (d2, g2) = load_gen(&e.click(item(2), DeckTarget::B));
+        e.track_ready(d2, g2, 60.0);
+        e.play(DeckId::A);
+        e.play(DeckId::B);
+        // Both at full: A at its own end and B out from under the fader.
+        e.set_crossfader(0.0);
+        e.set_fader_routing(FaderRouting { reverse: false, side: [FaderSide::Left, FaderSide::Thru] });
+        assert_eq!(e.auto_target(), DeckId::A, "the deck under the fader can be faded out");
+        e.set_fader_routing(FaderRouting { reverse: false, side: [FaderSide::Thru, FaderSide::Right] });
+        e.set_crossfader(1.0);
+        assert_eq!(e.auto_target(), DeckId::B);
+    }
+
+    #[test]
+    fn the_strip_gain_follows_the_routing() {
+        let mut e = DeckEngine::new();
+        let (d1, g1) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(d1, g1, 60.0);
+        e.set_crossfader(0.0);
+        assert!((e.deck_strip_gain(DeckId::A) - 1.0).abs() < 1e-6, "A at its end");
+        e.set_fader_routing(FaderRouting { reverse: true, ..FaderRouting::default() });
+        assert!(e.deck_strip_gain(DeckId::A).abs() < 1e-6, "turned round, A is at the far end");
+        e.set_fader_routing(FaderRouting { reverse: true, side: [FaderSide::Thru, FaderSide::Right] });
+        assert!((e.deck_strip_gain(DeckId::A) - 1.0).abs() < 1e-6, "thru: full anywhere");
+    }
+
+    /// A swap mirrors the fader to keep the programme, which only works
+    /// while the decks answer to opposite ends.
+    #[test]
+    fn a_swap_keeps_the_programme_only_while_the_sides_mirror() {
+        let mut e = DeckEngine::new();
+        e.set_crossfader(0.3);
+        e.swap();
+        assert!((e.crossfader - 0.7).abs() < 1e-6, "the mirror, as always");
+        e.set_fader_routing(FaderRouting { reverse: true, ..FaderRouting::default() });
+        e.swap();
+        assert!((e.crossfader - 0.3).abs() < 1e-6, "turned round still mirrors");
+        e.set_fader_routing(FaderRouting { reverse: false, side: [FaderSide::Left, FaderSide::Thru] });
+        e.swap();
+        assert!((e.crossfader - 0.3).abs() < 1e-6, "a thru deck has no mirror: the fader stays");
+    }
+
+    #[test]
+    fn the_routing_comes_back_from_its_file_and_an_older_file_is_the_default() {
+        let mut store = crate::settings::Settings::new();
+        let routing = FaderRouting { reverse: true, side: [FaderSide::Thru, FaderSide::Left] };
+        routing.write_settings(&mut store);
+        let back = crate::settings::Settings::from_text(&store.to_text());
+        assert_eq!(FaderRouting::read_settings(&back), routing);
+        let older = crate::settings::Settings::from_text("version 1\ndeck.curve 5\n");
+        assert_eq!(FaderRouting::read_settings(&older), FaderRouting::default());
+        let bare = crate::settings::legacy::autopilot("3\n1\n1\n1\n0\n0\n");
+        assert_eq!(FaderRouting::read_settings(&bare), FaderRouting::default());
     }
 
     #[test]
