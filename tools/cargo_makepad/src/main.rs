@@ -143,6 +143,12 @@ fn show_help() {
         "       --device=<DEVICE_NAME>                    The device name to use for signing/provisioning"
     );
     println!();
+    println!("    [package.metadata.makepad.ios] (or .tvos) in Cargo.toml:");
+    println!("       info_plist = \"packaging/ios/Info.plist\"");
+    println!("       Optional XML/binary plist dictionary, relative to the package directory.");
+    println!("       Its top-level keys replace generated defaults before icons and signing.");
+    println!("       CFBundleIdentifier and CFBundleExecutable must match the generated values.");
+    println!();
     println!("Android commands:");
     println!();
     println!(

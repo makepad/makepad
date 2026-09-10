@@ -236,7 +236,7 @@ pub fn list_profiles()->Result<(), String>{
 }
 */
 impl PlistValues {
-    fn to_plist_file(&self, os: AppleOs) -> String {
+    pub(super) fn to_plist_file(&self, os: AppleOs) -> String {
         match os {
             AppleOs::Tvos => self.to_tvos_plist_file(),
             AppleOs::Ios => self.to_ios_plist_file(),
@@ -701,10 +701,35 @@ pub fn build(
     apple_target: AppleTarget,
 ) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
+    let cwd = std::env::current_dir().unwrap();
+    let info_plist = crate::apple::info_plist::load(&cwd, build_crate, apple_target.os())?;
     let binary_name =
         get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
-    let cwd = std::env::current_dir().unwrap();
+    // Capitalize the first letter for the user-visible name (CFBundleDisplayName /
+    // CFBundleName) so the iOS home-screen icon doesn't show a lowercased crate name,
+    // while keeping the bundle identifier lowercase so existing provisioning profiles
+    // still match.
+    let display_name = {
+        let mut chars = product.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    };
+    let plist = PlistValues {
+        identifier: format!("{org}.{product}").to_string(),
+        display_name: display_name.clone(),
+        name: display_name,
+        executable: binary_name.clone(),
+        version: "1.0.0".to_string(),
+    };
+    let generated_plist = plist.to_plist_file(apple_target.os());
+    let plist_contents = match info_plist {
+        Some(overrides) => overrides.merge(&generated_plist)?,
+        None => generated_plist,
+    };
+
     let target_dir = cargo_target_dir(&cwd);
     let target_dir_str = target_dir.to_string_lossy().to_string();
     let target_dir_arg = format!("--target-dir={target_dir_str}");
@@ -745,25 +770,6 @@ pub fn build(
     }
     shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
-    // alright lets make the .app file with manifest
-    // Capitalize the first letter for the user-visible name (CFBundleDisplayName /
-    // CFBundleName) so the iOS home-screen icon doesn't show a lowercased crate name,
-    // while keeping the bundle identifier lowercase so existing provisioning profiles
-    // still match.
-    let display_name = {
-        let mut chars = product.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            None => String::new(),
-        }
-    };
-    let plist = PlistValues {
-        identifier: format!("{org}.{product}").to_string(),
-        display_name: display_name.clone(),
-        name: display_name,
-        executable: binary_name.clone(),
-        version: "1.0.0".to_string(),
-    };
     let profile = get_profile_from_args(args);
 
     let app_dir = target_dir.join(format!(
@@ -773,7 +779,7 @@ pub fn build(
     mkdir(&app_dir)?;
 
     let plist_file = app_dir.join("Info.plist");
-    write_text(&plist_file, &plist.to_plist_file(apple_target.os()))?;
+    write_text(&plist_file, &plist_contents)?;
 
     if matches!(apple_target.os(), AppleOs::Ios) {
         match generate_app_icon_xcassets(&app_dir, build_crate) {
