@@ -429,21 +429,47 @@ impl ChunkWriter {
     }
 }
 
+/// How long a sidecar lane may be, given the track it belongs to.
+///
+/// A lane was held to the fifteen minutes a local FILE is held to, which
+/// is the wrong question: a lane belongs to a track that is already
+/// decoded and sitting in memory, so the track itself says how long a
+/// lane can reasonably be. A track over that limit could never have its
+/// stems read at all, and the refusal was swallowed -- the faders simply
+/// did nothing and nothing said why.
+///
+/// Never less than the old limit, and never less than twice the track's
+/// own length: a lane recorded at a higher rate than the track has
+/// proportionally more frames, and an encoder's padding is free.
+fn sidecar_budget(track_frames: usize) -> usize {
+    crate::wave_analysis::MAX_LOCAL_TRACK_FRAMES.max(track_frames.saturating_mul(2))
+}
+
 /// Read the four sidecar stems beside a track, if they are all there.
-fn load_sidecar(source: &Path) -> Option<[TrackPcm; 4]> {
+fn load_sidecar(source: &Path, track_frames: usize) -> Option<[TrackPcm; 4]> {
     let dir = source.parent()?.join("stems");
     if !dir.is_dir() {
         return None;
     }
+    let budget = sidecar_budget(track_frames);
     let mut lanes = Vec::with_capacity(4);
     for name in SIDECAR_NAMES {
         let path = dir.join(name);
-        let pcm = crate::media::decode_audio_clip(
+        let pcm = match crate::media::decode_audio_clip(
             &path,
             makepad_asset_data::MediaType::Wav,
-            crate::wave_analysis::MAX_LOCAL_TRACK_FRAMES,
-        )
-        .ok()?;
+            budget,
+        ) {
+            Ok(pcm) => pcm,
+            // A stems folder that is there and cannot be read is worth
+            // saying out loud: the separation quietly falls back to doing
+            // the work itself, and nothing on screen says the files beside
+            // the track were passed over.
+            Err(error) => {
+                crate::error!("stems: sidecar {name} could not be read ({error})");
+                return None;
+            }
+        };
         lanes.push(pcm);
     }
     let mut out = lanes.into_iter();
@@ -867,7 +893,7 @@ impl StemsPool {
                     // A deck job never yields; only a background one does.
                     let should_yield = || prefetching && waiting.load(Ordering::SeqCst);
                     if let Some(source) = job.source.as_ref() {
-                        if let Some(lanes) = load_sidecar(source) {
+                        if let Some(lanes) = load_sidecar(source, job.pcm.frames.len()) {
                             run_sidecar(&job, lanes, &out);
                             // The sidecar answers for the STEMS and nothing
                             // else. Coverage is the only place a track's
@@ -1090,6 +1116,41 @@ impl StemsPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lanes beside a long track used to be measured against the limit
+    /// a local FILE is held to, so a track past that limit could not have
+    /// its stems read at all -- and the refusal was swallowed.
+    #[test]
+    fn a_sidecar_lane_is_measured_against_its_own_track() {
+        let quarter_hour = crate::wave_analysis::MAX_LOCAL_TRACK_FRAMES;
+        // A track inside the old limit is not held to anything tighter.
+        assert_eq!(sidecar_budget(0), quarter_hour);
+        assert_eq!(sidecar_budget(quarter_hour / 2), quarter_hour);
+        // And one past it takes its own length with it. Sixteen minutes
+        // at 44.1 kHz is the case that could not be read before.
+        let sixteen_minutes = 44_100 * 60 * 16;
+        assert!(
+            sidecar_budget(sixteen_minutes) >= sixteen_minutes,
+            "a lane as long as its own track must fit",
+        );
+        // Room for a lane at a higher rate than the track carries.
+        assert!(sidecar_budget(sixteen_minutes) >= sixteen_minutes * 2);
+        // Nothing here can overflow on a silly number.
+        assert!(sidecar_budget(usize::MAX) >= quarter_hour);
+    }
+
+    /// A stems folder that is there and cannot be read says so: the
+    /// separation quietly falls back to doing the work itself, and
+    /// nothing on screen says the files beside the track were passed over.
+    #[test]
+    fn a_sidecar_that_cannot_be_read_says_so() {
+        let source = include_str!("stems.rs");
+        let body = source.split("mod tests {").next().unwrap_or(source);
+        assert!(
+            body.contains("error!(\"stems: sidecar {name} could not be read"),
+            "a lane that could not be read is passed over in silence",
+        );
+    }
 
     #[test]
     fn chunk_geometry_covers_the_whole_track() {
