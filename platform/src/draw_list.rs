@@ -1590,6 +1590,46 @@ impl CxDrawListPool {
     }
 }
 
+impl CxDrawListPool {
+    /// Clear every retained draw call's binding of the given textures and
+    /// uniform buffers, wherever it lives. A hidden retained slot keeps its
+    /// bindings until it activates again, so a resource its owner released
+    /// can only be freed once those slots let go. No pass is marked for
+    /// repaint: a call binding a released resource draws nothing until its
+    /// owner rebinds it. Returns the number of bindings cleared.
+    pub fn release_bindings(
+        &mut self,
+        textures: &[crate::texture::TextureId],
+        uniform_buffers: &[crate::uniform_buffer::UniformBufferId],
+    ) -> usize {
+        let mut cleared = 0;
+        for list in 0..self.0.pool.len() {
+            let generation = self.0.pool[list].generation;
+            if !self.0.is_live_generation(list, generation) {
+                continue;
+            }
+            let items = &mut self.0.pool[list].item.draw_items;
+            for item in items.buffer.iter_mut() {
+                let Some(call) = item.kind.draw_call_mut() else {
+                    continue;
+                };
+                for slot in call.texture_slots.iter_mut() {
+                    if slot.as_ref().is_some_and(|t| textures.contains(&t.texture_id())) {
+                        *slot = None;
+                        cleared += 1;
+                    }
+                }
+                for slot in call.uniform_buffer_slots.iter_mut() {
+                    if slot.as_ref().is_some_and(|u| uniform_buffers.contains(&u.uniform_buffer_id())) {
+                        *slot = None;
+                        cleared += 1;
+                    }
+                }
+            }
+        }
+        cleared
+    }
+}
 impl std::ops::Index<DrawListId> for CxDrawListPool {
     type Output = CxDrawList;
     fn index(&self, index: DrawListId) -> &Self::Output {
