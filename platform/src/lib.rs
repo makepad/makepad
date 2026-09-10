@@ -98,6 +98,7 @@ mod app_main;
 pub mod remote;
 pub mod pixel_probe;
 pub mod screen_capture;
+pub mod audio_output_fence;
 pub mod audio_output_tap;
 pub mod log_ring;
 pub mod shader_error;

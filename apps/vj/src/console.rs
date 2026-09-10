@@ -500,8 +500,8 @@ pub fn detail_text(health: &AudioHealth, meters: &[f32; 5], decks: [f32; 2]) -> 
         health.stages.mix / 1_000,
         health.stages.publish / 1_000,
     ));
-    // The poison count only appears once there is one: it means a panic
-    // happened somewhere else in the app, and a permanent "poisoned 0"
+    // The panic count only appears once there is one: it means an output
+    // callback panicked and was retired, and a permanent "panicked 0"
     // would teach the eye to skip the line that matters.
     text.push_str(&format!(
         "silenced {}, phones {}",
@@ -510,8 +510,8 @@ pub fn detail_text(health: &AudioHealth, meters: &[f32; 5], decks: [f32; 2]) -> 
     if health.overruns > 0 {
         text.push_str(&format!(", overran {}", health.overruns));
     }
-    if health.poisoned > 0 {
-        text.push_str(&format!(", POISONED {}", health.poisoned));
+    if health.panicked > 0 {
+        text.push_str(&format!(", PANICKED {}", health.panicked));
     }
     text.push('\n');
     text.push_str(&format!(
@@ -552,7 +552,7 @@ mod tests {
 
     fn health() -> AudioHealth {
         AudioHealth {
-            poisoned: 0,
+            panicked: 0,
             overruns: 0,
             stages: crate::mixer::StageNanos::default(),
             contended: 0,
@@ -582,14 +582,14 @@ mod tests {
     }
 
     #[test]
-    fn a_panic_elsewhere_shows_up_in_the_numbers_and_silence_does_not_pretend_to_be_it() {
+    fn a_panic_in_a_callback_shows_up_in_the_numbers_and_silence_does_not_pretend_to_be_it() {
         let quiet = detail_text(&health(), &[0.0; 5], [0.0, 0.0]);
         assert!(quiet.contains("silenced 0, phones 0"));
-        assert!(!quiet.contains("POISONED"), "nothing to say while nothing has gone wrong");
+        assert!(!quiet.contains("PANICKED"), "nothing to say while nothing has gone wrong");
         let mut hurt = health();
-        hurt.poisoned = 3;
+        hurt.panicked = 3;
         let text = detail_text(&hurt, &[0.0; 5], [0.0, 0.0]);
-        assert!(text.contains("POISONED 3"), "and it is unmissable when there is: {text}");
+        assert!(text.contains("PANICKED 3"), "and it is unmissable when there is: {text}");
     }
 
     #[test]

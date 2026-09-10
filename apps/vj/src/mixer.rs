@@ -1249,9 +1249,13 @@ pub struct AudioHealth {
     /// there is nothing left to contend for. It counted a hazard that has
     /// been designed out rather than reduced.
     pub contended: u64,
-    /// Callbacks that found the lock poisoned and took it over. Zero for
-    /// the same reason.
-    pub poisoned: u64,
+    /// Output callbacks the platform's fence has retired: a panic in the
+    /// app's own render, contained where it happened so it cost that
+    /// buffer and not the device thread. The output it names plays
+    /// silence for the rest of the run, and the app says which.
+    ///
+    /// It used to count a poisoned lock, which this engine no longer has.
+    pub panicked: u64,
     /// Buffers the render could not fill inside their own playing time,
     /// since the app started. Nothing else can silence a buffer on this
     /// engine, so this is THE dropout figure -- counted since the render
@@ -3041,9 +3045,12 @@ impl Mixer {
 
     pub fn audio_health(&self) -> AudioHealth {
         AudioHealth {
-            // Both zero by construction on this engine; see the struct.
+            // Zero by construction on this engine; see the struct.
             contended: 0,
-            poisoned: 0,
+            // Not this engine's own count: the fence that holds it sits
+            // above every backend, in the platform, and every output goes
+            // through it.
+            panicked: makepad_widgets::makepad_platform::audio_output_fence::audio_output_panics_total(),
             overruns: self.shared.overrun_callbacks.load(Ordering::Relaxed),
             phones_starved: self.shared.cue_ring.starved.load(Ordering::Relaxed),
             render_nanos: self.shared.render_nanos.load(Ordering::Relaxed),

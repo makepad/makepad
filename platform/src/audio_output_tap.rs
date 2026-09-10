@@ -155,6 +155,15 @@ pub(crate) fn feed_audio_output_tap(output: usize, info: AudioInfo, buffer: &Aud
     EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
+/// The registry is one per process, so its tests take turns -- at module
+/// scope rather than inside the test module, because the seam that wraps
+/// this feed has a test of its own and it has to take the same turn.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,12 +172,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::{Duration, Instant};
-
-    /// The registry is one per process, so these tests take turns.
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
-    }
 
     fn info() -> AudioInfo {
         AudioInfo { device_id: AudioDeviceId(LiveId(7)), time: None, sample_rate: 48_000.0 }

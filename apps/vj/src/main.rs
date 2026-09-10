@@ -10861,7 +10861,12 @@ pub struct App {
     audio_overruns_seen: u64,
     /// Poisoned callbacks already reported.
     #[rust]
-    audio_poisoned_seen: u64,
+    audio_panicked_seen: u64,
+    /// The same, per output, so the app can name which one went and say
+    /// the panic's own words. This tab installs two: the room and the
+    /// monitor.
+    #[rust]
+    audio_panicked_by_output: [u64; 2],
     #[rust]
     audio_render_max_seen: u64,
     /// The monitor's own dropout count, as last reported.
@@ -19069,16 +19074,33 @@ p2 {}
             );
             self.audio_overruns_seen = health.overruns;
         }
-        // A panic on a thread that held the mixer lock. The buffer played,
-        // so nobody heard a thing; the app is one panic worse off than it
-        // looks, and this is the only place that says so.
-        if health.poisoned != self.audio_poisoned_seen {
-            log!(
-                "audio: state lock POISONED by a panic elsewhere {} time(s) (+{} since last); the callback took it over and carried on",
-                health.poisoned,
-                health.poisoned - self.audio_poisoned_seen
-            );
-            self.audio_poisoned_seen = health.poisoned;
+        // A panic inside an output callback, contained by the platform's
+        // fence. At error level and not as a note: the output it names is
+        // silent for the rest of the run, which is the loudest thing that
+        // can go wrong here, and an operator watching the one line under
+        // the lists must not have to open a pane to learn it.
+        if health.panicked != self.audio_panicked_seen {
+            self.audio_panicked_seen = health.panicked;
+            for index in 0..self.audio_panicked_by_output.len() {
+                let count =
+                    makepad_widgets::makepad_platform::audio_output_fence::audio_output_panics(index);
+                if count == self.audio_panicked_by_output[index] {
+                    continue;
+                }
+                self.audio_panicked_by_output[index] = count;
+                match makepad_widgets::makepad_platform::audio_output_fence::take_audio_output_panic_note(index) {
+                    Some(said) => error!(
+                        "audio: the output {index} callback panicked ({said}); that output is silent until the app is restarted"
+                    ),
+                    None => error!(
+                        "audio: the output {index} callback panicked, its words lost; that output is silent until the app is restarted"
+                    ),
+                }
+            }
+            // The render figures froze at the last buffer that finished.
+            // Stop the console quoting a budget for a device nothing is
+            // rendering into.
+            self.mixer.forget_device();
         }
         // The monitor's own dropout: heard in the cans, invisible in the
         // room, and until now counted nowhere at all.
@@ -34146,10 +34168,28 @@ impl MatchEvent for App {
             // nobody, which is the whole point of the command ring. Taken
             // once -- a second audio_output would find nothing left.
             let mut engine = self.mixer.take_engine();
+            // Only in a build asked for it, and only with the countdown
+            // set: the fence that contains a panicking callback cannot be
+            // watched containing one without one to contain.
+            #[cfg(feature = "audio-fault-injection")]
+            let mut fault_after: Option<u64> = std::env::var("VJ_PANIC_AFTER_BUFFERS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok());
             cx.audio_output(0, move |info, output| {
                 output.zero();
                 if let Some(engine) = engine.as_mut() {
                     engine.render(info.sample_rate, output);
+                }
+                // AFTER the render, on a buffer holding real audio: a
+                // panic before it would be indistinguishable from the
+                // zeroing above, and the point is to see the fence hand
+                // over silence in place of something.
+                #[cfg(feature = "audio-fault-injection")]
+                if let Some(left) = fault_after.as_mut() {
+                    match *left {
+                        0 => panic!("the injected fault"),
+                        _ => *left -= 1,
+                    }
                 }
             });
             // The headphone cue rides slot 1 unconditionally: with no

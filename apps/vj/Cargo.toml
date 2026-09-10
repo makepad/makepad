@@ -93,6 +93,12 @@ makepad-mp4-index = { path = "../../libs/mp4_index" }
 # models, so this is not a new toolchain requirement.
 advisor = ["dep:makepad-ai-llm"]
 
+# Build in a way to make the program output callback panic on purpose, so
+# the fence that contains it can be watched containing it in a running app.
+# Off by default and inert without VJ_PANIC_AFTER_BUFFERS on top, because a
+# deliberate panic has no business in a build anybody might take to a gig.
+audio-fault-injection = []
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-app-asset-server = { path = "../asset-server" }
 makepad-asset-store = { path = "../../libs/asset/store" }
