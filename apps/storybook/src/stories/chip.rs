@@ -114,9 +114,9 @@ script_mod! {
             Chip{text: "Outline" appearance: Outline disabled: true}
             Chip{text: "Chosen" selectable: true selected: true disabled: true}
         }
-    }
+    
 
-    mod.stories.ChipBasic = StoryPage{
+        StoryHeading{text: "One chip, under the controls"}
         StoryNote{text: "One chip. Every control on the right writes into it."}
         StoryRow{
             subject := Chip{text: "Chip" selectable: true}
@@ -188,9 +188,10 @@ fn chip_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             root.label(cx, ids!(removed)).set_text(cx, &format!("removed {name}"));
         }
     }
+    chip_subject_actions(cx, root, actions);
 }
 
-fn chip_basic_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+fn chip_subject_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let subject = root.chip(cx, ids!(subject));
     if let Some(on) = subject.toggled(actions) {
         let text = if on { "chosen" } else { "not chosen" };
@@ -210,24 +211,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "ChipOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Chip\n\nA chip stands for one thing the user chose, typed or was given. It is a noun, not a verb: the press toggles whether the thing is there rather than making something happen.\n\n`selectable` makes the press a toggle and gives the chosen chip a tick, which is what a filter is. `removable` puts a cross at the trailing edge with its own hit area, which is what a recipient in a field is. `Tag` is neither: `interactive: false`, so it takes no hover, no press and no focus.\n\nThe roles and their colours are the badge's, so a chip and a badge that both mean \"error\" are the same red. `appearance` decides how loudly the role is spoken: `Filled`, `Tonal`, `Outline` or `Ghost`. There is no elevated appearance on purpose — a shadow is a fact about the surface a chip sits on, so an elevated row of chips is a chip row inside an `ElevatedView1`.\n\nHover and press are drawn as state layers at `theme.state_hover_opacity` and `theme.state_press_opacity`, the same arithmetic every other control uses.",
         subject: "filter_open",
-        feature: None,
-        controls: &[],
-        on_actions: Some(chip_actions),
-    },
-    Story {
-        key: "inputs/chip/basic",
-        category: "Inputs",
-        component: "Chip",
-        also: &[],
-        name: "Basic",
-        dsl: "ChipBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Chip\n\nOne chip under the controls: its label, role, appearance, size, and whether it can be chosen or taken away.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Label", target: "subject", kind: ControlKind::Text { prop: "text", default: "Chip" } },
@@ -239,6 +225,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Radius", target: "subject", kind: ControlKind::Number { prop: "radius", min: 0., max: 999., step: 1., default: 999. } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: Some(chip_basic_actions),
+        on_actions: Some(chip_actions),
     },
 ];

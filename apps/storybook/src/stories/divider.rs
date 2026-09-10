@@ -41,9 +41,9 @@ script_mod! {
         Divider{inset: DividerInset.None, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Start, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Middle, appearance: DividerAppearance.Strong}
-    }
+    
 
-    mod.stories.DividerBasic = StoryPage{
+        StoryHeading{text: "One divider, under the controls"}
         StoryNote{text: "One divider. The controls write its label, where the label sits, its style, weight and inset."}
         subject := Divider{text: "or"}
     }
@@ -58,24 +58,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "DividerOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Divider\n\nA hairline between two things. `Divider` lies across its parent, `DividerVertical` stands as tall as its parent lets it, `DividerLabelled` carries an \"or\" in the middle. The label can sit at the start, the centre or the end and splits the rule into two segments; the style is solid, dashed or dotted; the appearance is subtle, strong or brand; the inset keeps the rule off the leading edge or off both.\n\n`Hr` and `Vr` keep drawing the theme's bevelled groove and are untouched.",
         subject: "labelled",
-        feature: None,
-        controls: &[],
-        on_actions: None,
-    },
-    Story {
-        key: "layout/divider/basic",
-        category: "Layout",
-        component: "Divider",
-        also: &[],
-        name: "Basic",
-        dsl: "DividerBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Divider\n\nOne divider under the controls: the label, where it sits, the style, the weight and the inset.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Label", target: "subject", kind: ControlKind::Text { prop: "text", default: "or" } },

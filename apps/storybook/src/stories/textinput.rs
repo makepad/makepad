@@ -1,6 +1,6 @@
 //! The text input stories: the input ladder, single-line scrolling, multiline inputs and a multiline toggle, with the change counter, ported from the widget zoo.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 script_mod! {
@@ -141,6 +141,13 @@ script_mod! {
             height: Fit
             width: Fill
         }
+    
+
+        StoryHeading{text: "One field, under the controls"}
+        StoryNote{text: "One text input with a placeholder."}
+        StoryRow{
+            subject := TextInput{width: 240. empty_text: "Type here"}
+        }
     }
 }
 
@@ -169,10 +176,15 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "TextInputOverview",
     added: "2026-04-06",
-    tags: &["ported"],
+    tags: &["controls", "ported"],
     doc: "# TextInput\n\nText inputs allow users to enter text.",
     subject: "",
     feature: None,
-    controls: &[],
+    controls: &[
+            Control { label: "Placeholder", target: "subject", kind: ControlKind::Text { prop: "empty_text", default: "Type here" } },
+            Control { label: "Password", target: "subject", kind: ControlKind::Bool { prop: "is_password", default: false } },
+            Control { label: "Read only", target: "subject", kind: ControlKind::Bool { prop: "is_read_only", default: false } },
+            Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
+        ],
     on_actions: Some(overview_actions),
 }];

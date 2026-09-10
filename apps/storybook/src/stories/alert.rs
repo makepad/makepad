@@ -86,17 +86,14 @@ script_mod! {
         View{width: 640. height: Fit  Reflowing{}}
         View{width: 440. height: Fit  Reflowing{}}
         View{width: 300. height: Fit  Reflowing{}}
-    }
+    
 
-    mod.stories.AlertBasic = StoryPage{
+        StoryHeading{text: "One alert, under the controls"}
         StoryNote{text: "One alert. The controls write its title, description, intent, appearance and close cross; the button brings it back after the cross folds it away."}
         subject := Alert{
             title: "Title"
             description: "A description of what happened and what to do about it."
             closable: true
-        }
-        StoryRow{
-            reopen := ButtonFlat{text: "Show again"}
         }
     }
 }
@@ -113,6 +110,7 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
         for path in closables {
             root.alert(cx, path).open(cx);
         }
+        root.alert(cx, ids!(subject)).open(cx);
     }
     for path in closables {
         let alert = root.alert(cx, path);
@@ -132,12 +130,6 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     }
 }
 
-fn basic_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
-    if root.button(cx, ids!(reopen)).clicked(actions) {
-        root.alert(cx, ids!(subject)).open(cx);
-    }
-}
-
 pub const STORIES: &[Story] = &[
     Story {
         key: "feedback/alert/overview",
@@ -147,24 +139,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "AlertOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Alert\n\nA message that sits in the page: an intent icon, a bold title, a description, an action slot and a close cross on a face coloured by intent. `Alert` is the bevelled standard, `AlertFlat` the plain face, `Banner` the full-width strip, `InlineTip` the guide banner with folded guidance and a media slot, `Callout` the card nudge with an accent bar.\n\nClosing folds the alert away over `motion_medium_1` and raises `Closed`; a tip with a `dismiss_key` also raises `Dismissed(key)`. A click on the widget in an action slot raises `Action`. `open` brings a closed alert back.\n\nWhile the title, the description and the actions fit on one line they share it; when the width shrinks the text stacks and the actions drop under it.",
         subject: "closable",
-        feature: None,
-        controls: &[],
-        on_actions: Some(overview_actions),
-    },
-    Story {
-        key: "feedback/alert/basic",
-        category: "Feedback",
-        component: "Alert",
-        also: &[],
-        name: "Basic",
-        dsl: "AlertBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Alert\n\nOne alert under the controls: title, description, intent, appearance, the close cross and the disabled dimming.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Title", target: "subject", kind: ControlKind::Text { prop: "title", default: "Title" } },
@@ -194,6 +171,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Closable", target: "subject", kind: ControlKind::Bool { prop: "closable", default: true } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: Some(basic_actions),
+        on_actions: Some(overview_actions),
     },
 ];

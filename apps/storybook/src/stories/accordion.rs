@@ -88,9 +88,9 @@ script_mod! {
         StoryRow{
             hover_state := Label{text: "showing: 0"}
         }
-    }
+    
+        StoryHeading{text: "A list on one side, the thing itself on the other"}
 
-    mod.stories.AccordionSplit = StoryPage{
         StoryNote{text: "A list of things to look at, with a pane beside it showing the one being pointed at. The sections open the moment the pointer arrives, because here the sweep IS the browsing and a wait only makes it feel stuck."}
 
         StoryRow{
@@ -197,40 +197,30 @@ fn split_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     root.label(cx, ids!(preview_note)).set_text(cx, &format!("section {index}"));
 }
 
+fn accordion_all_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    // One page now, so both halves' handlers run for it.
+    accordion_actions(cx, root, actions);
+    split_actions(cx, root, actions);
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "layout/accordion/overview",
     category: "Layout",
     component: "Accordion",
-    also: &["AccordionHover", "FoldButton", "FoldHeader"],
+    also: &["AccordionHover", "AccordionSweep", "FoldButton", "FoldHeader", "Filler"],
     name: "Overview",
     dsl: "AccordionOverview",
     added: "2026-09-05",
     tags: &["new"],
-    doc: "# Accordion\n\nA panel that decides which of its sections have room. The host sets how many may be open, because a panel narrows when the window does rather than because anyone asked; the person chooses which ones fill that room.\n\nThree rules, each learned by getting it wrong first. Folding a section leaves its room **empty**: handing it to a section nobody asked for means the panel answers a fold by opening something else, which then sits there while the sections actually in use trade places underneath it. A section that is wanted but crowded out **comes back on its own** when the room grows, because wanting is remembered apart from showing. And the **last open section cannot be folded**, since a column of headings over dead space is not a state worth reaching.\n\nThe widget only says which sections are open; it never draws one. Any fold header will do, including an app's own.",
+    doc: "# Accordion\n\nA panel that decides which of its sections have room. The host sets how many may be open, because a panel narrows when the window does rather than because anyone asked; the person chooses which ones fill that room.\n\nThree rules, each learned by getting it wrong first. Folding a section leaves its room **empty**: handing it to a section nobody asked for means the panel answers a fold by opening something else, which then sits there while the sections actually in use trade places underneath it. A section that is wanted but crowded out **comes back on its own** when the room grows, because wanting is remembered apart from showing. And the **last open section cannot be folded**, since a column of headings over dead space is not a state worth reaching.\n\nThe widget only says which sections are open; it never draws one. Any fold header will do, including an app's own.
+
+## A list on one side, the thing itself on the other
+
+`AccordionSweep` is the preset for browsing: `hover_secs: 0.0` drops the dwell, so a section opens the moment the pointer arrives. The dwell exists for a reason and this is the one place to be without it — a panel someone is WORKING in must not rearrange itself as the pointer crosses it on the way to a button, so `AccordionHover` waits. Here there is nothing to reach past: the panel is the whole left half, the sweep across it IS the browsing, and a wait only makes it feel stuck.
+
+The pane follows `AccordionAction::Changed`, which carries the section asked for most recently that the room can afford — the question the person just asked. A pane showing whichever section sits highest would be answering a different one.",
     subject: "panel",
     feature: None,
     controls: &[],
-    on_actions: Some(accordion_actions),
-}, Story {
-    key: "layout/accordion/split",
-    category: "Layout",
-    component: "Accordion",
-    also: &["AccordionSweep", "Filler"],
-    name: "Split",
-    dsl: "AccordionSplit",
-    added: "2026-09-05",
-    tags: &["new"],
-    doc: "# Accordion, split
-
-A list of things to look at on one side, a pane on the other showing the one being pointed at. `AccordionSweep` is the panel for it: `hover_secs: 0.0` drops the dwell, so a section opens the moment the pointer arrives.
-
-The dwell exists for a reason and this preset is the one place to be without it. A panel someone is WORKING in must not rearrange itself as the pointer crosses it on the way to a button, so `AccordionHover` waits. Here there is nothing to reach past: the panel is the whole left half, the sweep across it IS the browsing, and a wait only makes the thing feel stuck.
-
-The pane follows `AccordionAction::Changed`, which carries the section asked for most recently that the room can afford. That is the question the person just asked; a pane that showed whichever section sits highest would be answering a different one.
-
-A layout shift under a still pointer cannot ask again, because the panel only reconsiders when the pointer actually moves.",
-    subject: "features",
-    feature: None,
-    controls: &[],
-    on_actions: Some(split_actions),
+    on_actions: Some(accordion_all_actions),
 }];

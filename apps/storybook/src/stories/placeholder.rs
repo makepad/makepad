@@ -80,9 +80,9 @@ script_mod! {
         StoryRow{
             PlaceholderCard{}
         }
-    }
+    
 
-    mod.stories.PlaceholderBasic = StoryPage{
+        StoryHeading{text: "One stack of lines, under the controls"}
         StoryNote{text: "One stack of lines; the line count, the animation and the translucency come from the controls."}
         StoryRow{
             subject := ContentPlaceholder{shape: PlaceholderShape.Lines lines: 3 width: 320. height: Fit}
@@ -99,24 +99,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "PlaceholderOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Placeholder\n\nA `ContentPlaceholder` is the grey shape that stands in for content that has not arrived: a rect, a circle, or a stack of text lines (`lines`, `line_height`, `line_gap`, `last_line_width`). It shimmers (`animation: Wave`), breathes (`Pulse`) or stays still (`Static`, or `reduced_motion: true`), and can be `translucent` over content that is still partly there.\n\nThe presets compose it into the things it usually stands in for: `PlaceholderText`, `PlaceholderCircle`, `PlaceholderImage`, `PlaceholderButton`, `PlaceholderInput`, `PlaceholderParagraph`, `PlaceholderRow`, `PlaceholderCard` and `PlaceholderTable`.\n\nOnly the highlight reads the pass clock, so a page of static placeholders costs the window nothing.",
         subject: "",
-        feature: None,
-        controls: &[],
-        on_actions: None,
-    },
-    Story {
-        key: "feedback/placeholder/basic",
-        category: "Feedback",
-        component: "Placeholder",
-        also: &[],
-        name: "Basic",
-        dsl: "PlaceholderBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Placeholder\n\nOne stack of lines under the controls: change how many, how it moves and whether it is see-through.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Lines", target: "subject", kind: ControlKind::Number { prop: "lines", min: 1., max: 8., step: 1., default: 3. } },

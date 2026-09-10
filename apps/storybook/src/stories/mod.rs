@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub mod badge;
-pub mod basics;
 pub mod foundations;
 pub mod placeholder;
 pub mod button_more;
@@ -152,7 +151,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     spinner::script_mod(vm);
     rotary::script_mod(vm);
     video::script_mod(vm);
-    basics::script_mod(vm);
     badge::script_mod(vm);
     placeholder::script_mod(vm);
     checkbox_more::script_mod(vm);
@@ -238,7 +236,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         spinner::STORIES,
         rotary::STORIES,
         video::STORIES,
-        basics::STORIES,
         badge::STORIES,
         placeholder::STORIES,
         checkbox_more::STORIES,

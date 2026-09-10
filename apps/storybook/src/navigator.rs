@@ -160,6 +160,22 @@ impl StoryNavigator {
                 continue;
             }
             for component in &category.components {
+                // A component with one page IS that page. A folder holding a
+                // single row called "Overview" costs a click to learn nothing,
+                // so the component row opens the page directly and carries the
+                // component's own name.
+                if let [only] = component.stories[..] {
+                    let id = LiveId::from_str(only.key);
+                    self.keys.insert(id, only.key);
+                    let dot = if registry::is_new(only, &self.baseline) {
+                        GitStatusDotKind::New
+                    } else {
+                        GitStatusDotKind::None
+                    };
+                    self.file_tree.file_with_status(cx, id, component.name, dot);
+                    self.listed += 1;
+                    continue;
+                }
                 let comp_id = LiveId::from_str(&format!("component:{}/{}", category.name, component.name));
                 self.folder_open(cx, comp_id);
                 let dot = if component.any_new { GitStatusDotKind::New } else { GitStatusDotKind::None };

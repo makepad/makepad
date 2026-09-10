@@ -101,9 +101,9 @@ script_mod! {
         }
 
         menus := MenuLayer{}
-    }
+    
 
-    mod.stories.SegmentedControlBasic = StoryPage{
+        StoryHeading{text: "One segmented control, under the controls"}
         StoryNote{text: "One segmented control. Every control on the right writes into it."}
         StoryRow{
             subject := SegmentedControl{
@@ -170,9 +170,10 @@ fn group_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
         let text = if on.is_empty() { "on: nothing".to_string() } else { format!("on: {on}") };
         root.label(cx, ids!(style_note)).set_text(cx, &text);
     }
+    subject_actions(cx, root, actions);
 }
 
-fn segmented_basic_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+fn subject_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let subject = root.segmented_control(cx, ids!(subject));
     if let Some(index) = subject.selected(actions) {
         let text = format!("answer: {} ({index})", subject.selected_text());
@@ -185,28 +186,13 @@ pub const STORIES: &[Story] = &[
         key: "actions/buttongroup/overview",
         category: "Actions",
         component: "ButtonGroup",
-        also: &["ButtonGroupSpaced", "MenuButton", "SegmentedControlVertical", "SplitButton", "ToggleGroup"],
+        also: &["ButtonGroupSpaced", "MenuButton", "SegmentedControl", "SegmentedControlVertical", "SplitButton", "ToggleGroup"],
         name: "Overview",
         dsl: "ButtonGroupOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Button group and segmented control\n\nTwo shapes that are easy to confuse, so the library names them apart.\n\nA **button group** is a set of separate verbs sharing a row: cut, copy, paste. It reports which button was pressed and forgets. `join: Connected` collapses the inner corners so the row reads as one object; `Spaced` leaves every button its own shape. The group only lays out and shapes, so any button in the library can sit in one.\n\nA **segmented control** is one question with a fixed set of answers: day, week, month. It remembers which answer is current and shows it under a pill that glides over `theme.motion_short_4`. Its answers are `options`, a list of words it owns, rather than child widgets a caller has to keep in step with the selection.\n\nSet `selection: Multi` and the same control becomes a toggle group, where any number of answers can be on at once. The row is one tab stop: the arrows walk it, and with a single answer they move the answer as they go.",
         subject: "period",
-        feature: None,
-        controls: &[],
-        on_actions: Some(group_actions),
-    },
-    Story {
-        key: "actions/buttongroup/basic",
-        category: "Actions",
-        component: "ButtonGroup",
-        also: &["SegmentedControl"],
-        name: "Basic",
-        dsl: "SegmentedControlBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Segmented control\n\nOne control under the controls: which answer is current, whether several may be, whether the segments share a width, and which way the row runs.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Selected", target: "subject", kind: ControlKind::Number { prop: "selected", min: 0., max: 2., step: 1., default: 0. } },
@@ -218,6 +204,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Intent", target: "subject", kind: ControlKind::Choice { prop: "intent", options: &["Neutral", "Primary", "Secondary", "Tertiary", "Error", "Warning", "Success", "Info"], default: 0 } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: Some(segmented_basic_actions),
+        on_actions: Some(group_actions),
     },
 ];
