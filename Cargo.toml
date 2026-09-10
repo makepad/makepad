@@ -181,7 +181,6 @@ workspace.exclude = [
     # Clone into apps/scope; path deps stay ../../ like a subdirectory. Not a
     # required member so a clean makepad tree still loads.
     "apps/scope",
-    "apps/scope-private",
     # Private Arcade frontend. Clone into apps/sandbox; path deps stay ../../
     # like a subdirectory. Not a required member so a clean makepad tree
     # still loads.
