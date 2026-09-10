@@ -1,5 +1,6 @@
 #![allow(clippy::result_unit_err)]
 
+use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use {
     crate::{
         cx_2d::Cx2d,
@@ -499,6 +500,9 @@ impl<'a> CxDraw<'a> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset)
             / draw_call.total_instance_slots;
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         ia.into()
     }
 
@@ -532,6 +536,9 @@ impl<'a> CxDraw<'a> {
             .as_mut()
             .unwrap()
             .extend_from_slice(data);
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         ia.into()
     }
 }
@@ -555,10 +562,15 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset)
             / draw_call.total_instance_slots;
+        let area = if draw_item.instances.as_ref().unwrap().refused() {
+            Area::Empty
+        } else {
+            ia.into()
+        };
         if let Some(aligned) = many_instances.aligned {
-            self.align_list[aligned] = AlignEntry::Area(ia.into());
+            self.align_list[aligned] = AlignEntry::Area(area);
         }
-        ia.into()
+        area
     }
 
     pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
@@ -593,6 +605,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .as_mut()
             .unwrap()
             .extend_from_slice(data);
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         self.align_list.push(AlignEntry::Area(ia));
         ia
     }
@@ -622,7 +637,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 pub struct ManyInstances {
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
-    pub instances: Vec<f32>,
+    pub instances: RecordingBuffer,
 }
 
 #[derive(Clone)]

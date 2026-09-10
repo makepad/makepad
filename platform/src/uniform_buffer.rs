@@ -13,6 +13,49 @@ pub struct UniformBuffer(Rc<PoolId>);
 pub struct UniformBufferId(pub(crate) usize, u64);
 
 impl UniformBuffer {
+    pub fn readers(&self) -> usize {
+        Rc::strong_count(&self.0)
+    }
+    /// Release an unreferenced immutable buffer only after the supported
+    /// backend's real queue is complete. Return CPU storage for worker disposal.
+    pub fn release_if_unused(&self, cx: &mut Cx) -> Option<Vec<u8>> {
+        if self.readers() != 1
+            || cfg!(all(
+                not(headless),
+                any(use_vulkan, linux_direct, target_env = "ohos")
+            ))
+        {
+            return None;
+        }
+        let submitted = cx.frame_submission_serial();
+        #[cfg(all(
+            not(headless),
+            any(target_os = "macos", target_os = "ios", target_os = "tvos")
+        ))]
+        let submitted = submitted.max(
+            cx.textures
+                .1
+                .serials
+                .encoded
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        if submitted > cx.frame_completion_serial() {
+            return None;
+        }
+        let id = self.uniform_buffer_id();
+        #[cfg(all(
+            not(headless),
+            not(use_vulkan),
+            not(linux_direct),
+            not(target_env = "ohos"),
+            any(target_os = "linux", target_os = "android")
+        ))]
+        cx.uniform_buffers[id].os.buffer.free_resources(cx.os.gl());
+        let buffer = &mut cx.uniform_buffers[id];
+        buffer.os = CxOsUniformBuffer::default();
+        buffer.generation = 0;
+        Some(std::mem::take(&mut buffer.data))
+    }
     pub fn new(cx: &mut Cx) -> Self {
         cx.uniform_buffers.alloc()
     }

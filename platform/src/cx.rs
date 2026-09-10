@@ -78,6 +78,7 @@ pub struct Cx {
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
     pub demo_time_repaint: bool,
+    pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
@@ -816,6 +817,7 @@ impl Cx {
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
+            mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
             cpu_cores: crate::thread::available_parallelism().get(),

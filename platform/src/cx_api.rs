@@ -244,6 +244,31 @@ impl std::fmt::Debug for AccessibilityUpdatePayload {
     }
 }
 
+/// A set of screen edges, for [`Cx::defer_system_gestures`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScreenEdges(u8);
+
+impl ScreenEdges {
+    pub const NONE: ScreenEdges = ScreenEdges(0);
+    pub const TOP: ScreenEdges = ScreenEdges(1);
+    pub const LEFT: ScreenEdges = ScreenEdges(2);
+    pub const BOTTOM: ScreenEdges = ScreenEdges(4);
+    pub const RIGHT: ScreenEdges = ScreenEdges(8);
+    pub const ALL: ScreenEdges = ScreenEdges(15);
+
+    pub const fn with(self, other: ScreenEdges) -> ScreenEdges {
+        ScreenEdges(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: ScreenEdges) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
@@ -294,6 +319,10 @@ pub enum CxOsOp {
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
+    /// Asks the OS to defer its own edge gestures (the home-indicator swipe,
+    /// the status-bar and control-centre pulls) on these screen edges, so
+    /// the first swipe from such an edge reaches the app. Honored on iOS.
+    DeferSystemGestures(ScreenEdges),
 
     // The `Rect` is the caret/composition line's bounding box (top-left + size,
     // line height included), so each backend can ask the OS to place the IME
@@ -482,6 +511,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
+            Self::DeferSystemGestures(..) => write!(f, "DeferSystemGestures"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
@@ -899,9 +929,10 @@ impl Cx {
         Err(format!("Dependency not loaded {}", path))
     }
 
-    /// Get loaded resource data by ScriptHandle
-    pub fn get_resource(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
-        if let Some(data) = self.script_data.resources.get_data(handle) {
+    /// Get loaded resource data by the handle's owning heap and value
+    /// (`ScriptHandleRef::heap_key` / `as_handle`).
+    pub fn get_resource(&self, heap_key: usize, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
+        if let Some(data) = self.script_data.resources.get_data(heap_key, handle) {
             return Some(data);
         }
 
@@ -910,7 +941,7 @@ impl Cx {
         // Loaded yet, allow direct dependency lookup as a synchronous fallback.
         if self.os_type().is_web() {
             let resources = self.script_data.resources.resources.borrow();
-            if let Some(res) = resources.iter().find(|res| res.has_handle(handle)) {
+            if let Some(res) = resources.iter().find(|res| res.has_handle(heap_key, handle)) {
                 if let Some(dep_path) = res.dependency_path.as_deref() {
                     if let Ok(data) = self.get_dependency(dep_path) {
                         return Some(data);
@@ -922,12 +953,13 @@ impl Cx {
         None
     }
 
-    /// Get the absolute path registered for a script resource handle.
-    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+    /// Get the absolute path registered for a script resource handle of
+    /// the given heap.
+    pub fn get_resource_abs_path(&self, heap_key: usize, handle: ScriptHandle) -> Option<String> {
         let resources = self.script_data.resources.resources.borrow();
         resources
             .iter()
-            .find(|res| res.has_handle(handle))
+            .find(|res| res.has_handle(heap_key, handle))
             .map(|res| res.abs_path.clone())
     }
 
@@ -935,8 +967,8 @@ impl Cx {
     ///
     /// This reads local file-backed resources directly, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
-    pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
-        let path = self.get_resource_abs_path(handle)?;
+    pub fn get_resource_font_bytes(&mut self, heap_key: usize, handle: ScriptHandle) -> Option<SharedBytes> {
+        let path = self.get_resource_abs_path(heap_key, handle)?;
         self.get_resource_font_bytes_by_path(&path)
     }
 
@@ -1148,6 +1180,22 @@ impl Cx {
     /// event cycle.
     pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
         self.display_context.system_bar_appearance = appearance;
+    }
+
+    /// Ask the OS to defer its own gestures on these screen edges, so the
+    /// FIRST swipe from such an edge reaches the app (an app-owned home
+    /// gesture, an edge-dragged drawer); the OS then shows its indicator and
+    /// takes the next one — the immersive/game behaviour. [`ScreenEdges::NONE`]
+    /// gives the edges back. One call on every platform: honored on iOS
+    /// (`preferredScreenEdgesDeferringSystemGestures`), nothing where the OS
+    /// has no such gesture.
+    pub fn defer_system_gestures(&mut self, edges: ScreenEdges) {
+        if !matches!(self.os_type(), OsType::Ios(_)) {
+            return;
+        }
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::DeferSystemGestures(_)));
+        self.platform_ops.push_back(CxOsOp::DeferSystemGestures(edges));
     }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
@@ -1397,6 +1445,7 @@ impl Cx {
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
+        self.mouse_cursor = cursor;
         // down cursor overrides the hover cursor
         if let Some(p) = self.platform_ops.iter_mut().find(|p| match p {
             CxOsOp::SetCursor(_) => true,
@@ -1406,6 +1455,10 @@ impl Cx {
         } else {
             self.platform_ops.push_back(CxOsOp::SetCursor(cursor))
         }
+    }
+
+    pub fn mouse_cursor(&self) -> MouseCursor {
+        self.mouse_cursor
     }
 
     pub fn sweep_lock(&mut self, value: Area) {
@@ -2511,6 +2564,12 @@ impl Cx {
             .serials
             .submitted
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Last observed completed prefix, without polling the backend. Progress
+    /// timers use `frame_completion_serial` to refresh this nonblocking snapshot.
+    pub fn frame_completed_serial(&self) -> u64 {
+        self.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Poll without waiting, collect finished texture retirements, and return
