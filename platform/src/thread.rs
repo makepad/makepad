@@ -1213,6 +1213,7 @@ struct PoolInner {
     light_over_budget: AtomicU64,
     light_label_overflow: AtomicU64,
     offenders: [LightOffender; MAX_LIGHT_LABELS],
+    heavy_offenders: [LightOffender; MAX_LIGHT_LABELS],
     next_report_us: AtomicU64,
     reported_completed: AtomicU64,
     heavy_turn: AtomicUsize,
@@ -1271,6 +1272,16 @@ impl PoolInner {
             }
             if !recorded {
                 self.light_label_overflow.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if lane == Lane::Heavy && run_us > 250_000 {
+            for offender in &self.heavy_offenders {
+                if offender.label.get().is_none() { let _ = offender.label.set(label); }
+                if offender.label.get() == Some(&label) {
+                    offender.count.fetch_add(1, Ordering::Relaxed);
+                    offender.max_us.fetch_max(run_us, Ordering::Relaxed);
+                    break;
+                }
             }
         }
         queue.completed.fetch_add(1, Ordering::Relaxed);
@@ -1366,6 +1377,18 @@ impl PoolInner {
             ));
         }
         out.push_str(&format!("] overflow={}", stats.light_label_overflow));
+        out.push_str("; heavy >250ms offenders=[");
+        let mut separator = "";
+        for offender in &self.heavy_offenders {
+            if let Some(label) = offender.label.get() {
+                let count = offender.count.load(Ordering::Relaxed);
+                if count != 0 {
+                    out.push_str(&format!("{separator}{label} count={count} max={:.2}ms", offender.max_us.load(Ordering::Relaxed) as f64 / 1000.0));
+                    separator = ", ";
+                }
+            }
+        }
+        out.push(']');
         out
     }
 
@@ -1581,6 +1604,7 @@ impl TaskPool {
             light_over_budget: AtomicU64::new(0),
             light_label_overflow: AtomicU64::new(0),
             offenders: std::array::from_fn(|_| LightOffender::default()),
+            heavy_offenders: std::array::from_fn(|_| LightOffender::default()),
             next_report_us: AtomicU64::new(0),
             reported_completed: AtomicU64::new(0),
             heavy_turn: AtomicUsize::new(0),
@@ -1637,6 +1661,7 @@ impl TaskPool {
             light_over_budget: AtomicU64::new(0),
             light_label_overflow: AtomicU64::new(0),
             offenders: std::array::from_fn(|_| LightOffender::default()),
+            heavy_offenders: std::array::from_fn(|_| LightOffender::default()),
             next_report_us: AtomicU64::new(0),
             reported_completed: AtomicU64::new(0),
             heavy_turn: AtomicUsize::new(0),
