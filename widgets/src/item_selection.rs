@@ -4,9 +4,12 @@
 //! This is the half of a selectable list that has no pixels: no area, no
 //! shader, no actions, no widget. `ListItem` and its neighbours own the
 //! other half — they have a `selected` flag to set and nothing that says
-//! what to set it to — and three widgets in this library have each grown
-//! their own private answer, which is how a shift-press came to mean
-//! three different things in one library.
+//! what to set it to — and several widgets in this library have each
+//! grown their own private answer: a tree, a grid, a calendar, a picker
+//! over a drawing, and the chip and button groups. That is how a
+//! shift-press came to mean a union onto the live set in one of them, a
+//! range measured from a fixed end that replaces in the next, and
+//! nothing at all in the rest, which read no modifiers whatsoever.
 //!
 //! The display order is handed in on every call and never stored. A list
 //! that sorts, filters or folds is a different order between one press
@@ -15,8 +18,9 @@
 //! per press, which is nothing next to laying the rows out.
 //!
 //! The rules in one paragraph. A plain press takes one thing and drops
-//! the rest. The primary key (command on one family of machines, control
-//! on the rest) flips one thing and leaves the others. Shift sweeps the
+//! the rest. The primary key — whichever of the two a given machine
+//! calls primary, which [`KeyModifiers::is_primary`] already knows —
+//! flips one thing and leaves the others. Shift sweeps the
 //! range between the anchor and the thing pressed, laid over the *ground*
 //! — what was chosen at the moment the anchor was put down — so a second
 //! shift-press nearer the anchor shortens the range instead of only ever
@@ -297,14 +301,25 @@ impl<Id: Copy + Eq + Hash> ItemSelection<Id> {
         self.click(order, id, SelectionGesture::Toggle)
     }
 
-    /// Take everything on show. A one-of list ignores it rather than
-    /// settling on one of them arbitrarily.
+    /// Take everything on show, on top of anything already chosen that
+    /// the order is not showing.
+    ///
+    /// It adds rather than replaces for the same reason [`Self::chosen`]
+    /// filters rather than forgets: a filter or a fold hides a thing, it
+    /// does not deselect it, and a select-all typed into a filtered list
+    /// would otherwise quietly throw away the picks the reader made
+    /// before they narrowed it. What comes back from `chosen(order)` is
+    /// still exactly the order handed in — the extra picks are the ones
+    /// that order is hiding.
+    ///
+    /// A one-of list ignores it rather than settling on one of them
+    /// arbitrarily.
     pub fn select_all(&mut self, order: &[Id]) -> SelectionChange {
         if self.mode == SelectionMode::One || order.is_empty() {
             return SelectionChange::default();
         }
         let before = self.snapshot();
-        self.chosen = order.iter().copied().collect();
+        self.chosen.extend(order.iter().copied());
         // No ground: a wholesale set is an answer, not something a
         // reader was building on, so the next sweep replaces it. With
         // the ground left full instead, a shift-arrow after this could
@@ -370,16 +385,19 @@ impl<Id: Copy + Eq + Hash> ItemSelection<Id> {
         // something that has since been filtered away.
         let from = self.anchor.and_then(|anchor| index_of(order, anchor));
         let (Some(from), Some(to)) = (from, index_of(order, id)) else {
-            // Nowhere to measure from. Put the anchor under the finger
-            // and take that one thing, which reads as a plain press on
-            // an empty selection and as an addition to one that already
+            // Nowhere to measure from, so there is no range to lay over
+            // the ground and nothing to replace: the live set stays and
+            // this one thing joins it. That reads as a plain press on an
+            // empty selection and as an addition to one that already
             // held things — either way a press whose only fault is that
-            // the list moved underneath it loses nothing.
-            self.chosen = ground;
+            // the list moved underneath it loses nothing. Falling back
+            // to `ground` here instead would throw away every sweep made
+            // since the anchor went down, which is precisely the work
+            // the reader has just done. `ground` goes unused on this
+            // path on purpose: the ground is not what a stranded press
+            // falls back to.
             self.chosen.insert(id);
-            self.anchor = Some(id);
-            self.ground = self.chosen.clone();
-            self.cursor = Some(id);
+            self.drop_anchor(id);
             return;
         };
         let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
@@ -437,7 +455,11 @@ fn index_of<Id: Copy + Eq>(order: &[Id], id: Id) -> Option<usize> {
 /// no press that undoes that except starting again.
 fn walk(at: Option<usize>, by: isize, last: usize) -> usize {
     match at {
-        Some(at) => (at as isize + by).clamp(0, last as isize) as usize,
+        // Saturating rather than plain addition: a page step is a
+        // viewport height a host worked out and negated, and a public
+        // model that panicked in a debug build on a step larger than the
+        // list would be a trap laid for the one caller who guessed high.
+        Some(at) => (at as isize).saturating_add(by).clamp(0, last as isize) as usize,
         // Nothing under the cursor yet: start from the end the walk is
         // coming from, so one press of the down key reaches the first
         // thing rather than the second.
@@ -472,9 +494,9 @@ mod tests {
         KeyModifiers { shift: true, ..no_keys() }
     }
 
-    /// Both keys down, because the primary modifier is the command key
-    /// on one family of machines and the control key on the rest: a test
-    /// that names one of them is a test that only runs on half of them.
+    /// Both keys down, because which of the two counts as primary is a
+    /// property of the machine the test is running on: a test that names
+    /// one of them is a test that only runs on some of them.
     fn primary() -> KeyModifiers {
         KeyModifiers { control: true, logo: true, ..no_keys() }
     }
@@ -583,6 +605,27 @@ mod tests {
     }
 
     #[test]
+    fn a_sweep_whose_anchor_was_filtered_away_keeps_the_range_it_already_swept() {
+        // The same stranding, but after a sweep, so the live set and the
+        // ground have come apart. Falling back to the ground here would
+        // undo every row the first sweep took — rows that are still on
+        // show and still lit.
+        let mut sel = many();
+        sel.click(&ROWS, 22, SelectionGesture::Replace);
+        sel.click(&ROWS, 55, SelectionGesture::Extend);
+        assert_eq!(sel.chosen(&ROWS), vec![22, 33, 44, 55]);
+        let filtered = [11u32, 33, 44, 55, 66];
+        sel.click(&filtered, 66, SelectionGesture::Extend);
+        assert_eq!(sel.chosen(&filtered), vec![33, 44, 55, 66], "the swept range survived");
+        assert_eq!(sel.anchor(), Some(66));
+        // The ground came down with the anchor, exactly as it does for a
+        // plain press, so a sweep back over the range keeps it rather
+        // than sweeping it away a second time.
+        sel.click(&filtered, 44, SelectionGesture::Extend);
+        assert_eq!(sel.chosen(&filtered), vec![33, 44, 55, 66]);
+    }
+
+    #[test]
     fn a_primary_shift_press_keeps_the_range_already_swept_where_a_plain_one_replaces_it() {
         let mut plain = many();
         plain.click(&ROWS, 44, SelectionGesture::Replace);
@@ -684,12 +727,42 @@ mod tests {
     }
 
     #[test]
-    fn select_all_takes_everything_in_the_order_handed_in_and_nothing_else() {
+    fn a_page_step_bigger_than_the_list_still_lands_on_the_far_end() {
+        // A host that works a page step out from a viewport height and
+        // negates it can hand over anything at all. Adding that to an
+        // index before clamping it panics in a debug build and wraps
+        // round to the wrong end in a release one, which is a page-down
+        // that lands on the first row.
+        let mut sel = many();
+        sel.click(&ROWS, 33, SelectionGesture::Replace);
+        sel.key_move(&ROWS, SelectionStep::By(isize::MAX), SelectionMove::Replace);
+        assert_eq!(sel.chosen(&ROWS), vec![66], "as far down as it goes");
+        sel.key_move(&ROWS, SelectionStep::By(isize::MIN), SelectionMove::Replace);
+        assert_eq!(sel.chosen(&ROWS), vec![11], "and as far up");
+    }
+
+    #[test]
+    fn select_all_takes_everything_in_the_order_handed_in() {
         let mut sel = many();
         let filtered = [22u32, 44, 66];
         sel.select_all(&filtered);
         assert_eq!(sel.chosen(&ROWS), vec![22, 44, 66], "a filtered list takes what it shows");
         assert_eq!(sel.anchor(), Some(22));
+    }
+
+    #[test]
+    fn select_all_leaves_a_pick_the_order_is_not_showing_where_it_was() {
+        // A reader picks a row, narrows the list, then takes the lot. The
+        // row they picked first is hidden, not gone: a filter never
+        // deselects anything anywhere else in this model, and select-all
+        // is not the one place that quietly does.
+        let mut sel = many();
+        sel.click(&ROWS, 11, SelectionGesture::Toggle);
+        let filtered = [22u32, 44];
+        sel.select_all(&filtered);
+        assert_eq!(sel.chosen(&filtered), vec![22, 44], "what is on show is all of what is on show");
+        assert!(sel.is_selected(11), "and the hidden pick is still held");
+        assert_eq!(sel.chosen(&ROWS), vec![11, 22, 44]);
     }
 
     #[test]
