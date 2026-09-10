@@ -35,7 +35,6 @@ use crate::{
     widget_tree::CxWidgetExt,
     makepad_derive_widget::*,
     makepad_draw::*,
-    field::FieldWell,
     text_input::{TextInputAction, TextInputWidgetRefExt},
     widget::*,
 };
@@ -123,18 +122,59 @@ script_mod! {
         precision: 0
         wrap: false
 
-        well: mod.widgets.FieldWell{
-            width: Fill
-            height: Fill
-            align: Align{y: 0.5}
-            padding: Inset{left: theme.space_2, right: 0., top: 0., bottom: 0.}
-            input: mod.widgets.WellInput{
-                width: Fill
-                height: Fill
-                empty_text: ""
+        /** how wide the step column is, in pixels 8..40 step 1 */
+        spin_width: 15.
+        /** room before the number, in pixels 0..24 step 1 */
+        pad_left: theme.space_2
+
+        // The box is drawn here rather than by a FieldWell. The well
+        // lays its slots out in a row, and its input is `width: Fill`,
+        // so the input took the whole row and the step column was laid
+        // out into nothing and never painted. Sizing both children from
+        // Rust is the only arrangement where the column is certain to
+        // get its room.
+        draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
+            hover: 0.0
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: 0.0
+            /** disabled mix 0..1 step 0.01 */
+            disabled: 0.0
+
+            color: uniform(theme.color_inset)
+            color_hover: uniform(theme.color_inset_hover)
+            color_focus: uniform(theme.color_inset_focus)
+            color_disabled: uniform(theme.color_inset_disabled)
+            border_color: uniform(theme.color_bevel)
+            border_color_focus: uniform(theme.color_bevel_focus)
+            /** corner rounding radius 0..16 step 0.5 */
+            border_radius: uniform(theme.corner_radius)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    0.5
+                    0.5
+                    self.rect_size.x - 1.0
+                    self.rect_size.y - 1.0
+                    self.border_radius
+                )
+                sdf.fill_keep(
+                    self.color
+                        .mix(self.color_hover, self.hover)
+                        .mix(self.color_focus, self.focus)
+                        .mix(self.color_disabled, self.disabled)
+                )
+                sdf.stroke(self.border_color.mix(self.border_color_focus, self.focus), 1.0)
+                return sdf.result
             }
-            trailing: mod.widgets.NumberSpin{}
         }
+
+        input: mod.widgets.WellInput{
+            height: Fill
+            empty_text: ""
+        }
+        spin: mod.widgets.NumberSpin{}
     }
 }
 
@@ -333,10 +373,32 @@ pub struct NumberField {
     uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[find]
     #[redraw]
     #[live]
-    pub well: WidgetRef,
+    draw_bg: DrawQuad,
+    /// The number itself.
+    #[find]
+    #[live]
+    pub input: WidgetRef,
+    /// The two step buttons at the trailing edge.
+    #[find]
+    #[live]
+    pub spin: WidgetRef,
+
+    #[layout]
+    layout: Layout,
+
+    #[live(15.0)]
+    spin_width: f64,
+    #[live(8.0)]
+    pad_left: f64,
+
+    /// Asked of the input each pass rather than tracked: focus can
+    /// leave for reasons this widget never hears about.
+    #[rust]
+    focused: bool,
+    #[rust]
+    hovered: bool,
 
     #[walk]
     walk: Walk,
@@ -374,7 +436,8 @@ impl ScriptHook for NumberField {
         vm.with_cx_mut(|cx| {
             self.write_text(cx);
             if self.disabled {
-                self.well.set_disabled(cx, true);
+                self.input.set_disabled(cx, true);
+                self.spin.set_disabled(cx, true);
             }
         });
     }
@@ -386,10 +449,7 @@ impl NumberField {
     }
 
     fn input(&self) -> WidgetRef {
-        self.well
-            .borrow::<FieldWell>()
-            .map(|well| well.input.clone())
-            .unwrap_or_else(WidgetRef::empty)
+        self.input.clone()
     }
 
     fn write_text(&mut self, cx: &mut Cx) {
@@ -471,7 +531,8 @@ impl NumberField {
 impl Widget for NumberField {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
-        self.well.set_disabled(cx, disabled);
+        self.input.set_disabled(cx, disabled);
+        self.spin.set_disabled(cx, disabled);
     }
 
     fn disabled(&self, _cx: &Cx) -> bool {
@@ -479,18 +540,45 @@ impl Widget for NumberField {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // The well is drawn here rather than by a container, so nothing else
-        // puts it in the tree; without this a host cannot reach the input
-        // inside it at all.
-        cx.widget_tree_insert_child(self.uid, live_id!(well), self.well.clone());
-        self.well.draw_walk(cx, scope, walk)
+        self.draw_bg.set_uniform(cx.cx, id!(hover), &[if self.hovered { 1.0 } else { 0.0 }]);
+        self.draw_bg.set_uniform(cx.cx, id!(focus), &[if self.focused { 1.0 } else { 0.0 }]);
+        self.draw_bg
+            .set_uniform(cx.cx, id!(disabled), &[if self.disabled { 1.0 } else { 0.0 }]);
+
+        self.draw_bg.begin(cx, walk, self.layout);
+        let rect = cx.turtle().rect();
+        // The number takes what is left after the column, worked out
+        // here rather than asked of the turtle: a `Fill` child takes the
+        // whole row and the column that follows it gets nothing.
+        let spin_w = self.spin_width.max(0.0);
+        let text_w = (rect.size.x - spin_w - self.pad_left).max(0.0);
+
+        // Drawn here rather than by a container, so nothing else puts
+        // them in the tree and a host can reach ids!(field.input).
+        cx.widget_tree_insert_child(self.uid, live_id!(input), self.input.clone());
+        cx.widget_tree_insert_child(self.uid, live_id!(spin), self.spin.clone());
+
+        let mut input_walk = Walk::new(Size::Fixed(text_w), Size::Fixed(rect.size.y));
+        input_walk.margin.left = self.pad_left;
+        let _ = self.input.draw_walk(cx, scope, input_walk);
+        let _ = self.spin.draw_walk(
+            cx,
+            scope,
+            Walk::new(Size::Fixed(spin_w), Size::Fixed(rect.size.y)),
+        );
+        self.draw_bg.end(cx);
+        DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.disabled {
             return;
         }
-        for action in cx.capture_actions(|cx| self.well.handle_event(cx, event, scope)) {
+        let actions = cx.capture_actions(|cx| {
+            self.input.handle_event(cx, event, scope);
+            self.spin.handle_event(cx, event, scope);
+        });
+        for action in actions {
             match action.as_widget_action().cast() {
                 NumberSpinAction::Step(steps) => {
                     let v = self.value + steps * self.step;
@@ -505,7 +593,13 @@ impl Widget for NumberField {
                 // Leaving the field commits it too, so a number typed and
                 // then clicked away from is not quietly discarded. The
                 // action carries nothing, so the box is asked.
+                TextInputAction::KeyFocus => {
+                    self.focused = true;
+                    self.draw_bg.redraw(cx);
+                }
                 TextInputAction::KeyFocusLost => {
+                    self.focused = false;
+                    self.draw_bg.redraw(cx);
                     let typed = self.input().as_text_input().text();
                     self.take_typed(cx, &typed);
                 }
@@ -520,7 +614,18 @@ impl Widget for NumberField {
         // The wheel works anywhere over the field, including over the text,
         // because there is nothing to aim at and every other numeric control
         // in the library answers to it.
-        if let Hit::FingerScroll(e) = event.hits(cx, self.well.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                self.hovered = true;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hovered = false;
+                self.draw_bg.redraw(cx);
+            }
+            _ => {}
+        }
+        if let Hit::FingerScroll(e) = event.hits(cx, self.draw_bg.area()) {
             let notches = -e.scroll.y.signum();
             if notches != 0.0 {
                 let bite = if e.modifiers.shift { 10.0 } else { 1.0 };
