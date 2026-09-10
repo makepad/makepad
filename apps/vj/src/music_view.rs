@@ -2700,7 +2700,11 @@ script_mod! {
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
-                        deck_a_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        deck_a_cue := MusicTransportIconButton{
+                            width: 38
+                            icon_walk: Walk{width: 14 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/cue.svg") }
+                        }
                         // One beat either way -- the nudge a hand makes
                         // when the drop lands a hair off -- and held, they
                         // BEND the record rather than stepping it. A beat
@@ -3257,7 +3261,11 @@ script_mod! {
                         // the chevrons read the same on both decks.
                         deck_b_beat_fwd := MusicTransportButton{width: 22 text: "<"}
                         deck_b_beat_back := MusicTransportButton{width: 22 text: ">"}
-                        deck_b_cue := MusicTransportButton{width: 38 text: "CUE"}
+                        deck_b_cue := MusicTransportIconButton{
+                            width: 38
+                            icon_walk: Walk{width: 14 height: Fit}
+                            draw_icon +: { svg: crate_resource("self:resources/icons/cue.svg") }
+                        }
                         deck_b_play := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
