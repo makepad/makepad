@@ -151,7 +151,7 @@ pub use {
             INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
             LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
-        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
+        draw_list::{immediate_payload_hash, CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
         draw_matrix::DrawMatrix,
         draw_pass::{
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,

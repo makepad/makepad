@@ -1,9 +1,10 @@
-//! CPU recording capacity shares admission with retained publications and
-//! worker completions. Moving a buffer moves its capacity reservation too.
+//! Recording admission is independent of prepared-publication residency.
+//! Moving a buffer moves its capacity reservation too. Prepared CPU payloads
+//! and their worker reservations have their own account; they are not staging.
 use std::{
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -43,10 +44,25 @@ struct BudgetState {
     limit: AtomicUsize,
     resident: Arc<AtomicUsize>,
     reserved: Arc<AtomicUsize>,
+    prepared: Arc<AtomicUsize>,
+    changes: Arc<StorageChanges>,
     refused: AtomicUsize,
     reasons: [AtomicUsize; 3],
     needed: AtomicUsize,
     available: AtomicUsize,
+}
+#[derive(Debug, Default)]
+struct StorageChanges {
+    revision: AtomicU64,
+    waiting: AtomicBool,
+}
+impl StorageChanges {
+    fn released(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+        if self.waiting.swap(false, Ordering::AcqRel) {
+            crate::thread::SignalToUI::set_ui_signal();
+        }
+    }
 }
 impl Default for RecordingBudget {
     fn default() -> Self {
@@ -59,6 +75,8 @@ impl RecordingBudget {
             limit: AtomicUsize::new(limit),
             resident: Arc::new(AtomicUsize::new(0)),
             reserved: Arc::new(AtomicUsize::new(0)),
+            prepared: Arc::new(AtomicUsize::new(0)),
+            changes: Arc::new(StorageChanges::default()),
             refused: AtomicUsize::new(0),
             reasons: std::array::from_fn(|_| AtomicUsize::new(0)),
             needed: AtomicUsize::new(0),
@@ -66,16 +84,41 @@ impl RecordingBudget {
         }))
     }
     pub fn configure(&self, limit: usize) {
-        self.0.limit.store(limit, Ordering::Release);
+        if self.0.limit.swap(limit, Ordering::AcqRel) < limit {
+            self.0.changes.released();
+        }
     }
+    /// Preparation workers share this counter with the CPU cache, never with
+    /// recording vectors. The caller supplies the CPU preparation allowance.
     pub fn reservations(&self) -> Arc<AtomicUsize> {
-        self.0.reserved.clone()
+        self.0.prepared.clone()
     }
     pub fn residency(&self) -> Arc<AtomicUsize> {
         self.0.resident.clone()
     }
     pub fn bytes(&self) -> usize {
         self.0.reserved.load(Ordering::Acquire)
+    }
+    pub fn limit(&self) -> usize {
+        self.0.limit.load(Ordering::Acquire)
+    }
+    pub fn available(&self) -> usize {
+        self.limit().saturating_sub(self.bytes())
+    }
+    pub fn prepared_bytes(&self) -> usize {
+        self.0.prepared.load(Ordering::Acquire)
+    }
+    pub fn resident_bytes(&self) -> usize {
+        self.0.resident.load(Ordering::Acquire)
+    }
+    pub fn revision(&self) -> u64 {
+        self.0.changes.revision.load(Ordering::Acquire)
+    }
+    /// Arm before observing the revision: a racing release is either included
+    /// in this snapshot or sends the UI signal. No timer or polling at rest.
+    pub fn watch_releases(&self) -> u64 {
+        self.0.changes.waiting.store(true, Ordering::Release);
+        self.revision()
     }
     pub fn refusals(&self) -> usize {
         self.0.refused.load(Ordering::Acquire)
@@ -95,10 +138,12 @@ impl RecordingBudget {
         self.0.available.store(available,Ordering::Release);
     }
     pub fn reserve(&self, bytes: usize) -> Option<CpuReservation> {
-        let available = self.0.limit.load(Ordering::Acquire)
-            .saturating_sub(self.0.resident.load(Ordering::Acquire));
+        let available = self.limit();
         match CpuReservation::try_reserve(self.0.reserved.clone(),bytes,available) {
-            Ok(credit) => Some(credit),
+            Ok(mut credit) => {
+                credit.changes = Some(self.0.changes.clone());
+                Some(credit)
+            }
             Err(reason) => {
                 self.refused(reason,bytes,available.saturating_sub(self.bytes()));
                 None
@@ -110,22 +155,28 @@ impl RecordingBudget {
 pub struct CpuReservation {
     reserved: Arc<AtomicUsize>,
     bytes: usize,
+    changes: Option<Arc<StorageChanges>>,
 }
 impl CpuReservation {
-    /// One nonblocking admission attempt. Contention is retryable pressure;
-    /// neither UI nor a wasm worker spins waiting for another producer.
+    /// Bounded optimistic admission. Capacity pressure returns immediately;
+    /// concurrent counter updates get at most eight atomic comparisons, never
+    /// a wait for a producer to finish, a lock, or an until-success loop.
     pub fn reserve(reserved: Arc<AtomicUsize>, bytes: usize, available: usize) -> Option<Self> {
         Self::try_reserve(reserved,bytes,available).ok()
     }
     fn try_reserve(reserved: Arc<AtomicUsize>, bytes: usize, available: usize) -> Result<Self,usize> {
         // Linking an empty/retained stream needs no capacity transaction and
         // cannot fail because another producer changed the shared counter.
-        if bytes == 0 { return Ok(Self { reserved,bytes }); }
-        let used = reserved.load(Ordering::Acquire);
-        if bytes > available.saturating_sub(used) { return Err(0); }
-        reserved.compare_exchange(used,used.saturating_add(bytes),Ordering::AcqRel,Ordering::Acquire)
-            .map_err(|_|1usize)?;
-        Ok(Self { reserved,bytes })
+        if bytes == 0 { return Ok(Self { reserved,bytes, changes: None }); }
+        let mut used = reserved.load(Ordering::Acquire);
+        for _ in 0..8 {
+            if bytes > available.saturating_sub(used) { return Err(0); }
+            match reserved.compare_exchange(used, used + bytes, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(Self { reserved, bytes, changes: None }),
+                Err(current) => used = current,
+            }
+        }
+        Err(1)
     }
     pub fn bytes(&self) -> usize {
         self.bytes
@@ -133,14 +184,21 @@ impl CpuReservation {
     /// Release scratch capacity after the producer has destroyed its scratch.
     pub fn shrink_to(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes);
+        let released = self.bytes - bytes;
         self.reserved
-            .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+            .fetch_sub(released, Ordering::AcqRel);
         self.bytes = bytes;
+        if released != 0 {
+            if let Some(changes) = &self.changes { changes.released(); }
+        }
     }
 }
 impl Drop for CpuReservation {
     fn drop(&mut self) {
         self.reserved.fetch_sub(self.bytes, Ordering::AcqRel);
+        if self.bytes != 0 {
+            if let Some(changes) = &self.changes { changes.released(); }
+        }
     }
 }
 
@@ -284,5 +342,47 @@ impl Extend<f32> for RecordingBuffer {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retained_instances::RetainedMemoryBudgets;
+
+    #[test]
+    fn eight_gib_prepared_wander_cannot_consume_recording_admission() {
+        let pools = RetainedMemoryBudgets::from_process((8usize << 30) / 2);
+        assert_eq!(pools.cpu, 512 << 20);
+        assert_eq!(pools.recording, 256 << 20);
+        assert_eq!(pools.gpu, 1 << 30);
+        let budget = RecordingBudget::new(pools.recording);
+        let prepared = budget.reservations();
+        let residency = budget.residency();
+        // Scaled 8,192-file corpus. CPU cache grows past the smaller recording
+        // allowance. Upload scratch returns on each receipt; a bounded next
+        // preparation is concurrently charged to the preparation allowance.
+        let mut peak_recording = 0;
+        for file in 0..8192 {
+            residency.store((file + 1) * (64 << 10), Ordering::Release);
+            let job = CpuReservation::reserve(prepared.clone(), 1 << 20, pools.preparation).unwrap();
+            let mut recording = RecordingBuffer::new(budget.clone());
+            recording.resize(16 << 10, 1.0);
+            assert!(!recording.refused());
+            assert_eq!(budget.prepared_bytes(), job.bytes());
+            peak_recording = peak_recording.max(budget.bytes());
+            assert!(budget.available() > 0);
+            let revision = budget.watch_releases();
+            // The disposal owns the allocation until after the copy receipt.
+            drop(recording);
+            assert!(budget.revision() > revision);
+            assert_eq!(budget.bytes(), 0);
+            drop(job);
+        }
+        assert_eq!(residency.load(Ordering::Acquire), pools.cpu);
+        assert_eq!(peak_recording, 64 << 10);
+        assert_eq!(budget.refusals(), 0);
+        assert_eq!(budget.prepared_bytes(), 0);
+        assert_eq!(budget.available(), pools.recording);
     }
 }

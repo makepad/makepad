@@ -359,6 +359,9 @@ impl Cx {
         }
         scan.allowance = [self.draw_lists.1.limit; 4];
         scan.deferred_bytes = 0;
+        scan.critical.clear();
+        scan.critical_eligible = 0;
+        scan.critical_deferred = 0;
         scan.examined = 0;
         scan.eligible = [0; 4];
         scan.turn = scan.turn.wrapping_add(1);
@@ -369,6 +372,34 @@ impl Cx {
             &mut scan,
         );
         let mut available = self.draw_lists.1.limit;
+        // Present-blocking items first: a rotating cursor must never defer a
+        // payload the next paint cannot do without. The frame allowance still
+        // bounds them; anything it cannot fit is counted, not silently skipped.
+        // Up to 256 critical items are served every frame with no rotation at
+        // all; only beyond that count does a cursor round-robin among them, so
+        // a wide dirty inventory still makes bounded forward progress.
+        let critical_count = scan.critical.len();
+        let critical_start = if critical_count > 256 { scan.critical_cursor.min(critical_count) } else { 0 };
+        let mut served = 0usize;
+        let mut next_cursor = 0usize;
+        for step in 0..critical_count {
+            let index = (critical_start + step) % critical_count;
+            let (request, bytes, stride, ordinal) = scan.critical[index];
+            if scan.best[request.list.index()] != request.priority {
+                continue;
+            }
+            if served == 256 || (bytes != 0 && available < stride) {
+                scan.critical_deferred += 1;
+                scan.deferred_bytes = scan.deferred_bytes.saturating_add(bytes.max(1));
+                continue;
+            }
+            available = available.saturating_sub(bytes.min(available) / stride * stride);
+            let request = self.resolve_upload_category(request);
+            scan.requests.push(request);
+            served += 1;
+            next_cursor = ordinal + 1;
+        }
+        scan.critical_cursor = if critical_count > 256 && next_cursor < critical_count { next_cursor } else { 0 };
         // Reserve periodic service for each lower priority, even while a
         // pointer publication changes continuously. Painter order is untouched.
         let first = if scan.turn % 4 == 0 {
@@ -380,7 +411,7 @@ impl Cx {
             // Ordinary small draws receive service before bulk publications.
             let priority = if rank == 0 { 3 } else { (first + rank - 1) % 3 };
             for index in 0..scan.candidates[priority].len() {
-                let (mut request, bytes, stride, ordinal) = scan.candidates[priority][index];
+                let (request, bytes, stride, ordinal) = scan.candidates[priority][index];
                 // An alias later reached this list through a more urgent
                 // ancestor. Its new bucket owns admission, never this old one.
                 if scan.best[request.list.index()] != request.priority {
@@ -391,28 +422,7 @@ impl Cx {
                     continue;
                 }
                 available = available.saturating_sub(bytes.min(available) / stride * stride);
-                if request.category == crate::retained_instances::UploadCategory::Other {
-                    use crate::retained_instances::UploadCategory as Category;
-                    let call = self.draw_lists[request.list].draw_items[request.item]
-                        .draw_call()
-                        .unwrap();
-                    let inputs = &self.draw_shaders[call.draw_shader_id.index]
-                        .mapping
-                        .instances
-                        .inputs;
-                    let has = |name| inputs.iter().any(|input| input.id == name);
-                    request.category = if has(crate::id!(roof_height)) && has(crate::id!(start)) {
-                        Category::Outlines
-                    } else if has(crate::id!(height)) && has(crate::id!(tint)) {
-                        Category::Walls
-                    } else if has(crate::id!(stripe_side)) {
-                        Category::Roofs
-                    } else if has(crate::id!(glyph_depth)) {
-                        Category::Labels
-                    } else {
-                        Category::Other
-                    };
-                }
+                let request = self.resolve_upload_category(request);
                 scan.cursor[priority] = ordinal + 1;
                 scan.requests.push(request);
             }
@@ -423,6 +433,36 @@ impl Cx {
             }
         }
         std::mem::take(&mut scan.requests)
+    }
+
+    fn resolve_upload_category(&self, mut request: InstanceUploadRequest) -> InstanceUploadRequest {
+        if request.category == crate::retained_instances::UploadCategory::Other {
+            use crate::retained_instances::UploadCategory as Category;
+            let call = self.draw_lists[request.list].draw_items[request.item]
+                .draw_call()
+                .unwrap();
+            let inputs = &self.draw_shaders[call.draw_shader_id.index]
+                .mapping
+                .instances
+                .inputs;
+            let has = |name| inputs.iter().any(|input| input.id == name);
+            request.category = if has(crate::id!(roof_height)) && has(crate::id!(start)) {
+                Category::Outlines
+            } else if has(crate::id!(height)) && has(crate::id!(tint)) {
+                Category::Walls
+            } else if has(crate::id!(stripe_side)) {
+                Category::Roofs
+            } else if has(crate::id!(glyph_depth)) {
+                Category::Labels
+            } else {
+                Category::Other
+            };
+        }
+        request
+    }
+
+    pub fn instance_upload_collection_critical_deferred(&self, root: DrawListId) -> usize {
+        self.draw_lists[root].upload_collection.borrow().critical_deferred
     }
 
     /// Reuse the collector's dense reachability inventories. Unchanged passes
@@ -604,6 +644,29 @@ impl Cx {
                 |p| p.byte_len(),
             );
             let stride = call.total_instance_slots * 4;
+            // A payload the next paint cannot present without: a fresh immediate
+            // publication, a first retained publication, or a GPU-evicted one
+            // (mirrors CxDrawItem::blocks_present without backend residency).
+            let wanted = item.retained_instances.as_ref().map_or_else(
+                || item.instances.as_ref().map_or(0, |v| v.len() / call.total_instance_slots),
+                |_| item.retained_instance_count,
+            );
+            let critical = wanted != 0
+                && !(item.retained_progressive && item.retained_instances.is_some())
+                && ((item.retained_instances.is_none() && (item.instance_upload_pending || call.instance_dirty))
+                    || item.retained_gpu_evicted
+                    || (item.retained_instances.is_some() && item.retained_instance_id == 0));
+            if critical {
+                let ordinal = scan.critical_eligible;
+                scan.critical_eligible += 1;
+                scan.critical.push((
+                    InstanceUploadRequest { list: id, item: item_id, category, priority },
+                    bytes,
+                    stride,
+                    ordinal,
+                ));
+                continue;
+            }
             let p = if bytes <= 64 * 1024 && item.retained_instances.is_none() {
                 3
             } else {
@@ -904,6 +967,13 @@ struct InstanceUploadCollection {
     requests: Vec<InstanceUploadRequest>,
     deferred_bytes: usize,
     examined: usize,
+    /// Items whose absence this frame would block the present (a fresh
+    /// immediate payload, a first or GPU-evicted publication). They are
+    /// served before every rotating class, bounded only by the frame allowance.
+    critical: Vec<(InstanceUploadRequest, usize, usize, usize)>,
+    critical_cursor: usize,
+    critical_eligible: usize,
+    critical_deferred: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1001,6 +1071,7 @@ struct RetiredDrawInstances {
     // UI-owned staging, consumed only after the bounded worker queue accepts
     // a batch. The payloads contain no UI handles and travel as Arc leases.
     values: std::cell::RefCell<Vec<crate::retained_instances::RetainedInstances>>,
+    recording_releases: std::cell::RefCell<std::collections::VecDeque<(DrawListId, usize)>>,
     pending: Arc<std::sync::atomic::AtomicBool>,
 }
 pub struct CxDrawListPool(
@@ -1018,6 +1089,7 @@ impl Default for CxDrawListPool {
         let budget = crate::retained_instances::RetainedUploadBudget::default();
         let retired = std::rc::Rc::new(RetiredDrawInstances {
             values: std::cell::RefCell::new(Vec::with_capacity(4096)),
+            recording_releases: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(4096)),
             pending: budget.retirement_queued.clone(),
         });
         Self(
@@ -1109,6 +1181,24 @@ impl CxDrawListPool {
                 if let Some(retired) = retired {
                     batch.items[count] = Some((None, Some(retired), None, None));
                     count += 1;
+                    continue;
+                }
+                let release = self.3.recording_releases.borrow_mut().pop_front();
+                if let Some((id, index)) = release {
+                    if self.0.is_live_generation(id.0, id.1) {
+                        let items = &mut self.0.pool[id.0].draw_items;
+                        if let Some(item) = items.buffer.get_mut(index) {
+                            item.recording_release_owner = None;
+                            if item.uploaded_recording_scratch() {
+                                let storage = item.instances.replace(RecordingBuffer::new(items.recording_budget.clone()));
+                                batch.items[count] = Some((None, None, storage, None));
+                                count += 1;
+                            }
+                        }
+                    }
+                    // An unfinished copy is not retirement debt. A later
+                    // backend mutation queues its next check; a paused/evicted
+                    // owner cannot keep the event loop alive through this queue.
                     continue;
                 }
                 let (id, index) = match self.2 {
@@ -1426,6 +1516,7 @@ impl CxDrawListPool {
             || self.2.is_some()
             || self.0.has_pending_retirements()
             || !self.3.values.borrow().is_empty()
+            || !self.3.recording_releases.borrow().is_empty()
             || self.1.retirements.load(Ordering::Acquire) != 0
     }
     pub fn list_and_upload_budget(
@@ -1451,6 +1542,7 @@ impl CxDrawListPool {
         // dropped list would clip the new owner's instances.
         let recording_budget = self.1.recordings.clone();
         self[id].draw_items.recording_budget = recording_budget;
+        self[id].draw_items.list_id = Some(id);
         self[id].draw_items.retired_instances = Some(self.3.clone());
         self[id].draw_items.clean_leaf.set(false);
         self[id].draw_items.instance_counters.set(None);
@@ -1608,10 +1700,14 @@ pub struct CxDrawItem {
     // these values stick around to reduce buffer churn
     pub draw_item_id: usize,
     pub instances: Option<RecordingBuffer>,
+    recording_release_owner: Option<DrawListId>,
     recording_metadata: Option<Arc<CpuReservation>>,
     /// Immutable worker payload; old callers continue using `instances`.
     pub retained_instances: Option<crate::retained_instances::RetainedInstances>,
     pub retained_instance_id: u64,
+    /// Content hash of the last immediate payload a backend fully uploaded;
+    /// an identical re-record is then a no-op upload. Zero = none.
+    pub immediate_hash: u64,
     /// Immutable layout/font interpretation of the wanted and resident bytes.
     /// Zero preserves the ordinary immediate/retained API contract.
     pub retained_schema: u64,
@@ -1628,9 +1724,19 @@ pub struct CxDrawItem {
 }
 
 impl CxDrawItem {
+    fn uploaded_recording_scratch(&self) -> bool {
+        !self.instance_upload_pending && !self.retained_gpu_evicted
+            && self.kind.draw_call().is_some_and(|call| !call.instance_dirty)
+            && self.retained_instances.as_ref().is_some_and(|p| p.id() == self.retained_instance_id)
+            && self.instances.as_ref().is_some_and(|v| v.is_empty() && v.capacity() != 0)
+    }
     /// Shared presentation policy, also used by the software recorder. Only
     /// hosts that supply a stable underlying surface opt into progressive ink.
     /// Ordinary surfaces/texture producers keep their complete-frame contract.
+    /// Only an item with NO resident backing holds the present. A replacement
+    /// still copying keeps its previous complete payload on screen (both the
+    /// Metal and the software copy paths replace out of place or whole), which
+    /// is exactly what a skipped present would have shown anyway — only later.
     pub fn blocks_present(&self, resident_instances: usize) -> bool {
         let Some(call) = self.kind.draw_call() else { return false; };
         let slots = call.total_instance_slots;
@@ -1639,7 +1745,7 @@ impl CxDrawItem {
             || self.instances.as_ref().map_or(0, |v| v.len() / slots),
             |_| self.retained_instance_count);
         wanted != 0 && !(self.retained_progressive && self.retained_instances.is_some())
-            && (resident_instances == 0 || (self.instance_upload_pending && self.retained_instances.is_none()))
+            && resident_instances == 0
     }
     pub fn retained_zero_ink(&self) -> bool {
         self.retained_instance_count == 0 && self.retained_instances.is_some()
@@ -1891,6 +1997,7 @@ pub struct DrawItemInstanceCounters {
 
 #[derive(Default)]
 pub struct CxDrawItems {
+    list_id: Option<DrawListId>,
     retired_instances: Option<std::rc::Rc<RetiredDrawInstances>>,
     // A leaf proven clean by the collector needs no draw-call metadata walk.
     // Every mutable public item access invalidates this proof, including
@@ -1918,6 +2025,7 @@ impl std::ops::Index<usize> for CxDrawItems {
 
 impl std::ops::IndexMut<usize> for CxDrawItems {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.queue_recording_release(index);
         self.clean_leaf.set(false);
         self.instance_counters.set(None);
         self.child_inventory_valid = false;
@@ -1926,6 +2034,23 @@ impl std::ops::IndexMut<usize> for CxDrawItems {
 }
 
 impl CxDrawItems {
+    /// Upload and binding mutations announce only their own spare storage.
+    /// The worker service checks the resulting receipt after this borrow ends;
+    /// no full-corpus scan follows an unrelated widget's upload.
+    fn queue_recording_release(&mut self, index: usize) {
+        let Some(id) = self.list_id else { return; };
+        let Some(retired) = &self.retired_instances else { return; };
+        let item = &mut self.buffer[index];
+        if item.recording_release_owner == Some(id)
+            || item.retained_instances.is_none()
+            || !item.instances.as_ref().is_some_and(|v| v.is_empty() && v.capacity() != 0)
+        { return; }
+        let mut queue = retired.recording_releases.borrow_mut();
+        if queue.len() == queue.capacity() { return; }
+        queue.push_back((id, index));
+        item.recording_release_owner = Some(id);
+        retired.pending.store(true, Ordering::Release);
+    }
     /// Replace a screen-derived immutable view without recording its parent.
     /// The producer still owns the complete CPU publication; backend storage
     /// follows its ordinary asynchronous replacement/retirement path.
@@ -2058,6 +2183,7 @@ impl CxDrawItems {
             instances.bind_budget(&self.recording_budget);
             self.buffer.push(allocation.initialize(CxDrawItem {
                 instance_upload_pending: false,
+                immediate_hash: 0,
                 redraw_id: 0,
                 kind: CxDrawKind::Empty,
                 draw_item_id: self.buffer.len(),
@@ -2068,6 +2194,7 @@ impl CxDrawItems {
                 retained_gpu_evicted: false,
                 retained_prefetched: false,
                 retained_progressive: false,
+                recording_release_owner: None,
                 retained_schema: 0,
                 resident_schema: 0,
                 consumed_instance_id: 0,
@@ -2149,6 +2276,7 @@ impl CxDrawItems {
     /// Record backend consumption without changing the recording's topology
     /// or instance upload state.
     pub fn record_consumption(&mut self, index: usize, serial: u64) {
+        self.queue_recording_release(index);
         let item = &mut self.buffer[index];
         if item.retained_binding_ready() && !item.instance_upload_pending {
             item.consumed_instance_id = item.retained_instance_id;
@@ -2171,6 +2299,7 @@ impl CxDrawItems {
         any(target_os = "macos", target_os = "ios", target_os = "tvos")
     ))]
     pub(crate) fn binding_mut(&mut self, index: usize) -> &mut CxDrawItem {
+        self.queue_recording_release(index);
         &mut self.buffer[index]
     }
     pub fn push_item(&mut self, redraw_id: u64, kind: CxDrawKind) -> &mut CxDrawItem {
@@ -2208,6 +2337,7 @@ impl CxDrawItems {
                 retained_gpu_evicted: false,
                 retained_prefetched: false,
                 retained_progressive: false,
+                recording_release_owner: None,
                 retained_schema: 0,
                 resident_schema: 0,
                 consumed_instance_id: 0,
@@ -2217,6 +2347,7 @@ impl CxDrawItems {
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_upload_pending: false,
+                immediate_hash: 0,
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
             }));
@@ -3256,6 +3387,49 @@ mod uniform_generation_tests {
     }
 
     #[test]
+    fn uploaded_retained_scratch_retires_without_losing_residency() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.draw_lists.1.recordings.configure(1 << 20);
+        let list = DrawList::new(&mut cx);
+        let publication = crate::retained_instances::RetainedInstances::new(3, Arc::from([1.0, 2.0, 3.0])).unwrap();
+        let mut call = test_draw_call(1);
+        call.total_instance_slots = 3;
+        let item = cx.draw_lists[list.id()].draw_items.push_item(1, CxDrawKind::DrawCall(call));
+        item.instances.as_mut().unwrap().reserve(16 << 10);
+        item.retained_instances = Some(publication.clone());
+        item.retained_instance_count = 1;
+        // A partial copy does not release its staging storage.
+        item.instance_upload_pending = true;
+        let bytes = cx.draw_lists.1.recordings.bytes();
+        let pool = cx.task_pool();
+        cx.draw_lists.1.copied(12, 12, crate::retained_instances::UploadCategory::Code, std::time::Duration::ZERO);
+        for frame in 0..20 {
+            cx.draw_lists.retire_free_items(&pool, frame, |_| ());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(cx.draw_lists.1.recordings.bytes(), bytes);
+        let item = &mut cx.draw_lists[list.id()].draw_items[0];
+        item.instance_upload_pending = false;
+        item.kind.draw_call_mut().unwrap().instance_dirty = false;
+        item.retained_instance_id = publication.id();
+        cx.draw_lists[list.id()].draw_items.record_consumption(0, 12);
+        cx.draw_lists.1.copied(12, 12, crate::retained_instances::UploadCategory::Code, std::time::Duration::ZERO);
+        for frame in 20..120 {
+            if !cx.draw_lists.retire_free_items(&pool, frame, |_| ()) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!cx.draw_lists.has_pending_instance_retirements());
+        assert_eq!(cx.draw_lists.1.recordings.bytes(), 0, "storage actually freed, not just uncharged");
+        let item = &cx.draw_lists[list.id()].draw_items[0];
+        assert_eq!(item.instances.as_ref().unwrap().capacity(), 0);
+        assert!(item.retained_consumption_complete(12));
+        assert_eq!(item.retained_instances.as_ref().unwrap().data(), publication.data());
+        cx.draw_lists.evict_retained_item(list.id(), 0);
+        assert!(cx.draw_lists[list.id()].draw_items[0].retained_upload_needed());
+        assert_eq!(cx.draw_lists[list.id()].draw_items[0].retained_instances.as_ref().unwrap().data(), publication.data());
+    }
+
+    #[test]
     fn retained_binding_waits_for_matching_bytes_and_backend_consumption() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let list = DrawList::new(&mut cx);
@@ -3634,4 +3808,25 @@ mod uniform_generation_tests {
         assert_eq!(draw_list.recording_gen, 5);
         assert_eq!(draw_list.uniforms_gen, 6);
     }
+}
+
+/// Content hash of an immediate instance payload, for skipping the upload of
+/// a re-record whose bytes did not change (a camera move re-emitting the same
+/// world-space geometry). Bounded: payloads above 256 KiB are never hashed
+/// (returns 0, which matches nothing), so the hash cost stays under the
+/// budget of a small copy. Never returns 0 for a hashed payload.
+pub fn immediate_payload_hash(data: &[f32]) -> u64 {
+    if data.is_empty() || data.len() * 4 > 256 * 1024 {
+        return 0;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for chunk in data.chunks(64) {
+        for v in chunk {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    h.max(1)
 }
