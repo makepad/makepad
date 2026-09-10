@@ -174,7 +174,9 @@ pub struct ScreenCap {
     dot_margin: f64,
     #[live(60.0)]
     max_fps: f64,
-    /// Directory the mp4s land in, relative to the app's working directory.
+    /// Only a Studio-managed recording (an absolute directory handed over by
+    /// the flow) sets this. Every other recording, in every app of a repo,
+    /// lands in that repo's `local/screencap/` (see `repo_screencap_dir`).
     #[live]
     output_dir: String,
     #[rust]
@@ -285,10 +287,10 @@ impl ScreenCap {
         if self.session.is_some() {
             return;
         }
-        let dir = if self.output_dir.is_empty() {
-            PathBuf::from("local/screencap")
-        } else {
+        let dir = if self.managed && !self.output_dir.is_empty() {
             PathBuf::from(&self.output_dir)
+        } else {
+            repo_screencap_dir()
         };
         let path = capture_path(&dir, self.window_id);
         let fps = if self.managed { capture_fps(self.max_fps).min(MANAGED_MAX_FPS) } else { capture_fps(self.max_fps) };
@@ -626,11 +628,34 @@ fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32767.0) as i16
 }
 
+/// `<repo>/local/screencap`, where `<repo>` is the nearest ancestor of the
+/// working directory that has a `.git` entry or a `local/` directory. Apps
+/// are launched from their crate directories as often as from the repo root;
+/// the recordings must not scatter with them. Falls back to the working
+/// directory itself when no repo is found.
+pub fn repo_screencap_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut dir = cwd.clone();
+    for _ in 0..8 {
+        if dir.join(".git").exists() || dir.join("local").is_dir() {
+            return dir.join("local").join("screencap");
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    cwd.join("local").join("screencap")
+}
+
 fn capture_path(dir: &Path, window: Option<usize>) -> PathBuf {
+    let app = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "app".into());
     let stamp = local_timestamp();
     let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    dir.join(format!("screencap-{stamp}-p{}-w{}-{nanos}-{sequence}.mp4", std::process::id(), window.unwrap_or(0)))
+    dir.join(format!("screencap-{app}-{stamp}-p{}-w{}-{nanos}-{sequence}.mp4", std::process::id(), window.unwrap_or(0)))
 }
 
 /// `YYYYmmdd-HHMMSS`, so the files sort by when they were taken. Local time
