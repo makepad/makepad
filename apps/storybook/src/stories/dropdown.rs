@@ -1,5 +1,5 @@
-//! The drop down stories: two combo boxes and the drop down ladder, ported
-//! from the widget zoo.
+//! The drop down story: a face that names the current value and opens a
+//! list of the rest.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -8,60 +8,44 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
+    let VALUES = ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
+
     mod.stories.DropDownOverview = StoryPage{
-        H4{text: "ComboBox — type to filter, Enter commits the highlighted match"}
-        combo := ComboBox{
-            width: 220
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
+        StoryNote{text: "A closed face carrying the current value. Pressing it drops the list; choosing a row closes it again. Nothing here is typed, so the face is never mistaken for a field someone is meant to fill in."}
+
+        StoryHeading{text: "Choosing a value"}
+        StoryRow{
+            subject := DropDown{labels: VALUES}
+            chosen := Label{text: "chosen: Value One"}
         }
 
-        Hr{}
-        H4{text: "ComboBox — long list (40 rows, scrolls past 12)"}
-        combo_long := ComboBox{
-            width: 220
-            labels: [
-                "amber" "azure" "basalt" "beacon" "bramble" "cinder" "citrine" "cobalt"
-                "coral" "cypress" "dahlia" "dusk" "ember" "fathom" "fennel" "flint"
-                "garnet" "gossamer" "harbor" "indigo" "juniper" "kestrel" "lantern" "lichen"
-                "marble" "meadow" "nimbus" "onyx" "opal" "pewter" "quarry" "quill"
-                "russet" "saffron" "slate" "thistle" "umber" "verdant" "willow" "zephyr"
-            ]
-        }
-
-        Hr{}
-        H4{text: "Standard"}
-        dropdown := DropDown{
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
-        }
-
-        Hr{}
-        H4{text: "Standard, disabled"}
-        dropdown_disabled := DropDown{
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
-            animator +: {
-                disabled: {
-                    default: @on
-                }
+        StoryHeading{text: "Disabled"}
+        StoryNote{text: "The value stays legible — a control that is off still has to say what it is set to."}
+        StoryRow{
+            DropDown{
+                labels: VALUES
+                animator +: {disabled: {default: @on}}
             }
         }
 
-        Hr{}
-        H4{text: "DropDownFlat"}
-        dropdown_flat := DropDownFlat{
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
+        StoryHeading{text: "The ladder"}
+        StoryNote{text: "The same widget with the library's four faces: flat, the standard bevel, and the two gradient axes."}
+        StoryRow{
+            DropDownFlat{labels: VALUES}
+            DropDown{labels: VALUES}
         }
+        StoryRow{
+            DropDownGradientX{labels: VALUES}
+            DropDownGradientY{labels: VALUES}
+        }
+    }
+}
 
-        Hr{}
-        H4{text: "DropDownGradientX"}
-        dropdown_gradient_x := DropDownGradientX{
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
-        }
-
-        Hr{}
-        H4{text: "DropDownGradientY"}
-        dropdown_gradient_y := DropDownGradientY{
-            labels: ["Value One" "Value Two" "Third" "Fourth Value" "Option E" "Hexagons"]
-        }
+fn dropdown_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let subject = root.drop_down(cx, ids!(subject));
+    if subject.changed(actions).is_some() {
+        let text = format!("chosen: {}", subject.selected_label());
+        root.label(cx, ids!(chosen)).set_text(cx, &text);
     }
 }
 
@@ -69,14 +53,14 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/dropdown/overview",
     category: "Inputs",
     component: "DropDown",
-    also: &["ComboBox"],
+    also: &["DropDownFlat", "DropDownGradientX", "DropDownGradientY"],
     name: "Overview",
     dsl: "DropDownOverview",
     added: "2026-08-23",
-    tags: &["ported"],
-    doc: "# DropDown\n\nDropdowns allow selecting from a list of options.",
-    subject: "",
+    tags: &["ported", "select", "picker", "menu"],
+    doc: "# DropDown\n\nA face showing the value in force, and a list of the alternatives behind it. The face is a button, not a field: it takes no typing, and its shape says so.\n\nReach for it when the list is short enough to read, when every option is a real answer rather than a filter, and when the current value is worth showing all the time. When the list gets long enough that scanning it is work, a `ComboBox` lets the person type three letters instead. When the answer is a set rather than one value, a `MultiSelect` shows the count and keeps the list open.",
+    subject: "subject",
     feature: None,
     controls: &[],
-    on_actions: None,
+    on_actions: Some(dropdown_actions),
 }];

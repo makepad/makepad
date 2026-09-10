@@ -29,6 +29,7 @@ pub mod tip;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
+pub mod combobox;
 pub mod dropdown;
 pub mod label;
 pub mod slider;
@@ -93,6 +94,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     foundations::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
+    combobox::script_mod(vm);
     dropdown::script_mod(vm);
     label::script_mod(vm);
     slider::script_mod(vm);
@@ -178,6 +180,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         foundations::STORIES,
         button::STORIES,
         checkbox::STORIES,
+        combobox::STORIES,
         dropdown::STORIES,
         label::STORIES,
         slider::STORIES,
