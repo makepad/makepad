@@ -3859,6 +3859,81 @@ impl ThumbQueue {
     }
 }
 
+/// Whole tracks decoding at the same time, across the heavy lane. A track
+/// decode holds the file's bytes, the whole-file float buffer and the
+/// integer copy together, and the lane has up to eight workers; eight long
+/// tracks at once is a memory peak the machine does not survive. Two keeps a
+/// deck load overlapping another, and is what the library pass pays for
+/// that: it runs on two workers instead of eight.
+pub const MAX_TRACK_DECODES: usize = 2;
+
+/// The gate in front of whole-track decodes. Pads, stills, meshes and
+/// thumbs do not go through it: they are small, and they are the jobs a
+/// slow track decode must not hold up.
+struct TrackDecodeGate {
+    /// (decodes holding a slot, decodes inside right now, the most that
+    /// were ever inside at once). The last two are counted around the
+    /// decode call itself, not from the slots, so a gate that let
+    /// everything through would still be caught.
+    state: Mutex<(usize, usize, usize)>,
+    cv: Condvar,
+}
+
+impl TrackDecodeGate {
+    fn new() -> TrackDecodeGate {
+        TrackDecodeGate { state: Mutex::new((0, 0, 0)), cv: Condvar::new() }
+    }
+
+    /// Run `decode` with one of the [`MAX_TRACK_DECODES`] slots held,
+    /// waiting for one if they are all taken. The slot is given back
+    /// whatever the decode returns.
+    fn hold<T>(&self, decode: impl FnOnce() -> T) -> T {
+        {
+            let mut state = self.state.lock().unwrap();
+            while state.0 >= MAX_TRACK_DECODES {
+                state = self.cv.wait(state).unwrap();
+            }
+            state.0 += 1;
+        }
+        let out = self.measured(decode);
+        let mut state = self.state.lock().unwrap();
+        state.0 -= 1;
+        drop(state);
+        self.cv.notify_one();
+        out
+    }
+
+    /// The decode itself, counted in and out.
+    fn measured<T>(&self, decode: impl FnOnce() -> T) -> T {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.1 += 1;
+            state.2 = state.2.max(state.1);
+        }
+        let out = decode();
+        self.state.lock().unwrap().1 -= 1;
+        out
+    }
+
+    /// The most decodes that were ever inside at once.
+    #[cfg(test)]
+    fn peak(&self) -> usize {
+        self.state.lock().unwrap().2
+    }
+}
+
+/// A whole-track decode, through the gate. The three job kinds that read a
+/// full track share this so none of them can slip past the cap.
+fn decode_track(gate: &TrackDecodeGate, path: &PathBuf, media: MediaType) -> Result<TrackPcm, String> {
+    gate.hold(|| {
+        #[cfg(test)]
+        if let Some(delay) = test_sleep_marker(path) {
+            std::thread::sleep(delay);
+        }
+        decode_audio_clip(path, media, MAX_TRACK_FRAMES)
+    })
+}
+
 #[cfg(test)]
 fn test_sleep_marker(path: &Path) -> Option<Duration> {
     let ms: u64 = path
@@ -3870,10 +3945,10 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
-fn run_heavy_job(job: DecodeJob) -> DecodeDone {
+fn run_heavy_job(job: DecodeJob, gate: &TrackDecodeGate) -> DecodeDone {
     match job {
         DecodeJob::Deck { deck, gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+            let result = decode_track(gate, &path, media).map(|pcm| {
                 let peaks = wave_peaks(&pcm, WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
@@ -3886,11 +3961,11 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
         DecodeJob::Analyze { key, gen, path, media } => {
             // No peaks and no bins: nothing is going to draw this decode.
             // The analysis worker builds its own tiles from the samples.
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(Arc::new);
+            let result = decode_track(gate, &path, media).map(Arc::new);
             DecodeDone::Analyze { key, gen, result }
         }
         DecodeJob::Preview { gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+            let result = decode_track(gate, &path, media).map(|pcm| {
                 let peaks = preview_wave_bins(&pcm, PREVIEW_WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
@@ -3959,6 +4034,7 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
 pub struct DecodePool {
     heavy_tx: Sender<DecodeJob>,
     thumb_queue: Arc<ThumbQueue>,
+    track_gate: Arc<TrackDecodeGate>,
     rx: Receiver<DecodeDone>,
 }
 
@@ -3972,13 +4048,21 @@ impl DecodePool {
     pub fn new() -> DecodePool {
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let (heavy_workers, thumb_workers) = lane_sizes(cpus);
+        DecodePool::with_lanes(heavy_workers, thumb_workers)
+    }
 
+    /// A pool with the lane sizes given rather than measured, so a test
+    /// can put more workers on the heavy lane than the track gate lets
+    /// through and prove the gate holds.
+    fn with_lanes(heavy_workers: usize, thumb_workers: usize) -> DecodePool {
         let (heavy_tx, job_rx) = channel::<DecodeJob>();
         let (done_tx, rx) = channel::<DecodeDone>();
         let job_rx = Arc::new(Mutex::new(job_rx));
+        let track_gate = Arc::new(TrackDecodeGate::new());
         for i in 0..heavy_workers {
             let jobs = job_rx.clone();
             let done = done_tx.clone();
+            let gate = track_gate.clone();
             let _ = std::thread::Builder::new()
                 .name(format!("vj-decode-heavy-{i}"))
                 .spawn(move || loop {
@@ -3987,7 +4071,7 @@ impl DecodePool {
                         guard.recv()
                     };
                     let Ok(job) = job else { return };
-                    let out = run_heavy_job(job);
+                    let out = run_heavy_job(job, &gate);
                     if done.send(out).is_err() {
                         return;
                     }
@@ -4011,7 +4095,7 @@ impl DecodePool {
                 });
         }
 
-        DecodePool { heavy_tx, thumb_queue, rx }
+        DecodePool { heavy_tx, thumb_queue, track_gate, rx }
     }
 
     pub fn submit(&self, job: DecodeJob) {
@@ -5786,6 +5870,60 @@ mod tests {
         // threads — what keeps it from stealing a live set is the ACTIVE
         // width (`set_thumb_width`), not a small pool.
         assert_eq!(lane_sizes(32), (8, MAX_THUMB_WORKERS));
+    }
+
+    /// Four whole-track decodes on four heavy workers: two are inside at
+    /// once, never more, and all four still finish. The peak is taken
+    /// around the decode, not the gate, so a gate that stopped counting
+    /// would be caught as four. Pads are not gated: a pad decode runs
+    /// while both track slots are held.
+    #[test]
+    fn no_more_than_two_whole_tracks_decode_at_once() {
+        let pool = DecodePool::with_lanes(4, 2);
+        for gen in 0..4u64 {
+            pool.submit(DecodeJob::Deck {
+                deck: DeckId::A,
+                gen,
+                path: PathBuf::from("vj_test_sleep_300.wav"),
+                media: MediaType::Wav,
+            });
+        }
+        // Submitted after the four tracks, so it can only run while two
+        // of them hold the gate and the other two wait on it.
+        let dir = std::env::temp_dir().join(format!("vj_track_gate_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pad = dir.join("pad.wav");
+        std::fs::write(&pad, wav_pcm16(&[(1000, -1000); 50], 22_050)).unwrap();
+        pool.submit(DecodeJob::Pad {
+            pad: PadKey::from_bytes([4; 16]),
+            gen: 1,
+            revision: AssetRevisionId::from_bytes([5; 32]),
+            path: pad,
+            media: MediaType::Wav,
+        });
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(10);
+        let mut decks = 0;
+        let mut pad_done_at: Option<Instant> = None;
+        while decks < 4 && Instant::now() < deadline {
+            for done in pool.poll() {
+                match done {
+                    DecodeDone::Deck { .. } => decks += 1,
+                    DecodeDone::Pad { .. } => pad_done_at = Some(Instant::now()),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(decks, 4, "every gated decode must finish: the slot is given back");
+        assert_eq!(pool.track_gate.peak(), MAX_TRACK_DECODES, "two inside at once, not four");
+        let pad_done_at = pad_done_at.expect("the pad decoded");
+        assert!(
+            pad_done_at - started < Duration::from_millis(500),
+            "a pad is not a whole track: it must not wait for a track slot"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The thumb lane's politeness valve: narrowing parks the surplus
