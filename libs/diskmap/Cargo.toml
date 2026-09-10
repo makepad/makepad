@@ -8,4 +8,4 @@ publish = false
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-makepad-code-graph = { path = "../code_graph" }
+makepad-git = { path = "../git" }

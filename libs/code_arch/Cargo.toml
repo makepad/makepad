@@ -7,4 +7,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-toml-parser = { path = "../toml_parser" }
-makepad-code-graph = { path = "../code_graph" }
+makepad-git = { path = "../git" }

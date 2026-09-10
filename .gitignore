@@ -2,11 +2,18 @@
 # will have compiled files and executables
 **/target/
 
+# Private Scope (the Architecture map). Clone into this path:
+#   git clone git@github.com:makepad/scope.git apps/scope
+/apps/scope/
+
 # Private Arcade frontend. Clone into this path:
 #   git clone git@github.com:makepad/sandbox.git apps/sandbox
 /apps/sandbox/
 #   git clone git@github.com:makepad/source-library.git apps/source-library
 /apps/source-library/
+# Private Stage performance app. Clone into this path:
+#   git clone git@github.com:makepad/stage.git apps/stage
+/apps/stage/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html

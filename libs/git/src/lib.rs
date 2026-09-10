@@ -1,9 +1,11 @@
+pub mod attribution;
 pub mod clone;
 mod bounded_read;
 pub mod commit;
 pub mod diff;
 pub mod error;
 pub mod http_sync;
+pub mod ignore;
 pub mod index;
 pub mod merge;
 pub mod object;

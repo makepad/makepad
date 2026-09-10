@@ -16,16 +16,16 @@ fn root_workspace_manifest() {
         .get_path(&["workspace", "members"])
         .and_then(Toml::as_array)
         .expect("workspace.members");
-    assert!(members.iter().any(|m| m.as_str() == Some("apps/studio")));
+    assert!(members.iter().any(|m| m.as_str() == Some("apps/director")));
     assert!(members.iter().any(|m| m.as_str() == Some("apps/terminal")));
     assert!(members.len() > 50);
 }
 
 #[test]
-fn studio_manifest_has_four_bins_and_a_lib() {
-    let doc = parse(include_str!("../../../apps/studio/Cargo.toml"));
-    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-studio"));
-    assert_eq!(get_str(&doc, &["lib", "name"]), Some("makepad_studio"));
+fn director_manifest_has_four_bins_and_a_lib() {
+    let doc = parse(include_str!("../../../apps/director/Cargo.toml"));
+    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-director"));
+    assert_eq!(get_str(&doc, &["lib", "name"]), Some("makepad_director"));
     let bins = doc
         .get_path(&["bin"])
         .and_then(Toml::as_array_of_tables)
@@ -33,7 +33,7 @@ fn studio_manifest_has_four_bins_and_a_lib() {
     let names: Vec<&str> = bins.iter().map(|b| b["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["studio", "studio-git-guard", "studio-rustc-guard", "studio-flow"]
+        ["director", "director-git-guard", "director-rustc-guard", "director-flow"]
     );
     assert_eq!(bins[1]["test"].as_bool(), Some(false));
     assert_eq!(bins[0]["path"].as_str(), Some("src/main.rs"));
