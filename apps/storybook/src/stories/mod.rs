@@ -32,6 +32,15 @@ pub mod checkbox;
 pub mod combobox;
 pub mod dropdown;
 pub mod label;
+pub mod number_field;
+pub mod calendar;
+pub mod date_picker;
+pub mod time_picker;
+pub mod rating;
+pub mod tags;
+pub mod radio_group;
+pub mod kbd;
+pub mod wheel_picker;
 pub mod range_slider;
 pub mod slider;
 pub mod textinput;
@@ -100,6 +109,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
     label::script_mod(vm);
     slider::script_mod(vm);
     range_slider::script_mod(vm);
+    wheel_picker::script_mod(vm);
+    kbd::script_mod(vm);
+    radio_group::script_mod(vm);
+    tags::script_mod(vm);
+    rating::script_mod(vm);
+    time_picker::script_mod(vm);
+    date_picker::script_mod(vm);
+    calendar::script_mod(vm);
+    number_field::script_mod(vm);
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     view::script_mod(vm);
@@ -187,6 +205,15 @@ pub fn tables() -> &'static [&'static [Story]] {
         label::STORIES,
         slider::STORIES,
         range_slider::STORIES,
+        wheel_picker::STORIES,
+        kbd::STORIES,
+        radio_group::STORIES,
+        tags::STORIES,
+        rating::STORIES,
+        time_picker::STORIES,
+        date_picker::STORIES,
+        calendar::STORIES,
+        number_field::STORIES,
         textinput::STORIES,
         radiobutton::STORIES,
         view::STORIES,

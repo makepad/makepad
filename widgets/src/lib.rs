@@ -83,6 +83,7 @@ pub mod field;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
+pub mod number_field;
 pub mod range_slider;
 pub mod slider;
 pub mod text_input;
@@ -111,6 +112,14 @@ pub mod bare_step;
 pub mod turtle_step;
 
 pub mod data_grid;
+pub mod calendar;
+pub mod date_picker;
+pub mod time_picker;
+pub mod rating;
+pub mod tags;
+pub mod radio_group;
+pub mod kbd;
+pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
 pub mod text_flow;
@@ -240,6 +249,14 @@ pub use crate::{
     popup_menu::*,
     popup_notification::*,
     data_grid::*,
+    calendar::*,
+    date_picker::*,
+    time_picker::*,
+    rating::*,
+    tags::*,
+    radio_group::*,
+    kbd::*,
+    wheel_picker::*,
     portal_list::*,
     progress::*,
     reorder_list::*,
@@ -253,6 +270,7 @@ pub use crate::{
     scroll_bars::ScrollBars,
     scroll_shadow::*,
     slide_panel::*,
+    number_field::*,
     range_slider::*,
     slider::*,
     slides_view::*,
@@ -452,6 +470,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
     crate::field::script_mod(vm);
+    crate::number_field::script_mod(vm);
 
     crate::splitter::script_mod(vm);
 
@@ -482,6 +501,14 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::data_grid::script_mod(vm);
     crate::portal_list::script_mod(vm);
+    crate::calendar::script_mod(vm);
+    crate::date_picker::script_mod(vm);
+    crate::time_picker::script_mod(vm);
+    crate::rating::script_mod(vm);
+    crate::tags::script_mod(vm);
+    crate::radio_group::script_mod(vm);
+    crate::kbd::script_mod(vm);
+    crate::wheel_picker::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 

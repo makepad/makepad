@@ -639,6 +639,30 @@ impl Widget for RangeSlider {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
             }
+            // The wheel moves the handle the keyboard has; with Shift it
+            // moves the span, which is the same split the arrow keys use.
+            // Every other numeric control in the library answers to the
+            // wheel and there is no reason this one should not.
+            Hit::FingerScroll(e) => {
+                let notches = -e.scroll.y.signum();
+                if notches != 0.0 {
+                    let d = self.key_step() * notches;
+                    let end = self.active_is_end;
+                    let mut r = self.range_of();
+                    if e.modifiers.shift {
+                        r.shift(d);
+                    } else if end {
+                        r.move_end(r.quantize(r.end + d));
+                    } else {
+                        r.move_start(r.quantize(r.start + d));
+                    }
+                    r.settle();
+                    self.put(r);
+                    self.slided(cx);
+                    cx.widget_action(uid, RangeSliderAction::EndSlide(self.start, self.end));
+                    self.draw_bg.redraw(cx);
+                }
+            }
             Hit::FingerHoverOut(_) => {
                 self.draw_bg.hot_start = 0.0;
                 self.draw_bg.hot_end = 0.0;
