@@ -3938,6 +3938,27 @@ script_mod! {
                                     flow: Right
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 90 text: "CUE / ROOM"}
+                                    phones_mix := ApcHSlider{
+                                        min: 0.0
+                                        max: 1.0
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 90 text: "EARS"}
+                                    phones_split := PhonesDrop{width: 110 labels: ["STEREO" "SPLIT"]}
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "PLAYER"}
                                     phones_place := PhonesDrop{width: 110 labels: ["DOCKED" "INLINE" "FLOATING"]}
                                 }
@@ -9774,6 +9795,13 @@ pub struct App {
     phones_placement: PhonesPlacement,
     #[rust]
     phones_cue_mode: CueMode,
+    /// How much of the room the phones hear, -1 (the cue alone, which is
+    /// the default and what the phones always heard) to 1 (the room alone).
+    #[rust(-1.0f32)]
+    phones_mix: f32,
+    /// The cue in one ear and the room in the other.
+    #[rust]
+    phones_split: bool,
     /// UI mirror of the mixer's per-slot cue toggles; latches while no
     /// phones device exists and starts sounding the moment one arms.
     #[rust]
@@ -24853,6 +24881,8 @@ p2 {}
         store.set_f64("phones.volume", self.phones_volume as f64);
         store.set_usize("phones.placement", self.phones_placement.index());
         store.set_usize("phones.cue_mode", self.phones_cue_mode.index());
+        store.set_f64("phones.mix", self.phones_mix as f64);
+        store.set_bool("phones.split", self.phones_split);
         // The master level rides in the same file: it is the same rig, and
         // an operator who turned the room down and quit came back to full
         // scale, which is the one setting nobody wants restored wrongly.
@@ -24892,6 +24922,13 @@ p2 {}
             CueMode::from_index(store.usize("phones.cue_mode", self.phones_cue_mode.index()));
         self.mixer.set_phones_volume(self.phones_volume);
         self.mixer.set_cue_mode(self.phones_cue_mode);
+        // A file from before the knob existed hears the cue alone, which
+        // is what its phones always heard.
+        self.phones_mix =
+            (store.f64("phones.mix", self.phones_mix as f64) as f32).clamp(-1.0, 1.0);
+        self.phones_split = store.bool("phones.split", false);
+        self.mixer.set_phones_mix(self.phones_mix);
+        self.mixer.set_phones_split(self.phones_split);
         // The master, unless this instance is deliberately silent: a muted
         // test window must not come up at the level the operator left.
         self.master_level =
@@ -25009,6 +25046,8 @@ p2 {}
             // starts sounding now.
             self.mixer.set_phones_volume(self.phones_volume);
             self.mixer.set_cue_mode(self.phones_cue_mode);
+            self.mixer.set_phones_mix(self.phones_mix);
+            self.mixer.set_phones_split(self.phones_split);
             for deck in [DeckId::A, DeckId::B] {
                 self.mixer.set_deck_cue(deck, self.phones_deck[deck.index()]);
             }
@@ -25088,6 +25127,14 @@ p2 {}
         self.ui
             .slider(cx, ids!(phones_volume))
             .set_value(cx, self.phones_volume as f64);
+        // The slider runs 0..1 with its home at the left; the knob runs
+        // -1..1 with the cue alone at -1.
+        self.ui
+            .slider(cx, ids!(phones_mix))
+            .set_value(cx, ((self.phones_mix + 1.0) * 0.5) as f64);
+        self.ui
+            .drop_down(cx, ids!(phones_split))
+            .set_selected_item(cx, self.phones_split as usize);
         self.sync_phones_status(cx);
         self.ui.modal(cx, ids!(phones_modal)).open(cx);
     }
@@ -25202,6 +25249,16 @@ p2 {}
         if let Some(value) = self.ui.slider(cx, ids!(phones_volume)).slided(actions) {
             self.phones_volume = value as f32;
             self.mixer.set_phones_volume(self.phones_volume);
+            self.save_phones_settings();
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(phones_mix)).slided(actions) {
+            self.phones_mix = (value as f32 * 2.0 - 1.0).clamp(-1.0, 1.0);
+            self.mixer.set_phones_mix(self.phones_mix);
+            self.save_phones_settings();
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(phones_split)).selected(actions) {
+            self.phones_split = index == 1;
+            self.mixer.set_phones_split(self.phones_split);
             self.save_phones_settings();
         }
     }

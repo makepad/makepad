@@ -340,6 +340,31 @@ phones.placement 1
         assert_eq!(older.f64("mix.master", 0.9), 0.9, "the default stands");
     }
 
+    /// The phones' blend of cue and room, and whether the two are split
+    /// between the ears. A file from before either key, at either
+    /// version, hears the cue alone in stereo: what its phones always did.
+    #[test]
+    fn an_older_phones_file_hears_the_cue_alone_in_both_ears() {
+        let bare = legacy::phones("Headset
+0.85
+0
+0
+");
+        assert_eq!(bare.f64("phones.mix", -1.0), -1.0);
+        assert!(!bare.bool("phones.split", false));
+        let older = Settings::from_text("phones.device Headset
+phones.volume 0.5
+");
+        assert_eq!(older.f64("phones.mix", -1.0), -1.0);
+        assert!(!older.bool("phones.split", false));
+        let mut store = Settings::new();
+        store.set_f64("phones.mix", 0.5);
+        store.set_bool("phones.split", true);
+        let back = Settings::from_text(&store.to_text());
+        assert_eq!(back.f64("phones.mix", -1.0), 0.5);
+        assert!(back.bool("phones.split", false));
+    }
+
     /// The room's pinned output rides in the phones file. A file from
     /// before the pin, at either version, reads it as empty: the room
     /// follows the default, which is what it always did.

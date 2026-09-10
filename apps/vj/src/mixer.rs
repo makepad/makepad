@@ -2301,6 +2301,13 @@ struct MixState {
     /// channel strip, not the record, so `swap_decks` leaves these alone.
     cue_deck: [bool; 2],
     cue_mode: CueMode,
+    /// How much of the room the phones hear: -1 is the cue alone, which
+    /// is what the phones always heard, 0 is half and half, 1 is the room
+    /// alone. Slewed like every other level.
+    phones_mix: Ramp,
+    /// The cue in the left ear and the room in the right, each folded to
+    /// mono, the knob still bringing the room into the cue ear.
+    phones_split: bool,
     preview: PreviewVoice,
     /// The headphone bus ends on a limiter of its own, on the master's
     /// settings. Two instances and not one because they carry different
@@ -2385,6 +2392,8 @@ impl MixState {
             scheduled_video: None,
             cue_deck: [false; 2],
             cue_mode: CueMode::default(),
+            phones_mix: Ramp::at(-1.0),
+            phones_split: false,
             preview: PreviewVoice::new(),
             // The rate is not known until the first buffer; the look-ahead
             // re-windows itself then, allocation-free. The ceiling is the
@@ -2684,6 +2693,8 @@ pub enum MixCmd {
     SetPadVoicesGain { pad: PadKey, gain: f32 },
     SetDeckCue { deck: DeckId, on: bool },
     SetCueMode(CueMode),
+    SetPhonesMix(f32),
+    SetPhonesSplit(bool),
     InstallPreview { pcm: Arc<TrackPcm>, autoplay: bool },
     ClearPreview,
     SetPreviewPlaying(bool),
@@ -2898,6 +2909,8 @@ struct UiShadow {
     abandoned: bool,
     cue_deck: [bool; 2],
     cue_mode: CueMode,
+    phones_mix: f32,
+    phones_split: bool,
     deck: [DeckShadow; 2],
     /// A transition sent but not yet seen in the callback's atomics:
     /// reported as `Armed` under its own id until then, so the cue engine
@@ -3015,6 +3028,8 @@ impl Mixer {
                 abandoned: false,
                 cue_deck: [false; 2],
                 cue_mode: CueMode::default(),
+                phones_mix: -1.0,
+                phones_split: false,
                 deck: [DeckShadow::default(); 2],
                 pending_arm: None,
                 ended_decks: Vec::new(),
@@ -4565,6 +4580,33 @@ impl Mixer {
         self.ui.with(|ui| ui.cue_mode)
     }
 
+    /// How much of the room the phones hear, -1 (the cue alone) to 1 (the
+    /// room alone). A value that is not a number moves nothing, the same
+    /// rule as the phones volume.
+    pub fn set_phones_mix(&self, mix: f32) {
+        let Some(mix) = knob(mix, -1.0, 1.0) else { return };
+        self.ui.with(|ui| {
+            ui.phones_mix = mix;
+            Self::send_in(&self.shared, ui, MixCmd::SetPhonesMix(mix));
+        });
+    }
+
+    pub fn phones_mix(&self) -> f32 {
+        self.ui.with(|ui| ui.phones_mix)
+    }
+
+    /// The cue in the left ear and the room in the right, each in mono.
+    pub fn set_phones_split(&self, on: bool) {
+        self.ui.with(|ui| {
+            ui.phones_split = on;
+            Self::send_in(&self.shared, ui, MixCmd::SetPhonesSplit(on));
+        });
+    }
+
+    pub fn phones_split(&self) -> bool {
+        self.ui.with(|ui| ui.phones_split)
+    }
+
     /// Install (and by default start) the pre-listen player.
     pub fn install_preview(&self, pcm: Arc<TrackPcm>, autoplay: bool) {
         self.run_cmd(MixCmd::InstallPreview { pcm, autoplay });
@@ -5598,6 +5640,8 @@ impl MixEngine {
             }
             MixCmd::SetDeckCue { deck, on } => s.cue_deck[deck.index()] = on,
             MixCmd::SetCueMode(mode) => s.cue_mode = mode,
+            MixCmd::SetPhonesMix(mix) => s.phones_mix.slew(mix, SLEW_SECS),
+            MixCmd::SetPhonesSplit(on) => s.phones_split = on,
             MixCmd::InstallPreview { pcm, autoplay } => {
                 if let Some(old) = s.preview.pcm.replace(pcm) {
                     retire(shared, Retired::Track(old));
@@ -6493,13 +6537,6 @@ impl MixEngine {
                         }
                     }
                 }
-                // `audible` before the limiter, because a non-finite
-                // sample would poison its peak read and duck the bus for
-                // good -- the same guard the master's own limiter takes.
-                s.cue_limiter.set_sample_rate(rate as f32);
-                let cued = s.cue_limiter.process([audible(cue.0), audible(cue.1)]);
-                shared.cue_ring.push(cue_pos, cued[0], cued[1]);
-                cue_pos = cue_pos.saturating_add(1);
             }
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
@@ -6515,6 +6552,12 @@ impl MixEngine {
             let drums = s.synth.frame(SynthTrack::Drums, frame);
             let drums = s.chain_mut(ChainTarget::Drums).process(drums, rate);
             let master = s.master.tick(rate);
+            // The room as the phones may hear it: after the mix's own
+            // chain and before the bus dynamics, which is the only place
+            // that signal exists. The phones end on a limiter of their
+            // own, so the room taken after the master's would reach the
+            // cans a look-ahead late.
+            let mut room = [0.0f32; 2];
             let mixed = s.program_mix.process_frame_with(
                 [
                     [video.0, video.1],
@@ -6527,8 +6570,40 @@ impl MixEngine {
                 ],
                 master,
                 rate,
-                |summed| s.master_chain.process(summed, rate),
+                |summed| {
+                    let heard = s.master_chain.process(summed, rate);
+                    room = heard;
+                    heard
+                },
             );
+            if cue_armed {
+                // What the cans hear: the cue, the room, or the blend the
+                // knob sets; in split, the cue in the left ear and the
+                // room in the right, each folded to mono, the knob still
+                // bringing the room into the cue ear. With the knob at
+                // home and split off the frame is the one it always was.
+                let mix = s.phones_mix.tick(rate);
+                let (left, right) = if mix <= -1.0 && !s.phones_split {
+                    (cue.0, cue.1)
+                } else {
+                    let g_cue = 0.5 * (1.0 - mix);
+                    let g_room = 0.5 * (1.0 + mix);
+                    if s.phones_split {
+                        let cue_mono = 0.5 * (cue.0 + cue.1);
+                        let room_mono = 0.5 * (room[0] + room[1]);
+                        (cue_mono * g_cue + room_mono * g_room, room_mono)
+                    } else {
+                        (cue.0 * g_cue + room[0] * g_room, cue.1 * g_cue + room[1] * g_room)
+                    }
+                };
+                // `audible` before the limiter, because a non-finite
+                // sample would poison its peak read and duck the bus for
+                // good -- the same guard the master's own limiter takes.
+                s.cue_limiter.set_sample_rate(rate as f32);
+                let cued = s.cue_limiter.process([audible(left), audible(right)]);
+                shared.cue_ring.push(cue_pos, cued[0], cued[1]);
+                cue_pos = cue_pos.saturating_add(1);
+            }
             let l = mixed[0].clamp(-CLAMP, CLAMP);
             let r = mixed[1].clamp(-CLAMP, CLAMP);
             write_frame(output, channels, frame, l, r);
@@ -8907,6 +8982,142 @@ mod tests {
             (got - 0.5).abs() < 0.01,
             "PFL carries the full-level deck whatever the faders do: {got}"
         );
+    }
+
+    /// A deck at 0.5 in the cans by PFL and at 0.1 in the room (gain 0.2),
+    /// so the two are told apart by level alone.
+    fn cued_deck_in_a_quiet_room(pcm: Arc<TrackPcm>) -> TestMixer {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0); // hard on A
+        mixer.install_deck(DeckId::A, pcm);
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_gain(DeckId::A, 0.2);
+        mixer.set_cue_armed(true);
+        mixer.set_deck_cue(DeckId::A, true);
+        mixer
+    }
+
+    /// One settled frame of what the cans hear, left and right.
+    fn phones_frame(mixer: &TestMixer) -> (f32, f32) {
+        render(mixer, 48_000.0, 8_192);
+        let mut state = CueReadState::default();
+        let out = consume_cue(mixer, &mut state, 48_000.0, 512);
+        (out.channel(0)[256], out.channel(1)[256])
+    }
+
+    fn near(got: f32, want: f32) -> bool {
+        (got - want).abs() < 0.01
+    }
+
+    /// The knob at home is what the phones always heard: the cue alone,
+    /// with none of the room in it.
+    #[test]
+    fn the_phones_at_home_hear_the_cue_alone() {
+        let mixer = cued_deck_in_a_quiet_room(const_pcm(16_384, 48_000 * 8, 48_000));
+        assert_eq!(mixer.phones_mix(), -1.0, "home is the cue alone");
+        let (left, right) = phones_frame(&mixer);
+        assert!(near(left, 0.5) && near(right, 0.5), "cue alone: {left} {right}");
+    }
+
+    #[test]
+    fn the_phones_turned_to_the_room_hear_the_room_alone() {
+        let mixer = cued_deck_in_a_quiet_room(const_pcm(16_384, 48_000 * 8, 48_000));
+        mixer.set_phones_mix(1.0);
+        let (left, right) = phones_frame(&mixer);
+        assert!(near(left, 0.1) && near(right, 0.1), "the room alone: {left} {right}");
+    }
+
+    #[test]
+    fn the_phones_at_centre_hear_half_of_each() {
+        let mixer = cued_deck_in_a_quiet_room(const_pcm(16_384, 48_000 * 8, 48_000));
+        mixer.set_phones_mix(0.0);
+        let (left, right) = phones_frame(&mixer);
+        // 0.5 × 0.5 of the cue and 0.5 × 0.1 of the room.
+        assert!(near(left, 0.3) && near(right, 0.3), "half and half: {left} {right}");
+    }
+
+    /// Split: the cue in the left ear and the room in the right, each
+    /// folded to mono, so a side signal proves the fold. The knob brings
+    /// the room into the cue ear and leaves the room ear alone.
+    #[test]
+    fn split_puts_the_cue_in_one_ear_and_the_room_in_the_other() {
+        // 0.5 left, 0.25 right: mono 0.375 in the cue, 0.075 in the room.
+        let pcm = const_stereo_pcm(16_384, 8_192, 48_000 * 8, 48_000);
+        let mixer = cued_deck_in_a_quiet_room(pcm.clone());
+        mixer.set_phones_split(true);
+        let (left, right) = phones_frame(&mixer);
+        assert!(near(left, 0.375), "the cue ear hears the cue in mono: {left}");
+        assert!(near(right, 0.075), "the room ear hears the room in mono: {right}");
+
+        let mixer = cued_deck_in_a_quiet_room(pcm);
+        mixer.set_phones_split(true);
+        mixer.set_phones_mix(0.0);
+        let (left, right) = phones_frame(&mixer);
+        assert!(near(left, 0.225), "half cue, half room in the cue ear: {left}");
+        assert!(near(right, 0.075), "the room ear does not move with the knob: {right}");
+    }
+
+    /// The room reaches the cans when it reaches the room. Both buses end
+    /// on a limiter with the same look-ahead, so the room must be taken
+    /// before the master's; taken after, it would arrive in the cans a
+    /// look-ahead late, which on a beat is a beat-match error.
+    #[test]
+    fn the_room_in_the_phones_is_not_a_look_ahead_late() {
+        let rate = 48_000.0;
+        let step_at = 24_000usize;
+        let mut frames = vec![[0i16; 2]; step_at + 8_192];
+        for frame in frames.iter_mut().skip(step_at) {
+            *frame = [9_830, 9_830]; // 0.3
+        }
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, Arc::new(TrackPcm { frames, sample_rate: 48_000 }));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_cue_armed(true);
+        mixer.set_phones_mix(1.0); // the room alone; nothing is cued
+        let chunk = 1_024usize;
+        let total = step_at + 4_096;
+        let mut onset_room = None;
+        let mut rendered = 0usize;
+        while rendered < total {
+            let out = render(&mixer, rate, chunk);
+            if onset_room.is_none() {
+                onset_room = out
+                    .channel(0)
+                    .iter()
+                    .position(|v| v.abs() > 0.05)
+                    .map(|index| rendered + index);
+            }
+            rendered += chunk;
+        }
+        let onset_room = onset_room.expect("the step reached the room");
+        // The ring holds the last CUE_RING_FRAMES frames by absolute
+        // position; the step is inside that window.
+        let ring = mixer.cue_ring();
+        let onset_phones = (rendered - CUE_RING_FRAMES..rendered)
+            .find(|pos| ring.frame_at(*pos as u64).0.abs() > 0.05)
+            .expect("the step reached the phones");
+        let late = onset_phones as i64 - onset_room as i64;
+        assert!(
+            late.abs() <= 1,
+            "the room reached the phones {late} frames after the room (look-ahead is {})",
+            crate::music_dsp::limiter_latency_frames(rate as f32)
+        );
+    }
+
+    #[test]
+    fn a_phones_mix_that_is_not_a_number_moves_nothing() {
+        let mixer = cued_deck_in_a_quiet_room(const_pcm(16_384, 48_000 * 8, 48_000));
+        mixer.set_phones_mix(f32::NAN);
+        assert_eq!(mixer.phones_mix(), -1.0);
+        let (left, right) = phones_frame(&mixer);
+        assert!(near(left, 0.5) && near(right, 0.5), "still the cue alone: {left} {right}");
+        mixer.set_phones_mix(f32::INFINITY);
+        assert_eq!(mixer.phones_mix(), -1.0);
+        mixer.set_phones_mix(0.5);
+        assert_eq!(mixer.phones_mix(), 0.5, "a number moves it");
     }
 
     #[test]
