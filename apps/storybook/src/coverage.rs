@@ -3,7 +3,8 @@
 //!
 //! The library's real organising axis is the ladder: `<Name>Flat` carries the
 //! geometry and shaders, the bare name adds the bevel, `GradientX`/`GradientY`
-//! add a fill gradient, `Flatter` is the ghost, `Icon` the icon-only face.
+//! add a fill gradient, `Flatter` is the ghost, `Icon` the icon-only face and
+//! `Knob` the panel-knob face.
 //! Walking the widget module through the script heap lists every rung of
 //! every family, so the catalogue can say what it is not showing yet instead
 //! of leaving that to memory. The walk happens once, on the first draw, and
@@ -95,7 +96,7 @@ pub struct Declaration {
     pub storyable: bool,
 }
 
-const RUNGS: &[&str] = &["GradientX", "GradientY", "Flatter", "Flat", "Icon", "Base"];
+const RUNGS: &[&str] = &["GradientX", "GradientY", "Flatter", "Flat", "Icon", "Knob", "Base"];
 
 /// The ladder rung a name sits on, from its suffix.
 pub fn rung_of(name: &str) -> &'static str {
@@ -345,5 +346,13 @@ mod tests {
         assert_eq!(family_of("ButtonGradientYIcon"), "Button");
         assert_eq!(family_of("Slider"), "Slider");
         assert_eq!(family_of("Flat"), "Flat");
+        // A face is a rung: the knob is the Rotary drawn as one, and a
+        // later RotaryKnobFlat folds the whole way back in a single pass.
+        assert_eq!(rung_of("RotaryKnob"), "Knob");
+        assert_eq!(family_of("RotaryKnob"), "Rotary");
+        assert_eq!(family_of("RotaryKnobFlat"), "Rotary");
+        // And a widget actually called Knob is still its own family: the
+        // strip needs the name to be longer than the rung.
+        assert_eq!(family_of("Knob"), "Knob");
     }
 }
