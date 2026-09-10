@@ -2058,7 +2058,10 @@ fn parse_aiff(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
                     }
                     match &body[18..22] {
                         // Big-endian PCM, which is what this parser reads.
-                        b"NONE" => {}
+                        // Two spellings of the identical bytes: some
+                        // converters write the second, and refusing it
+                        // refused a file this parser can read.
+                        b"NONE" | b"twos" => {}
                         // The same samples with their bytes the other way.
                         b"sowt" => little_endian = true,
                         id => {
@@ -4583,7 +4586,11 @@ mod tests {
         let big: Vec<u8> = vec![0x12, 0x34, 0xF0, 0x0D, 0x7F, 0xFF, 0x80, 0x00];
         let swapped: Vec<u8> = big.chunks(2).flat_map(|p| [p[1], p[0]]).collect();
         let plain = parse_aiff(&aiff_bytes(1, 16, 44_100, None, None, &big), 100).unwrap();
+        // Two spellings of the identical bytes; the second was refused.
+        let twos = parse_aiff(&aiff_bytes(1, 16, 44_100, Some(b"twos"), None, &big), 100)
+            .expect("big-endian PCM under its other name");
         let none = parse_aiff(&aiff_bytes(1, 16, 44_100, Some(b"NONE"), None, &big), 100).unwrap();
+        assert_eq!(twos.frames, none.frames, "the same bytes read the same way");
         let sowt =
             parse_aiff(&aiff_bytes(1, 16, 44_100, Some(b"sowt"), None, &swapped), 100).unwrap();
         assert_eq!(plain.frames, none.frames);
