@@ -460,6 +460,10 @@ struct InstancePublication {
     parent: Option<Arc<InstanceStamp>>,
     slots: usize,
     data: Arc<[f32]>,
+    len: usize,
+    // Prefix recordings still own the producer's entire CPU allocation.
+    // Preserve its weak accounting receipt until the last view is retired.
+    source: Option<Arc<InstancePublication>>,
 }
 #[derive(Debug)]
 struct InstanceStamp {
@@ -478,7 +482,9 @@ impl RetainedInstances {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             parent: None,
             slots,
+            len: data.len(),
             data,
+            source: None,
         })))
     }
     pub fn id(&self) -> u64 {
@@ -531,7 +537,19 @@ impl RetainedInstances {
         self.0.slots
     }
     pub fn data(&self) -> &[f32] {
-        &self.0.data
+        &self.0.data[..self.0.len]
+    }
+    /// A view of an immutable CPU prefix. The backend sees only these records;
+    /// creating an LOD view never copies the file's geometry on the UI thread.
+    /// Keep the full publication with the producer until retirement.
+    pub fn prefix(&self, count: usize) -> Self {
+        let len = count.min(self.count()) * self.slots();
+        if len == self.0.len { return self.clone(); }
+        let mut result = Self::new(self.slots(), self.0.data.clone()).unwrap();
+        let view = Arc::get_mut(&mut result.0).unwrap();
+        view.len = len;
+        view.source = Some(self.0.source.as_ref().unwrap_or(&self.0).clone());
+        result
     }
     pub fn count(&self) -> usize {
         self.data().len() / self.slots()

@@ -1,3 +1,7 @@
+#[path = "metal_pan_timing.rs"]
+mod pan_timing;
+use pan_timing::{PanCounters, PanEncoder, PanFrame};
+
 use {
     crate::{
         cx::Cx,
@@ -262,18 +266,9 @@ impl Cx {
                 });
             let before = budget.stats.bytes;
             let was_capacity_waiting = item.os.instance_buffer.capacity_waiting;
-            // A small first residency is never deferred by the frame's byte
-            // budget: deferring it paints the item as a hole, and the bytes
-            // are a rounding error next to the budget. The limit is
-            // exceeded by at most this item; the next request sees nothing
-            // left.
-            let saved_limit = budget.limit;
-            let needed = range.end.min(data.len()) * 4;
-            let first = item.os.instance_buffer.inner.is_none()
-                && item.os.instance_buffer.pending.is_none();
-            if first && needed > 0 && needed <= METAL_SYNC_ALLOCATION_BYTES {
-                budget.limit = budget.limit.max(budget.stats.bytes + needed);
-            }
+            // One hard allowance for the whole repaint, including first and
+            // immediate publications. Keep the previous complete buffer until
+            // a replacement finishes; every copy uses the same bounded range.
             let remaining = item.os.instance_buffer.update_retained(
                 metal_cx,
                 data,
@@ -285,7 +280,6 @@ impl Cx {
                 request.category,
                 budget,
             );
-            budget.limit = saved_limit;
             if item.os.instance_buffer.capacity_waiting && !was_capacity_waiting {
                 crate::log!("retained-upload capacity_wait list={:?} owner={} item={} publication={} allocation_bytes={} allocation_limit={} retry=true", request.list, list.debug_id, request.item, target, budget.allocations.bytes(), budget.allocations.limit());
             }
@@ -309,6 +303,8 @@ impl Cx {
             .allocations
             .set_pending_backend_retirements(metal_cx.retired_instances.borrow().len());
         if crate::thread::ui_hang::hashing::enabled() && (budget.stats.bytes != 0 || pending != 0) {
+            static NAMES: std::sync::Once = std::sync::Once::new();
+            NAMES.call_once(|| crate::log!("retained-upload names=[Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other]"));
             let pool = metal_cx.instance_pool.borrow();
             crate::log!("retained-upload frame={} bytes={} B={} instances_uploaded={} install_us={} pending={} upload_pending_max={} starved={} allocation_bytes={} allocation_refusals={} evicted_bytes={} allocation_waits={} buffer_allocations={} pool_bytes={} pool_reuses={} named_bytes={:?}",
                 self.repaint_id, budget.stats.bytes, budget.limit, budget.stats.instances_uploaded,
@@ -371,6 +367,12 @@ impl Cx {
             if resident == 0 {
                 return true;
             }
+            // Frame ink whose copy did not finish: what is resident is the
+            // previous frame's, and painting it is painting the wrong
+            // frame. Only a retained publication may show its old ink.
+            if item.instance_upload_pending && item.retained_instances.is_none() {
+                return true;
+            }
         }
         false
     }
@@ -381,7 +383,7 @@ impl Cx {
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
-        encoder: ObjcId,
+        encoders: &mut PanEncoder,
         metal_cx: &MetalCx,
     ) {
         let _phase = crate::thread::ui_hang::ui_phase_detail(
@@ -442,7 +444,7 @@ impl Cx {
                 // list reported. See `CxDrawList::zbias_hold`.
                 if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
                     let mut held = *child_zbias;
-                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0, encoder, metal_cx);
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0, encoders, metal_cx);
                     *child_zbias += steps as f32 * zbias_step;
                 } else {
                     self.render_view(
@@ -450,7 +452,7 @@ impl Cx {
                         sub_list_id,
                         child_zbias,
                         zbias_step,
-                        encoder,
+                        encoders,
                         metal_cx,
                     );
                 }
@@ -527,6 +529,8 @@ impl Cx {
                 if instances == 0 {
                     continue;
                 }
+
+                let encoder = encoders.group(draw_call.draw_shader_id.index, sh);
 
                 if self.passes[draw_pass_id].depth_texture.is_some() {
                     let depth_state = if draw_call.options.depth_write {
@@ -1235,6 +1239,7 @@ impl Cx {
         // one-buffer-per-pass behavior so per-pass GPU spans stay real.
         // Every draw item's instances are copied, or their allocations
         // requested, before this pass owns any GPU object.
+        let upload_cpu_start = Instant::now();
         if self.upload_instance_buffers(draw_list_id, metal_cx) {
             // Continue copying retained buffers without invalidating every
             // widget in every window. Atlas separately samples pending bytes
@@ -1250,19 +1255,29 @@ impl Cx {
         // streak of repaints, so an allocation that never lands degrades to
         // the hole rather than to a frozen screen.
         if self.draw_list_has_unresident_draw(draw_list_id) {
-            let streak = if metal_cx.hole_streak_repaint + 1 == self.repaint_id {
-                metal_cx.hole_streak + 1
-            } else {
-                1
+            let consecutive = metal_cx.hole_streak_repaint + 1 == self.repaint_id;
+            let since = match metal_cx.hole_streak_since {
+                Some(since) if consecutive => since,
+                _ => Instant::now(),
             };
-            if streak <= METAL_HOLE_ABORT_STREAK_MAX {
-                metal_cx.hole_streak = streak;
-                metal_cx.hole_streak_repaint = self.repaint_id;
+            metal_cx.hole_streak_repaint = self.repaint_id;
+            metal_cx.hole_streak_since = Some(since);
+            if since.elapsed() < METAL_HOLE_ABORT_MAX {
                 metal_cx.abort_repaint(self.repaint_id, "instances not resident");
                 self.passes[draw_pass_id].paint_dirty = true;
                 let () = unsafe { msg_send![pool, release] };
                 return false;
             }
+            if !metal_cx.hole_logged {
+                metal_cx.hole_logged = true;
+                crate::log!(
+                    "metal: painting with a hole — a draw item has had nothing resident for {} ms (repaint {})",
+                    since.elapsed().as_millis(),
+                    self.repaint_id
+                );
+            }
+        } else {
+            metal_cx.hole_logged = false;
         }
         // Frame batching regressed badly at large window sizes (3fps —
         // suspicion: hazard-serialized encoders on one buffer defeating
@@ -1270,8 +1285,11 @@ impl Cx {
         static BATCH_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let batch_enabled =
             *BATCH_ON.get_or_init(|| std::env::var_os("MAKEPAD_BATCH_PASSES").is_some());
-        let batch_this_pass =
-            batch_enabled && !Self::gpu_profile_enabled() && matches!(mode, DrawPassMode::Texture);
+        let pan_diagnostics = std::env::var_os("MAKEPAD_ATLAS_DIAGNOSTICS").is_some();
+        let batch_this_pass = batch_enabled
+            && !pan_diagnostics
+            && !Self::gpu_profile_enabled()
+            && matches!(mode, DrawPassMode::Texture);
         if !batch_this_pass {
             // Entering a present-bound pass: commit the batched offscreen
             // work NOW so the GPU pipelines it under this pass's CPU encode.
@@ -1297,31 +1315,26 @@ impl Cx {
         // CPU->GPU uploads for the Vec textures this pass samples go on THIS
         // command buffer, ahead of its render encoder, so the GPU orders them
         // after every earlier reader and before this pass (`VecUploadEncoder`).
-        let texture_bytes = self.encode_vec_texture_uploads(metal_cx, draw_list_id, command_buffer);
+        let gpu_time_query = self.passes[draw_pass_id].gpu_time_query.as_ref().map(|q|q.recorder.clone());
+        // Offscreen passes usually have no timing consumer of their own. Route
+        // their diagnostics to the active consumer without restricting sampling
+        // to that consumer's containing pass.
+        let diagnostic_query = if pan_diagnostics {
+            gpu_time_query.clone().or_else(|| self.passes.id_iter().find_map(|id|
+                self.passes[id].gpu_time_query.as_ref().map(|q|q.recorder.clone())))
+        } else { None };
+        let pass_label = format!("{}:{:?}",self.passes[draw_pass_id].debug_name,draw_pass_id);
+        let upload_cpu_ms = upload_cpu_start.elapsed().as_secs_f64()*1000.0;
+        let mut pan_frame = render_setup.pan_counters.as_ref().and_then(|c|
+            c.begin(diagnostic_query.clone(),pass_label.clone(),upload_cpu_ms,self.repaint_id,gpu_time_query.is_some()));
+        let diagnostic_frame = pan_frame.is_some();
+        let texture_bytes = self.encode_vec_texture_uploads(metal_cx, draw_list_id, command_buffer, pan_frame.as_mut());
         self.os.texture_bytes_uploaded =
             self.os.texture_bytes_uploaded.saturating_add(texture_bytes);
-        let encoder: ObjcId = unsafe {
-            msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
-        };
-
-        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state_write.as_ref() {
-            let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state.as_id()] };
-        }
-
         let pass_width = dpi_factor * pass_rect.size.x;
         let pass_height = dpi_factor * pass_rect.size.y;
-
-        let () = unsafe {
-            msg_send![encoder, setViewport: MTLViewport {
-                originX: 0.0,
-                originY: 0.0,
-                width: pass_width,
-                height: pass_height,
-                znear: 0.0,
-                zfar: 1.0,
-            }]
-        };
-
+        let viewport = MTLViewport {originX:0.0,originY:0.0,width:dpi_factor*pass_rect.size.x,height:dpi_factor*pass_rect.size.y,znear:0.0,zfar:1.0};
+        let mut encoders = PanEncoder::new(command_buffer, render_pass_descriptor, viewport, pan_frame);
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
@@ -1330,9 +1343,13 @@ impl Cx {
             draw_list_id,
             &mut zbias,
             zbias_step,
-            encoder,
+            &mut encoders,
             &metal_cx,
         );
+        if metal_cx.uniforms_starved.replace(false) {
+            metal_cx.abort_repaint(self.repaint_id, "uniforms not resident");
+            self.passes[draw_pass_id].paint_dirty = true;
+        }
         metal_cx.register_pass(draw_pass_id, &self.passes[draw_pass_id].debug_name);
         let gpu_profile_label = Self::gpu_profile_enabled().then(|| {
             let name = &self.passes[draw_pass_id].debug_name;
@@ -1342,10 +1359,7 @@ impl Cx {
                 name.clone()
             }
         });
-        let gpu_time_query = self.passes[draw_pass_id]
-            .gpu_time_query
-            .as_ref()
-            .map(|query| query.recorder.clone());
+
         let gpu_counters = GpuSampleCounters {
             draw_calls: self.os.draw_calls_done as u64,
             instances: self.os.instances_done,
@@ -1355,6 +1369,12 @@ impl Cx {
             vertex_buffer_bytes: self.os.vertex_buffer_bytes_uploaded,
             texture_bytes: self.os.texture_bytes_uploaded,
         };
+        if pan_diagnostics {
+            pan_timing::record_pass(command_buffer, diagnostic_query,
+                pass_label, self.repaint_id, metal_cx.current_cb_seq,
+                (pass_width, pass_height), gpu_time_query.is_some(), diagnostic_frame,
+                upload_cpu_ms, gpu_counters);
+        }
         if Self::total_drawcall_log_enabled() {
             static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
             if LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 200 {
@@ -1369,7 +1389,7 @@ impl Cx {
             }
         }
 
-        let () = unsafe { msg_send![encoder, endEncoding] };
+        encoders.end();
         // RENDERER-OWNED TEXTURE CAPTURE: a capture requested for a texture
         // THIS pass renders is blitted on this very command buffer — the
         // producing queue — and delivered only from its completion handler,
@@ -1404,7 +1424,7 @@ impl Cx {
                 ]
             };
         }
-        if let Some(query) = gpu_time_query {
+        if let Some(query) = gpu_time_query.filter(|_| !diagnostic_frame) {
             // The tag identifies what was ENCODED into this buffer; capture
             // it now — by completion time the owner may have retagged the
             // pass for a later frame.
@@ -1527,6 +1547,16 @@ impl Cx {
                     None,
                     pass_window_id,
                 );
+                // A repaint that stopped for a hole in any of its passes
+                // commits this window pass (queue order) but does not
+                // present it: the last whole frame stays up. The uniform
+                // starvation of THIS pass is caught here too — it is only
+                // known once its draw list is encoded.
+                let present = if metal_cx.aborted_repaint == Some(self.repaint_id) {
+                    None
+                } else {
+                    Some((drawable, target_presentation_time))
+                };
                 self.commit_command_buffer(
                     screenshot,
                     None,
@@ -1535,7 +1565,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
-                    Some((drawable, target_presentation_time)),
+                    present,
                 );
             }
             DrawPassMode::Resizing(drawable) => {
@@ -2052,10 +2082,17 @@ pub struct MetalCx {
     /// texture that had never rendered (the first frame of a new gauss
     /// stack: the desktop through the phone, one black frame).
     aborted_repaint: Option<u64>,
+    /// A draw item of the pass being encoded found no uniform arena room
+    /// (`bind_inline_uniforms`): the repaint is aborted after the encode.
+    uniforms_starved: std::cell::Cell<bool>,
     /// Consecutive repaints stopped because a draw item had nothing
     /// resident, and the last repaint that was.
-    hole_streak: u32,
+    /// When the current run of repaints stopped for an unresident draw item
+    /// began, and the repaint that last stopped: a run that outlives
+    /// `METAL_HOLE_ABORT_MAX` paints with the hole and logs it once.
+    hole_streak_since: Option<Instant>,
     hole_streak_repaint: u64,
+    hole_logged: bool,
     uniform_chunks: RefCell<Vec<MetalUniformChunk>>,
     retired_instances: RefCell<VecDeque<MetalBuffer>>,
     instance_pool: RefCell<crate::retained_instances::RetainedBufferPool<MetalBufferInner>>,
@@ -2537,16 +2574,18 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
 /// blit` probe proved clean at 3 frames in flight). The blit encoder opens
 /// lazily (most passes upload nothing) and the staging buffers return to
 /// the pool from the command buffer's completion handler.
-struct VecUploadEncoder {
+struct VecUploadEncoder<'a> {
+    pan_frame: Option<&'a mut PanFrame>,
     command_buffer: ObjcId,
     blit: Option<ObjcId>,
     used: Vec<StagingBuffer>,
     bytes: u64,
 }
 
-impl VecUploadEncoder {
-    fn new(command_buffer: ObjcId) -> Self {
+impl<'a> VecUploadEncoder<'a> {
+    fn new(command_buffer: ObjcId, pan_frame: Option<&'a mut PanFrame>) -> Self {
         Self {
+            pan_frame,
             command_buffer,
             blit: None,
             used: Vec::new(),
@@ -2558,7 +2597,7 @@ impl VecUploadEncoder {
         let command_buffer = self.command_buffer;
         *self
             .blit
-            .get_or_insert_with(|| unsafe { msg_send![command_buffer, blitCommandEncoder] })
+            .get_or_insert_with(|| self.pan_frame.as_mut().map_or_else(||unsafe { msg_send![command_buffer, blitCommandEncoder] }, |f|f.blit_encoder(command_buffer)))
     }
 
     /// Ends the blit encoder (a render encoder may open after this) and
@@ -2566,6 +2605,7 @@ impl VecUploadEncoder {
     /// consumed them. Returns the bytes uploaded.
     fn finish(self, metal_cx: &MetalCx) -> u64 {
         if let Some(blit) = self.blit {
+            if let Some(frame) = &self.pan_frame {frame.end_blit(blit);}
             let () = unsafe { msg_send![blit, endEncoding] };
         }
         if !self.used.is_empty() {
@@ -2796,8 +2836,9 @@ impl Cx {
         metal_cx: &MetalCx,
         draw_list_id: DrawListId,
         command_buffer: ObjcId,
+        pan_frame: Option<&mut PanFrame>,
     ) -> u64 {
-        let mut enc = VecUploadEncoder::new(command_buffer);
+        let mut enc = VecUploadEncoder::new(command_buffer, pan_frame);
         let mut stack: Vec<DrawListId> = vec![draw_list_id];
         while let Some(list_id) = stack.pop() {
             // A retained sub-list its owner dropped since the parent last
@@ -2947,8 +2988,10 @@ impl MetalCx {
             render_setup,
             render_setup_queued,
             aborted_repaint: None,
-            hole_streak: 0,
+            uniforms_starved: std::cell::Cell::new(false),
+            hole_streak_since: None,
             hole_streak_repaint: 0,
+            hole_logged: false,
             frame_command_buffer: None,
             frame_command_buffer_seq: 0,
             cb_seq: 0,
@@ -3500,13 +3543,22 @@ struct MetalInstanceAllocation {
 
 const METAL_UNIFORM_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const METAL_UNIFORM_MAX_CHUNKS: usize = 32;
-/// Instance buffers up to this size are allocated on the UI thread and
-/// their first copy is never deferred by the frame's upload budget: the
-/// chrome, the labels, the quads a frame adds must paint in that frame.
-const METAL_SYNC_ALLOCATION_BYTES: usize = 64 * 1024;
-/// Consecutive repaints stopped for a draw item with nothing resident
-/// before the frame paints with the hole instead.
-const METAL_HOLE_ABORT_STREAK_MAX: u32 = 4;
+/// First instance allocations up to this size are made on the UI thread,
+/// in the microseconds they cost. Instance copies still share the frame's
+/// bounded upload allowance, including the first copy. A
+/// fixed 64 KiB here sent every shadow-cascade, particle and decal buffer
+/// of a game to the allocator thread, the repaint stopped for it, and after
+/// a few stops the frame painted with the hole — every shadow blinked while
+/// the camera moved. Derived from the retained envelope (physical/2 on a
+/// desktop): one 512th of it, 1..16 MiB, so a small machine keeps its UI
+/// thread light and a big one never paints a hole for a frame's own data.
+fn sync_allocation_bytes(allocations: &crate::retained_instances::RetainedAllocationBudget) -> usize {
+    (allocations.limit() / 512).clamp(1 << 20, 16 << 20)
+}
+/// How long a repaint may keep stopping for a draw item with nothing
+/// resident — the last frame stays up meanwhile — before the frame paints
+/// with the hole and says so. A stale frame is invisible; a hole is not.
+const METAL_HOLE_ABORT_MAX: Duration = Duration::from_millis(400);
 
 struct MetalUniformChunk {
     allocation: Arc<MetalInstanceAllocation>,
@@ -3520,17 +3572,26 @@ impl MetalUniformChunk {
         capacity: usize,
         charge: crate::retained_instances::RetainedAllocation,
     ) -> Option<Self> {
+        // A uniform arena is a few MiB and every draw of the frame binds
+        // into it: allocated right here, pages touched, so no draw is ever
+        // skipped while a chunk sits with the allocator thread.
+        let buffer = NonNull::new(unsafe {
+            msg_send![device, newBufferWithLength: capacity as u64 options: nil]
+        })
+        .map(RcObjcId::from_owned)?;
+        METAL_INSTANCE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
+        if !contents.is_null() {
+            for offset in (0..capacity).step_by(4096) {
+                unsafe { contents.add(offset).write_volatile(0); }
+            }
+        }
         let allocation = Arc::new(MetalInstanceAllocation {
             capacity,
             ready: std::sync::OnceLock::new(),
             charge: Some(charge),
         });
-        metal_buffer_allocator()
-            .try_send(MetalAllocationRequest::Instances(
-                RcObjcId::from_unowned(NonNull::new(device)?),
-                allocation.clone(),
-            ))
-            .ok()?;
+        let _ = allocation.ready.set(Some(buffer));
         Some(Self {
             allocation,
             seq: 0,
@@ -3701,6 +3762,10 @@ impl MetalCx {
                 chunks.push(chunk);
             }
         }
+        // The draw item is skipped by the caller; a skipped item is a hole,
+        // and a repaint paints whole or not at all — the pass owner aborts
+        // the repaint once its draw list is encoded.
+        self.uniforms_starved.set(true);
         false
     }
 }
@@ -3709,6 +3774,7 @@ impl MetalCx {
 // publication. Encoders capture their pass state, so it is reused between
 // encodes. All attachment slots are materialized on the allocation worker.
 struct MetalRenderSetup {
+    pan_counters: Option<Arc<PanCounters>>,
     descriptor: RcObjcId,
     colors: Vec<RcObjcId>,
     depth: RcObjcId,
@@ -3746,6 +3812,7 @@ impl MetalRenderSetup {
         let depth_write = create_depth(true)?;
         let depth_no_write = create_depth(false)?;
         Some(Self {
+            pan_counters: PanCounters::new(device),
             descriptor,
             colors,
             depth,
@@ -4031,7 +4098,7 @@ impl MetalBuffer {
                     if pressure {
                         budget.allocations.wait_for_reclaim(capacity);
                         self.capacity_waiting = true;
-                        if !(publication == 0 && capacity <= METAL_SYNC_ALLOCATION_BYTES)
+                        if !(publication == 0 && capacity <= sync_allocation_bytes(&budget.allocations))
                             && !budget.allow_visible_overflow
                         {
                             return end;
@@ -4048,7 +4115,7 @@ impl MetalBuffer {
                         ready: std::sync::OnceLock::new(),
                         charge: Some(charge),
                     });
-                    if capacity <= METAL_SYNC_ALLOCATION_BYTES {
+                    if capacity <= sync_allocation_bytes(&budget.allocations) {
                         // A small buffer is allocated right here, in the
                         // microseconds it costs, so the draw it serves lands
                         // in this frame. Only a large one takes the
