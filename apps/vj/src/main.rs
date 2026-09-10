@@ -6418,6 +6418,15 @@ fn parse_synth_mix(body: &str) -> Option<SynthMixUiState> {
         let mut parts = line?.split(',');
         for item in &mut out {
             *item = parts.next()?.parse().ok()?;
+            // A line carrying a number that is not one is refused whole and
+            // reads as the default, which is the settings store's own law.
+            // Parsing "NaN" SUCCEEDS and a clamp keeps it, so without this
+            // it reached the engine -- where a channel gain that is not a
+            // number becomes a hard zero and the channel is silent with
+            // nothing on the face to say why.
+            if !f32::is_finite(*item) {
+                return None;
+            }
         }
         Some(out)
     }
@@ -7045,6 +7054,25 @@ mod synth_mix_file_tests {
         // A program is not a value: the file holds the knobs, and a program
         // that no longer matched them would be a lie.
         assert_eq!(after.ironfish_program, None);
+    }
+
+    /// Parsing "NaN" succeeds and a clamp keeps it, so a file carrying
+    /// one used to hand the engine a channel gain that is not a number --
+    /// which the engine turns into a hard zero, leaving the channel
+    /// silent with nothing anywhere to say why. The line is refused
+    /// whole and reads as the default, which is what the settings store
+    /// next door already does with a number that is not one.
+    #[test]
+    fn a_gain_that_is_not_a_number_leaves_every_channel_where_it_was() {
+        let mut state = SynthMixUiState::default();
+        state.strip_gains[StripId::DjA.index()] = 0.25;
+        let text = synth_mix_text(&state).replace("0.2500000", "NaN");
+        let back = parse_synth_mix(&text).expect("the rest of the file still reads");
+        assert!(
+            back.strip_gains.iter().all(|gain| gain.is_finite()),
+            "a number that is not one reached the engine"
+        );
+        assert_eq!(back.strip_gains, SynthMixUiState::default().strip_gains);
     }
 
     fn all_shut() -> SynthMixUiState {
