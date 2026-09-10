@@ -526,7 +526,7 @@ impl Html {
                                 .unwrap_or_else(|| "#".into())
                         }
                     };
-                    ll.li_count += 1;
+                    ll.li_count = ll.li_count.saturating_add(1);
                     (marker, ll.padding)
                 });
                 let (marker, pad) = marker_and_pad
@@ -799,6 +799,7 @@ impl Widget for Html {
         self.open_elements.clear();
         self.open_summaries = 0;
         self.used_widget_ids.clear();
+        self.table_columns_cache.clear();
         while !node.done() {
             // Intercept <details> / <summary> open tags before the generic
             // handler, so <details> never falls through to handle_custom_widget
@@ -1147,10 +1148,21 @@ fn handle_custom_widget(
     };
 
     let template = node.open_tag_nc().unwrap();
-    let mut scope_with_attrs = Scope::with_props_index(doc, node.index);
+    let open_index = node.index;
+    let mut scope_with_attrs = Scope::with_props_index(doc, open_index);
+
+    // Find the element's extent first. One with no close tag of its own is
+    // void, so it has no text: reading ahead would pick up the *following*
+    // sibling's text, which the main loop then draws again.
+    node.jump_to_close();
+    let text = if node.index() == open_index {
+        ""
+    } else {
+        doc.new_walker_with_index(open_index).find_text().unwrap_or("")
+    };
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
-        item.set_text(cx, node.find_text().unwrap_or(""));
+        item.set_text(cx, text);
         // A widget is walked atomically, so on the last allowed line it has to
         // be kept there rather than relocated onto a row the budget cannot pay
         // for; when it overruns that line it is cut at the edge with an
@@ -1161,8 +1173,6 @@ fn handle_custom_widget(
         item.draw_all(cx, &mut draw_scope);
         tf.end_inline_content(cx, hold);
     }
-
-    node.jump_to_close();
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1485,8 +1495,9 @@ impl OrderedListType {
     /// Returns the marker for the given count and separator character.
     ///
     /// ## Notes on behavior
+    /// ## Notes on behavior
     /// * A negative or zero `count` will always return an integer number marker.
-    /// * Currently, for `UpperApha` and `LowerAlpha`, a `count` higher than 25 will result in a wrong character.
+    /// * `UpperAlpha` and `LowerAlpha` continue past `z` as `aa`, `ab`, ...
     /// * Roman numerals >= 4000 will return an integer number marker.
     pub fn marker(&self, count: i32, separator: &str) -> String {
         let to_number = || format!("{count}{separator}");

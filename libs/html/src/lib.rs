@@ -327,6 +327,8 @@ pub fn parse_html(
         ElementClose(usize),
         ElementAttrs,
         ElementCloseScanSpaces,
+        /// Discarding a malformed tag up to its `>`.
+        BogusTag,
         ElementSelfClose,
         AttribName(usize),
         AttribValueEq(LiveId, LiveId),
@@ -591,7 +593,26 @@ pub fn parse_html(
                 }
             }
             State::ElementClose(start) => {
-                if c == '>' {
+                if i == start && !c.is_ascii_alphabetic() {
+                    // `</3`, `</ ` — not a close tag, so keep it as text.
+                    let dec_start = decoded.len();
+                    decoded.push('<');
+                    decoded.push('/');
+                    let mut last_non_whitespace = decoded.len();
+                    process_entity(
+                        c,
+                        &mut in_entity,
+                        &mut decoded,
+                        &mut last_non_whitespace,
+                        pre_depth == 0,
+                    );
+                    State::Text {
+                        start,
+                        dec_start,
+                        last_non_whitespace,
+                        collapse_ws: pre_depth == 0,
+                    }
+                } else if c == '>' {
                     let lc = LiveId::from_str_lc(&body[start..i]);
                     let nc = LiveId::from_str_with_intern(&body[start..i], intern);
                     if preserves_whitespace(lc) {
@@ -630,18 +651,14 @@ pub fn parse_html(
                     if let Some(errors) = errors {
                         errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})
                     };
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
+                    State::BogusTag
                 } else {
                     State::ElementCloseScanSpaces
                 }
             }
             State::ElementSelfClose => {
-                if c != '>' {
+                let malformed = c != '>';
+                if malformed {
                     if let Some(errors) = errors {
                         errors.push(HtmlError {
                             message: "Expected > after / self closed tag".into(),
@@ -666,11 +683,29 @@ pub fn parse_html(
                     }
                     nodes.push(HtmlNode::CloseTag { lc, nc });
                 }
-                State::Text {
-                    start: i + 1,
-                    dec_start: decoded.len(),
-                    last_non_whitespace: decoded.len(),
-                    collapse_ws: pre_depth == 0,
+                if malformed {
+                    // Drop the rest of the malformed tag instead of resuming
+                    // text inside it, which leaked its `>` into the output.
+                    State::BogusTag
+                } else {
+                    State::Text {
+                        start: i + 1,
+                        dec_start: decoded.len(),
+                        last_non_whitespace: decoded.len(),
+                        collapse_ws: pre_depth == 0,
+                    }
+                }
+            }
+            State::BogusTag => {
+                if c == '>' {
+                    State::Text {
+                        start: i + 1,
+                        dec_start: decoded.len(),
+                        last_non_whitespace: decoded.len(),
+                        collapse_ws: pre_depth == 0,
+                    }
+                } else {
+                    State::BogusTag
                 }
             }
             State::ElementAttrs => {
@@ -2878,6 +2913,25 @@ mod tests {
         assert_eq!(text_of("<p>x</p>"), "x");
         assert_eq!(text_of("<P>x</P>"), "x");
         for body in ["5<10 and 6<12", "a < b", "<>", "<1a>x", "i <3 you", "<é>t"] {
+            assert_nodes_consistent(body);
+        }
+    }
+
+    /// Junk inside a tag is discarded up to its `>` instead of resuming text
+    /// in the middle of it, and `</` that cannot name an element is text.
+    #[test]
+    fn malformed_tags_do_not_leak_their_markup_into_the_text() {
+        assert_eq!(text_of("a</p x>b"), "ab");
+        assert_eq!(text_of("a<br/x>b"), "ab");
+        assert_eq!(text_of("<p>x</p junk>y"), "xy");
+        assert_eq!(text_of("</3 you"), "</3 you");
+        assert_eq!(text_of("i </3 u"), "i </3 u");
+        assert_eq!(text_of("a</ b"), "a</ b");
+        // well-formed close tags are unaffected
+        assert_eq!(text_of("<p>x</p >y"), "xy");
+        assert_eq!(text_of("<br/>ok"), "ok");
+        assert_eq!(text_of("<a href=u>t</a>tail"), "ttail");
+        for body in ["a</p x>b", "a<br/x>b", "</3 you", "a</ b", "a</>b"] {
             assert_nodes_consistent(body);
         }
     }
