@@ -324,6 +324,44 @@ mod tests {
         assert_eq!(store.usize("queue.repeat", 9), 0);
     }
 
+    /// The level the room was left at rides in the phones file, because
+    /// it is the same rig. A file written before it existed reads as the
+    /// face's own default rather than as silence.
+    #[test]
+    fn the_master_level_comes_back_and_an_older_file_reads_as_the_default() {
+        let mut store = Settings::new();
+        store.set_f64("mix.master", 0.42);
+        let back = Settings::from_text(&store.to_text());
+        assert_eq!(back.f64("mix.master", 0.9), 0.42);
+        // An older file, which has every other key and not this one.
+        let older = Settings::from_text("phones.volume 0.5
+phones.placement 1
+");
+        assert_eq!(older.f64("mix.master", 0.9), 0.9, "the default stands");
+    }
+
+    /// The crossfader's own law and which decks are in the cans: both were
+    /// set by hand every launch because neither was written down. An older
+    /// file reads as what the tab did before, not as a surprise.
+    #[test]
+    fn the_fade_curve_and_the_cue_latches_come_back() {
+        let mut store = Settings::new();
+        store.set_usize("deck.curve", 5);
+        store.set_bool("phones.cue_a", true);
+        store.set_bool("phones.cue_b", false);
+        let back = Settings::from_text(&store.to_text());
+        assert_eq!(back.usize("deck.curve", 0), 5);
+        assert!(back.bool("phones.cue_a", false));
+        assert!(!back.bool("phones.cue_b", false));
+        // A file from before either key: equal power, and nothing cued.
+        let older = Settings::from_text("auto.set_curve 2
+phones.volume 0.5
+");
+        assert_eq!(older.usize("deck.curve", 0), 0, "equal power");
+        assert!(!older.bool("phones.cue_a", false));
+        assert!(!older.bool("phones.cue_b", false));
+    }
+
     #[test]
     fn a_setting_comes_back_as_what_it_was_put_in_as() {
         let mut store = Settings::new();

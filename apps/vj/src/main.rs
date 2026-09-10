@@ -6746,6 +6746,53 @@ mod fault_level_tests {
 }
 
 #[cfg(test)]
+mod master_face_tests {
+    /// Where the restored level is PAINTED has no witness but the source
+    /// either, and it caught a real fault: the window's own handler runs
+    /// its Startup block first and the trait's `handle_startup` -- which
+    /// is where the file is read -- second, so a paint standing in that
+    /// block quotes a level nobody has loaded. The face said full scale
+    /// while the room ran at a quarter. It belongs where the file is read.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// Every needle is assembled from pieces, because a test that reads
+    /// this file is in this file: written whole, each one would find its
+    /// own copy first and pass on nothing but itself.
+    fn needle(head: &str, tail: &str) -> String {
+        format!("{head}{tail}")
+    }
+
+    fn face() -> String {
+        needle("ids!(master_", "slider)")
+    }
+
+    #[test]
+    fn the_master_face_is_painted_where_the_level_is_read() {
+        let load = needle("self.load_phones_", "settings();");
+        let at = SOURCE.find(&load).expect("the phones load") + load.len();
+        let after = &SOURCE[at..(at + 400).min(SOURCE.len())];
+        assert!(
+            after.contains(&face()),
+            "the restored level is not painted where the file is read"
+        );
+    }
+
+    #[test]
+    fn the_startup_block_paints_only_the_muted_zero() {
+        let from = needle("if let Event::", "Startup = event");
+        let to = needle("if self.poll_timer.", "is_event(event)");
+        let from = SOURCE.find(&from).expect("the startup block");
+        let to = from + SOURCE[from..].find(&to).expect("the block's end");
+        let block = &SOURCE[from..to];
+        assert_eq!(
+            block.matches(&face()).count(),
+            1,
+            "only the muted zero can be painted before the file is read"
+        );
+    }
+}
+
+#[cfg(test)]
 mod name_table_tests {
     use super::*;
 
@@ -10433,6 +10480,13 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// Where the room's level was left. The DSL's own default until a
+    /// settings file says otherwise.
+    #[rust(0.9f32)]
+    master_level: f32,
+    /// A saved level is waiting to go on the face at the first pump.
+    #[rust]
+    master_restore: bool,
     /// The newest thing the app said went wrong, for the one line. Reads
     /// the process log through a cursor of its own.
     #[rust]
@@ -12259,6 +12313,7 @@ impl App {
                     false => v,
                 };
                 let value = crate::mixer::master_from_control(control_value);
+                self.master_level = value;
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
@@ -16607,6 +16662,10 @@ p2 {}
                 // same fader adopted through learn could reach all of it.
                 let value = seven_bit_detent(value, 1.0 / crate::mixer::MAX_MASTER_GAIN);
                 let value = crate::mixer::master_from_control(value);
+                // Remembered, not written: a knob turn is a hundred values
+                // a second, and the file is written by the hand on the
+                // slider or by the next thing that saves this rig.
+                self.master_level = value;
                 self.mixer.set_master(value);
                 self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
@@ -19214,7 +19273,8 @@ p2 {}
                     if !self.gen_panel_loaded {
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);
-                        self.load_autopilot_settings();
+                        let cmds = self.load_autopilot_settings();
+                        self.run_deck_cmds(cx, cmds);
         self.load_set_history();
         self.load_recent_searches();
         self.start_advisor();
@@ -24380,6 +24440,15 @@ p2 {}
         store.set_f64("phones.volume", self.phones_volume as f64);
         store.set_usize("phones.placement", self.phones_placement.index());
         store.set_usize("phones.cue_mode", self.phones_cue_mode.index());
+        // The master level rides in the same file: it is the same rig, and
+        // an operator who turned the room down and quit came back to full
+        // scale, which is the one setting nobody wants restored wrongly.
+        store.set_f64("mix.master", self.master_level as f64);
+        // Which decks are in the cans. Re-sent whenever the rig arms, and
+        // until now forgotten between launches -- so an operator who
+        // works with A latched had to latch it again every time.
+        store.set_bool("phones.cue_a", self.phones_deck[0]);
+        store.set_bool("phones.cue_b", self.phones_deck[1]);
         let _ = crate::durable::write_file(&path, store.to_text());
     }
 
@@ -24408,6 +24477,21 @@ p2 {}
             CueMode::from_index(store.usize("phones.cue_mode", self.phones_cue_mode.index()));
         self.mixer.set_phones_volume(self.phones_volume);
         self.mixer.set_cue_mode(self.phones_cue_mode);
+        // The master, unless this instance is deliberately silent: a muted
+        // test window must not come up at the level the operator left.
+        self.master_level =
+            (store.f64("mix.master", self.master_level as f64) as f32).clamp(0.0, 1.0);
+        if std::env::var_os("VJ_MUTE").is_none() {
+            self.mixer.set_master(self.master_level);
+            self.master_restore = true;
+        }
+        self.phones_deck = [
+            store.bool("phones.cue_a", false),
+            store.bool("phones.cue_b", false),
+        ];
+        for deck in [DeckId::A, DeckId::B] {
+            self.mixer.set_deck_cue(deck, self.phones_deck[deck.index()]);
+        }
     }
 
     /// Bind the output devices: the program on slot 0 (the system default),
@@ -25160,13 +25244,27 @@ p2 {}
             "auto.set_curve",
             Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0),
         );
+        // The crossfader's own law. Not the same thing as the key above,
+        // which is the autopilot's energy arc: this is the shape the
+        // fader itself follows, and a DJ who works on a cut came back to
+        // an equal-power fader at every launch.
+        store.set_usize(
+            "deck.curve",
+            crate::decks::FADE_CURVES
+                .iter()
+                .position(|(curve, _)| *curve == self.decks.curve)
+                .unwrap_or(0),
+        );
         let path = Self::autopilot_settings_path();
         let _ = crate::durable::write_file(&path, store.to_text());
     }
 
-    fn load_autopilot_settings(&mut self) {
+    /// Returns what the restored crossfader law asks the engine to do:
+    /// the caller runs it, because this reader has no context of its own.
+    #[must_use]
+    fn load_autopilot_settings(&mut self) -> Vec<DeckCmd> {
         let Ok(body) = std::fs::read_to_string(Self::autopilot_settings_path()) else {
-            return;
+            return Vec::new();
         };
         // Six bare numbers before the store existed; keys since. A file with
         // no version line is the old one, whatever else it looks like.
@@ -25216,6 +25314,11 @@ p2 {}
         self.set_length_mins = store.usize("auto.set_length_mins", 0) as u32;
         let curve = store.usize("auto.set_curve", 0);
         self.set_curve = Curve::ALL[curve.min(Curve::ALL.len() - 1)];
+        let fade = store.usize("deck.curve", 0);
+        let (fade, _) = crate::decks::FADE_CURVES[fade.min(crate::decks::FADE_CURVES.len() - 1)];
+        // Handed back rather than run here: this reader has no context to
+        // run a deck command with, and the caller is one line away.
+        self.decks.set_curve(fade)
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -31664,6 +31767,7 @@ p2 {}
             if refs.hp.clicked(actions) {
                 let on = !self.phones_deck[deck.index()];
                 self.phones_deck[deck.index()] = on;
+                self.save_phones_settings();
                 // The latch stands either way; unarmed, the first press
                 // also opens the rig dialog so the sound has somewhere to
                 // go. The mixer call is harmless while unarmed — the ring
@@ -33649,6 +33753,13 @@ impl MatchEvent for App {
         // The phones rig loads before the first devices event, which then
         // resolves the saved name against what the OS actually has.
         self.load_phones_settings();
+        // The level the operator left, on the face as well as in the
+        // engine, and HERE because this is where the file has just been
+        // read: a slider that says one thing while the room does another
+        // is worse than either.
+        if self.master_restore {
+            self.set_drop_slider(cx, ids!(master_slider), self.master_level as f64);
+        }
         self.load_fx_levels_settings(cx);
         // The clock's own switch, after the ports event has been seen at
         // least once -- and harmless before it, since the sender simply
@@ -33863,7 +33974,9 @@ impl MatchEvent for App {
 
         // ---- header ----
         if let Some(v) = self.drop_slider_changed(cx, ids!(master_slider), actions) {
-            self.mixer.set_master(v as f32);
+            self.master_level = (v as f32).clamp(0.0, 1.0);
+            self.mixer.set_master(self.master_level);
+            self.save_phones_settings();
         }
 
         let mut lighting_changed = false;
@@ -34960,6 +35073,7 @@ impl MatchEvent for App {
                         if let Some((curve, _)) = crate::decks::FADE_CURVES.get(index) {
                             let cmds = self.decks.set_curve(*curve);
                             self.run_deck_cmds(cx, cmds);
+                            self.save_autopilot_settings();
                         }
                     }
                 }
@@ -35983,6 +36097,9 @@ impl AppMain for App {
                     self.mixer.set_master(0.0);
                     self.set_drop_slider(cx, ids!(master_slider), 0.0);
                 }
+                // The restored level is painted where it is READ, in
+                // `handle_startup`, which this window runs after the block
+                // it is standing in.
             }
         }
         if self.poll_timer.is_event(event).is_some() {
