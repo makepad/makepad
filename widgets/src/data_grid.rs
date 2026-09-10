@@ -1299,7 +1299,10 @@ impl DataGrid {
             .layout(cx, 0.0, 0.0, None, false, Align::default(), mark);
         let mw = laidout.size_in_lpxs.width as f64;
         let mh = laidout.size_in_lpxs.height as f64;
-        let x = cell.rect.pos.x + cell.rect.size.x - self.cell_pad_x - mw;
+        // Clear of the resize grab zone as well as of the padding: the
+        // marks are the part of a heading people aim at, and the last few
+        // points of a column belong to the edge drag.
+        let x = cell.rect.pos.x + cell.rect.size.x - Self::RESIZE_MARGIN - self.cell_pad_x - mw;
         let y = cell.rect.pos.y + (cell.rect.size.y - mh) * 0.5;
         self.draw_text.draw_abs(cx, dvec2(x, y), mark);
         self.draw_text.color = rest;
@@ -2148,11 +2151,18 @@ impl DataGridRef {
 
     /// The sort a heading press just asked for, if it changed this pass.
     /// `Some((col, None))` means that column went back to unsorted.
+    ///
+    /// Every action from this grid is looked at, not just the first: one
+    /// press on a heading raises the selection change, the sort and the
+    /// header click, in that order, and asking only for the first one
+    /// hands back the selection and reports no sort at all.
     pub fn sort_changed(&self, actions: &Actions) -> Option<(usize, Option<bool>)> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
-            DataGridAction::SortChanged { col, ascending } => Some((col, ascending)),
-            _ => None,
-        }
+        actions
+            .filter_widget_actions_cast::<DataGridAction>(self.widget_uid())
+            .find_map(|a| match a {
+                DataGridAction::SortChanged { col, ascending } => Some((col, ascending)),
+                _ => None,
+            })
     }
 
     pub fn sort(&self) -> Option<(usize, bool)> {
