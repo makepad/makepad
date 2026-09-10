@@ -5,19 +5,22 @@ use current source for API signatures and working examples.
 
 ## Current delegation context
 
-- Codex / Astra designs, reviews, and BUILDS the hard things by default:
-  renderers, shaders, worker pipelines, layout engines, crate geometry,
-  memory/lifetime contracts, and diagnose-and-fix of deep bugs. Give it the
-  design of record, exact file ownership, and acceptance criteria.
-- Fable integrates: wiring crate/host contracts into the Studio views,
-  coordination across lanes, independent design and code reviews, and only
-  those proofs that need a GPU launch Astra's sandbox cannot do (no Metal
-  device there). Do not spend Fable on scripted checks.
-- Grok does the mundane and the proofs: mechanical edits, extractions, theme
-  roles, tests and sweeps, and every scripted runtime proof (hidden-instance
-  walks, grabs, `/gseq` sequences, counter checks, overlays). A proof lane
-  writes observations; a fix lane (Astra hard, Fable integration) acts on
-  them; then Grok proves again. Never bundle "prove + fix" into one Fable lane.
+- HIERARCHY (user, 2026-09-10): GROK does the mechanical work, CODEX / Astra
+  does the architecture and the hard things, FABLE manages.
+- Codex / Astra designs, reviews, and BUILDS the hard things: renderers,
+  shaders, worker pipelines, layout engines, crate geometry, memory/lifetime
+  contracts, and diagnose-and-fix of deep bugs. Give it the design of
+  record, exact file ownership, raw observations and acceptance criteria.
+- Grok does everything mechanical and every scripted proof: edits by recipe,
+  extractions, renames, reference sweeps, theme roles, test batteries,
+  hidden-instance walks, grabs, `/gseq` sequences, acceptance runs. A proof
+  lane writes observations; a fix lane (Astra) acts on them; Grok proves
+  again. Never bundle "prove + fix" into one lane.
+- Fable manages: writes the briefs, sequences and chains the lanes, reads
+  the reports, integrates and reviews, commits with explicit paths and
+  pushes, and relaunches the user. Fable forks build only when both
+  providers are down or a step needs the supervisor's full context; Fable
+  never runs scripted checks.
 - Keep this hierarchy in the context of Studio flows and their root agents,
   including when resuming an archived lane. The user's later directions can
   change these roles for a particular task or flow.
