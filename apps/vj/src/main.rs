@@ -25,6 +25,7 @@ use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::MusicImporter;
 use crate::track_key::KeyNotation;
+use crate::room_output::RoomPin;
 
 /// The third list tab: the loops page that stands in for the explorer and
 /// the queue together.
@@ -107,6 +108,7 @@ mod midi_binding;
 mod mix;
 mod mixer;
 mod program_mix;
+mod room_output;
 // The lock-free hand-off across the audio thread's boundary, in either direction.
 mod spsc;
 mod synth;
@@ -3938,6 +3940,15 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "PLAYER"}
                                     phones_place := PhonesDrop{width: 110 labels: ["DOCKED" "INLINE" "FLOATING"]}
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 90 text: "ROOM"}
+                                    room_device := PhonesDrop{width: Fill labels: ["DEFAULT"]}
                                 }
                                 phones_status := Label{
                                     width: Fill
@@ -9753,6 +9764,10 @@ pub struct App {
     /// and not stable to write to disk.
     #[rust]
     phones_device_name: Option<String>,
+    /// The output the room is pinned to, by NAME like the phones. Absent,
+    /// the room follows the system default, as every install did before.
+    #[rust]
+    room_device_name: Option<String>,
     #[rust(0.85f32)]
     phones_volume: f32,
     #[rust]
@@ -9781,6 +9796,10 @@ pub struct App {
     /// when the room moves and when there is nowhere for it to go.
     #[rust]
     last_main_output: Option<AudioDeviceId>,
+    /// How the pin fared on the last resolve, so the log speaks once when
+    /// that changes and not on every devices event.
+    #[rust(RoomPin::Follow)]
+    last_room_pin: RoomPin,
     /// Fallback re-resolve after a truncated (repositioning) request whose
     /// displaced device thread never fired a devices event.
     #[rust]
@@ -24828,6 +24847,9 @@ p2 {}
         let path = Self::phones_settings_path();
         let mut store = crate::settings::Settings::new();
         store.set_text("phones.device", self.phones_device_name.as_deref().unwrap_or(""));
+        // Where the room goes, when it does not follow the default. Empty
+        // is the default, and so is the key not being there at all.
+        store.set_text("mix.output", self.room_device_name.as_deref().unwrap_or(""));
         store.set_f64("phones.volume", self.phones_volume as f64);
         store.set_usize("phones.placement", self.phones_placement.index());
         store.set_usize("phones.cue_mode", self.phones_cue_mode.index());
@@ -24857,6 +24879,8 @@ p2 {}
         };
         let name = store.text("phones.device", "");
         self.phones_device_name = (!name.is_empty()).then_some(name);
+        let room = store.text("mix.output", "");
+        self.room_device_name = (!room.is_empty()).then_some(room);
         // The store refuses a number that is not finite, so a hand-edited or
         // half-written file can no longer hand the monitor a level it could
         // never leave.
@@ -24885,11 +24909,13 @@ p2 {}
         }
     }
 
-    /// Bind the output devices: the program on slot 0 (the system default),
-    /// the phones on slot 1 when configured and present. The slice order is
-    /// LAW — device callback slots are positional and captured at thread
-    /// spawn, so main is always first, phones always second, and phones
-    /// never ride without main.
+    /// Bind the output devices: the program on slot 0 (the system default,
+    /// or the output the operator pinned), the phones on slot 1 when
+    /// configured and present. The slice order is LAW — device callback
+    /// slots are positional and captured at thread spawn, so main is always
+    /// first, phones always second, and phones never ride without main.
+    /// Which devices those are is `room_output`'s decision; this is the
+    /// wiring.
     fn resolve_audio_outputs(&mut self, cx: &mut Cx) {
         let Some(devices) = self.last_audio_devices.clone() else { return };
         self.audio_out_descs = devices
@@ -24898,13 +24924,19 @@ p2 {}
             .filter(|desc| desc.device_type.is_output())
             .cloned()
             .collect();
-        let main_id = devices.default_output().first().copied();
-        // The room follows the system default, and the default moves on its
-        // own: a display's audio waking, a headset connecting. The log names
-        // the device the program lands on whenever that changes, and says
-        // at error level when there is none left -- in which case the
-        // budget the console quotes belongs to a device that is gone, and
-        // is forgotten with it.
+        let room = crate::room_output::build_room_request(
+            &self.audio_out_descs,
+            devices.default_output().first().copied(),
+            self.room_device_name.as_deref(),
+            self.phones_device_name.as_deref(),
+        );
+        let main_id = room.main;
+        // Unpinned, the room follows the system default, and the default
+        // moves on its own: a display's audio waking, a headset connecting.
+        // The log names the device the program lands on whenever that
+        // changes, and says at error level when there is none left -- in
+        // which case the budget the console quotes belongs to a device that
+        // is gone, and is forgotten with it.
         if main_id != self.last_main_output {
             match main_id {
                 Some(main) => {
@@ -24923,26 +24955,23 @@ p2 {}
             }
             self.last_main_output = main_id;
         }
-        // Resolve the phones by EXACT name, never through `match_outputs`,
-        // whose no-match fallback is the default output — the one device
-        // the cue must never land on.
-        let phones_id = self.phones_device_name.as_ref().and_then(|name| {
-            self.audio_out_descs
-                .iter()
-                .find(|desc| !desc.has_failed && desc.name == *name)
-                .map(|desc| desc.device_id)
-        });
-        let mut desired = Vec::new();
-        if let Some(main) = main_id {
-            desired.push(main);
-            // The main device offered as phones would silently keep its
-            // slot-0 binding; treat it as unconfigured instead.
-            if let Some(phones) = phones_id {
-                if Some(phones) != main_id {
-                    desired.push(phones);
+        // And once, when the pin's fortunes change: held, fallen back, or
+        // refused because it names the phones.
+        if room.pin != self.last_room_pin {
+            let pin = self.room_device_name.as_deref().unwrap_or("?");
+            match room.pin {
+                RoomPin::Follow => log!("audio: the room follows the default"),
+                RoomPin::Held => log!("audio: the room is pinned to {pin}"),
+                RoomPin::Missing => {
+                    log!("audio: pinned output {pin} is not here; the room follows the default")
+                }
+                RoomPin::Refused => {
+                    log!("audio: pinned output {pin} is the phones device; the room follows the default")
                 }
             }
+            self.last_room_pin = room.pin;
         }
+        let desired = room.devices();
         // Repositioning guard: a device already open keeps the callback
         // slot it spawned with, so a device whose position changed must be
         // dropped first (prefix truncation) and re-requested once its old
@@ -24988,17 +25017,40 @@ p2 {}
 
     /// The rows the OUTPUT dropdown shows: NONE first, then every output
     /// with its role marked. Selection is index-based, so the one builder
-    /// serves both the picker and the pick.
+    /// serves both the picker and the pick. MAIN is the device the room is
+    /// on right now, which is the pinned one when a pin holds.
     fn phones_device_rows(&self) -> Vec<(String, Option<String>)> {
-        let main_id = self
-            .last_audio_devices
-            .as_ref()
-            .and_then(|devices| devices.default_output().first().copied());
+        let main_id = self.last_main_output;
         let mut rows = vec![("NONE".to_string(), None)];
         for desc in &self.audio_out_descs {
             let mut label = desc.name.clone();
             if Some(desc.device_id) == main_id {
                 label.push_str("  (MAIN)");
+            }
+            if desc.has_failed {
+                label.push_str("  (failed)");
+            }
+            rows.push((label, Some(desc.name.clone())));
+        }
+        rows
+    }
+
+    /// The rows the ROOM dropdown shows: DEFAULT first, then every output,
+    /// marking the system default and the phones device. A pinned output
+    /// that is not here has no row; the status line says where it went.
+    fn room_device_rows(&self) -> Vec<(String, Option<String>)> {
+        let default_id = self
+            .last_audio_devices
+            .as_ref()
+            .and_then(|devices| devices.default_output().first().copied());
+        let mut rows = vec![("DEFAULT".to_string(), None)];
+        for desc in &self.audio_out_descs {
+            let mut label = desc.name.clone();
+            if Some(desc.device_id) == default_id {
+                label.push_str("  (DEFAULT)");
+            }
+            if self.phones_device_name.as_deref() == Some(desc.name.as_str()) {
+                label.push_str("  (PHONES)");
             }
             if desc.has_failed {
                 label.push_str("  (failed)");
@@ -25018,6 +25070,15 @@ p2 {}
         let dropdown = self.ui.drop_down(cx, ids!(phones_device));
         dropdown.set_labels(cx, rows.into_iter().map(|(label, _)| label).collect());
         dropdown.set_selected_item(cx, selected);
+        let rows = self.room_device_rows();
+        let selected = self
+            .room_device_name
+            .as_ref()
+            .and_then(|name| rows.iter().position(|(_, n)| n.as_ref() == Some(name)))
+            .unwrap_or(0);
+        let dropdown = self.ui.drop_down(cx, ids!(room_device));
+        dropdown.set_labels(cx, rows.into_iter().map(|(label, _)| label).collect());
+        dropdown.set_selected_item(cx, selected);
         self.ui
             .drop_down(cx, ids!(phones_mode))
             .set_selected_item(cx, self.phones_cue_mode.index());
@@ -25032,23 +25093,33 @@ p2 {}
     }
 
     fn sync_phones_status(&mut self, cx: &mut Cx) {
-        let text = if self.phones_armed {
+        let mut text = if self.phones_armed {
             format!("cue → {}", self.phones_device_name.as_deref().unwrap_or("?"))
         } else if let Some(name) = &self.phones_device_name {
             format!("{name} is not available — cue is off")
         } else {
             "no phones device — cue and preview are silent".to_string()
         };
+        // A pin that holds shows in its row; one that does not is said here,
+        // because its row cannot show a device that is not in the list.
+        if let Some(pin) = self.room_device_name.as_deref() {
+            match self.last_room_pin {
+                RoomPin::Missing => {
+                    text.push_str(&format!(" · {pin} is not here — the room is on the default"))
+                }
+                RoomPin::Refused => {
+                    text.push_str(&format!(" · {pin} is the phones — the room is on the default"))
+                }
+                _ => {}
+            }
+        }
         self.ui.label(cx, ids!(phones_status)).set_text(cx, &text);
     }
 
     fn pick_phones_device(&mut self, cx: &mut Cx, index: usize) {
         let rows = self.phones_device_rows();
         let Some((_, name)) = rows.get(index) else { return };
-        let main_id = self
-            .last_audio_devices
-            .as_ref()
-            .and_then(|devices| devices.default_output().first().copied());
+        let main_id = self.last_main_output;
         let picked_main = name.as_ref().is_some_and(|name| {
             self.audio_out_descs
                 .iter()
@@ -25079,6 +25150,31 @@ p2 {}
         self.sync_phones_status(cx);
     }
 
+    /// The mirror of the phones pick: the cue device may not become the
+    /// room. DEFAULT clears the pin.
+    fn pick_room_device(&mut self, cx: &mut Cx, index: usize) {
+        let rows = self.room_device_rows();
+        let Some((_, name)) = rows.get(index) else { return };
+        if name.is_some() && *name == self.phones_device_name {
+            self.ui
+                .label(cx, ids!(phones_status))
+                .set_text(cx, "that IS the phones output — pick a different device");
+            let selected = self
+                .room_device_name
+                .as_ref()
+                .and_then(|current| rows.iter().position(|(_, n)| n.as_ref() == Some(current)))
+                .unwrap_or(0);
+            self.ui
+                .drop_down(cx, ids!(room_device))
+                .set_selected_item(cx, selected);
+            return;
+        }
+        self.room_device_name = name.clone();
+        self.save_phones_settings();
+        self.resolve_audio_outputs(cx);
+        self.sync_phones_status(cx);
+    }
+
     fn handle_phones_modal(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(headphones_cfg)).clicked(actions) {
             self.open_phones_modal(cx);
@@ -25088,6 +25184,9 @@ p2 {}
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(phones_device)).selected(actions) {
             self.pick_phones_device(cx, index);
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(room_device)).selected(actions) {
+            self.pick_room_device(cx, index);
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(phones_mode)).selected(actions) {
             self.phones_cue_mode = CueMode::from_index(index);

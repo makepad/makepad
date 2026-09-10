@@ -340,6 +340,29 @@ phones.placement 1
         assert_eq!(older.f64("mix.master", 0.9), 0.9, "the default stands");
     }
 
+    /// The room's pinned output rides in the phones file. A file from
+    /// before the pin, at either version, reads it as empty: the room
+    /// follows the default, which is what it always did.
+    #[test]
+    fn an_older_phones_file_reads_the_room_pin_as_empty() {
+        let mut store = Settings::new();
+        store.set_text("mix.output", "Interface");
+        let back = Settings::from_text(&store.to_text());
+        assert_eq!(back.text("mix.output", ""), "Interface");
+        let older = Settings::from_text("phones.device Headset
+phones.volume 0.5
+");
+        assert!(!older.has("mix.output"));
+        assert_eq!(older.text("mix.output", ""), "", "follow the default");
+        let bare = legacy::phones("Headset
+0.85
+0
+0
+");
+        assert!(!bare.has("mix.output"));
+        assert_eq!(bare.text("mix.output", ""), "");
+    }
+
     /// The crossfader's own law and which decks are in the cans: both were
     /// set by hand every launch because neither was written down. An older
     /// file reads as what the tab did before, not as a surprise.
