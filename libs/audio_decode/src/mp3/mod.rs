@@ -44,7 +44,7 @@ const MAX_RESERVOIR: usize = 511;
 /// the LAME tag's numbers.
 pub const FILTERBANK_DELAY: u64 = 529;
 
-pub use header::looks_like_mp3;
+pub use header::{holds_mp3_frame, looks_like_mp3, SNIFF_WINDOW};
 
 /// One decoded frame: interleaved samples plus the format they are in.
 pub struct Frame<'a> {

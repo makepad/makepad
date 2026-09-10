@@ -2013,13 +2013,6 @@ fn extended80_rate(field: &[u8; 10]) -> Option<u32> {
     u32::try_from(value).ok().filter(|rate| *rate > 0)
 }
 
-/// A FORM wrapper with an AIFF or AIFC form type. Matched at offset zero
-/// only: an AIFF keeps its tags in a chunk INSIDE the FORM, never in front
-/// of it, so unlike the FLAC marker there is no tag to read past.
-fn looks_like_aiff(magic: &[u8]) -> bool {
-    magic.len() >= 12 && &magic[0..4] == b"FORM" && matches!(&magic[8..12], b"AIFF" | b"AIFC")
-}
-
 /// Bounded FORM/AIFF (and AIFC) parse, emitting interleaved stereo i16 --
 /// the big-endian sibling of `parse_wav`, shaped the same way.
 ///
@@ -2191,7 +2184,9 @@ pub fn decode_audio_clip(
     match media {
         MediaType::Wav => {
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-            parse_wav(&bytes, max_frames)
+            parse_wav(&bytes, max_frames).or_else(|refused| {
+                retry_by_content(path, LocalContainer::Riff, refused, max_frames)
+            })
         }
         MediaType::Mp4 => {
             // Everything unrecognised lands in this arm: the local
@@ -2203,59 +2198,159 @@ pub fn decode_audio_clip(
             // offered by the explorer all along and failed here with
             // "no video stream", which is the platform decoder being
             // asked for something it was never given.
-            let magic = audio_magic(path).unwrap_or_default();
-            // An AIFF is the same story one step further on: a wrapper
-            // around PCM that the platform will not open for want of a
-            // picture, and that the decode library has no seat for either
-            // -- so it is read here, next door to the other PCM wrapper.
-            // Ahead of the marker sniff, because that sniff only names
-            // decoders the library HAS.
-            if looks_like_aiff(&magic) {
-                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-                return parse_aiff(&bytes, max_frames);
-            }
-            if let Some(format) = repo_audio_format(&magic) {
-                return decode_repo_audio(path, format, max_frames);
-            }
-            // A cache object's name is a digest and the platform demuxers
-            // key on the extension, so a nameless source goes out under a
-            // typed link. A file that has a name is opened by it.
-            //
-            // Opened for its SOUND, either way: this arm never wanted a
-            // picture, and every platform opener refuses a file that has
-            // none before it looks at the audio.
-            let (_input, mut decoder) = open_container_audio(path)?;
-            let mut frames: Vec<[i16; 2]> = Vec::new();
-            let mut sample_rate = decoder.info().audio_sample_rate.max(1);
-            loop {
-                match decoder.next_audio().map_err(|e| e.to_string())? {
-                    None => break,
-                    Some(chunk) => {
-                        sample_rate = chunk.sample_rate.max(1);
-                        let ch = chunk.channels.max(1) as usize;
-                        for frame in chunk.samples.chunks_exact(ch) {
-                            if frames.len() >= max_frames {
-                                return Err("audio clip exceeds the decode budget".into());
-                            }
-                            let Some(pair) = crate::dsp_math::stereo_pair(frame) else {
-                                continue;
-                            };
-                            frames.push(pair);
-                        }
-                    }
+            let named = match sniff_container(&audio_magic(path).unwrap_or_default()) {
+                // The frame scan is not let loose here. A head this short
+                // cannot confirm a frame anyway -- the shortest frame is
+                // ninety-six bytes -- and if it ever could, the answer
+                // would still be the platform: a file that reached this
+                // arm is far likelier to be a raw stream of another codec
+                // than an MP3, and a real MP3 is named by its extension or
+                // by the store long before it gets here.
+                Some(LocalContainer::Repo(AudioFormat::Mp3)) | None => LocalContainer::Platform,
+                Some(found) => found,
+            };
+            // The local parsers are PREFERRED here, not exclusive: a RIFF
+            // this app cannot decode -- a companded or an adaptive one --
+            // is still a container the platform reads, and it loaded
+            // through this arm before there was a wrapper row at all.
+            decode_container(path, named, max_frames).or_else(|refused| match named {
+                LocalContainer::Riff | LocalContainer::Aiff => {
+                    // And when the platform will not have it either, the
+                    // LOCAL parser's refusal is the one to show: it names
+                    // the codec the file actually carries, where the
+                    // platform can only say it does not know the bytes.
+                    decode_platform_container(path, max_frames).map_err(|_| refused)
                 }
-            }
-            if frames.is_empty() {
-                return Err("mp4 audio decoded to zero frames".into());
-            }
-            Ok(TrackPcm { frames, sample_rate })
+                _ => Err(refused),
+            })
         }
         // MP3 and Ogg Vorbis go through the repo's own decoders, the same way
         // WAV does: whole file in, interleaved PCM out, no platform codec.
-        MediaType::Mp3 => decode_repo_audio(path, AudioFormat::Mp3, max_frames),
-        MediaType::Ogg => decode_repo_audio(path, AudioFormat::OggVorbis, max_frames),
+        MediaType::Mp3 => decode_repo_audio(path, AudioFormat::Mp3, max_frames).or_else(
+            |refused| {
+                retry_by_content(
+                    path,
+                    LocalContainer::Repo(AudioFormat::Mp3),
+                    refused,
+                    max_frames,
+                )
+            },
+        ),
+        // One case this deliberately does not catch: a FLAC stream inside
+        // an Ogg container sniffs as the same container that just refused
+        // it, so there is no retry -- this repo has no Ogg-FLAC demux to
+        // retry into, and the Vorbis decoder's own error is the honest one.
+        MediaType::Ogg => decode_repo_audio(path, AudioFormat::OggVorbis, max_frames).or_else(
+            |refused| {
+                retry_by_content(
+                    path,
+                    LocalContainer::Repo(AudioFormat::OggVorbis),
+                    refused,
+                    max_frames,
+                )
+            },
+        ),
         other => Err(format!("unsupported audio media {other:?}")),
     }
+}
+
+/// One container, one decoder. Total, and it never re-enters
+/// `decode_audio_clip`, so a retry cannot start another one.
+fn decode_container(
+    path: &PathBuf,
+    container: LocalContainer,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
+    match container {
+        LocalContainer::Riff => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            parse_wav(&bytes, max_frames)
+        }
+        LocalContainer::Aiff => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            parse_aiff(&bytes, max_frames)
+        }
+        LocalContainer::Repo(format) => decode_repo_audio(path, format, max_frames),
+        LocalContainer::Platform => decode_platform_container(path, max_frames),
+    }
+}
+
+/// How far the second look reads. An MP3 frame is only real once the frame
+/// after it agrees, which is the one thing here that needs a window rather
+/// than a marker; this is the decoder's own scan window, so the probe and
+/// the decode make the same call.
+const CONTENT_SCAN_BYTES: usize = makepad_audio_decode::mp3::SNIFF_WINDOW;
+
+/// A second look when the decoder the NAME chose refused the bytes.
+///
+/// The extension stays the first answer: it is right for every file that is
+/// what it says it is, and it costs nothing. But a refusal is the one
+/// moment when the name is KNOWN to be no use, and a file another decoder
+/// in this repo reads is not unplayable, it is misnamed. Only a DIFFERENT
+/// container is retried -- when the bytes agree with the decoder that just
+/// refused them the file really is broken, and its own error is the honest
+/// one to show. When a retry does run, its error is the one that stands:
+/// telling an operator holding a truncated container that it is "not a
+/// RIFF/WAVE file" is worse than useless.
+fn retry_by_content(
+    path: &PathBuf,
+    refused_by: LocalContainer,
+    refusal: String,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
+    let Some(window) = audio_head(path, CONTENT_SCAN_BYTES) else {
+        return Err(refusal);
+    };
+    // Two readers disagree about how long a tag is, and the difference is
+    // not the ten bytes of a footer: the frame side refuses a size field
+    // that is not seven bits to the byte and answers zero, which would
+    // leave the whole window inside the tag. When the first look finds
+    // nothing, look again from where the other side says the tag ends.
+    let found = sniff_container(&window).or_else(|| {
+        let skip = makepad_audio_decode::flac::metadata::skip_id3(&window);
+        window.get(skip..).and_then(sniff_container)
+    });
+    let Some(found) = found else { return Err(refusal) };
+    if found == refused_by {
+        return Err(refusal);
+    }
+    decode_container(path, found, max_frames)
+}
+
+/// The platform's own decoder, for its sound alone.
+fn decode_platform_container(path: &PathBuf, max_frames: usize) -> Result<TrackPcm, String> {
+    // A cache object's name is a digest and the platform demuxers key on
+    // the extension, so a nameless source goes out under a typed link. A
+    // file that has a name is opened by it.
+    //
+    // Opened for its SOUND: this path never wanted a picture, and every
+    // platform opener refuses a file that has none before it looks at the
+    // audio.
+    let (_input, mut decoder) = open_container_audio(path)?;
+    let mut frames: Vec<[i16; 2]> = Vec::new();
+    let mut sample_rate = decoder.info().audio_sample_rate.max(1);
+    loop {
+        match decoder.next_audio().map_err(|e| e.to_string())? {
+            None => break,
+            Some(chunk) => {
+                sample_rate = chunk.sample_rate.max(1);
+                let ch = chunk.channels.max(1) as usize;
+                for frame in chunk.samples.chunks_exact(ch) {
+                    if frames.len() >= max_frames {
+                        return Err("audio clip exceeds the decode budget".into());
+                    }
+                    let Some(pair) = crate::dsp_math::stereo_pair(frame) else {
+                        continue;
+                    };
+                    frames.push(pair);
+                }
+            }
+        }
+    }
+    if frames.is_empty() {
+        return Err("the container decoded to zero frames".into());
+    }
+    Ok(TrackPcm { frames, sample_rate })
 }
 
 /// Open a container for its sound, under its own name when it has one.
@@ -2319,37 +2414,92 @@ const MAX_TAG_SKIP: usize = 4 << 20;
 /// because that length comes out of the file: a corrupt one must not turn
 /// a sniff into a whole-file read of something that was never audio.
 fn audio_magic(path: &PathBuf) -> Option<Vec<u8>> {
+    audio_head(path, 4)
+}
+
+/// The same, with `tail` bytes wanted past whatever tag is in front. Four
+/// is all a marker needs; a frame scan wants a window, because a frame is
+/// only real once the frame after it agrees.
+fn audio_head(path: &Path, tail: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
     let mut head = [0u8; 12];
     file.read_exact(&mut head).ok()?;
     let skip = makepad_audio_decode::flac::metadata::skip_id3(&head);
-    if skip == 0 {
-        return Some(head.to_vec());
-    }
     if skip > MAX_TAG_SKIP {
         return None;
     }
-    let mut rest = vec![0u8; skip + 4 - head.len()];
-    file.read_exact(&mut rest).ok()?;
+    let want = skip.saturating_add(tail);
+    if want <= head.len() {
+        return Some(head.to_vec());
+    }
     let mut out = head.to_vec();
-    out.extend_from_slice(&rest);
+    // A short read is what a small file HAS, not a failure: the probe works
+    // on whatever the front of the file holds.
+    file.take((want - head.len()) as u64).read_to_end(&mut out).ok()?;
     Some(out)
 }
 
-/// Which of the repo's own decoders a file's first bytes call for, if any.
+/// What a file's first bytes say it holds, whatever its name says.
 ///
-/// Only the two EXACT markers are honoured. `sniff` also carries a loose
-/// MP3 frame-sync scan, and letting that loose on every file that reached
-/// the fallback would eventually call an MP4 an MP3 -- while a real MP3 is
-/// named as one by its extension or by the store long before it gets here.
-/// So this deliberately answers None to that scan and lets the platform
-/// have the file.
-pub fn repo_audio_format(magic: &[u8]) -> Option<AudioFormat> {
-    match makepad_audio_decode::sniff(magic) {
-        Some(format @ (AudioFormat::Flac | AudioFormat::OggVorbis)) => Some(format),
-        _ => None,
+/// Deliberately not a `MediaType`: that enum is a wire contract with no
+/// seat for a FLAC or an AIFF, and a file on this machine has no business
+/// widening it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalContainer {
+    /// A RIFF wrapper, read by `parse_wav`.
+    Riff,
+    /// A FORM wrapper, read by `parse_aiff`.
+    Aiff,
+    /// One of this repo's own decoders.
+    Repo(AudioFormat),
+    /// A box container the platform decoder demuxes.
+    Platform,
+}
+
+/// A whole `ftyp` box at the front. The size is the only other field worth
+/// reading: zero means "to the end of the file" and one means a 64-bit size
+/// follows, neither of which a real `ftyp` box uses, and refusing them keeps
+/// out a text file that happens to read `....ftyp`.
+fn is_box_container(bytes: &[u8]) -> bool {
+    let Some(head) = bytes.get(0..8) else { return false };
+    &head[4..8] == b"ftyp" && u32::from_be_bytes(head[0..4].try_into().unwrap()) >= 8
+}
+
+/// Which container a file's first bytes name, whatever it is called.
+///
+/// Exact markers first and the frame scan last: no file begins with
+/// `RIFF....WAVE` by accident, while a run of audio bytes containing an MP3
+/// sync is ordinary. The scan is never satisfied by a tag prefix -- a
+/// tagged stream of another codec carries the same three letters.
+pub fn sniff_container(bytes: &[u8]) -> Option<LocalContainer> {
+    // The length word at 4..8 is deliberately not checked: a streaming
+    // writer leaves it zero or all ones.
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return Some(LocalContainer::Riff);
     }
+    if bytes.len() >= 12
+        && &bytes[0..4] == b"FORM"
+        && matches!(&bytes[8..12], b"AIFF" | b"AIFC")
+    {
+        return Some(LocalContainer::Aiff);
+    }
+    if bytes.len() >= 4 && &bytes[0..4] == b"OggS" {
+        return Some(LocalContainer::Repo(AudioFormat::OggVorbis));
+    }
+    // Exact, but a tagger may have put a block in front of it; that
+    // function reads past one.
+    if makepad_audio_decode::flac::metadata::looks_like_flac(bytes) {
+        return Some(LocalContainer::Repo(AudioFormat::Flac));
+    }
+    if is_box_container(bytes) {
+        return Some(LocalContainer::Platform);
+    }
+    // Last, and only on a frame the frame after it agrees with.
+    if makepad_audio_decode::mp3::holds_mp3_frame(bytes) {
+        return Some(LocalContainer::Repo(AudioFormat::Mp3));
+    }
+    None
 }
 
 /// Min/max waveform columns over the whole clip.
@@ -3923,31 +4073,145 @@ mod tests {
         out
     }
 
+    /// `count` Layer III frames back to back. 0xFFFB9004 is 128 kbps at
+    /// 44.1 kHz with no padding, so a frame is 417 bytes and the scan
+    /// confirms the first because the second sits exactly that far on. ONE
+    /// frame followed by zeros is deliberately not a stream.
+    fn mp3_frames(count: usize) -> Vec<u8> {
+        let mut frame = vec![0xFF, 0xFB, 0x90, 0x04];
+        frame.resize(417, 0);
+        frame.repeat(count)
+    }
+
+    /// A tag whose size field is not seven bits to the byte. Real taggers
+    /// write these, and the two readers in this repo disagree about them:
+    /// one refuses the size and answers zero, the other masks and answers
+    /// a length. The retry has to cope with both.
+    fn awkward_tag(body: usize) -> Vec<u8> {
+        let mut out = b"ID3\x04\x00\x00".to_vec();
+        out.push(0x80);
+        for shift in [14, 7, 0] {
+            out.push(((body >> shift) & 0x7f) as u8);
+        }
+        out.extend(std::iter::repeat_n(0u8, body));
+        out
+    }
+
     #[test]
     fn a_flac_is_recognised_by_its_marker_tagged_or_not() {
-        assert_eq!(repo_audio_format(b"fLaC\0\0\0\x22"), Some(AudioFormat::Flac));
+        assert_eq!(
+            sniff_container(b"fLaC\0\0\0\x22"),
+            Some(LocalContainer::Repo(AudioFormat::Flac)),
+        );
         let mut tagged = id3_header(64);
         tagged.extend(std::iter::repeat_n(0u8, 64));
         tagged.extend_from_slice(b"fLaC");
-        assert_eq!(repo_audio_format(&tagged), Some(AudioFormat::Flac));
-        assert_eq!(repo_audio_format(b"OggS\0\x02\0\0"), Some(AudioFormat::OggVorbis));
+        assert_eq!(sniff_container(&tagged), Some(LocalContainer::Repo(AudioFormat::Flac)));
+        assert_eq!(
+            sniff_container(b"OggS\0\x02\0\0"),
+            Some(LocalContainer::Repo(AudioFormat::OggVorbis)),
+        );
     }
 
     #[test]
     fn the_loose_mp3_scan_is_not_let_loose_on_unrecognised_files() {
-        // A frame sync, which `sniff` would call MP3. Refused here: a real
-        // MP3 is named by its extension or by the store long before it
-        // reaches the fallback, and a scan this loose would eventually
-        // call an MP4 an MP3 and hand it to the wrong decoder.
-        assert_eq!(repo_audio_format(b"\xff\xfb\x90\x00\0\0\0\0"), None);
-        // A tagged MP3: an ID3 block and no `fLaC` behind it.
+        // A frame sync with nothing to confirm it. The decode library's own
+        // sniff would call this an MP3; a caller deciding whether to take a
+        // file away from another decoder needs the frame after it to agree.
+        assert_eq!(sniff_container(b"\xff\xfb\x90\x00\0\0\0\0"), None);
+        // A tagged stream: an ID3 block and no marker behind it. The tag
+        // alone is never enough, which is what keeps a tagged stream of
+        // another codec on the platform path it takes today.
         let mut tagged = id3_header(8);
         tagged.extend(std::iter::repeat_n(0u8, 8));
         tagged.extend_from_slice(b"\xff\xfb\x90\x00");
-        assert_eq!(repo_audio_format(&tagged), None);
-        // A real MP4, which must go on to the platform decoder.
-        assert_eq!(repo_audio_format(b"\0\0\0\x18ftypmp42"), None);
-        assert_eq!(repo_audio_format(b""), None);
+        assert_eq!(sniff_container(&tagged), None);
+        // A box container, which goes on to the platform decoder -- now
+        // said out loud rather than by falling through.
+        assert_eq!(sniff_container(b"\0\0\0\x18ftypmp42"), Some(LocalContainer::Platform));
+        assert_eq!(sniff_container(b""), None);
+    }
+
+    /// One table over the bytes: every row a layout, and the rows that must
+    /// answer nothing are as load-bearing as the rows that answer.
+    #[test]
+    fn the_container_probe_names_what_the_bytes_are() {
+        let riff = wav_pcm16(&[(1, 2)], 48_000);
+        assert_eq!(sniff_container(&riff), Some(LocalContainer::Riff));
+        assert_eq!(sniff_container(&riff[..11]), None, "eleven bytes cannot say");
+        let mut avi = b"RIFF".to_vec();
+        avi.extend_from_slice(&64u32.to_le_bytes());
+        avi.extend_from_slice(b"AVI ");
+        assert_eq!(sniff_container(&avi), None, "a RIFF that is not a WAVE");
+        let mut rf64 = b"RF64".to_vec();
+        rf64.extend_from_slice(&64u32.to_le_bytes());
+        rf64.extend_from_slice(b"WAVE");
+        assert_eq!(sniff_container(&rf64), None, "not a wrapper this app reads");
+
+        for kind in [b"AIFF", b"AIFC"] {
+            let mut form = b"FORM".to_vec();
+            form.extend_from_slice(&64u32.to_be_bytes());
+            form.extend_from_slice(kind);
+            assert_eq!(sniff_container(&form), Some(LocalContainer::Aiff));
+        }
+
+        assert_eq!(
+            sniff_container(b"\0\0\0\x18ftypM4A \0\0\0\0M4A mp42"),
+            Some(LocalContainer::Platform),
+        );
+        assert_eq!(
+            sniff_container(b"\0\0\0\0ftypM4A \0\0\0\0M4A mp42"),
+            None,
+            "a box that runs to the end of the file is not one of these",
+        );
+
+        // A raw stream of another codec, tagged and bare: both must stay
+        // off this table, or a working file is taken from the platform.
+        assert_eq!(sniff_container(b"\xff\xf1\x50\x80\0\0\0\0"), None);
+        let mut tagged_other = id3_header(8);
+        tagged_other.extend(std::iter::repeat_n(0u8, 8));
+        tagged_other.extend_from_slice(b"\xff\xf1\x50\x80");
+        assert_eq!(sniff_container(&tagged_other), None);
+
+        // A confirmed pair is an MP3, bare or behind a tag.
+        assert_eq!(
+            sniff_container(&mp3_frames(2)),
+            Some(LocalContainer::Repo(AudioFormat::Mp3)),
+        );
+        let mut tagged_mp3 = id3_header(32);
+        tagged_mp3.extend(std::iter::repeat_n(0u8, 32));
+        tagged_mp3.extend_from_slice(&mp3_frames(2));
+        assert_eq!(
+            sniff_container(&tagged_mp3),
+            Some(LocalContainer::Repo(AudioFormat::Mp3)),
+        );
+        // And one frame adrift in a bigger buffer is not a stream.
+        let mut lone = mp3_frames(1);
+        lone.extend(std::iter::repeat_n(0u8, 400));
+        assert_eq!(sniff_container(&lone), None);
+
+        // A tag whose length field the two readers disagree about: the
+        // first look finds nothing, which is what the retry's second look
+        // exists for.
+        let mut awkward = awkward_tag(64);
+        awkward.extend_from_slice(&mp3_frames(2));
+        assert_eq!(
+            sniff_container(&awkward),
+            Some(LocalContainer::Repo(AudioFormat::Mp3)),
+            "a short tag is scanned past whatever its length field says",
+        );
+        // Wider than the scan window, though, and the frames are only
+        // found by starting where the tag ends -- which is the second
+        // look the retry makes.
+        let mut wide = awkward_tag(makepad_audio_decode::mp3::SNIFF_WINDOW + 4_096);
+        let tail = wide.len();
+        wide.extend_from_slice(&mp3_frames(2));
+        assert_eq!(sniff_container(&wide), None, "the window is all tag");
+        assert_eq!(
+            sniff_container(&wide[tail..]),
+            Some(LocalContainer::Repo(AudioFormat::Mp3)),
+            "and the frames are there once the tag is stepped over",
+        );
     }
 
     #[test]
@@ -3962,7 +4226,7 @@ mod tests {
         bytes.extend_from_slice(b"fLaC");
         std::fs::write(&tagged, &bytes).expect("write");
         let magic = audio_magic(&tagged).expect("a magic");
-        assert_eq!(repo_audio_format(&magic), Some(AudioFormat::Flac));
+        assert_eq!(sniff_container(&magic), Some(LocalContainer::Repo(AudioFormat::Flac)));
 
         // A tag claiming more than the cap. The file is not read past the
         // header and the platform decoder gets to make its own mind up --
@@ -3988,7 +4252,7 @@ mod tests {
         std::fs::write(&form, aiff_bytes(1, 16, 44_100, None, None, &[0; 8])).expect("write");
         let magic = audio_magic(&form).expect("a magic");
         assert!(magic.len() >= 12, "the head reaches the form type: {}", magic.len());
-        assert!(looks_like_aiff(&magic));
+        assert_eq!(sniff_container(&magic), Some(LocalContainer::Aiff));
 
         // The head's width is a rule, so a file shorter than it says so.
         // Outcome-neutral: ten bytes was never a container either way.
@@ -4045,9 +4309,156 @@ mod tests {
         assert!(error.contains("ima4"), "{error}");
         assert!(!error.contains("stream in file"), "the platform never saw it: {error}");
 
-        // And nothing was hard-linked on the way: this never reaches the
-        // typed-link path at all.
-        assert!(!dir.join(".makepad-decoder-input").exists());
+        // And no link is left behind. A file this parser refuses is still
+        // offered to the platform, which is where the lease directory
+        // beside it comes from; what matters is that the lease took its
+        // link with it.
+        let leased = dir.join(".makepad-decoder-input");
+        assert!(
+            std::fs::read_dir(&leased).map(|mut d| d.next().is_none()).unwrap_or(true),
+            "the lease outlived the decode",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The retry, end to end, on bytes that are real rather than shaped.
+    ///
+    /// The samples are chosen so no little-endian pair can read as a frame
+    /// sync: a WAV that is retried has to be one the MP3 decoder can only
+    /// REFUSE, and that decoder scans the whole file rather than a window,
+    /// so one confirmed frame pair anywhere in the data would turn the
+    /// refusal into a garbage decode and the retry would never run.
+    #[test]
+    fn a_file_whose_name_lies_is_read_for_what_it_is() {
+        let dir = test_dir("name-lies");
+        std::fs::create_dir_all(&dir).expect("make dir");
+        let frames: Vec<(i16, i16)> = (0..600)
+            .map(|i| ((i * 37 % 30_000) as i16, (i * 53 % 30_000) as i16))
+            .collect();
+        let riff = wav_pcm16(&frames, 24_000);
+        let honest = parse_wav(&riff, 10_000).expect("the fixture is a wav");
+
+        // A wav wearing an mp3 name, and the same wearing an ogg one.
+        for (name, media) in [("lies.mp3", MediaType::Mp3), ("lies.ogg", MediaType::Ogg)] {
+            let path = dir.join(name);
+            std::fs::write(&path, &riff).expect("write");
+            let pcm = decode_audio_clip(&path, media, 10_000)
+                .unwrap_or_else(|error| panic!("{name} was not read for what it is: {error}"));
+            assert_eq!(pcm.sample_rate, honest.sample_rate, "{name}");
+            assert_eq!(pcm.frames, honest.frames, "{name}");
+        }
+
+        // An AIFF wearing a wav name: the retry reaches the other wrapper.
+        let aiff = aiff_bytes(1, 16, 48_000, None, None, &[0x01, 0x00, 0x02, 0x00]);
+        let path = dir.join("lies.wav");
+        std::fs::write(&path, &aiff).expect("write");
+        let pcm = decode_audio_clip(&path, MediaType::Wav, 10_000)
+            .expect("an aiff called a wav is still an aiff");
+        assert_eq!(pcm.sample_rate, 48_000);
+        assert_eq!(pcm.frames.len(), 2);
+
+        // A real stream behind a tag whose length field the two readers
+        // disagree about -- the case the second look exists for.
+        let mut awkward = awkward_tag(makepad_audio_decode::mp3::SNIFF_WINDOW + 4_096);
+        awkward.extend_from_slice(&mp3_frames(8));
+        let path = dir.join("tagged.wav");
+        std::fs::write(&path, &awkward).expect("write");
+        let found = decode_audio_clip(&path, MediaType::Wav, 100_000).err();
+        assert!(
+            !found.as_deref().is_some_and(|error| error.contains("not a RIFF/WAVE file")),
+            "the second look never happened: {found:?}",
+        );
+
+        // And the refusals that must NOT be replaced, because the bytes
+        // agree with the decoder that refused them.
+        let broken = dir.join("broken.wav");
+        std::fs::write(&broken, b"not a wav").expect("write");
+        let error = match decode_audio_clip(&broken, MediaType::Wav, 10_000) {
+            Err(error) => error,
+            Ok(_) => panic!("nine bytes of nothing were decoded"),
+        };
+        assert!(error.contains("not a RIFF/WAVE file"), "{error}");
+
+        let headless = dir.join("headless.wav");
+        let mut head = b"RIFF".to_vec();
+        head.extend_from_slice(&36u32.to_le_bytes());
+        head.extend_from_slice(b"WAVEfmt ");
+        head.extend_from_slice(&16u32.to_le_bytes());
+        head.extend_from_slice(&[1, 0, 2, 0]);
+        head.extend_from_slice(&44_100u32.to_le_bytes());
+        head.extend_from_slice(&176_400u32.to_le_bytes());
+        head.extend_from_slice(&[4, 0, 16, 0]);
+        std::fs::write(&headless, &head).expect("write");
+        let error = match decode_audio_clip(&headless, MediaType::Wav, 10_000) {
+            Err(error) => error,
+            Ok(_) => panic!("a wav with no sound in it was decoded"),
+        };
+        assert!(error.contains("wav: no data chunk"), "its own refusal stands: {error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A retry's error is the retried decoder's, not the one the name
+    /// picked: telling somebody holding a box container that it is "not a
+    /// RIFF/WAVE file" is worse than useless.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn an_ftyp_stub_named_a_wav_reports_the_platforms_refusal() {
+        let dir = test_dir("ftyp-stub");
+        std::fs::create_dir_all(&dir).expect("make dir");
+        let mut stub = b"\0\0\0\x18ftypM4A \0\0\0\0M4A mp42".to_vec();
+        stub.extend(std::iter::repeat_n(0u8, 1024));
+        let path = dir.join("stub.wav");
+        std::fs::write(&path, &stub).expect("write");
+        let error = match decode_audio_clip(&path, MediaType::Wav, 10_000) {
+            Err(error) => error,
+            Ok(_) => panic!("a stub with no sound in it was decoded"),
+        };
+        assert!(
+            !error.contains("not a RIFF/WAVE file"),
+            "the name's decoder had the last word: {error}",
+        );
+        let leased = dir.join(".makepad-decoder-input");
+        assert!(
+            std::fs::read_dir(&leased).map(|mut d| d.next().is_none()).unwrap_or(true),
+            "the lease outlived the decode",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RIFF this app cannot decode is still a container the platform
+    /// reads, and it loaded through the fallback arm before there was a
+    /// wrapper row at all. The row must not have taken that away.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_riff_the_local_parser_cannot_decode_still_reaches_the_platform() {
+        let dir = test_dir("riff-to-platform");
+        std::fs::create_dir_all(&dir).expect("make dir");
+        // A-law: one byte a sample, a format `parse_wav` refuses by name
+        // and the platform decodes.
+        let data: Vec<u8> = (0..8_000u32).map(|i| (i % 251) as u8).collect();
+        let path = dir.join("alaw.wav");
+        std::fs::write(&path, wav_bytes(6, 1, 8, 8_000, &data)).expect("write");
+        let decoded = decode_audio_clip(&path, MediaType::Mp4, 100_000);
+        // Whether this platform can read A-law is the platform's business
+        // and not the same on every machine, so what is pinned is that it
+        // was ASKED. Asking leaves its mark: opening a named file for its
+        // sound fails first and offers it again under a typed link, which
+        // is the directory beside the source.
+        let asked = dir.join(".makepad-decoder-input").exists();
+        match decoded {
+            Ok(pcm) => assert!(!pcm.frames.is_empty(), "the platform read it"),
+            // And when the platform will not have it either, the LOCAL
+            // parser's refusal is what the operator is shown: it names the
+            // codec, where the platform can only say it does not know the
+            // bytes.
+            Err(error) => {
+                assert!(asked, "the platform was never asked: {error}");
+                assert!(
+                    error.contains("wav: unsupported format"),
+                    "the informative refusal is the one kept: {error}",
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4307,15 +4718,21 @@ mod tests {
     /// The wrapper is recognised by its own head and nothing else is.
     #[test]
     fn an_aiff_is_recognised_by_its_wrapper_and_nothing_else_is() {
-        assert!(looks_like_aiff(b"FORM\0\0\x10\0AIFF"));
-        assert!(looks_like_aiff(b"FORM\0\0\x10\0AIFC"));
-        assert!(!looks_like_aiff(b"RIFF\0\0\x10\0WAVE"));
-        assert!(!looks_like_aiff(b"fLaC\0\0\0\x22\0\0\0\0"));
-        assert!(!looks_like_aiff(b"\0\0\0\x18ftypmp42"));
-        assert!(!looks_like_aiff(b"FORM\0\0\x10\0AIF"), "eleven bytes is not enough");
-        assert!(!looks_like_aiff(b""));
-        // And the marker sniff still answers exactly as it did.
-        assert_eq!(repo_audio_format(b"FORM\0\0\x10\0AIFF"), None);
+        assert_eq!(sniff_container(b"FORM\0\0\x10\0AIFF"), Some(LocalContainer::Aiff));
+        assert_eq!(sniff_container(b"FORM\0\0\x10\0AIFC"), Some(LocalContainer::Aiff));
+        assert_eq!(sniff_container(b"RIFF\0\0\x10\0WAVE"), Some(LocalContainer::Riff));
+        assert_eq!(
+            sniff_container(b"fLaC\0\0\0\x22\0\0\0\0"),
+            Some(LocalContainer::Repo(AudioFormat::Flac)),
+        );
+        assert_eq!(sniff_container(b"\0\0\0\x18ftypmp42"), Some(LocalContainer::Platform));
+        assert_eq!(sniff_container(b"FORM\0\0\x10\0AIF"), None, "eleven bytes is not enough");
+        assert_eq!(sniff_container(b""), None);
+        // And a wrapper is not one of the repo decoders' own formats.
+        assert!(!matches!(
+            sniff_container(b"FORM\0\0\x10\0AIFF"),
+            Some(LocalContainer::Repo(_)),
+        ));
     }
 
     /// One table, and it knows both spellings of a RIFF file. The deck
@@ -4902,9 +5319,10 @@ mod tests {
 
         // A container with both: the arm still decodes everything it did.
         let both = clip("both.mp4", true);
-        assert!(
-            repo_audio_format(&audio_magic(&both).unwrap_or_default()).is_none(),
-            "and it really took the platform path, not the byte sniff",
+        assert_eq!(
+            sniff_container(&audio_magic(&both).unwrap_or_default()),
+            Some(LocalContainer::Platform),
+            "and it really took the platform path, not a local parser",
         );
         let pcm = decode_audio_clip(&both, MediaType::Mp4, MAX_TRACK_FRAMES)
             .expect("a container with sound decodes");
