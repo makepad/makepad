@@ -21,7 +21,7 @@ use {
         widget::*,
         widget_async::{CxSplashVmExt, ScriptAsyncResult},
     },
-    std::rc::Rc,
+    std::{ops::Range, rc::Rc},
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
 };
 
@@ -1729,6 +1729,128 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
+    /// Whether the platform IME is still composing text in this field. That text
+    /// is the IME's until it commits; see [`Self::replace_range`].
+    ///
+    /// iOS's keyboard bridge doesn't yet report its marked text to the widget, so
+    /// this is always false there.
+    pub fn is_composing(&self) -> bool {
+        self.has_composition()
+    }
+
+    /// Replaces `range` (byte offsets into the text) with `text` as an ordinary
+    /// undoable edit, without needing keyboard focus.
+    ///
+    /// This is how anything that isn't the keyboard — dictation, autocomplete, a
+    /// paste button — should write into the field. The edit goes through the same
+    /// path as typing: the input filter applies (text it rejects outright is
+    /// refused with [`ReplaceRangeError::Rejected`] rather than deleting the
+    /// range), it lands in the undo history (grouped per `undo`), `Changed` is
+    /// emitted, and the selection is carried across it, with any part that was
+    /// inside the range ending up after the replacement. Replacing text with
+    /// itself is not an edit. An IME composition elsewhere in the text is moved
+    /// along with the edit and the IME told about the new text; an edit that
+    /// overlaps the composition is refused with [`ReplaceRangeError::Composing`],
+    /// so wait for [`Self::is_composing`] to clear and try again.
+    pub fn replace_range(
+        &mut self,
+        cx: &mut Cx,
+        range: Range<usize>,
+        text: &str,
+        undo: UndoGroup,
+    ) -> Result<(), ReplaceRangeError> {
+        if self.is_read_only {
+            return Err(ReplaceRangeError::ReadOnly);
+        }
+        let Range { start, end } = range;
+        if start > end
+            || end > self.text.len()
+            || !self.text.is_char_boundary(start)
+            || !self.text.is_char_boundary(end)
+        {
+            return Err(ReplaceRangeError::InvalidRange);
+        }
+        // A history rewind or a keyboard delete can leave the recorded composition
+        // hanging past the text; what's left of it inside the text is what counts.
+        if self.has_composition() {
+            let len = self.text.len();
+            let composition_start = floor_grapheme_boundary(&self.text, self.composition_start.min(len));
+            let composition_end = floor_grapheme_boundary(&self.text, self.composition_end.min(len));
+            if composition_end > composition_start {
+                self.composition_start = composition_start;
+                self.composition_end = composition_end;
+            } else {
+                self.clear_composition();
+            }
+        }
+        if self.has_composition() && start < self.composition_end && end > self.composition_start {
+            return Err(ReplaceRangeError::Composing);
+        }
+        let replace_with = self.filter_input_replacing(text, Some(start..end));
+        if replace_with.is_empty() && !text.is_empty() {
+            return Err(ReplaceRangeError::Rejected);
+        }
+        if self.text[start..end] == replace_with {
+            return Ok(());
+        }
+        let uid = self.widget_uid();
+        self.preserved_selection_cursor = None;
+        if undo == UndoGroup::New {
+            self.history.force_new_edit_group();
+        }
+        self.create_or_extend_edit_group(EditKind::External);
+        let replacement_len = replace_with.len();
+        let selection = self.selection;
+        self.history.apply_edit(Edit { start, end, replace_with }, &mut self.text);
+        let carry = |index: usize| {
+            if index < start {
+                floor_grapheme_boundary(&self.text, index)
+            } else if index > end {
+                floor_grapheme_boundary(&self.text, (index - (end - start) + replacement_len).min(self.text.len()))
+            } else {
+                // Never before the replacement, even if it joined a grapheme after it.
+                ceil_grapheme_boundary(&self.text, start + replacement_len)
+            }
+        };
+        self.selection = Selection {
+            anchor: Cursor {
+                index: carry(selection.anchor.index),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: carry(selection.cursor.index),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
+        if self.has_composition() {
+            // The edit is entirely on one side of the composition, so it either
+            // shifts the whole composition or leaves it alone.
+            if end <= self.composition_start {
+                self.composition_start = self.composition_start - (end - start) + replacement_len;
+                self.composition_end = self.composition_end - (end - start) + replacement_len;
+            }
+            // update_ime_context skips the push while composing, so send the new
+            // text with the moved composition ourselves; the IME's copy of the
+            // field would otherwise go stale.
+            let sel = CharOffset(self.text[..self.selection.start().index].chars().count())
+                ..CharOffset(self.text[..self.selection.end().index].chars().count());
+            let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                ..CharOffset(self.text[..self.composition_end].chars().count());
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
+            self.ime_update_frame = cx.redraw_id();
+            cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+        }
+        self.needs_scroll_to_cursor = true;
+        self.laidout_text = None;
+        self.check_text_is_empty(cx);
+        self.draw_bg.redraw(cx);
+        self.emit_change(cx, uid);
+        cx.hide_clipboard_actions();
+        Ok(())
+    }
+
     fn handle_focus_lost(&mut self, cx: &mut Cx, uid: WidgetUid) {
         self.animator_play(cx, ids!(focus.off));
         self.animator_play(cx, ids!(blink.on));
@@ -1908,6 +2030,17 @@ impl TextInput {
     }
 
     fn filter_input(&self, input: &str, is_set_text: bool) -> String {
+        let replacing = if is_set_text {
+            None
+        } else {
+            Some(self.selection.start().index..self.selection.end().index)
+        };
+        self.filter_input_replacing(input, replacing)
+    }
+
+    /// `replacing` is the range the input goes into, so a decimal field can tell
+    /// whether the text it keeps already has a dot; `None` means the whole text goes.
+    fn filter_input_replacing(&self, input: &str, replacing: Option<Range<usize>>) -> String {
         // strip control chars (escape sequences/tabs the IME sometimes sends),
         // but keep a newline in multiline fields where a soft keyboard inserts it
         if input.len() == 1 {
@@ -1922,13 +2055,9 @@ impl TextInput {
             InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
             InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
             InputMode::Decimal => {
-                let mut contains_dot = if is_set_text {
-                    false
-                } else {
-                    let before_selection = self.text[..self.selection.start().index].to_string();
-                    let after_selection = self.text[self.selection.end().index..].to_string();
-                    before_selection.contains('.') || after_selection.contains('.')
-                };
+                let mut contains_dot = replacing.as_ref().map_or(false, |range| {
+                    self.text[..range.start].contains('.') || self.text[range.end..].contains('.')
+                });
                 input
                     .chars()
                     .filter(|c| match c {
@@ -2082,6 +2211,8 @@ impl TextInput {
 
     fn undo(&mut self, cx: &mut Cx) -> bool {
         if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
+            // The text the IME was composing is gone, so the composition is too.
+            self.clear_composition();
             self.laidout_text = None;
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
@@ -2094,6 +2225,7 @@ impl TextInput {
 
     fn redo(&mut self, cx: &mut Cx) -> bool {
         if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
+            self.clear_composition();
             self.laidout_text = None;
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
@@ -3401,6 +3533,57 @@ impl TextInputRef {
             inner.set_selection(cx, state.selection);
         }
     }
+
+    /// See [`TextInput::replace_range`].
+    pub fn replace_range(
+        &self,
+        cx: &mut Cx,
+        range: Range<usize>,
+        text: &str,
+        undo: UndoGroup,
+    ) -> Result<(), ReplaceRangeError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.replace_range(cx, range, text, undo)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// See [`TextInput::is_composing`].
+    pub fn is_composing(&self) -> bool {
+        self.borrow().map_or(false, |inner| inner.is_composing())
+    }
+
+    /// See [`TextInput::force_new_edit_group`].
+    pub fn force_new_edit_group(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.force_new_edit_group();
+        }
+    }
+}
+
+/// How an edit made through [`TextInput::replace_range`] joins the undo history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UndoGroup {
+    /// The edit is its own undo step.
+    New,
+    /// The edit joins the previous `replace_range` edit's undo step, so a run of
+    /// them (say, every revision of one dictated phrase) undoes as one. Anything
+    /// else in between — typing, undo, a `New` edit — starts a fresh step.
+    Extend,
+}
+
+/// Why [`TextInput::replace_range`] refused an edit. The text is untouched in every case.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplaceRangeError {
+    ReadOnly,
+    /// The range runs past the text or splits a `char`.
+    InvalidRange,
+    /// The field's input filter rejected all of `text`.
+    Rejected,
+    /// The range overlaps text the platform IME is still composing. That text is
+    /// the IME's until it commits; wait for [`TextInput::is_composing`] to clear.
+    Composing,
 }
 
 /// The saved (checkpointed) state of a text input widget.
@@ -3552,6 +3735,8 @@ enum EditKind {
     Insert,
     Backspace,
     Delete,
+    /// An edit made through `replace_range`; consecutive ones share an undo step.
+    External,
     Other,
 }
 
@@ -3752,4 +3937,296 @@ fn uses_apple_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
 
 fn is_apple_text_platform() -> bool {
     cfg!(target_vendor = "apple")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A field on a bare `Cx`, plus every `Changed` it emits.
+    fn field(text: &str) -> (Cx, TextInputRef, Rc<RefCell<Vec<String>>>) {
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let seen = changes.clone();
+        let mut cx = Cx::new(Box::new(move |_, event| {
+            if let Event::Actions(actions) = event {
+                for action in actions.iter() {
+                    if let TextInputAction::Changed(text) = action.as_widget_action().cast() {
+                        seen.borrow_mut().push(text);
+                    }
+                }
+            }
+        }));
+        let input = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                TextInput {}
+            });
+            WidgetRef::script_from_value(vm, value).as_text_input()
+        });
+        input.set_text(&mut cx, text);
+        (cx, input, changes)
+    }
+
+    fn caret(cx: &mut Cx, input: &TextInputRef, index: usize) {
+        input.set_cursor(cx, Cursor { index, prefer_next_row: false }, false);
+    }
+
+    fn selection(input: &TextInputRef) -> (usize, usize) {
+        let selection = input.selection();
+        (selection.start().index, selection.end().index)
+    }
+
+    /// Typing goes through the private edit path, exactly as a key event would.
+    fn type_text(cx: &mut Cx, input: &TextInputRef, text: &str) {
+        let mut inner = input.borrow_mut().unwrap();
+        inner.create_or_extend_edit_group(EditKind::Insert);
+        let start = inner.selection.start().index;
+        let end = inner.selection.end().index;
+        inner.apply_edit(cx, Edit { start, end, replace_with: text.into() });
+    }
+
+    fn cx_edit(start: usize, end: usize, replace_with: &str) -> Edit {
+        Edit { start, end, replace_with: replace_with.into() }
+    }
+
+    fn undo(cx: &mut Cx, input: &TextInputRef) -> bool {
+        input.borrow_mut().unwrap().undo(cx)
+    }
+
+    fn redo(cx: &mut Cx, input: &TextInputRef) -> bool {
+        input.borrow_mut().unwrap().redo(cx)
+    }
+
+    #[test]
+    fn replace_range_edits_the_text_and_carries_the_selection_across() {
+        let (mut cx, input, changes) = field("hello world");
+
+        // An insertion at the caret leaves the caret after the new text.
+        caret(&mut cx, &input, 5);
+        input.replace_range(&mut cx, 5..5, " big", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello big world");
+        assert_eq!(selection(&input), (9, 9));
+        cx.handle_actions();
+        assert_eq!(*changes.borrow(), vec!["hello big world".to_string()]);
+
+        // A selection over the replaced range collapses after the replacement.
+        input.set_selection(&mut cx, Selection {
+            anchor: Cursor { index: 6, prefer_next_row: false },
+            cursor: Cursor { index: 9, prefer_next_row: false },
+        });
+        input.replace_range(&mut cx, 6..9, "small", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello small world");
+        assert_eq!(selection(&input), (11, 11));
+
+        // A caret before the range stays put; one after it shifts with the text.
+        caret(&mut cx, &input, 2);
+        input.replace_range(&mut cx, 6..11, "tiny", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello tiny world");
+        assert_eq!(selection(&input), (2, 2));
+        caret(&mut cx, &input, 16);
+        input.replace_range(&mut cx, 6..10, "enormous", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello enormous world");
+        assert_eq!(selection(&input), (20, 20));
+
+        // Deleting is just an empty replacement.
+        input.replace_range(&mut cx, 5..14, "", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello world");
+        assert_eq!(selection(&input), (11, 11));
+    }
+
+    #[test]
+    fn replace_range_refuses_bad_ranges_and_read_only_fields_untouched() {
+        let (mut cx, input, changes) = field("héllo");
+        caret(&mut cx, &input, 3);
+        // Splitting the two-byte é, running past the end, and a backwards range.
+        for range in [1..2, 0..99, 3..2] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "x", UndoGroup::New),
+                Err(ReplaceRangeError::InvalidRange)
+            );
+        }
+        input.set_is_read_only(&mut cx, true);
+        assert_eq!(
+            input.replace_range(&mut cx, 0..0, "x", UndoGroup::New),
+            Err(ReplaceRangeError::ReadOnly)
+        );
+        assert_eq!(input.text(), "héllo");
+        assert_eq!(selection(&input), (3, 3));
+        cx.handle_actions();
+        assert!(changes.borrow().is_empty());
+        // Nothing to undo either.
+        input.set_is_read_only(&mut cx, false);
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn replace_range_goes_through_the_input_filter() {
+        let (mut cx, input, _) = field("12");
+        input.set_is_numeric_only(&mut cx, true);
+        input.replace_range(&mut cx, 2..2, "3a4", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "1234");
+        // Text that filters to nothing is refused, and must not delete the range
+        // it was meant to replace.
+        for range in [4..4, 0..4] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "abc", UndoGroup::New),
+                Err(ReplaceRangeError::Rejected)
+            );
+        }
+        assert_eq!(input.text(), "1234");
+        // An explicitly empty text is a deletion, though.
+        input.replace_range(&mut cx, 0..2, "", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "34");
+        assert!(undo(&mut cx, &input));
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "12");
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn replacing_text_with_itself_is_not_an_edit() {
+        let (mut cx, input, changes) = field("hello");
+        input.replace_range(&mut cx, 0..5, "hello", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 5..5, "", UndoGroup::New).unwrap();
+        cx.handle_actions();
+        assert!(changes.borrow().is_empty());
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn a_caret_carried_through_a_replacement_never_ends_up_before_it() {
+        // Replacing the base letter of "b́" (b plus a combining acute) with "c"
+        // joins the new letter to the accent; the caret goes after both.
+        let (mut cx, input, _) = field("ab\u{301}");
+        caret(&mut cx, &input, 1);
+        input.replace_range(&mut cx, 1..2, "c", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "ac\u{301}");
+        assert_eq!(selection(&input), (4, 4));
+    }
+
+    #[test]
+    fn a_composition_left_behind_by_undo_or_a_delete_does_not_break_edits() {
+        // Undoing the keyboard's preview ends the composition outright.
+        let (mut cx, input, _) = field("abc");
+        caret(&mut cx, &input, 3);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.create_or_extend_edit_group(EditKind::Other);
+            inner.apply_edit(&mut cx, cx_edit(3, 3, "に"));
+            inner.composition_start = 3;
+            inner.composition_end = 6;
+        }
+        assert!(input.is_composing());
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "abc");
+        assert!(!input.is_composing());
+
+        // A composition that a delete has truncated is trimmed to what is left of
+        // it, and one that is entirely gone is dropped, instead of indexing past
+        // the text.
+        let (mut cx, input, _) = field("abc 你");
+        caret(&mut cx, &input, 7);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 4;
+            inner.composition_end = 10;
+        }
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc 你");
+        let inner = input.borrow().unwrap();
+        assert_eq!((inner.composition_start, inner.composition_end), (5, 8));
+        drop(inner);
+        let (mut cx, input, _) = field("abc");
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 3;
+            inner.composition_end = 6;
+        }
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc");
+        assert!(!input.is_composing());
+    }
+
+    #[test]
+    fn extend_shares_an_undo_step_only_with_the_previous_external_edit() {
+        // A run of extended edits is one step.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "hello", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 5..5, " world", UndoGroup::Extend).unwrap();
+        input.replace_range(&mut cx, 6..11, "there", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "hello there");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+        assert!(redo(&mut cx, &input));
+        assert_eq!(input.text(), "hello there");
+
+        // Typing in between splits the steps in three.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "hello", UndoGroup::New).unwrap();
+        type_text(&mut cx, &input, "!");
+        assert_eq!(input.text(), "hello!");
+        input.replace_range(&mut cx, 6..6, " world", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "hello! world");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "hello!");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "hello");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+
+        // And so does asking for a new step.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "a", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 1..1, "b", UndoGroup::Extend).unwrap();
+        input.replace_range(&mut cx, 2..2, "c", UndoGroup::New).unwrap();
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "ab");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn an_edit_beside_a_composition_moves_it_and_one_inside_is_refused() {
+        let (mut cx, input, _) = field("abc 你好");
+        let composition = |input: &TextInputRef| {
+            let inner = input.borrow().unwrap();
+            (inner.composition_start, inner.composition_end)
+        };
+        // Moving the caret ends a composition, as it would for the IME, so place
+        // it before pretending the IME is composing 你好.
+        caret(&mut cx, &input, 10);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 4;
+            inner.composition_end = 10;
+        }
+        assert!(input.is_composing());
+
+        // Before the composition: it shifts along with the caret.
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc 你好");
+        assert_eq!(composition(&input), (5, 11));
+        assert_eq!(selection(&input), (11, 11));
+        assert!(input.is_composing());
+
+        // After it: nothing moves.
+        input.replace_range(&mut cx, 11..11, "!", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "Xabc 你好!");
+        assert_eq!(composition(&input), (5, 11));
+
+        // Touching its edges is fine; overlapping it is not.
+        input.replace_range(&mut cx, 1..5, "", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "X你好!");
+        assert_eq!(composition(&input), (1, 7));
+        for range in [4..4, 4..7, 0..4, 1..8] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "no", UndoGroup::Extend),
+                Err(ReplaceRangeError::Composing)
+            );
+        }
+        assert_eq!(input.text(), "X你好!");
+        assert_eq!(composition(&input), (1, 7));
+    }
 }
