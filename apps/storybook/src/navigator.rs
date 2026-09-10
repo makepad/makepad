@@ -283,7 +283,7 @@ impl StoryNavigator {
         for category in &outline {
             let cat_id = LiveId::from_str(&format!("category:{}", category.name));
             self.folder_open(cx, cat_id, &on_the_way);
-            let dot = if category.any_new { GitStatusDotKind::New } else { GitStatusDotKind::None };
+            let dot = if category.any_new { StatusDotKind::New } else { StatusDotKind::None };
             if self.file_tree.begin_folder_with_status(cx, cat_id, category.name, dot).is_err() {
                 continue;
             }
@@ -296,9 +296,9 @@ impl StoryNavigator {
                     let id = LiveId::from_str(only.key);
                     self.keys.insert(id, only.key);
                     let dot = if registry::is_new(only, &self.baseline) {
-                        GitStatusDotKind::New
+                        StatusDotKind::New
                     } else {
-                        GitStatusDotKind::None
+                        StatusDotKind::None
                     };
                     self.file_tree.file_with_status(cx, id, component.name, dot);
                     self.listed += 1;
@@ -306,7 +306,7 @@ impl StoryNavigator {
                 }
                 let comp_id = LiveId::from_str(&format!("component:{}/{}", category.name, component.name));
                 self.folder_open(cx, comp_id, &on_the_way);
-                let dot = if component.any_new { GitStatusDotKind::New } else { GitStatusDotKind::None };
+                let dot = if component.any_new { StatusDotKind::New } else { StatusDotKind::None };
                 if self.file_tree.begin_folder_with_status(cx, comp_id, component.name, dot).is_err() {
                     continue;
                 }
@@ -314,9 +314,9 @@ impl StoryNavigator {
                     let id = LiveId::from_str(story.key);
                     self.keys.insert(id, story.key);
                     let dot = if registry::is_new(story, &self.baseline) {
-                        GitStatusDotKind::New
+                        StatusDotKind::New
                     } else {
-                        GitStatusDotKind::None
+                        StatusDotKind::None
                     };
                     self.file_tree.file_with_status(cx, id, story.name, dot);
                     self.listed += 1;

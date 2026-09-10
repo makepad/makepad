@@ -1,7 +1,7 @@
 use crate::{
     makepad_code_editor::CodeSession,
     makepad_studio_hub::HubConnection,
-    makepad_widgets::{file_tree::GitStatusDotKind, *},
+    makepad_widgets::{file_tree::StatusDotKind, *},
 };
 use makepad_studio_protocol::hub_protocol::{
     AiMountState, EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus,
@@ -278,12 +278,12 @@ impl FlatFileTree {
         self.nodes.get(&node_id).map(|node| node.path.as_str())
     }
 
-    pub fn git_status_dot_for_path(&self, path: &str) -> GitStatusDotKind {
+    pub fn git_status_dot_for_path(&self, path: &str) -> StatusDotKind {
         self.path_to_id
             .get(path)
             .and_then(|id| self.nodes.get(id))
             .map(|node| git_status_dot(node.git_status))
-            .unwrap_or(GitStatusDotKind::None)
+            .unwrap_or(StatusDotKind::None)
     }
 
     fn cascade_git_status_to_folders(&mut self) {
@@ -341,13 +341,13 @@ impl FlatFileTree {
     }
 }
 
-fn git_status_dot(status: GitStatus) -> GitStatusDotKind {
+fn git_status_dot(status: GitStatus) -> StatusDotKind {
     match status {
-        GitStatus::Added | GitStatus::Untracked => GitStatusDotKind::New,
-        GitStatus::Modified | GitStatus::Staged => GitStatusDotKind::Modified,
-        GitStatus::Deleted => GitStatusDotKind::Deleted,
-        GitStatus::Conflict => GitStatusDotKind::Mixed,
-        GitStatus::Clean | GitStatus::Ignored | GitStatus::Unknown => GitStatusDotKind::None,
+        GitStatus::Added | GitStatus::Untracked => StatusDotKind::New,
+        GitStatus::Modified | GitStatus::Staged => StatusDotKind::Modified,
+        GitStatus::Deleted => StatusDotKind::Deleted,
+        GitStatus::Conflict => StatusDotKind::Mixed,
+        GitStatus::Clean | GitStatus::Ignored | GitStatus::Unknown => StatusDotKind::None,
     }
 }
 
@@ -415,11 +415,11 @@ mod tests {
 
         assert_eq!(
             tree.git_status_dot_for_path("repo/src"),
-            GitStatusDotKind::Modified
+            StatusDotKind::Modified
         );
         assert_eq!(
             tree.git_status_dot_for_path("repo"),
-            GitStatusDotKind::Modified
+            StatusDotKind::Modified
         );
     }
 
@@ -444,11 +444,11 @@ mod tests {
 
         assert_eq!(
             tree.git_status_dot_for_path("repo/src"),
-            GitStatusDotKind::Deleted
+            StatusDotKind::Deleted
         );
         assert_eq!(
             tree.git_status_dot_for_path("repo"),
-            GitStatusDotKind::Deleted
+            StatusDotKind::Deleted
         );
     }
 
@@ -477,8 +477,8 @@ mod tests {
 
         assert_eq!(
             tree.git_status_dot_for_path("repo/src"),
-            GitStatusDotKind::None
+            StatusDotKind::None
         );
-        assert_eq!(tree.git_status_dot_for_path("repo"), GitStatusDotKind::None);
+        assert_eq!(tree.git_status_dot_for_path("repo"), StatusDotKind::None);
     }
 }

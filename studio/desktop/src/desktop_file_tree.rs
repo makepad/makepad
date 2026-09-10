@@ -1,6 +1,6 @@
 use crate::{
     app_data::{is_hidden_virtual_path, AppData, FlatFileTree},
-    makepad_widgets::file_tree::{FileTreeAction, GitStatusDotKind},
+    makepad_widgets::file_tree::{FileTreeAction, StatusDotKind},
     makepad_widgets::*,
 };
 
@@ -145,12 +145,12 @@ pub struct DesktopFileTree {
 impl DesktopFileTree {
     const ROW_HEIGHT: f64 = 28.0;
 
-    fn status_dot_color(status: GitStatusDotKind) -> Vec4 {
+    fn status_dot_color(status: StatusDotKind) -> Vec4 {
         match status {
-            GitStatusDotKind::New => vec4(0.345, 0.761, 0.427, 1.0),
-            GitStatusDotKind::Modified => vec4(1.0, 0.667, 0.0, 1.0),
-            GitStatusDotKind::Deleted | GitStatusDotKind::Mixed => vec4(0.847, 0.392, 0.392, 1.0),
-            GitStatusDotKind::None => vec4(0.42, 0.48, 0.56, 0.45),
+            StatusDotKind::New => vec4(0.345, 0.761, 0.427, 1.0),
+            StatusDotKind::Modified => vec4(1.0, 0.667, 0.0, 1.0),
+            StatusDotKind::Deleted | StatusDotKind::Mixed => vec4(0.847, 0.392, 0.392, 1.0),
+            StatusDotKind::None => vec4(0.42, 0.48, 0.56, 0.45),
         }
     }
 
