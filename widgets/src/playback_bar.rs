@@ -86,7 +86,7 @@ script_mod! {
         /** room above the track for the clock, in pixels 0..40 step 1 */
         label_height: 16.
         /** track inset from the left and right edges, in pixels 0..40 step 1 */
-        track_inset: 2.
+        track_inset: 10.
         /** draw the clock */
         show_clock: true
         /** the right-hand clock counts down instead of naming the whole length */
@@ -106,6 +106,17 @@ script_mod! {
             color_disabled: uniform(theme.color_label_outer_disabled)
 
             text_style: theme.font_regular{font_size: theme.font_size_p}
+
+            // DrawText's own get_color hands back `self.color` and nothing
+            // else, so without this override the three instances above and
+            // the animator applies that drive them are inert and the clock
+            // stays one colour through every state, disabled included.
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_drag, self.drag)
+                    .mix(self.color_disabled, self.disabled)
+            }
         }
 
         draw_bg +: {
@@ -166,9 +177,13 @@ script_mod! {
                     sdf.fill(self.color_track)
                 }
 
-                // A disabled bar still says where the playhead is, it just
-                // stops shouting: the fill walks halfway to the track
-                // rather than needing a muted colour of its own.
+                // Disabled, the fill walks halfway to the track so the bar
+                // reads as muted. It is NOT what carries the answer: this
+                // pair is the theme's own progress pairing (primary on the
+                // highest surface container) and even at full strength it
+                // is 1.76:1 in the dark theme, so no amount of undimming
+                // would reach the 3:1 a graphical object wants. The knob
+                // below is the mark that has to survive, and does.
                 let played = mix(self.color_elapsed, self.color_track, 0.5 * self.disabled)
                 let fw = w * clamp(self.pos_frac, 0.0, 1.0)
                 if fw > 0.25 {
@@ -178,19 +193,33 @@ script_mod! {
                     sdf.fill(played)
                 }
 
-                let kr = mix(self.knob_size, self.knob_size_hover, lift) * 0.5 * (1.0 - self.disabled)
+                let grip = mix(self.knob_size, self.knob_size_hover, lift) * 0.5
+                // Disabled it stops being a handle and becomes a mark: it
+                // keeps both colours — knob on ring is 4.7:1 in the dark
+                // theme, 5.1:1 in the light and 6.6:1 in the skeleton, the
+                // one pair on this bar that clears 3:1 everywhere — and
+                // shrinks to the track's own thickness, so a bar nobody can
+                // move still says where the playhead is without offering a
+                // grip that would not answer. Three points across is the
+                // floor, or a hairline track would leave no mark at all.
+                let kr = mix(grip, min(grip, max(h, 3.0) * 0.5), self.disabled)
                 if kr > 0.5 {
                     // The knob rides on a ring of the page's own ground.
                     // Without it the knob would have to out-contrast both
                     // halves of the track at once, and no single theme
                     // token manages that in all three themes.
                     //
-                    // On a bar narrower than the knob the two stops below
-                    // would cross, and a clamp whose stops cross answers
-                    // with whichever the driver happens to prefer. Half the
-                    // track is a stop that always holds.
-                    let kb = min(kr, w * 0.5)
-                    let kx = clamp(x0 + fw, x0 + kb, x0 + w - kb)
+                    // Its centre is the fill's leading edge and nothing
+                    // else: `fw` is already clamped to 0..w, so the centre
+                    // is on the track by construction and there is no
+                    // second clamp to hold it in — one that pinned the knob
+                    // half its width inside each end would draw it where
+                    // `fraction_at` does not map it back, and the bar would
+                    // not move at all through the first half-knob of the
+                    // piece. `track_inset` is what buys the room instead:
+                    // it is sized so the ring clears the widget's edge at
+                    // both ends of the travel.
+                    let kx = x0 + fw
                     sdf.circle(kx, mid, kr + self.knob_ring)
                     sdf.fill(self.color_knob_ring)
                     sdf.circle(kx, mid, kr)
@@ -311,8 +340,24 @@ fn fraction_of(position: f64, duration: f64) -> f64 {
 /// few pixels thick and nobody hits a few pixels while moving. The clock row
 /// itself is not, so pressing the total does not throw the playhead to the
 /// end of the piece.
-fn seeks_at(y: f64, label_height: f64) -> bool {
-    y >= label_height.max(0.0)
+fn seeks_at(y: f64, label_room: f64) -> bool {
+    y >= label_room.max(0.0)
+}
+
+/// The room actually kept above the track.
+///
+/// A bar drawing no clock keeps none. `label_height` reserves the strip AND
+/// cuts it out of the press band, so a bar that only stopped DRAWING the
+/// clock would carry a dead strip along its top that refused presses with
+/// nothing on it to explain why — and turning the clock off would have to be
+/// done twice, once for the text and once for the room, to get the bar the
+/// one toggle plainly asks for.
+fn label_room(show_clock: bool, label_height: f64) -> f64 {
+    if show_clock {
+        label_height.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Holds the newest seek target and decides when it may go out.
@@ -408,6 +453,59 @@ impl Hold {
     }
 }
 
+/// Which part of a gesture a point on the bar arrived from.
+///
+/// The bar cannot infer this from the hold it is carrying, because the hold
+/// outlives the gesture that made it: for `settle_secs` after a release
+/// there is still one sitting there with its finger up. Every caller says
+/// which end it is instead.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Stroke {
+    /// The first touch of a gesture.
+    Down,
+    /// A move inside a gesture that already owns the bar.
+    Move,
+    /// The last point of a gesture that began with a `Down`.
+    Up,
+    /// A key press: both ends at once. One whole intent rather than a
+    /// gesture with two of them.
+    Whole,
+}
+
+impl Stroke {
+    /// A stroke that begins a gesture takes the bar fresh.
+    fn begins(self) -> bool {
+        matches!(self, Stroke::Down | Stroke::Whole)
+    }
+
+    /// A stroke that ends one sends its target whatever the interval says,
+    /// because nothing follows it to carry the target out.
+    fn ends(self) -> bool {
+        matches!(self, Stroke::Up | Stroke::Whole)
+    }
+}
+
+/// The hold the bar is left carrying after a stroke puts the playhead at
+/// `fraction`.
+///
+/// A stroke that BEGINS a gesture always builds a new one. Carrying the old
+/// hold over would leave `down` false for a drag that has only just started
+/// — every move and the release after it would be dropped as belonging to
+/// no gesture, `drag.off` would never play, and the previous release time
+/// riding along inside it would expire the hold with the finger still on
+/// the bar and hand the playhead back to the host mid-drag. All of which is
+/// reachable by pressing twice inside `settle_secs`, which is a second.
+fn hold_after(held: Option<Hold>, stroke: Stroke, fraction: f64, seconds: f64, now: f64) -> Hold {
+    match held {
+        Some(mut hold) if !stroke.begins() => {
+            hold.fraction = fraction;
+            hold.seconds = seconds;
+            hold
+        }
+        _ => Hold { fraction, seconds, down: true, released: now },
+    }
+}
+
 /// A playback bar's actions.
 #[derive(Clone, Debug, Default)]
 pub enum PlaybackBarAction {
@@ -489,9 +587,15 @@ pub struct PlaybackBar {
     /// Room above the track for the clock, and the track's inset from the
     /// widget's edges. Rust owns both because the hit band is measured from
     /// them; the shader is handed the same numbers every draw.
+    ///
+    /// The inset is the knob's room, not decoration. The knob's centre goes
+    /// all the way to both ends of the track — that is what makes the drawn
+    /// mark and the hit mapping one number — so its outer edge, 9.5 points
+    /// out at the hover size and the default ring, would be cut by the
+    /// widget's edge at 0:00 and again at the end with any less than this.
     #[live(16.0)]
     label_height: f64,
-    #[live(2.0)]
+    #[live(10.0)]
     track_inset: f64,
 
     /// Draw the clock. Off for a bar whose host already prints the times.
@@ -581,27 +685,23 @@ impl PlaybackBar {
         (left, right)
     }
 
+    /// The strip kept above the track for the clock, which is nothing at all
+    /// on a bar that is not drawing one.
+    fn label_room(&self) -> f64 {
+        label_room(self.show_clock, self.label_height)
+    }
+
     fn fraction_at_x(&self, abs_x: f64, rect: Rect) -> f64 {
         fraction_at(abs_x, rect.pos.x + self.track_inset, rect.size.x - self.track_inset * 2.0)
     }
 
-    /// Put the playhead at `fraction` and say so. `settled` marks the end of
-    /// a gesture, where the target goes out whether or not the interval has
-    /// run — nothing follows it to carry it.
-    fn drive(&mut self, cx: &mut Cx, fraction: f64, now: f64, settled: bool) {
+    /// Put the playhead at `fraction` and say so.
+    fn drive(&mut self, cx: &mut Cx, fraction: f64, now: f64, stroke: Stroke) {
         let seconds = self.seconds_at(fraction);
-        match &mut self.hold {
-            Some(hold) => {
-                hold.fraction = fraction;
-                hold.seconds = seconds;
-            }
-            None => {
-                self.hold = Some(Hold { fraction, seconds, down: true, released: now });
-            }
-        }
+        self.hold = Some(hold_after(self.hold.take(), stroke, fraction, seconds, now));
         cx.widget_action(self.uid, PlaybackBarAction::Scrubbed(seconds));
         self.gate.want(fraction);
-        let target = if settled {
+        let target = if stroke.ends() {
             self.gate.flush()
         } else {
             self.gate.due(now, self.seek_interval)
@@ -706,6 +806,17 @@ impl Widget for PlaybackBar {
             self.tick(cx, ne.time);
         }
         if self.animator_in_state(cx, ids!(disabled.on)) {
+            // A bar disabled under a finger would otherwise keep a hold
+            // with its finger down for the rest of the session: nothing
+            // could expire it, every `set_position` would be ignored and
+            // `tick` would re-arm a frame forever. A disabled bar has no
+            // gesture, so the hold goes with it.
+            if self.hold.as_ref().map(|h| h.down) == Some(true) {
+                self.hold = None;
+                self.gate.rest();
+                self.animator_play(cx, ids!(drag.off));
+                self.draw_bg.redraw(cx);
+            }
             return;
         }
         let uid = self.uid;
@@ -721,12 +832,12 @@ impl Widget for PlaybackBar {
             Hit::FingerHoverOver(fe) => {
                 // The cursor changes only over the band that answers, so
                 // the pointer says where the target is before it is tried.
-                if self.seekable() && seeks_at(fe.abs.y - fe.rect.pos.y, self.label_height) {
+                if self.seekable() && seeks_at(fe.abs.y - fe.rect.pos.y, self.label_room()) {
                     cx.set_cursor(MouseCursor::Hand);
                 }
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                if !self.seekable() || !seeks_at(fe.abs.y - fe.rect.pos.y, self.label_height) {
+                if !self.seekable() || !seeks_at(fe.abs.y - fe.rect.pos.y, self.label_room()) {
                     return;
                 }
                 cx.set_key_focus(self.draw_bg.area());
@@ -736,21 +847,21 @@ impl Widget for PlaybackBar {
                 self.animator_play(cx, ids!(drag.on));
                 cx.widget_action(uid, PlaybackBarAction::Grabbed);
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
-                self.drive(cx, fraction, fe.time, false);
+                self.drive(cx, fraction, fe.time, Stroke::Down);
             }
             Hit::FingerMove(fe) => {
                 if !dragging {
                     return;
                 }
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
-                self.drive(cx, fraction, fe.time, false);
+                self.drive(cx, fraction, fe.time, Stroke::Move);
             }
             Hit::FingerUp(fe) => {
                 if !dragging {
                     return;
                 }
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
-                self.drive(cx, fraction, fe.time, true);
+                self.drive(cx, fraction, fe.time, Stroke::Up);
                 if let Some(hold) = &mut self.hold {
                     hold.down = false;
                     hold.released = fe.time;
@@ -771,7 +882,11 @@ impl Widget for PlaybackBar {
                 self.animator_play(cx, ids!(focus.off));
             }
             Hit::KeyDown(ke) => {
-                if !self.seekable() {
+                // The bar takes key focus on the press that starts a drag,
+                // so a key can arrive with the finger still down. `Whole`
+                // would throw that drag's hold away and leave the finger
+                // with nothing to move; the finger keeps the bar.
+                if !self.seekable() || dragging {
                     return;
                 }
                 let here = self.shown_seconds();
@@ -786,7 +901,7 @@ impl Widget for PlaybackBar {
                 // held back by the drag interval, and it needs no hold of
                 // its own beyond the settling one `drive` leaves behind.
                 self.gate.rest();
-                self.drive(cx, fraction_of(to, self.duration), ke.time, true);
+                self.drive(cx, fraction_of(to, self.duration), ke.time, Stroke::Whole);
                 if let Some(hold) = &mut self.hold {
                     hold.down = false;
                     hold.released = ke.time;
@@ -797,16 +912,20 @@ impl Widget for PlaybackBar {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // The one number for the strip: the shader draws its track below it,
+        // the hit band starts at it and the clock sits in it, so a bar with
+        // the clock off loses the strip in all three at once.
+        let room = self.label_room();
         self.draw_bg.pos_frac = self.shown_fraction() as f32;
-        self.draw_bg.label_px = self.label_height as f32;
+        self.draw_bg.label_px = room as f32;
         self.draw_bg.inset_px = self.track_inset as f32;
 
         self.draw_bg.begin(cx, walk, self.layout);
         let rect = cx.turtle().rect();
-        if self.show_clock && self.label_height > 0.0 {
+        if room > 0.0 {
             let (left, right) = self.clocks();
             let size = self.draw_text.text_style.font_size as f64;
-            let baseline = rect.pos.y + (self.label_height - size) * 0.5;
+            let baseline = rect.pos.y + (room - size) * 0.5;
             self.draw_text
                 .draw_abs(cx, dvec2(rect.pos.x + self.track_inset, baseline), &left);
             if !right.is_empty() {
@@ -831,6 +950,34 @@ impl Widget for PlaybackBar {
             format!("{left} / {right}")
         }
     }
+}
+
+/// The first action of the wanted shape in one pass, whatever else that pass
+/// is carrying from the same bar.
+///
+/// Every reader below goes through this rather than `find_widget_action`
+/// (widget.rs:1715-1724), which answers with the FIRST action from a uid and
+/// stops, whatever type it is. This bar puts THREE in the pass a press
+/// lands — `Grabbed`, then `Scrubbed`, then `Seek` — so a reader built on
+/// that helper would cast the `Grabbed`, fail its own match and report
+/// nothing: a click would never deliver a seek, a release would never be
+/// seen behind the `Scrubbed` that precedes it, and a keyboard seek would be
+/// swallowed the same way. The library says so directly above the helper
+/// (widget.rs:1595-1601) and ships `filter_widget_actions_cast` for it.
+///
+/// Reordering the pushes is not the fix: four readers want four different
+/// firsts.
+fn scan<T>(
+    actions: &Actions,
+    uid: WidgetUid,
+    mut pick: impl FnMut(PlaybackBarAction) -> Option<T>,
+) -> Option<T> {
+    for action in actions.filter_widget_actions_cast::<PlaybackBarAction>(uid) {
+        if let Some(found) = pick(action) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 impl PlaybackBarRef {
@@ -862,38 +1009,35 @@ impl PlaybackBarRef {
     /// The seek to act on. Already coalesced, so a player may take every one
     /// of these at face value.
     pub fn seek(&self, actions: &Actions) -> Option<f64> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
+        scan(actions, self.widget_uid(), |action| match action {
             PlaybackBarAction::Seek(seconds) => Some(seconds),
             _ => None,
-        }
+        })
     }
 
     /// Where the bar is showing, on every move of the gesture. For captions
     /// and previews, not for seeking.
     pub fn scrubbed(&self, actions: &Actions) -> Option<f64> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
+        scan(actions, self.widget_uid(), |action| match action {
             PlaybackBarAction::Scrubbed(seconds) => Some(seconds),
             _ => None,
-        }
+        })
     }
 
     /// A drag began. A host that pauses while the playhead moves pauses on
     /// this and resumes on `released`.
     pub fn grabbed(&self, actions: &Actions) -> bool {
-        actions
-            .find_widget_action(self.widget_uid())
-            .map(|item| matches!(item.cast(), PlaybackBarAction::Grabbed))
-            .unwrap_or(false)
+        scan(actions, self.widget_uid(), |action| {
+            matches!(action, PlaybackBarAction::Grabbed).then_some(())
+        })
+        .is_some()
     }
 
     pub fn released(&self, actions: &Actions) -> Option<f64> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
+        scan(actions, self.widget_uid(), |action| match action {
             PlaybackBarAction::Released(seconds) => Some(seconds),
             _ => None,
-        }
+        })
     }
 }
 
@@ -1080,5 +1224,146 @@ mod tests {
         let hold = Hold { fraction: 0.5, seconds: 60.0, down: false, released: 4.0 };
         assert!(!hold.expired(4.5, 1.0), "give it a moment");
         assert!(hold.expired(5.0, 1.0), "then give the bar back");
+    }
+
+    #[test]
+    fn a_press_landing_on_a_hold_that_is_still_settling_starts_a_gesture_of_its_own() {
+        // The bar a second after a release: the hold is still there, finger
+        // up, holding the last gesture's release time.
+        let settling = Hold { fraction: 0.5, seconds: 60.0, down: false, released: 4.0 };
+        let pressed = hold_after(Some(settling), Stroke::Down, 0.25, 30.0, 4.4);
+        // A press is a new gesture whatever was left lying there. Reuse
+        // would leave `down` false, and then the moves and the release that
+        // follow belong to no gesture and are dropped.
+        assert!(pressed.down, "the finger on the bar is down");
+        assert_eq!(pressed.released, 4.4, "and the old release time is gone");
+        assert_eq!(pressed.fraction, 0.25);
+        assert_eq!(pressed.seconds, 30.0);
+        // The stale release time is not a detail: kept, it expires the hold
+        // 0.6s into a press that is still going on.
+        assert!(
+            !pressed.expired(5.0, 1.0),
+            "a hold under a finger cannot expire, and its clock starts now"
+        );
+    }
+
+    #[test]
+    fn a_move_inside_a_gesture_keeps_the_hold_the_press_made() {
+        let pressed = hold_after(None, Stroke::Down, 0.25, 30.0, 4.0);
+        let moved = hold_after(Some(pressed), Stroke::Move, 0.6, 72.0, 4.2);
+        // Only the point moves. The finger is the same finger, so `down`
+        // and the release clock are the press's.
+        assert_eq!((moved.fraction, moved.seconds), (0.6, 72.0));
+        assert!(moved.down);
+        assert_eq!(moved.released, 4.0);
+    }
+
+    #[test]
+    fn a_key_press_is_one_whole_intent_and_takes_the_bar_fresh() {
+        assert!(Stroke::Whole.begins(), "it owns the bar from this point");
+        assert!(Stroke::Whole.ends(), "and nothing follows to carry its target out");
+        // A key struck while the last one is still settling restarts the
+        // wait rather than inheriting a clock that is part run down.
+        let settling = Hold { fraction: 0.1, seconds: 12.0, down: false, released: 9.0 };
+        let struck = hold_after(Some(settling), Stroke::Whole, 0.2, 24.0, 9.5);
+        assert_eq!(struck.released, 9.5);
+        // The two mid-gesture strokes are the other way round on both counts.
+        assert!(!Stroke::Move.begins() && !Stroke::Move.ends());
+        assert!(!Stroke::Down.ends(), "a press has a release coming to carry it");
+        assert!(!Stroke::Up.begins(), "a release joins the gesture it ends");
+    }
+
+    #[test]
+    fn a_bar_that_draws_no_clock_keeps_no_room_for_one() {
+        // The strip is reserved and cut out of the press band by the same
+        // number, so turning the clock off has to reclaim it or the bar
+        // grows a dead top that refuses presses.
+        assert_eq!(label_room(true, 16.0), 16.0);
+        assert_eq!(label_room(false, 16.0), 0.0);
+        assert!(seeks_at(0.0, label_room(false, 16.0)), "top to bottom answers");
+        assert!(!seeks_at(0.0, label_room(true, 16.0)), "the clock row does not");
+        // A negative height is no room rather than a band starting above
+        // the widget.
+        assert_eq!(label_room(true, -4.0), 0.0);
+    }
+
+    /// One widget action, as `cx.widget_action` builds it.
+    fn action(uid: WidgetUid, what: PlaybackBarAction) -> Action {
+        Box::new(WidgetAction { widget_uid: uid, data: None, action: Box::new(what), group: None })
+    }
+
+    #[test]
+    fn every_reader_finds_its_own_action_in_the_pass_a_press_puts_out() {
+        // The pass a press on the bar lands, in the order it lands it.
+        let uid = WidgetUid(9_001);
+        let pass: ActionsBuf = vec![
+            action(uid, PlaybackBarAction::Grabbed),
+            action(uid, PlaybackBarAction::Scrubbed(60.0)),
+            action(uid, PlaybackBarAction::Seek(60.0)),
+        ];
+        let seek = scan(&pass, uid, |a| match a {
+            PlaybackBarAction::Seek(s) => Some(s),
+            _ => None,
+        });
+        let scrubbed = scan(&pass, uid, |a| match a {
+            PlaybackBarAction::Scrubbed(s) => Some(s),
+            _ => None,
+        });
+        let grabbed = scan(&pass, uid, |a| {
+            matches!(a, PlaybackBarAction::Grabbed).then_some(())
+        });
+        // A reader that took the pass's first action and stopped would
+        // answer None to two of these three, and the seek is the one the
+        // whole widget exists to deliver.
+        assert_eq!(seek, Some(60.0), "a click delivers its seek");
+        assert_eq!(scrubbed, Some(60.0));
+        assert_eq!(grabbed, Some(()));
+        let first = pass[0].downcast_ref::<WidgetAction>().expect("a widget action");
+        assert!(
+            matches!(
+                first.action.downcast_ref::<PlaybackBarAction>(),
+                Some(PlaybackBarAction::Grabbed)
+            ),
+            "and the first of the three is neither of the two"
+        );
+    }
+
+    #[test]
+    fn a_release_is_found_behind_the_scrub_and_the_seek_that_precede_it() {
+        // The pass a finger lifting lands: `Released` is last of four.
+        let uid = WidgetUid(9_002);
+        let pass: ActionsBuf = vec![
+            action(uid, PlaybackBarAction::Scrubbed(90.0)),
+            action(uid, PlaybackBarAction::Seek(90.0)),
+            action(uid, PlaybackBarAction::Released(90.0)),
+        ];
+        let released = scan(&pass, uid, |a| match a {
+            PlaybackBarAction::Released(s) => Some(s),
+            _ => None,
+        });
+        assert_eq!(released, Some(90.0));
+    }
+
+    #[test]
+    fn another_bars_actions_in_the_same_pass_are_not_this_bars() {
+        // Two bars on a page report in one pass. A reader answers for its
+        // own uid and is blind to the other's, however early the other's
+        // action sits.
+        let mine = WidgetUid(9_003);
+        let theirs = WidgetUid(9_004);
+        let pass: ActionsBuf = vec![
+            action(theirs, PlaybackBarAction::Seek(11.0)),
+            action(mine, PlaybackBarAction::Grabbed),
+            action(mine, PlaybackBarAction::Seek(22.0)),
+        ];
+        let pick = |uid| {
+            scan(&pass, uid, |a| match a {
+                PlaybackBarAction::Seek(s) => Some(s),
+                _ => None,
+            })
+        };
+        assert_eq!(pick(mine), Some(22.0));
+        assert_eq!(pick(theirs), Some(11.0));
+        assert_eq!(pick(WidgetUid(9_005)), None, "a bar that said nothing said nothing");
     }
 }
