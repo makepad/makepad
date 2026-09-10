@@ -5,6 +5,8 @@
 //! and cannot drift from the theme files. The visual rows (the radius boxes,
 //! the elevation cards, the type presets, the easing buttons) are DSL, since
 //! text styles and easings are objects reflection does not reach.
+use crate::makepad_widgets::animator::Ease;
+use crate::makepad_widgets::makepad_script::trap::NoTrap;
 use crate::makepad_widgets::reflect::{theme_values, ThemeVal};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
@@ -89,21 +91,28 @@ script_mod! {
     }
 
     mod.stories.FoundationsMotionOverview = StoryPage{
-        StoryNote{text: "Durations in seconds, short to extra long, and the seven easings. Hover a button: its fade takes the long duration and follows the easing it is named after."}
+        StoryNote{text: "Press an easing and the sixteen bars below run out from nothing, each over its own duration. The short ones are done before the long ones start to look like they are moving, which is the point of having sixteen of them. Hovering a button fades it over the long duration with the same easing, so the curve can be read twice."}
         StoryHeading{text: "Easings"}
         StoryRow{
-            Button{text: "standard" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
-            Button{text: "standard decelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard_decelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
-            Button{text: "standard accelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard_accelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
-            Button{text: "emphasized decelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_emphasized_decelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_standard := Button{text: "standard" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_standard_decelerate := Button{text: "standard decelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard_decelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_standard_accelerate := Button{text: "standard accelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_standard_accelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_emphasized_decelerate := Button{text: "emphasized decelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_emphasized_decelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
         }
         StoryRow{
-            Button{text: "emphasized accelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_emphasized_accelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
-            Button{text: "linear" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_linear apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
-            Button{text: "spring" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_spring apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_emphasized_accelerate := Button{text: "emphasized accelerate" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_emphasized_accelerate apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_linear := Button{text: "linear" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_linear apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
+            ease_spring := Button{text: "spring" animator +: {hover: {on: AnimatorState{from: {all: Forward{duration: theme.motion_long_4}} ease: theme.motion_ease_spring apply: {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}}}}}
         }
         StoryHeading{text: "Durations"}
-        mod.storybook.TokenTable{prefixes: ["motion_"]}
+        // A wide bar column and a big scale: the bars are the thing on
+        // this page that moves, so they are given room to move in.
+        // Every other table leaves both at their defaults.
+        durations := mod.storybook.TokenTable{
+            prefixes: ["motion_"]
+            swatch_width: 300.
+            bar_scale: 280.
+        }
     }
 
     mod.stories.FoundationsStateLayers = StoryPage{
@@ -144,6 +153,10 @@ struct Row {
     value: String,
     at: String,
     demo: Demo,
+    /// How long this row's bar takes to run out, in seconds, when the
+    /// table is asked to play. Only a duration token has one; every
+    /// other row sits still.
+    secs: Option<f64>,
 }
 
 enum Demo {
@@ -153,6 +166,18 @@ enum Demo {
     Bar(f64),
     /// The text colour at this opacity.
     Opacity(f64),
+}
+
+/// A run of the bars, from nothing to their full length.
+struct Playing {
+    /// When it started, on the same clock `Cx::seconds_since_app_start`
+    /// hands out, so a frame that arrives late lands where it belongs
+    /// rather than replaying from where the last one stopped.
+    start: f64,
+    ease: Ease,
+    /// The longest row, so the run knows when every bar has arrived.
+    until: f64,
+    next: NextFrame,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -178,6 +203,11 @@ pub struct TokenTable {
     /// Height of one line.
     #[live(30.0)]
     row_height: f64,
+    /// Points per unit for a duration's bar. A duration is a fraction of
+    /// a second, so it needs a big multiplier before it is a length worth
+    /// looking at; every other bar is already in points and ignores this.
+    #[live(60.0)]
+    bar_scale: f64,
     /// Width of the swatch column.
     #[live(72.0)]
     swatch_width: f64,
@@ -189,28 +219,86 @@ pub struct TokenTable {
     value_width: f64,
     #[rust]
     rows: Vec<Row>,
+    #[rust]
+    playing: Option<Playing>,
 }
 
-fn read_rows(cx: &mut Cx, prefixes: &[String]) -> Vec<Row> {
+impl TokenTable {
+    /// Run every duration bar out from nothing, each over its own
+    /// duration, along this curve. Pressing again starts over.
+    pub fn play(&mut self, cx: &mut Cx, ease: Ease) {
+        if self.rows.is_empty() {
+            self.rows = read_rows(cx, &self.prefixes, self.bar_scale);
+        }
+        let until = self.rows.iter().filter_map(|r| r.secs).fold(0.0, f64::max);
+        if until <= 0.0 {
+            return;
+        }
+        self.playing = Some(Playing {
+            start: cx.seconds_since_app_start(),
+            ease,
+            until,
+            next: cx.new_next_frame(),
+        });
+        self.area.redraw(cx);
+    }
+
+    /// How far along its own run this row's bar is, 0 to 1. One when
+    /// nothing is playing, so a table at rest draws its bars full.
+    fn reached(&self, row: &Row, now: f64) -> f64 {
+        let (Some(play), Some(secs)) = (&self.playing, row.secs) else {
+            return 1.0;
+        };
+        if secs <= 0.0 {
+            return 1.0;
+        }
+        play.ease.map(((now - play.start) / secs).clamp(0.0, 1.0))
+    }
+}
+
+impl TokenTableRef {
+    pub fn play(&self, cx: &mut Cx, ease: Ease) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.play(cx, ease);
+        }
+    }
+}
+
+/// The easing a theme token names, read out of the running theme rather
+/// than restated here. An easing is an object, so the reflection surface
+/// that hands out the colours and the numbers does not carry it.
+pub fn theme_ease(cx: &mut Cx, name: &str) -> Ease {
+    let key = LiveId::from_str(name);
+    cx.with_vm(|vm| {
+        let theme = vm.module(id!(theme));
+        let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+        Ease::script_from_value(vm, value)
+    })
+}
+
+fn read_rows(cx: &mut Cx, prefixes: &[String], bar_scale: f64) -> Vec<Row> {
     let mut rows: Vec<(usize, Row)> = Vec::new();
     for (name, _key, val, at) in theme_values(cx) {
         let Some(group) = prefixes.iter().position(|p| name.starts_with(p.as_str())) else {
             continue;
         };
-        let (value, demo) = match val {
-            ThemeVal::Color(c) => (format!("#{c:08x}"), Demo::Color(c)),
+        let (value, demo, secs) = match val {
+            ThemeVal::Color(c) => (format!("#{c:08x}"), Demo::Color(c), None),
             ThemeVal::Num(v) => {
-                let demo = if name.starts_with("state_") {
-                    Demo::Opacity(v)
+                // A duration is a length of TIME, so its bar is that time
+                // scaled to points and it is also how long the bar takes
+                // to get there. Everything else is already a length.
+                let (demo, secs) = if name.starts_with("state_") {
+                    (Demo::Opacity(v), None)
                 } else if name.starts_with("motion_") {
-                    Demo::Bar(v * 60.0)
+                    (Demo::Bar(v * bar_scale), Some(v))
                 } else {
-                    Demo::Bar(v)
+                    (Demo::Bar(v), None)
                 };
-                (format!("{v}"), demo)
+                (format!("{v}"), demo, secs)
             }
         };
-        rows.push((group, Row { name, value, at, demo }));
+        rows.push((group, Row { name, value, at, demo, secs }));
     }
     // Grouped by the prefix list, then by name, so a family reads base,
     // container, and the ladders count up.
@@ -230,8 +318,9 @@ fn color_vec(c: u32) -> Vec4f {
 impl Widget for TokenTable {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.rows.is_empty() {
-            self.rows = read_rows(cx, &self.prefixes);
+            self.rows = read_rows(cx, &self.prefixes, self.bar_scale);
         }
+        let now = cx.seconds_since_app_start();
         cx.begin_turtle(walk, Layout::flow_down());
         let h = self.row_height;
         let rows = std::mem::take(&mut self.rows);
@@ -251,7 +340,11 @@ impl Widget for TokenTable {
                     let mut c = self.draw_text.color;
                     c.w = 0.8;
                     self.draw_swatch.color = c;
-                    let len = len.clamp(2.0, self.swatch_width);
+                    // Floored at 2 so a bar part way out is still a bar
+                    // and not a gap. A run therefore starts from a mark
+                    // rather than from nothing, which also says which
+                    // rows are about to move.
+                    let len = (len * self.reached(row, now)).clamp(2.0, self.swatch_width);
                     self.draw_swatch.draw_abs(
                         cx,
                         Rect { pos: dvec2(rect.pos.x, demo_top + 4.0), size: dvec2(len, demo_height - 8.0) },
@@ -278,10 +371,44 @@ impl Widget for TokenTable {
         DrawStep::done()
     }
 
-    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         // A theme switch arrives as a reload: read the tokens again.
         if let Event::LiveEdit = event {
             self.rows.clear();
+        }
+        // A run asks for the next frame until the longest bar has
+        // arrived, then stops asking. Nothing here runs when nothing is
+        // playing, so a table sitting on a page costs no frames.
+        let Some(play) = &self.playing else {
+            return;
+        };
+        if let Some(_) = play.next.is_event(event) {
+            if cx.seconds_since_app_start() - play.start >= play.until {
+                self.playing = None;
+            } else if let Some(play) = &mut self.playing {
+                play.next = cx.new_next_frame();
+            }
+            self.area.redraw(cx);
+        }
+    }
+}
+
+/// The seven easing buttons run the bars below them.
+fn motion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    const BUTTONS: &[(&[LiveId], &str)] = &[
+        (ids!(ease_standard), "motion_ease_standard"),
+        (ids!(ease_standard_decelerate), "motion_ease_standard_decelerate"),
+        (ids!(ease_standard_accelerate), "motion_ease_standard_accelerate"),
+        (ids!(ease_emphasized_decelerate), "motion_ease_emphasized_decelerate"),
+        (ids!(ease_emphasized_accelerate), "motion_ease_emphasized_accelerate"),
+        (ids!(ease_linear), "motion_ease_linear"),
+        (ids!(ease_spring), "motion_ease_spring"),
+    ];
+    for (id, token) in BUTTONS {
+        if root.button(cx, id).clicked(actions) {
+            let ease = theme_ease(cx, token);
+            root.token_table(cx, ids!(durations)).play(cx, ease);
+            return;
         }
     }
 }
@@ -360,14 +487,23 @@ pub const STORIES: &[Story] = &[
         "# Elevation\n\nFive levels, each a blur radius, a vertical drop and a shadow colour. `ElevatedView1` to `ElevatedView5` apply them to a rounded shadow view.",
         &["ElevatedView1", "ElevatedView2", "ElevatedView3", "ElevatedView4", "ElevatedView5"],
     ),
-    story(
-        "foundations/motion/overview",
-        "Motion",
-        "Overview",
-        "FoundationsMotionOverview",
-        "# Motion\n\nSixteen durations in four bands and seven easings. An easing token is an `Ease` object, so an animator state says `ease: theme.motion_ease_standard`; the buttons above use exactly that.",
-        &[],
-    ),
+    Story {
+        on_actions: Some(motion_actions),
+        ..story(
+            "foundations/motion/overview",
+            "Motion",
+            "Overview",
+            "FoundationsMotionOverview",
+            "# Motion
+
+Sixteen durations in four bands and seven easings.
+
+An easing token is an `Ease` object, not a number, so the reflection surface that lists the theme's colours and numbers does not carry it and the table below has none of them. An animator state names one directly: `ease: theme.motion_ease_standard`, which is what the seven buttons do to their own hover.
+
+Press one and the bars run out from nothing, each over its own duration and along that curve. They arrive at different times because they are different lengths of time, which is the only thing sixteen durations are for: `short_1` is over before `extra_long_4` has visibly started. The bar never goes to nothing, it floors at two points, so a row that is about to move still says where it is.",
+            &[],
+        )
+    },
     story(
         "foundations/state/layers",
         "State",
