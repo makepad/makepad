@@ -551,6 +551,10 @@ impl X11Cx {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let window = &cx.windows[window_id];
                     let (create_position, create_inner_size) = window.create_geom();
+                    let custom_window_chrome = match &cx.os_type {
+                        OsType::LinuxWindow(params) => params.custom_window_chrome,
+                        _ => false,
+                    };
                     let opengl_window = OpenglWindow::new(
                         window_id,
                         gl_cx,
@@ -559,6 +563,7 @@ impl X11Cx {
                         &window.create_title,
                         &window.create_app_id,
                         window.is_fullscreen,
+                        custom_window_chrome,
                     );
                     let window = &mut cx.windows[window_id];
                     window.window_geom = opengl_window.window_geom.clone();
