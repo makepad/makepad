@@ -505,7 +505,7 @@ script_mod! {
         }
     }
 
-    mod.widgets.AppleGlassRoundedView = mod.widgets.GaussRoundedView{
+    mod.widgets.LensedRoundedView = mod.widgets.GaussRoundedView{
         draw_bg +: {
             tint_alpha: 0.10
             surface_alpha: 0.74
@@ -601,6 +601,10 @@ script_mod! {
         }
     }
 
+    // The old name for the block above. It named a vendor rather than the
+    // thing, which this repository does not do, and two examples outside
+    // the library still write it.
+    mod.widgets.AppleGlassRoundedView = mod.widgets.LensedRoundedView{}
     mod.widgets.GaussGradientRoundedView = mod.widgets.GaussRoundedView{
         draw_bg +: {
             blur_level: 4.35

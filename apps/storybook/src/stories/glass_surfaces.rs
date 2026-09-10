@@ -111,7 +111,7 @@ script_mod! {
         }
 
         StoryHeading{text: "The two rounded surfaces underneath"}
-        StoryNote{text: "AppleGlassRoundedView is the tuned preset of GaussRoundedView the whole family sits on, and GaussGradientRoundedView is the version that also lays a gradient over the blur."}
+        StoryNote{text: "LensedRoundedView is the tuned preset of GaussRoundedView the whole family sits on, and GaussGradientRoundedView is the version that also lays a gradient over the blur."}
         StoryRow{
             View{
                 width: Fill height: 150. flow: Overlay
@@ -120,8 +120,8 @@ script_mod! {
                     width: Fill height: Fit flow: Right spacing: theme.space_2
                     align: Align{y: 0.5}
                     padding: theme.mspace_3
-                    AppleGlassRoundedView{width: 150. height: 70.}
-                    Cap{text: "AppleGlassRoundedView"}
+                    LensedRoundedView{width: 150. height: 70.}
+                    Cap{text: "LensedRoundedView"}
                     GaussGradientRoundedView{width: 150. height: 70.}
                     Cap{text: "GaussGradientRoundedView"}
                 }
@@ -139,7 +139,7 @@ pub const STORIES: &[Story] = &[Story {
         "IconSurface", "InputSurface", "RadioSurface",
         "LensButton", "LensButtonProminent", "LensChip", "ClearPanel",
         "List", "ListRow", "CutButton", "ProminentButton", "IconButton", "Body", "ButtonLabel",
-        "AppleGlassRoundedView", "GaussGradientRoundedView",
+        "LensedRoundedView", "GaussGradientRoundedView",
     ],
     name: "Surfaces",
     dsl: "GlassSurfacesOverview",
@@ -149,7 +149,7 @@ pub const STORIES: &[Story] = &[Story {
 
 The lensing backing the glass family is built on, and every preset of it the library ships.
 
-`GaussRoundedView` is the raw surface: it samples the scene behind itself through a chain of mip textures and blurs it. `AppleGlassRoundedView` is the tuned preset the family actually sits on, and `GaussGradientRoundedView` lays a gradient over the blur as well.
+`GaussRoundedView` is the raw surface: it samples the scene behind itself through a chain of mip textures and blurs it. `LensedRoundedView` is the tuned preset the family actually sits on, and `GaussGradientRoundedView` lays a gradient over the blur as well.
 
 `LensSurface` derives from that, and everything else derives from `LensSurface` — the same surface adjusted for what sits on top of it. `ButtonSurface` and `ProminentButtonSurface` for buttons, `ChipSurface` for a chip, `IconSurface` for a square icon target, `InputSurface` for a field, `RadioSurface` for a toggle. **`LensButton`, `LensButtonProminent` and `LensChip` are not buttons.** They are the same surfaces with a padding and a centring, and they carry neither a label nor a press — writing `text:` on one is rejected at runtime, where only the log can see it. Put the label inside. The thing that answers a click is `GlassButton`, on the glass controls page.
 

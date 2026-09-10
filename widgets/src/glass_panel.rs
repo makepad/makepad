@@ -570,7 +570,7 @@ script_mod! {
         }
     }
 
-    mod.widgets.glass.Panel = mod.widgets.AppleGlassRoundedView{
+    mod.widgets.glass.Panel = mod.widgets.LensedRoundedView{
         width: Fill
         height: Fit
         flow: Down
@@ -739,7 +739,7 @@ script_mod! {
         }
     }
 
-    mod.widgets.glass.LensSurface = mod.widgets.AppleGlassRoundedView{
+    mod.widgets.glass.LensSurface = mod.widgets.LensedRoundedView{
         width: Fit
         height: 42
         flow: Overlay
