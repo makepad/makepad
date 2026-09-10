@@ -115,7 +115,11 @@ pub fn toolbar_raised(scroll: f64, raised: bool, lift_at: f64, settle_at: f64) -
     // the same movement, so it is held below it whatever a caller wrote.
     let settle = settle_at.clamp(0.0, lift);
     if raised {
-        scroll > settle
+        // At the settle point the bar is still lifted — it settles as the
+        // content passes it, not on reaching it. But at the very top it is
+        // always flat, whatever the thresholds were set to: a bar lifted
+        // over content that has not moved has nothing to lift away from.
+        scroll > 0.0 && scroll >= settle
     } else {
         scroll > 0.0 && scroll >= lift
     }

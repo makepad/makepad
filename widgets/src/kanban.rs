@@ -1312,7 +1312,7 @@ mod tests {
 
     /// Three columns: a loose one, one that will take three, and one that is
     /// already at its cap of two.
-    fn board() -> KanbanBoardModel {
+    fn sample_board() -> KanbanBoardModel {
         KanbanBoardModel {
             columns: vec![
                 column("To do", 0, &["a", "b", "c"]),
@@ -1332,7 +1332,7 @@ mod tests {
 
     #[test]
     fn a_card_moved_down_its_own_column_gives_back_the_gap_it_left() {
-        let mut board = board();
+        let mut board = sample_board();
         // "a" is carried to the gap under "c", which is gap 3 while "a" is
         // still lying in the column.
         assert_eq!(board.apply(0, 0, 0, 3), KanbanLanding::Moved { to: 2 });
@@ -1341,14 +1341,14 @@ mod tests {
 
     #[test]
     fn a_card_moved_up_its_own_column_lands_in_the_gap_itself() {
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(0, 2, 0, 0), KanbanLanding::Moved { to: 0 });
         assert_eq!(cards(&board, 0), vec!["c", "a", "b"]);
     }
 
     #[test]
     fn a_card_dropped_back_where_it_lies_moves_nothing() {
-        let mut board = board();
+        let mut board = sample_board();
         // Its own gap, and the gap directly under it: both are where it
         // already is.
         assert_eq!(board.apply(0, 1, 0, 1), KanbanLanding::Nothing);
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn a_card_crosses_to_another_column_at_the_gap_it_was_dropped_in() {
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(0, 1, 1, 0), KanbanLanding::Moved { to: 0 });
         assert_eq!(cards(&board, 0), vec!["a", "c"]);
         assert_eq!(cards(&board, 1), vec!["b", "d"]);
@@ -1366,20 +1366,20 @@ mod tests {
 
     #[test]
     fn a_card_dropped_past_the_last_one_lands_at_the_end() {
-        let mut board = board();
+        let mut board = sample_board();
         // Past the end of another column: the gap is that column's length.
         assert_eq!(board.apply(0, 0, 1, 1), KanbanLanding::Moved { to: 1 });
         assert_eq!(cards(&board, 1), vec!["d", "a"]);
         // And past the end of its own, which counts itself and gives it
         // back.
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(0, 0, 0, 3), KanbanLanding::Moved { to: 2 });
         assert_eq!(cards(&board, 0), vec!["b", "c", "a"]);
     }
 
     #[test]
     fn a_gap_past_the_end_of_a_short_column_is_still_the_end() {
-        let mut board = board();
+        let mut board = sample_board();
         // A pointer below every card in a nearly empty column can name a gap
         // beyond it; the card lands at the end rather than nowhere.
         assert_eq!(board.apply(0, 0, 1, 9), KanbanLanding::Moved { to: 1 });
@@ -1388,7 +1388,7 @@ mod tests {
 
     #[test]
     fn a_full_column_refuses_a_card_from_another_one() {
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(0, 0, 2, 1), KanbanLanding::Refused);
         assert_eq!(cards(&board, 0), vec!["a", "b", "c"], "the card stayed put");
         assert_eq!(cards(&board, 2), vec!["e", "f"]);
@@ -1398,14 +1398,14 @@ mod tests {
     fn a_full_column_still_puts_its_own_cards_in_order() {
         // A cap is about how much work is in flight, not about whether the
         // column may be tidied.
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(2, 0, 2, 2), KanbanLanding::Moved { to: 1 });
         assert_eq!(cards(&board, 2), vec!["f", "e"]);
     }
 
     #[test]
     fn a_column_under_its_cap_takes_one_more_and_then_is_full() {
-        let mut board = board();
+        let mut board = sample_board();
         assert!(board.push(1, "g"), "the second of three");
         assert!(board.push(1, "h"), "the third");
         assert!(!board.push(1, "i"), "and no more");
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn a_drop_that_names_nothing_that_exists_does_nothing() {
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(9, 0, 0, 0), KanbanLanding::Nothing);
         assert_eq!(board.apply(0, 9, 0, 0), KanbanLanding::Nothing);
         assert_eq!(board.apply(0, 0, 9, 0), KanbanLanding::Nothing);
@@ -1424,7 +1424,7 @@ mod tests {
 
     #[test]
     fn a_count_says_the_cap_only_when_there_is_one() {
-        let board = board();
+        let board = sample_board();
         assert_eq!(board.columns[0].count_text(), "3");
         assert_eq!(board.columns[1].count_text(), "1 / 3");
         assert!(!board.columns[1].is_full());
@@ -1492,7 +1492,7 @@ mod tests {
         assert_eq!(drag.commit(), Some((0, 0, 0, 3)));
         // And what the board makes of that: gap 3 of its own column, with
         // the card itself counted in it, is index 2.
-        let mut board = board();
+        let mut board = sample_board();
         assert_eq!(board.apply(0, 0, 0, 3), KanbanLanding::Moved { to: 2 });
     }
 

@@ -27,6 +27,9 @@ script_mod! {
                 // repository declares zero here for the same reason.
                 rows: 0
                 cols: 3
+                // On, so the page shows what a sortable heading looks like
+                // before it is sorted as well as after.
+                sortable: true
                 default_col_width: 150.0
                 default_row_height: 24.0
                 allow_col_reorder: true

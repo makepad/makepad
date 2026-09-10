@@ -206,6 +206,9 @@ pub enum NumberSpinAction {
 /// one step is never read as two.
 const REPEAT_DELAY: f64 = 0.4;
 const REPEAT_EVERY: f64 = 0.06;
+/// How far a press on the field body must travel before it is read as a
+/// scrub rather than as somebody selecting the number to retype.
+const BODY_DRAG_SLOP: f64 = 4.0;
 /// Travel, in layout points, that a drag on the column spends per step.
 const DRAG_POINTS_PER_STEP: f64 = 6.0;
 /// The glyphs on the two halves.
@@ -399,6 +402,12 @@ pub struct NumberField {
     focused: bool,
     #[rust]
     hovered: bool,
+    /// A press in flight on the field body: where it started, how many
+    /// steps it has already reported, and whether it has become a
+    /// scrub. Kept apart from the spin column's own drag, which is a
+    /// different gesture on a different target.
+    #[rust]
+    body_drag: Option<(DVec2, f64, bool)>,
 
     #[walk]
     walk: Walk,
@@ -609,6 +618,52 @@ impl Widget for NumberField {
                 }
                 _ => {}
             }
+        }
+
+        // Dragging the FIELD changes the value, not only dragging the
+        // step column. Watched as raw mouse events rather than through
+        // `hits`, because the text box covers the field and would take
+        // the press first: by the time a hit came back the input would
+        // already be selecting text.
+        //
+        // Vertical is the value, horizontal is the text. Whichever way
+        // the pointer commits to first wins the gesture, so selecting a
+        // number to retype still works and a drag up still counts.
+        let rect = self.draw_bg.area().rect(cx);
+        match event {
+            Event::MouseDown(e) if rect.contains(e.abs) => {
+                self.body_drag = Some((e.abs, 0.0, false));
+            }
+            Event::MouseMove(e) => {
+                if let Some((from, reported, scrubbing)) = self.body_drag {
+                    let dx = (e.abs.x - from.x).abs();
+                    let dy = from.y - e.abs.y;
+                    if !scrubbing {
+                        // Not decided yet. It becomes a scrub only when
+                        // the pointer has gone further up or down than
+                        // across; a press that wanders sideways is
+                        // somebody selecting the number.
+                        if dy.abs() > BODY_DRAG_SLOP && dy.abs() > dx {
+                            self.body_drag = Some((from, 0.0, true));
+                        } else if dx > BODY_DRAG_SLOP {
+                            self.body_drag = None;
+                        }
+                    }
+                    if let Some((from, reported, true)) = self.body_drag {
+                        let want = ((from.y - e.abs.y) / DRAG_POINTS_PER_STEP).trunc();
+                        if want != reported {
+                            let v = self.value + (want - reported) * self.step;
+                            self.commit(cx, v);
+                            self.body_drag = Some((from, want, true));
+                        }
+                    }
+                    let _ = reported;
+                }
+            }
+            Event::MouseUp(_) => {
+                self.body_drag = None;
+            }
+            _ => {}
         }
 
         // The wheel works anywhere over the field, including over the text,

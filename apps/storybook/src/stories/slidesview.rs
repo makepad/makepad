@@ -23,7 +23,7 @@ script_mod! {
                 SlideChapter{
                     title := H1{text: "Hey!"}
                     SlideBody{text: "This is the 1st slide. Use your right\ncursor key to show the next slide."}
-            }
+                }
 
                 Slide{
                     title := H1{text: "Second slide"}

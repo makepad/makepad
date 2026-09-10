@@ -48,7 +48,7 @@ script_mod! {
         }
 
         StoryHeading{text: "A panel the person drags"}
-        StoryNote{text: "ExpandablePanel puts its panel over a background and lets you pull it up and down. It reports the offset as it moves, so a host can fade the background or snap it somewhere; nothing snaps on its own. initial_offset is how far down it starts."}
+        StoryNote{text: "ExpandablePanel puts its panel over a background and lets you pull it up and down. It reports the offset as it moves, so a host can fade the background or snap it somewhere; nothing snaps on its own. initial_offset is how far down it starts and how far up a drag may take it. The panel is the child named panel, and it is declared last because this is an overlay."}
         StoryRow{
             reset_panel := Button{text: "reset"}
             offset_state := Label{text: "offset 0"}
@@ -138,7 +138,11 @@ I had this page telling you `is_animating` was broken. It is not: driven with th
 
 ## ExpandablePanel — the person moves it
 
-Its `panel` sits over a background and is dragged up and down by hand. `initial_offset` is where it starts, `scrolled_at` reports the offset as it moves, `reset` puts it back and `get_current_offset` asks where it is.
+Its `panel` sits over a background and is dragged up and down by hand. `scrolled_at` reports the offset as it moves, `reset` puts it back and `get_current_offset` asks where it is.
+
+**The panel is a child you name `panel`, and it goes last.** The widget is an overlay, so the child written last is the one painted on top — the background first, the panel after it. The widget used to hold that slot open itself, which is why the panel came out invisible: a child declared on a preset is copied into every instance ahead of the instance's own children, so the panel was always the first child and always underneath the background it is meant to sit above.
+
+`initial_offset` is how far down the panel rests and the whole of the travel: pulled all the way up it meets the top of the area and stops there, and it does not go below where it started.
 
 **Nothing snaps and nothing settles by itself.** If you want it to spring to a detent, fade the background as it rises, or refuse to go past a point, that is your code reading `scrolled_at` — the widget hands you the number and takes no view about it. That is the opposite of the drawer's sheet detents, which do settle on their own.",
     subject: "sliding",

@@ -1185,10 +1185,21 @@ impl DataGrid {
                 self.draw_cell.draw_abs(cx, rect);
                 let data_col = self.display_to_data(display_col);
                 let mut label = self.col_label(data_col);
-                if let Some((sort_col, asc)) = self.sort_indicator {
-                    if sort_col == data_col {
-                        label.push_str(if asc { " ▲" } else { " ▼" });
+                // A column that CAN be sorted says so before it is, with a
+                // pale pair of marks. Without it there is nothing on screen
+                // to tell a sortable heading from a plain one, and the only
+                // way to find out is to press every heading in the row.
+                let can_sort = self.sortable && !self.unsortable_cols.contains(&data_col);
+                match self.sort_indicator {
+                    Some((sort_col, asc)) if sort_col == data_col => {
+                        label.push_str(if asc { "  ▲" } else { "  ▼" });
                     }
+                    // The filled pair, not the hollow one: the hollow
+                    // triangles are only in faces this chain does not carry
+                    // and rendered as tofu. Two marks means "either way from
+                    // here", one means "this way".
+                    _ if can_sort => label.push_str("  ▲▼"),
+                    _ => {}
                 }
                 if w >= 15.0 {
                     let cell = GridCell {

@@ -1,8 +1,9 @@
-//! The lists story: one that draws every row it is given, and one that lets
-//! a person drag the rows into a different order.
+//! The lists story: the two list widgets that are not the portal list, what
+//! each one is for, and what neither of them keeps. The reorder demo owns the
+//! order and applies the move itself, because that is the whole of the
+//! widget's contract: it reports where a row was dropped and moves nothing.
 use crate::makepad_widgets::flat_list::FlatList;
-use crate::makepad_widgets::portal_list::PortalList;
-use crate::makepad_widgets::reorder_list::ReorderListAction;
+use crate::makepad_widgets::reorder_list::ReorderList;
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -11,16 +12,30 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.storybook.StoryListsBase = #(StoryLists::register_widget(vm))
+    // A list is Fill by nature and Fill inside a scrolling page resolves to
+    // nothing at all, so every list here sits in a box with a real height.
+    // The face is part of the point: the EMPTY list further down is only
+    // legible as an empty list if the box it does not fill can be seen.
+    let ListBox = RoundedView{
+        width: Fill
+        height: 168.
+        draw_bg +: {
+            color: theme.color_surface_container_low
+            border_radius: theme.radius_m
+        }
+    }
 
-    mod.storybook.StoryLists = set_type_default() do mod.storybook.StoryListsBase{
+    mod.storybook.StoryFlatRowsBase = #(StoryFlatRows::register_widget(vm))
+
+    mod.storybook.StoryFlatRows = set_type_default() do mod.storybook.StoryFlatRowsBase{
         width: Fill
         height: Fit
         flow: Down
-        spacing: theme.space_2
 
-        View{
-            width: Fill height: 180.
+        /** hand the list its rows; false leaves the model empty */
+        filled: true
+
+        ListBox{
             flat := FlatList{
                 width: Fill height: Fill
                 Row := View{
@@ -30,12 +45,21 @@ script_mod! {
                 }
             }
         }
+    }
 
-        View{
-            width: Fill height: 220.
+    mod.storybook.StoryReorderRowsBase = #(StoryReorderRows::register_widget(vm))
+
+    mod.storybook.StoryReorderRows = set_type_default() do mod.storybook.StoryReorderRowsBase{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: theme.space_2
+
+        ListBox{
+            height: 220.
             // The gripper is named here and pointed at: the list watches that
             // one child of every row and starts a reorder from a press on it,
-            // so a drag anywhere else still scrolls.
+            // so a drag anywhere else on the row still scrolls.
             reorder := ReorderList{
                 width: Fill height: Fill
                 drag_handle: @gripper
@@ -56,59 +80,103 @@ script_mod! {
                 }
             }
         }
+        // What the list said, in the list's own terms. It starts out saying
+        // nothing, because until a row is dropped the list has said nothing.
+        report := Label{text: "nothing reported yet"}
     }
 
     mod.stories.ListsOverview = StoryPage{
-        StoryNote{text: "Two lists that are not the portal list, and one of them is only a specialisation of it. What separates all three is how much they hold on your behalf."}
+        StoryNote{text: "Four widgets show many rows. Two of them are here; the portal list and the data grid have pages of their own. What separates them is how much each one holds on your behalf, and the answer is never your rows."}
 
-        StoryHeading{text: "A list of rows, and a list you can reorder"}
-        StoryNote{text: "The first draws whatever rows it is handed. The second is a portal list that also watches one named child of each row — the gripper — and turns a press on that into a drag. Take hold of a gripper and move a row; the order below follows, because the list moved nothing itself."}
-        demo := mod.storybook.StoryLists{}
-        StoryRow{
-            order := Label{text: "order: A B C D E F G H"}
+        StoryHeading{text: "A list that draws every row"}
+        StoryNote{text: "`FlatList` is asked for each row by an id you choose, and it draws all of them: no visible range to work out, nothing recycled, no scroll arithmetic. Reach for it when the count is bounded by the design rather than by the data — a settings group, a legend, the ten rows below. Hand it a thousand expensive rows and it will draw a thousand expensive rows, on every frame."}
+        flat_demo := mod.storybook.StoryFlatRows{}
+        StoryNote{text: "The id is the row's identity. The widget built for it is kept and handed back, so what a row holds — a cursor in a text field, a half-typed number — survives the next draw, and nothing evicts it either. Ids that come and go with the data leave their widgets behind, so number rows by position unless per-row state has to follow the row rather than the place."}
+
+        StoryHeading{text: "A list you can reorder"}
+        StoryNote{text: "`ReorderList` is a portal list with one addition, and it is driven exactly like one: same templates, same item range, same virtualisation, same item actions. What it adds is `drag_handle`, which names one child of the row template — the gripper here. A press on that child is taken before the inner list ever sees it, so a drag on the gripper reorders and a drag anywhere else on the row still scrolls. Four pixels of travel decide which: under that, a press on the gripper is still a click."}
+        reorder_demo := mod.storybook.StoryReorderRows{}
+        StoryNote{text: "Take hold of a gripper and move. A line marks the gap the row would land in, Escape abandons the gesture, the wheel is ignored while it lasts so the rows cannot slide out from under the pointer, and holding at the top or bottom edge crawls the list, so a long one can be reordered end to end in one gesture."}
+        StoryNote{text: "On release it reports `from` and `to` and stops there — it moves nothing. The line under the list is this page removing that row and inserting it, which is all a host has to do: `to` arrives already adjusted for the removal, and adjusting it a second time lands every downward drag one row short of the gap it was dropped in. A drop back where the row started reports nothing, and neither does a press that never became a drag."}
+
+        StoryHeading{text: "With no rows"}
+        StoryNote{text: "A list with nothing in it paints its background and stops: no message, no placeholder, no apology. That is a division of labour rather than an oversight, because the list cannot know why it is empty and the reader has to. Nothing yet, nothing matched, not allowed, the fetch failed, no connection — five answers, and a blank box is none of them."}
+        empty_demo := mod.storybook.StoryFlatRows{filled: false}
+        StoryNote{text: "The same widget and the same draw loop as the first list, over an empty model. Put an `EmptyState` in the space the list would have filled and say which of the five this is."}
+        ListBox{
+            height: Fit
+            EmptyStateNothingYet{}
+        }
+
+        StoryHeading{text: "Which of the four"}
+        StoryNote{text: "`FlatList` when the rows are few and the count is bounded by the design: it draws them all and costs what they cost."}
+        StoryNote{text: "`PortalList` when the rows are many or unbounded: it works out which of them are on screen, asks for those, and recycles the widgets behind them, so a thousand posts cost a screenful."}
+        StoryNote{text: "`ReorderList` when the order is itself the data — a playlist, a queue, a set of steps to run in turn. It is a portal list, so that choice is already made; what it adds is the gesture and the report."}
+        StoryNote{text: "`DataGrid` when a row is columns that line up and can be selected, resized and moved about: a spreadsheet rather than a list. Both axes are virtualised and it asks for one cell at a time."}
+    }
+}
+
+/// The rows both demos show. Ten, so that the box scrolls: a list that fits
+/// inside its box demonstrates nothing about how either widget fills one.
+const NAMES: &[&str] = &[
+    "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett",
+];
+
+/// Apply a reorder the list has only reported: take the row out at `from`,
+/// put it back at `to`.
+///
+/// `to` arrives ALREADY adjusted for the removal — the widget did that when
+/// it turned the drop slot into an index — so this must not adjust it again.
+/// This page did, and every downward drag landed one row short of the gap it
+/// was dropped in.
+fn apply_move<T>(rows: &mut Vec<T>, from: usize, to: usize) -> bool {
+    // `to` indexes the list with that row already taken out of it, so the
+    // last place either index may name is the same one.
+    if from >= rows.len() || to >= rows.len() || from == to {
+        return false;
+    }
+    let row = rows.remove(from);
+    rows.insert(to, row);
+    true
+}
+
+/// A flat list over the names, or over nothing at all: the empty section of
+/// the page is this same widget with `filled: false`, so what stands there is
+/// a real list with a real row template and no rows.
+#[derive(Script, ScriptHook, Widget)]
+pub struct StoryFlatRows {
+    #[deref]
+    view: View,
+    #[live(true)]
+    filled: bool,
+}
+
+impl StoryFlatRows {
+    fn rows(&self) -> &'static [&'static str] {
+        if self.filled {
+            NAMES
+        } else {
+            &[]
         }
     }
 }
 
-const NAMES: &[&str] = &["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"];
-
-#[derive(Script, ScriptHook, Widget)]
-pub struct StoryLists {
-    #[deref]
-    view: View,
-    /// The model. The reorder list deliberately owns none of this: it reports
-    /// where a row was dropped and the host is what actually moves it.
-    #[rust(NAMES.iter().map(|s| s.to_string()).collect::<Vec<String>>())]
-    order: Vec<String>,
-}
-
-impl Widget for StoryLists {
+impl Widget for StoryFlatRows {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = item.borrow_mut::<FlatList>() {
-                // A flat list is asked for each row by id; it draws them all
-                // rather than working out which are on screen.
-                for (i, name) in self.order.iter().enumerate() {
-                    let id = LiveId(i as u64 + 1);
-                    if let Some(row) = list.item(cx, id, live_id!(Row)) {
-                        row.label(cx, ids!(label)).set_text(cx, name);
-                        row.draw_all(cx, &mut Scope::empty());
-                    }
-                }
+            let Some(mut list) = item.borrow_mut::<FlatList>() else {
                 continue;
-            }
-            // A reorder list IS a portal list, so it is driven like one.
-            if let Some(mut list) = item.borrow_mut::<PortalList>() {
-                list.set_item_range(cx, 0, self.order.len());
-                while let Some(id) = list.next_visible_item(cx) {
-                    let Some(name) = self.order.get(id) else {
-                        continue;
-                    };
-                    let name = name.clone();
-                    let row = list.item(cx, id, live_id!(Row));
-                    row.label(cx, ids!(label)).set_text(cx, &name);
-                    row.draw_all(cx, &mut Scope::empty());
-                }
+            };
+            // Every row, every draw. There is no visible range to ask for and
+            // nothing to recycle, so the loop runs over the whole model.
+            for (i, name) in self.rows().iter().enumerate() {
+                // Row ids are the caller's to choose, and they start at one
+                // here because LiveId(0) is the id of nothing.
+                let Some(row) = list.item(cx, LiveId(i as u64 + 1), live_id!(Row)) else {
+                    continue;
+                };
+                row.label(cx, ids!(label)).set_text(cx, name);
+                row.draw_all(cx, &mut Scope::empty());
             }
         }
         DrawStep::done()
@@ -119,43 +187,75 @@ impl Widget for StoryLists {
     }
 }
 
-impl StoryLists {
-    /// Apply a reorder the list has only reported. Nothing moves until this
-    /// runs, which is the whole contract.
-    fn move_row(&mut self, from: usize, to: usize) -> bool {
-        if from >= self.order.len() || to > self.order.len() || from == to {
-            return false;
+/// The reorder demo. The order lives here because the list deliberately does
+/// not keep it: the widget reports a drop and this applies it.
+#[derive(Script, ScriptHook, Widget)]
+pub struct StoryReorderRows {
+    #[deref]
+    view: View,
+    #[rust(NAMES.iter().map(|s| s.to_string()).collect::<Vec<String>>())]
+    order: Vec<String>,
+}
+
+impl StoryReorderRows {
+    /// Apply what the list reported, and answer with the row that moved.
+    fn apply(&mut self, from: usize, to: usize) -> Option<String> {
+        apply_move(&mut self.order, from, to).then(|| self.order[to].clone())
+    }
+}
+
+impl Widget for StoryReorderRows {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            // Borrowed as a ReorderList, never as the PortalList it derefs
+            // to: the concrete widget here IS the reorder list, a downcast to
+            // the base matches nothing, and a host that asks for the base
+            // draws no rows at all and is told nothing about why.
+            let Some(mut list) = item.borrow_mut::<ReorderList>() else {
+                continue;
+            };
+            // From here on it is driven exactly like the portal list it is.
+            list.set_item_range(cx, 0, self.order.len());
+            while let Some(id) = list.next_visible_item(cx) {
+                let Some(name) = self.order.get(id) else {
+                    continue;
+                };
+                let name = name.clone();
+                let row = list.item(cx, id, live_id!(Row));
+                row.label(cx, ids!(label)).set_text(cx, &name);
+                row.draw_all(cx, &mut Scope::empty());
+            }
         }
-        let row = self.order.remove(from);
-        let to = if to > from { to - 1 } else { to };
-        self.order.insert(to.min(self.order.len()), row);
-        true
+        DrawStep::done()
     }
 
-    fn order_text(&self) -> String {
-        format!("order: {}", self.order.join(" "))
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
     }
 }
 
 fn lists_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
-    let host = root.widget(cx, ids!(demo));
+    let list = root.reorder_list(cx, ids!(reorder_demo.reorder));
+    // The list's own reader rather than a scan of every action: it filters by
+    // the list's uid, so a page carrying more than one list cannot pick up
+    // the wrong one's report.
+    let reported = {
+        let borrowed = list.borrow();
+        let Some(inner) = borrowed else { return };
+        inner.reordered(actions)
+    };
+    let Some((from, to)) = reported else { return };
+    let host = root.widget(cx, ids!(reorder_demo));
     let mut moved = None;
-    for action in actions {
-        if let ReorderListAction::Reordered { from, to } = action.as_widget_action().cast() {
-            moved = Some((from, to));
-        }
+    if let Some(mut inner) = host.borrow_mut::<StoryReorderRows>() {
+        moved = inner.apply(from, to);
     }
-    let Some((from, to)) = moved else { return };
-    let mut text = None;
-    if let Some(mut inner) = host.borrow_mut::<StoryLists>() {
-        if inner.move_row(from, to) {
-            text = Some(inner.order_text());
-        }
-    }
-    if let Some(text) = text {
-        root.label(cx, ids!(order)).set_text(cx, &text);
-        host.redraw(cx);
-    }
+    let Some(name) = moved else { return };
+    root.label(cx, ids!(reorder_demo.report)).set_text(
+        cx,
+        &format!("reported from {from} to {to}: this page moved {name}"),
+    );
+    host.redraw(cx);
 }
 
 pub const STORIES: &[Story] = &[Story {
@@ -166,26 +266,94 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "ListsOverview",
     added: "2025-05-06",
-    tags: &[],
+    tags: &["list", "rows", "reorder", "drag", "gripper", "virtualisation", "empty"],
     doc: "# FlatList and ReorderList
 
-Two lists that are not `PortalList`, though one of them is made of it. What separates all three is **how much each holds on your behalf**.
+Four widgets show many rows. Two of them are on this page; `PortalList` and `DataGrid` have pages of their own. What separates them is **how much each one holds on your behalf**, and the answer is never your rows.
 
 ## FlatList
 
-Asked for each row by id, and it draws them all. There is no visible range to compute and no recycling: it is the list you want when there are twenty rows and virtualisation would be ceremony. Give it more than a screenful of expensive rows and it will draw every one of them.
+Asked for each row by an id you choose, and it draws all of them. There is no visible range to compute, nothing to recycle and no scroll arithmetic: it is a scrolling box with your rows in it.
+
+Reach for it when the count is bounded by the design rather than by the data — a settings group, a legend, a menu of twenty things. Hand it a thousand expensive rows and it draws a thousand expensive rows on every frame, which is not slow once, it is slow always.
+
+**The id is the row's identity.** `item(cx, id, template)` builds the widget the first time and hands the same one back afterwards, so what a row holds — a cursor in a text field, a half-typed number — survives the next draw. Nothing evicts it, either: an id you stop asking for keeps its widget for the life of the list. Numbering rows by position keeps that map bounded, at the price of per-row state following the place rather than the row.
 
 ## ReorderList
 
-A `PortalList` that can also reorder itself — templates, scrolling, virtualisation and item actions all pass straight through, because the portal list is its deref base.
+A `PortalList` that can also reorder itself. The portal list is its `#[deref]` base, so templates, scrolling, virtualisation and item actions all pass straight through, and it is driven exactly like one: `set_item_range`, then `next_visible_item` in a loop.
 
-What it adds is one rule: `drag_handle` names **a child of the row template**, and a press on that child becomes a reorder instead of a scroll. The press is captured by the reorder list *before* the inner portal list sees it, so drag-to-scroll never fights the gesture — and a drag anywhere else on the row still scrolls, which is what you want.
+**Borrow it as a `ReorderList`, not as a `PortalList`.** The concrete widget is the reorder list; the portal list is the field it derefs to, and a downcast to the base matches nothing, silently, leaving a demo that draws no rows at all.
 
-**It moves nothing.** On release it raises `Reordered { from, to }` with indices into the host's own range, and stops. The model is yours, the move is yours, the redraw is yours. This page keeps a `Vec` of names and applies the move itself; take the list's report away and the rows spring back, because the list never held the order in the first place.
+What it adds is one rule: `drag_handle` names **a child of the row template**, and a press on that child becomes a reorder instead of a scroll. The press is captured by the reorder list *before* the inner portal list sees it, so drag-to-scroll never fights the gesture — and a drag anywhere else on the row still scrolls, which is what you want. `drag_threshold`, four pixels by default, is where a click ends and a drag begins.
 
-The widget's own source records why no `Area` is cached anywhere inside it: a finger capture is keyed on the captured widget's area, every redraw remaps that capture to a fresh one, and any area a widget snapshots for itself goes stale on the first redraw — `hits` then fails `is_valid` and returns nothing for ever. The gripper's current area is re-resolved from the live row on every event instead.",
-    subject: "demo",
+While the gesture lasts, an indicator line marks the gap the row would land in, Escape abandons it, the wheel is swallowed so the rows cannot slide out from under the pointer, and a pointer held at the top or bottom edge crawls the list, so a long list can be reordered end to end in one gesture. `drag_state()` answers with `(from, slot)` while you draw, for a host that wants to tint the row being carried.
+
+### What it reports
+
+**It moves nothing.** On release it raises `Reordered { from, to }` — read with `reordered(actions)` — carrying indices into the host's own range, and stops. The model is yours, the move is yours, the redraw is yours:
+
+```
+let row = rows.remove(from);
+rows.insert(to, row);
+```
+
+`to` is **already adjusted for the removal**. Subtracting one again is the easy mistake, and it lands every downward drag one row short of the gap it was dropped in. A drop back where the row started reports nothing, and neither does a press that never passed the threshold.
+
+The widget's own source records why no `Area` is cached anywhere inside it: a finger capture is keyed on the captured widget's area, every redraw remaps that capture to a fresh one, and any area a widget snapshots for itself goes stale on the first redraw — `hits` then fails `is_valid` and returns nothing for ever. The gripper's current area is re-resolved from the live row on every event instead.
+
+## With no rows
+
+Both lists paint their background and stop. No message, no placeholder: the list cannot know *why* it is empty and the reader has to. Nothing yet, nothing matched, not allowed to see them, the fetch failed, the device is offline — five answers, and a blank rectangle is none of them. Put an `EmptyState` in the space the list would have filled.
+
+## Which of the four
+
+| Widget | Reach for it when | What it holds |
+|---|---|---|
+| `FlatList` | the rows are few and bounded by the design | every row widget, by your id, for the life of the list |
+| `PortalList` | the rows are many or unbounded | a visible window, recycled |
+| `ReorderList` | the order is itself the data | that window, plus one live gesture |
+| `DataGrid` | a row is columns that line up, select and resize | a sparse size table for both axes |",
+    subject: "reorder_demo.reorder",
     feature: None,
     controls: &[],
     on_actions: Some(lists_actions),
 }];
+
+#[cfg(test)]
+mod tests {
+    use super::apply_move;
+
+    fn rows() -> Vec<&'static str> {
+        vec!["A", "B", "C", "D"]
+    }
+
+    #[test]
+    fn a_reported_move_is_applied_exactly_as_reported() {
+        // What the list reports for A dragged into the gap between C and D.
+        let mut rows = rows();
+        assert!(apply_move(&mut rows, 0, 2));
+        // Adjusting `to` for the removal a second time would give B A C D:
+        // the row one place short of the gap it was dropped in.
+        assert_eq!(rows, ["B", "C", "A", "D"]);
+    }
+
+    #[test]
+    fn dragging_upward_lands_on_the_index_reported() {
+        let mut rows = rows();
+        assert!(apply_move(&mut rows, 3, 0));
+        assert_eq!(rows, ["D", "A", "B", "C"]);
+    }
+
+    #[test]
+    fn a_move_that_moves_nothing_is_refused() {
+        let mut rows = rows();
+        assert!(!apply_move(&mut rows, 2, 2), "onto its own place");
+        assert!(!apply_move(&mut rows, 4, 0), "no such row");
+        assert!(
+            !apply_move(&mut rows, 0, 4),
+            "no such place: `to` indexes the shortened list"
+        );
+        assert_eq!(rows, ["A", "B", "C", "D"], "and nothing moved");
+    }
+}

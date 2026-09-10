@@ -1,9 +1,10 @@
 use crate::{
     animator::Animate,
-    gauss_view::{request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
+    gauss_view::{arm_gauss_capture, request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
+    overlay_place::span_inboard,
     view::View,
     widget::*,
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
@@ -20,6 +21,7 @@ script_mod! {
     mod.widgets.glass.GlassButtonBase = #(GlassButton::register_widget(vm))
     mod.widgets.glass.GlassSliderBase = #(GlassSlider::register_widget(vm))
     mod.widgets.glass.GlassSegmentedBase = #(GlassSegmented::register_widget(vm))
+    mod.widgets.glass.FloatingSurfaceBase = #(GlassFloatingSurface::register_widget(vm))
 
     mod.widgets.glass.Layer = mod.widgets.glass.LayerBase{
         width: Fill
@@ -664,6 +666,78 @@ script_mod! {
         }
     }
 
+    /** A sheet of glass that floats over the page: moved by its body, sized
+     * by its edges and its corners. */
+    mod.widgets.glass.FloatingSurface = set_type_default() do mod.widgets.glass.FloatingSurfaceBase{
+        /** where it opens, in window points */
+        pos: vec2(120., 120.)
+        /** how big it opens */
+        size: vec2(320., 220.)
+        /** it never gets smaller than this */
+        min_size: vec2(140., 96.)
+        /** nor bigger; a zero side means the window is the only ceiling */
+        max_size: vec2(0., 0.)
+        /** how far either side of an edge a press still takes hold of it, in points 2..24 step 1 */
+        grab_margin: 8.
+        /** the corner mark's side, in points; 0 draws none 0..48 step 1 */
+        grip_size: 24.
+        /** the body moves it 0..1 step 1 */
+        movable: true
+        /** the edges and the corners size it 0..1 step 1 */
+        resizable: true
+
+        content := mod.widgets.glass.Panel{
+            width: Fill
+            height: Fill
+            flow: Down
+            spacing: 12
+            padding: 16
+            // Scrolled, not spilled: the surface can be dragged smaller than
+            // whatever was put on it, and content that ran out past the glass
+            // would sit on the page with no sheet under it.
+            body := View{
+                width: Fill
+                height: Fill
+                flow: Down
+                spacing: 12
+                scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+            }
+        }
+
+        draw_grip +: {
+            /** pointer-on-the-frame mix 0..1 step 0.01 */
+            hover: uniform(0.0)
+            grip_color: uniform(#xffffffcc)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let c = self.grip_color * (0.55 + self.hover * 0.45)
+                // Six dots stepped down the corner's diagonal. Dots and not
+                // hatch lines: a mark this small drawn as a path does not
+                // paint reliably. They start 7 points in from each edge so
+                // they clear the panel's rounded corner rather than sitting
+                // on the unpainted bite it takes out of the square.
+                let r = 1.4
+                let s = 5.5
+                let b = 7.0
+                sdf.circle(w - b, h - b, r)
+                sdf.fill(c)
+                sdf.circle(w - b - s, h - b, r)
+                sdf.fill(c)
+                sdf.circle(w - b, h - b - s, r)
+                sdf.fill(c)
+                sdf.circle(w - b - s * 2.0, h - b, r)
+                sdf.fill(c)
+                sdf.circle(w - b - s, h - b - s, r)
+                sdf.fill(c)
+                sdf.circle(w - b, h - b - s * 2.0, r)
+                sdf.fill(c)
+                return sdf.result
+            }
+        }
+    }
+
     mod.widgets.glass.LensSurface = mod.widgets.AppleGlassRoundedView{
         width: Fit
         height: 42
@@ -1138,6 +1212,7 @@ script_mod! {
     }
 
     mod.widgets.GlassPanel = mod.widgets.glass.Panel{}
+    mod.widgets.GlassFloatingSurface = mod.widgets.glass.FloatingSurface{}
 }
 
 #[derive(Script, Widget)]
@@ -1271,7 +1346,12 @@ impl ScriptHook for GlassRadio {
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
-        vm.with_cx_mut(|cx| self.redraw(cx));
+        vm.with_cx_mut(|cx| {
+            // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to
+            // be captured on the frame this first paints in, rather than the one after it.
+            arm_gauss_capture(cx);
+            self.redraw(cx);
+        });
     }
 }
 
@@ -1541,7 +1621,12 @@ impl ScriptHook for GlassButton {
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
-        vm.with_cx_mut(|cx| self.redraw(cx));
+        vm.with_cx_mut(|cx| {
+            // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to
+            // be captured on the frame this first paints in, rather than the one after it.
+            arm_gauss_capture(cx);
+            self.redraw(cx);
+        });
     }
 }
 
@@ -1905,7 +1990,12 @@ impl ScriptHook for GlassSlider {
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
-        vm.with_cx_mut(|cx| self.redraw(cx));
+        vm.with_cx_mut(|cx| {
+            // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to
+            // be captured on the frame this first paints in, rather than the one after it.
+            arm_gauss_capture(cx);
+            self.redraw(cx);
+        });
     }
 }
 
@@ -2122,7 +2212,12 @@ impl ScriptHook for GlassSegmented {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
         self.sel_pos = self.selected as f32;
-        vm.with_cx_mut(|cx| self.redraw(cx));
+        vm.with_cx_mut(|cx| {
+            // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to
+            // be captured on the frame this first paints in, rather than the one after it.
+            arm_gauss_capture(cx);
+            self.redraw(cx);
+        });
     }
 }
 

@@ -1,3 +1,38 @@
+//! GaussRoundedView — the refracting surface the glass family is built on.
+//!
+//! A glass surface has no colour of its own. It samples a snapshot of what is
+//! behind it — the window's own content, rendered to a texture and blurred into
+//! a mip pyramid — and bends that through its rounded edge. Building the pyramid
+//! costs most of an idle window's GPU budget, so a window only builds one on the
+//! frames a glass surface actually asked for it. This module owns that per-window
+//! bookkeeping and the surface shaders; `widgets/src/window.rs` does the rendering.
+//!
+//! # The frame a glass surface first appears on
+//!
+//! The window has to decide whether to capture BEFORE any widget draws, and the
+//! only evidence it has is which surfaces asked on the *previous* frame. On the
+//! frame a glass surface first appears — app start, a page swap, a live reload —
+//! nothing had asked yet, so no capture ran, every surface painted its flat
+//! `fallback_color` face, and the real one arrived a frame or more later. That
+//! is what `arm_gauss_capture` is for: a surface announces itself from its apply
+//! hook, which runs before any drawing, and the next frame of every window
+//! captures whether or not anything asked last frame.
+//!
+//! Announcing beats the alternative — holding the glass face back until a
+//! snapshot exists — because a surface that skips a frame is still a change on
+//! screen, only from nothing to something instead of from grey to something,
+//! and whatever the surface sits over would show through the hole meanwhile.
+//! Arming makes the first painted frame the right one instead of the second.
+//!
+//! A UI with no glass in it never arms and never captures, which is the whole
+//! point of the accounting; `MAKEPAD_NO_GAUSS=1` switches capture off for good
+//! and leaves every surface on its fallback colour.
+//!
+//! What this deliberately does not do: it does not drop the last snapshot when a
+//! frame skips the capture, so an overlay-only repaint (a hover, a press) goes on
+//! refracting the last scene instead of blinking to the fallback; and no shader
+//! here reads `draw_pass.time`, which would pin the window at display rate for as
+//! long as the glass is on screen — see the note on `ripple_age`.
 use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
 pub const GAUSS_VIEW_LEVELS: usize = 6;
@@ -11,18 +46,45 @@ pub struct GaussBlurSnapshot {
     pub dpi_factor: f64,
 }
 
+/// MAKEPAD_NO_GAUSS=1: skip the scene capture + blur pyramid entirely (glass falls
+/// back to fallback_color). A/B switch for frame-budget hunts — the pyramid is most
+/// of an idle UI's per-frame GPU cost. Read once and cached: this is queried for
+/// every window on every frame, and `var_os` allocates on each call.
+fn gauss_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("MAKEPAD_NO_GAUSS").is_some())
+}
+
 #[derive(Default)]
 struct GaussWindowEntry {
     generation: u64,
     requested_last_frame: bool,
     requested_this_frame: bool,
     capture_active: bool,
+    /// The arm generation this window has already captured for. Zero is what a fresh
+    /// entry and an un-armed global both hold, so a UI that never builds a glass
+    /// surface never sees an arm.
+    armed_seen: u64,
     snapshot: Option<GaussBlurSnapshot>,
+}
+
+/// What the end of a window's frame asks of it.
+#[derive(Clone, Copy, Debug)]
+struct GaussFrameEnd {
+    /// The set of surfaces asking for a capture changed, so the window's pass has to be
+    /// painted again — with the blur pyramid now attached to it, or without it.
+    repaint: bool,
+    /// Glass painted this frame with no capture behind it, so what it shows is not this
+    /// frame's scene. A repaint cannot mend that: it re-issues the draw calls already
+    /// recorded, and whether to capture is only re-decided when the widgets draw again.
+    redraw: bool,
 }
 
 #[derive(Default)]
 struct GaussWindowGlobal {
     windows: Vec<Option<GaussWindowEntry>>,
+    /// Bumped by `arm_gauss_capture` every time a glass surface is built or re-applied.
+    armed: u64,
 }
 
 impl GaussWindowGlobal {
@@ -40,18 +102,92 @@ impl GaussWindowGlobal {
         }
         entry
     }
+
+    fn arm(&mut self) {
+        self.armed += 1;
+    }
+
+    /// True once per arm per window: this window has not yet run a capture for the
+    /// current arm. Each window takes the arm separately, so a second window shows its
+    /// glass correctly on its own first frame rather than on whichever frame the first
+    /// window happened to spend the arm.
+    fn take_arm(&mut self, window_id: WindowId) -> bool {
+        let armed = self.armed;
+        let entry = self.entry_mut(window_id);
+        if entry.armed_seen == armed {
+            return false;
+        }
+        entry.armed_seen = armed;
+        true
+    }
+
+    fn wants_capture(&mut self, window_id: WindowId, capture_possible: bool) -> bool {
+        // The arm is taken either way, so it cannot pile up and fire later.
+        let armed = self.take_arm(window_id);
+        capture_possible && (armed || self.entry_mut(window_id).requested_last_frame)
+    }
+
+    fn begin_frame(
+        &mut self,
+        window_id: WindowId,
+        capture_active: bool,
+        snapshot: Option<GaussBlurSnapshot>,
+    ) {
+        let entry = self.entry_mut(window_id);
+        entry.capture_active = capture_active;
+        entry.requested_this_frame = false;
+        // Only replace the snapshot when we actually re-captured the scene this frame. On frames
+        // that skip the capture (e.g. a hover-only overlay repaint), keep the last good snapshot so
+        // the glass keeps refracting it instead of blinking to its flat fallback colour.
+        if capture_active {
+            entry.snapshot = snapshot;
+        }
+    }
+
+    /// Record that a glass surface drew in this window, and hand it the last captured
+    /// scene. `None` only before anything has ever been captured.
+    fn request(&mut self, window_id: WindowId) -> Option<GaussBlurSnapshot> {
+        let entry = self.entry_mut(window_id);
+        entry.requested_this_frame = true;
+        // Return the last captured snapshot regardless of whether THIS frame ran a capture pass.
+        // This keeps the lensing stable across overlay-only repaints (the source of the hover
+        // flicker). `requested_this_frame` still drives a fresh capture on the next full frame.
+        entry.snapshot.clone()
+    }
+
+    fn finish_frame(&mut self, window_id: WindowId, capture_possible: bool) -> GaussFrameEnd {
+        let entry = self.entry_mut(window_id);
+        let end = GaussFrameEnd {
+            repaint: entry.requested_last_frame != entry.requested_this_frame,
+            // With capture switched off there is no better frame to wait for, and asking
+            // for one every frame would spin the window forever.
+            redraw: capture_possible && entry.requested_this_frame && !entry.capture_active,
+        };
+        entry.requested_last_frame = entry.requested_this_frame;
+        entry.requested_this_frame = false;
+        entry.capture_active = false;
+        // Intentionally do NOT drop `entry.snapshot` here: a glass overlay can repaint on its own
+        // (hover/press) without the window running a full capture pass. Keeping the last snapshot
+        // means those repaints still refract the previously captured scene (≤1 capture stale, which
+        // is invisible) rather than flickering. It is refreshed whenever a full frame captures again.
+        end
+    }
+}
+
+/// Tell every window to capture the scene on its next frame, because a glass surface
+/// now exists that has not drawn yet. Call it from a glass widget's apply hook, which
+/// runs before any drawing — the window commits to capturing or not before the widget
+/// tree draws, so a surface that waits until its own `draw_walk` to ask has already
+/// missed the frame it is being painted in and shows an uncorrected face until the next
+/// one. Cheap to call often: a page of thirty glass surfaces still costs one capture.
+pub fn arm_gauss_capture(cx: &mut Cx) {
+    cx.global::<GaussWindowGlobal>().arm();
 }
 
 pub(crate) fn window_wants_gauss_capture(cx: &mut Cx, window_id: WindowId) -> bool {
-    // MAKEPAD_NO_GAUSS=1: skip the scene capture + blur pyramid entirely
-    // (glass falls back to fallback_color). A/B switch for frame-budget
-    // hunts — the pyramid is most of an idle UI's per-frame GPU cost.
-    if std::env::var_os("MAKEPAD_NO_GAUSS").is_some() {
-        return false;
-    }
+    let capture_possible = !gauss_disabled();
     cx.global::<GaussWindowGlobal>()
-        .entry_mut(window_id)
-        .requested_last_frame
+        .wants_capture(window_id, capture_possible)
 }
 
 pub(crate) fn begin_window_gauss_frame(
@@ -60,28 +196,25 @@ pub(crate) fn begin_window_gauss_frame(
     capture_active: bool,
     snapshot: Option<GaussBlurSnapshot>,
 ) {
-    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
-    entry.capture_active = capture_active;
-    entry.requested_this_frame = false;
-    // Only replace the snapshot when we actually re-captured the scene this frame. On frames
-    // that skip the capture (e.g. a hover-only overlay repaint), keep the last good snapshot so
-    // the glass keeps refracting it instead of blinking to its flat fallback colour.
-    if capture_active {
-        entry.snapshot = snapshot;
-    }
+    cx.global::<GaussWindowGlobal>()
+        .begin_frame(window_id, capture_active, snapshot);
 }
 
+/// Returns whether the window's pass has to be painted again. May also ask the whole
+/// UI to redraw, which is the only way a window that painted glass without a capture
+/// can get one: `use_gauss_capture` is decided in `Window::begin`, so nothing short of
+/// drawing again re-decides it. Reached only when a surface appears without having
+/// armed (it was already built and merely became visible), so it costs one extra draw
+/// in that case and nothing in the ordinary one.
 pub(crate) fn finish_window_gauss_frame(cx: &mut Cx, window_id: WindowId) -> bool {
-    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
-    let capture_changed = entry.requested_last_frame != entry.requested_this_frame;
-    entry.requested_last_frame = entry.requested_this_frame;
-    entry.requested_this_frame = false;
-    entry.capture_active = false;
-    // Intentionally do NOT drop `entry.snapshot` here: a glass overlay can repaint on its own
-    // (hover/press) without the window running a full capture pass. Keeping the last snapshot
-    // means those repaints still refract the previously captured scene (≤1 capture stale, which
-    // is invisible) rather than flickering. It is refreshed whenever a full frame captures again.
-    capture_changed
+    let capture_possible = !gauss_disabled();
+    let end = cx
+        .global::<GaussWindowGlobal>()
+        .finish_frame(window_id, capture_possible);
+    if end.redraw {
+        cx.redraw_all();
+    }
+    end.repaint
 }
 
 pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
@@ -89,12 +222,7 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
         return None;
     }
     let window_id = cx.get_current_window_id()?;
-    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
-    entry.requested_this_frame = true;
-    // Return the last captured snapshot regardless of whether THIS frame ran a capture pass.
-    // This keeps the lensing stable across overlay-only repaints (the source of the hover
-    // flicker). `requested_this_frame` still drives a fresh capture on the next full frame.
-    entry.snapshot.clone()
+    cx.global::<GaussWindowGlobal>().request(window_id)
 }
 
 // DRAW-ORDER RULE FOR GLASS SURFACES
@@ -547,7 +675,7 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct GaussRoundedView {
     #[source]
     source: ScriptObjectRef,
@@ -557,6 +685,20 @@ pub struct GaussRoundedView {
     // view is placed in the normal (background) flow rather than inside a `glass.Layer`.
     #[rust]
     draw_list: Option<DrawList2d>,
+}
+
+impl ScriptHook for GaussRoundedView {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to be
+        // captured on the frame this first paints in, rather than the one after it.
+        vm.with_cx_mut(|cx| arm_gauss_capture(cx));
+    }
 }
 
 impl GaussRoundedView {
@@ -728,6 +870,127 @@ impl Widget for GaussRoundedView {
             let step = self.view.draw_walk(cx, scope, walk);
             self.draw_list.as_mut().unwrap().end(cx);
             step
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(id: usize) -> WindowId {
+        WindowId(id, 0)
+    }
+
+    /// One window frame: `glass_draws` says whether a glass surface painted in it.
+    /// Mirrors what `Window::begin`/`end` do around the widget tree.
+    fn frame(g: &mut GaussWindowGlobal, w: WindowId, glass_draws: bool) -> (bool, GaussFrameEnd) {
+        let captured = g.wants_capture(w, true);
+        g.begin_frame(w, captured, None);
+        if glass_draws {
+            g.request(w);
+        }
+        (captured, g.finish_frame(w, true))
+    }
+
+    #[test]
+    fn a_ui_with_no_glass_never_captures() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        for _ in 0..4 {
+            let (captured, end) = frame(&mut g, w, false);
+            assert!(!captured, "nothing asked, so nothing was rendered for it");
+            assert!(!end.redraw);
+            assert!(!end.repaint);
+        }
+    }
+
+    #[test]
+    fn the_frame_a_glass_surface_first_draws_in_captures() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        // The surface is built before anything draws, and says so.
+        g.arm();
+        let (captured, end) = frame(&mut g, w, true);
+        assert!(captured, "the first painted frame had a scene to refract");
+        assert!(!end.redraw, "so it does not have to be painted over");
+    }
+
+    #[test]
+    fn each_window_takes_the_arm_for_itself() {
+        let mut g = GaussWindowGlobal::default();
+        g.arm();
+        assert!(g.wants_capture(window(0), true));
+        assert!(
+            g.wants_capture(window(1), true),
+            "the second window did not lose the arm to the first"
+        );
+    }
+
+    #[test]
+    fn the_arm_is_spent_once() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        g.arm();
+        let (captured, _) = frame(&mut g, w, false);
+        assert!(captured);
+        let (captured, _) = frame(&mut g, w, false);
+        assert!(
+            !captured,
+            "an unused surface does not keep the pyramid alive"
+        );
+    }
+
+    #[test]
+    fn capture_holds_while_the_glass_stays_and_stops_when_it_goes() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        g.arm();
+        frame(&mut g, w, true);
+        let (captured, end) = frame(&mut g, w, true);
+        assert!(captured, "still on screen, still captured");
+        assert!(
+            !end.repaint,
+            "and nothing about the window's passes changed"
+        );
+
+        let (_, end) = frame(&mut g, w, false);
+        assert!(
+            end.repaint,
+            "the glass left: the pass is painted without the pyramid"
+        );
+        let (captured, _) = frame(&mut g, w, false);
+        assert!(!captured);
+    }
+
+    #[test]
+    fn glass_that_appears_without_arming_asks_to_be_drawn_again() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        // A surface that was built long ago and merely became visible: nobody armed.
+        let (captured, end) = frame(&mut g, w, true);
+        assert!(!captured, "the window had no way to know");
+        assert!(end.redraw, "so it asks for the frame to be drawn again");
+        // And the next frame is the corrected one, which asks for nothing further.
+        let (captured, end) = frame(&mut g, w, true);
+        assert!(captured);
+        assert!(!end.redraw);
+    }
+
+    #[test]
+    fn switched_off_it_neither_captures_nor_spins() {
+        let mut g = GaussWindowGlobal::default();
+        let w = window(0);
+        g.arm();
+        for _ in 0..3 {
+            assert!(!g.wants_capture(w, false));
+            g.begin_frame(w, false, None);
+            g.request(w);
+            let end = g.finish_frame(w, false);
+            assert!(
+                !end.redraw,
+                "there is no better frame to wait for, so it must not ask for one"
+            );
         }
     }
 }
