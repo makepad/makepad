@@ -34,6 +34,15 @@ script_mod! {
     mod.stories.EmptyStateOverview = StoryPage{
         StoryHeading{text: "Five wordings, one shape"}
         StoryNote{text: "A list with no rows still owes the reader an answer, and these five are not the same answer: one of them means start, one means ask for less, one means ask someone, one means try again, and one means wait. The layout never changes, so they are presets of one widget."}
+        StoryHeading{text: "One empty state, under the controls"}
+        StoryNote{text: "One empty state under the controls: the two lines it says, how wide the words get before they wrap, and the gap between them."}
+        ListArea{
+            subject := EmptyState{
+                heading: "Nothing here yet"
+                body: "Whatever you add shows up in this list."
+                action: ButtonPrimary{text: "Add the first one"}
+            }
+        }
         ListArea{
             EmptyStateNothingYet{action: ButtonPrimary{text: "Add the first one"}}
         }
@@ -149,16 +158,6 @@ script_mod! {
         }
     }
 
-    mod.stories.EmptyStateBasic = StoryPage{
-        StoryNote{text: "One empty state under the controls: the two lines it says, how wide the words get before they wrap, and the gap between them."}
-        ListArea{
-            subject := EmptyState{
-                heading: "Nothing here yet"
-                body: "Whatever you add shows up in this list."
-                action: ButtonPrimary{text: "Add the first one"}
-            }
-        }
-    }
 }
 
 fn empty_state_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -194,21 +193,6 @@ pub const STORIES: &[Story] = &[
         doc: "# EmptyState\n\nWhat a list shows when it has nothing to show: a mark, a heading, a line of body text and up to two actions, in a centred column.\n\nThe five reasons a list is empty are not one reason, and a reader acts differently on each, so there are five presets that differ only in what they say: `EmptyStateNothingYet` (start), `EmptyStateNoMatches` (ask for less), `EmptyStateNotAllowed` (ask someone), `EmptyStateFailed` (try again) and `EmptyStateOffline` (wait). Each carries its own `heading` and `body`, so the common case is one line at the call site, and either can be overridden by writing the property.\n\nThe mark is a **slot**, not a property: an `EmptyGlyph` by default, or an icon, a picture, an illustration the app owns. `EmptyGlyph` draws one of five figures — `EmptyMark.Nothing`, `NoMatches`, `NotAllowed`, `Failed`, `Offline` — out of circles, boxes and rects. `visible: false` on the slot keeps the words and drops the picture.\n\n`action` and `secondary` are slots too, and the widget raises nothing of its own: a host reads `ids!(state.action)` and `ids!(state.secondary)`, because one event could not say which of two actions was taken.\n\nIt has no face — no card, no border, no fill — so it takes the colour of whatever it is dropped into. Every example on this page is sitting on a `RoundedView` that the widget knows nothing about.",
         subject: "retry",
         feature: None,
-        controls: &[],
-        on_actions: Some(empty_state_actions),
-    },
-    Story {
-        key: "feedback/empty-state/basic",
-        category: "Feedback",
-        component: "EmptyState",
-        also: &[],
-        name: "Basic",
-        dsl: "EmptyStateBasic",
-        added: "2026-09-10",
-        tags: &["new", "controls"],
-        doc: "# EmptyState\n\nOne empty state under the controls. `heading` is the bold line that says what is going on and `body` the quiet line that says what to do about it; `max_width` caps how wide the words get before they wrap, and `text_spacing` is the gap between the two lines.",
-        subject: "subject",
-        feature: None,
         controls: &[
             Control { label: "Heading", target: "subject", kind: ControlKind::Text { prop: "heading", default: "Nothing here yet" } },
             Control {
@@ -219,6 +203,5 @@ pub const STORIES: &[Story] = &[
             Control { label: "Max width", target: "subject", kind: ControlKind::Number { prop: "max_width", min: 160., max: 520., step: 10., default: 320. } },
             Control { label: "Text spacing", target: "subject", kind: ControlKind::Number { prop: "text_spacing", min: 0., max: 24., step: 1., default: 3. } },
         ],
-        on_actions: None,
-    },
-];
+        on_actions: Some(empty_state_actions),
+    },];

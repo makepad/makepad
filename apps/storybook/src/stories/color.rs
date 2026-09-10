@@ -29,6 +29,9 @@ script_mod! {
 
     mod.stories.ColorOverview = StoryPage{
         StoryNote{text: "One colour, and the several ways a person reaches for it. The ring picks a hue, the square picks how strong and how bright it is, the strip picks how much of it there is, and the numbers say all of that again for anyone who arrived with a value already in mind. Every one of them is a widget on its own; the picker is what you get when they are put in a panel together."}
+        StoryHeading{text: "One picker, under the controls"}
+        StoryNote{text: "One picker under the controls. Turn the alpha strip off for a control that chooses a colour and not a transparency; turn the recent strip off where there is no session worth remembering."}
+        subject := ColorPicker{color: #x3B82F6FF}
 
         StoryHeading{text: "The panel"}
         StoryNote{text: "Wheel, square, alpha strip, three rows of numbers and the last few colours committed anywhere in the session. It reports twice: while the colour is moving under your hand, and once when the gesture ends. A host that wrote to a document on every report would write hundreds of times across one drag."}
@@ -103,10 +106,6 @@ script_mod! {
         StoryNote{text: "Every border, every panel face and both squares of every checker come from the theme, so the whole family follows a light page, a dark one and the skeleton grade. The only colours held back are the two the pucks are drawn in: a puck sits on the colour being chosen rather than on a surface, so it has to stay legible over red, over white and over black, and a dark outline with a light ring inside is the shape that manages that."}
     }
 
-    mod.stories.ColorPickerBasic = StoryPage{
-        StoryNote{text: "One picker under the controls. Turn the alpha strip off for a control that chooses a colour and not a transparency; turn the recent strip off where there is no session worth remembering."}
-        subject := ColorPicker{color: #x3B82F6FF}
-    }
 
     mod.stories.ColorFieldOverview = StoryPage{
         StoryNote{text: "A colour written down, next to the colour itself. This is the control for a place where the colour usually arrives from somewhere else — a brand sheet, a screenshot, a message — and the panel would be four gestures where a paste is one."}
@@ -237,28 +236,14 @@ pub const STORIES: &[Story] = &[
         doc: "# ColorPicker\n\nOne colour, and the several ways a person reaches for it: a hue ring, a saturation/value square, an alpha strip, rows of numbers, and the last few colours committed in this session.\n\n`ColorPicker` stands inline on a page. `ColorPickerButton` is the same widget with `popover: true`: the swatch is the whole control at rest and the panel opens over the page under it, flipping above when the bottom would run off the window. A press outside commits; Escape puts back the colour that was there when it opened.\n\nEvery piece is also a widget on its own — `ColorWheel` (the ring), `ColorArea` (the square), `ColorAlpha` (the strip), `ColorSwatch` (a colour as a block), `PaletteStrip` (a wrapped grid of cells) and `ColorField` (a colour written down). The picker places the square inside the ring's hole rather than the ring nesting it, so neither depends on the other.\n\n**Hue is the state, not red-green-blue.** Each control holds hue, saturation, value and alpha, and derives the RGBA from that. Round-tripping through RGBA loses the hue of a grey and the hue of black, and a picker whose ring swings back to red the moment the value reaches zero is the classic way this control goes wrong.\n\nEverything reports twice: `Changed` while the colour moves under the hand, and `Ended` once when the gesture finishes. Follow the first, record the second.\n\n**What it is not.** There is no eyedropper — nothing here can read a screen pixel, and an OS capture path is a host's business. There is no colour space beyond sRGB and HSV. And a palette strip binds to nothing: it reports the cell that was picked and the colour in it, and what that cell means is known only to whoever filled the strip.",
         subject: "inline",
         feature: None,
-        controls: &[],
-        on_actions: Some(color_actions),
-    },
-    Story {
-        key: "inputs/color-picker/basic",
-        category: "Inputs",
-        component: "ColorPicker",
-        also: &[],
-        name: "Basic",
-        dsl: "ColorPickerBasic",
-        added: "2026-09-10",
-        tags: &["new", "controls"],
-        doc: "# ColorPicker\n\nOne picker under the controls. `color` is the colour being chosen and can be written from outside at any time; `with_alpha` shows the alpha strip and puts alpha in the hex; `with_recent` shows the strip of colours committed earlier in the session, which is process-wide, so a colour mixed on another page of this catalogue turns up here.",
-        subject: "subject",
-        feature: None,
         controls: &[
             Control { label: "Colour", target: "subject", kind: ControlKind::Color { prop: "color", default: 0x3B82F6FF } },
             Control { label: "Alpha strip", target: "subject", kind: ControlKind::Bool { prop: "with_alpha", default: true } },
             Control { label: "Recent colours", target: "subject", kind: ControlKind::Bool { prop: "with_recent", default: true } },
         ],
-        on_actions: None,
+        on_actions: Some(color_actions),
     },
+    
     Story {
         key: "inputs/color-field/overview",
         category: "Inputs",

@@ -60,6 +60,12 @@ pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
 pub mod drag_number;
+pub mod chart_more;
+pub mod toolbar;
+pub mod masonry;
+pub mod kanban;
+pub mod splitter_more;
+pub mod scroll_more;
 pub mod tour;
 pub mod range_slider;
 pub mod slider;
@@ -130,6 +136,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
     slider::script_mod(vm);
     range_slider::script_mod(vm);
     tour::script_mod(vm);
+    scroll_more::script_mod(vm);
+    splitter_more::script_mod(vm);
+    kanban::script_mod(vm);
+    masonry::script_mod(vm);
+    toolbar::script_mod(vm);
+    chart_more::script_mod(vm);
     drag_number::script_mod(vm);
     pie_menu::script_mod(vm);
     command_palette::script_mod(vm);
@@ -246,6 +258,12 @@ pub fn tables() -> &'static [&'static [Story]] {
         slider::STORIES,
         range_slider::STORIES,
         tour::STORIES,
+        scroll_more::STORIES,
+        splitter_more::STORIES,
+        kanban::STORIES,
+        masonry::STORIES,
+        toolbar::STORIES,
+        chart_more::STORIES,
         drag_number::STORIES,
         pie_menu::STORIES,
         command_palette::STORIES,

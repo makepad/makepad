@@ -10,6 +10,29 @@ script_mod! {
 
     mod.stories.CardOverview = StoryPage{
         StoryNote{text: "A surface that holds a picture, a header, a body and a footer. The three appearances are three settings of one shader — a fill, a line, and a rung of the theme's elevation ladder — so a theme change moves all three together."}
+        StoryHeading{text: "One card, under the controls"}
+        StoryNote{text: "One card under the controls: how the surface is dressed, whether the whole of it answers a press, its corner, and whether it is switched off."}
+        StoryRow{
+            subject := Card{
+                width: 300.
+                media: CardMedia{
+                    height: 130.
+                    Image{
+                        width: Fill height: Fill
+                        src: crate_resource("self:resources/photo_landscape.jpg")
+                        fit: ImageFit.Horizontal
+                    }
+                }
+                header: CardHeader{H4{text: "Ridge route"}}
+                body: CardBody{P{text: "Nine kilometres, most of it above the treeline."}}
+                footer: CardFooter{
+                    subject_button := Button{text: "Details"}
+                }
+            }
+        }
+        StoryRow{
+            state := Label{text: "nothing pressed yet"}
+        }
 
         StoryHeading{text: "Three appearances"}
         StoryNote{text: "Elevated takes the low container tint and rests on the ladder's first rung. Filled takes the highest container tint and lies flat. Outlined takes the page's own colour with a line around it. Nothing here is hand-mixed: every fill, line and shadow is a theme token."}
@@ -148,30 +171,6 @@ script_mod! {
         }
     }
 
-    mod.stories.CardBasic = StoryPage{
-        StoryNote{text: "One card under the controls: how the surface is dressed, whether the whole of it answers a press, its corner, and whether it is switched off."}
-        StoryRow{
-            subject := Card{
-                width: 300.
-                media: CardMedia{
-                    height: 130.
-                    Image{
-                        width: Fill height: Fill
-                        src: crate_resource("self:resources/photo_landscape.jpg")
-                        fit: ImageFit.Horizontal
-                    }
-                }
-                header: CardHeader{H4{text: "Ridge route"}}
-                body: CardBody{P{text: "Nine kilometres, most of it above the treeline."}}
-                footer: CardFooter{
-                    subject_button := Button{text: "Details"}
-                }
-            }
-        }
-        StoryRow{
-            state := Label{text: "nothing pressed yet"}
-        }
-    }
 }
 
 fn card_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -205,6 +204,12 @@ fn card_basic_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     if let Some(text) = text {
         root.label(cx, ids!(state)).set_text(cx, text);
     }
+}
+
+fn card_actions_all(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    // One page now, so both halves' handlers run for it.
+    card_actions(cx, root, actions);
+    card_basic_actions(cx, root, actions);
 }
 
 pub const STORIES: &[Story] = &[
@@ -255,23 +260,6 @@ A picture that stops short of the rounding is not a card's picture, it is a pict
 It does not scroll: a card whose body scrolls is a panel. It carries no title or subtitle typography — the header slot takes whatever you put in it, and the library's headings are already a ladder of their own. It has no expanded state, no swipe, and no fourth appearance.",
         subject: "pressy",
         feature: None,
-        controls: &[],
-        on_actions: Some(card_actions),
-    },
-    Story {
-        key: "containers/card/basic",
-        category: "Containers",
-        component: "Card",
-        also: &[],
-        name: "Basic",
-        dsl: "CardBasic",
-        added: "2026-09-10",
-        tags: &["new", "controls"],
-        doc: "# Card
-
-One card under the controls. `appearance` dresses the surface, `pressable` makes the whole of it a target, `radius` rounds it — and rounds the media band with it, because the card writes its own radius into the band on every draw. `disabled` reaches all four slots, so the button in the footer goes quiet with the card.",
-        subject: "subject",
-        feature: None,
         controls: &[
             Control {
                 label: "Appearance",
@@ -298,6 +286,5 @@ One card under the controls. `appearance` dresses the surface, `pressable` makes
                 kind: ControlKind::Disabled { default: false },
             },
         ],
-        on_actions: Some(card_basic_actions),
-    },
-];
+        on_actions: Some(card_actions),
+    },];

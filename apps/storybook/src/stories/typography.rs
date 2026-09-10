@@ -11,6 +11,19 @@ script_mod! {
     mod.stories.TypographyOverview = StoryPage{
         StoryHeading{text: "Body"}
         StoryNote{text: "Three rungs, named rather than numbered. Each takes its size from the theme's type scale, so a theme that retunes the scale retunes every screen written in these."}
+        StoryHeading{text: "The specimen, under the controls"}
+        StoryNote{text: "One string through the whole family, so what is being compared is the rungs and not the sentences. A pangram judges the letterforms, the figures show whether numbers stay legible at the small end, and the long word shows where each rung starts to crowd."}
+        StoryRow{
+            pangram := Button{text: "Pangram"}
+            figures := Button{text: "Figures"}
+            long := Button{text: "Long word"}
+        }
+        large := TextLarge{text: "The quick brown fox jumps over the lazy dog"}
+        sample := Text{text: "The quick brown fox jumps over the lazy dog"}
+        small := TextSmall{text: "The quick brown fox jumps over the lazy dog"}
+        strong := TextStrong{text: "The quick brown fox jumps over the lazy dog"}
+        muted := TextMuted{text: "The quick brown fox jumps over the lazy dog"}
+        code := TextCode{text: "The quick brown fox jumps over the lazy dog"}
         TextLarge{text: "TextLarge, the line that has to be read first"}
         Text{text: "Text, the size the rest of a screen is written in"}
         TextSmall{text: "TextSmall, for captions, units and timestamps"}
@@ -46,20 +59,6 @@ script_mod! {
         P{text: "A paragraph fills the width it is given and breaks where it runs out, so the same text reads as one block at any window size. Drag the window narrower and this line rewraps; the row of presets above it does not, because each of those is only as wide as the letters in it."}
     }
 
-    mod.stories.TypographySpecimen = StoryPage{
-        StoryNote{text: "One string through the whole family, so what is being compared is the rungs and not the sentences. A pangram judges the letterforms, the figures show whether numbers stay legible at the small end, and the long word shows where each rung starts to crowd."}
-        StoryRow{
-            pangram := Button{text: "Pangram"}
-            figures := Button{text: "Figures"}
-            long := Button{text: "Long word"}
-        }
-        large := TextLarge{text: "The quick brown fox jumps over the lazy dog"}
-        sample := Text{text: "The quick brown fox jumps over the lazy dog"}
-        small := TextSmall{text: "The quick brown fox jumps over the lazy dog"}
-        strong := TextStrong{text: "The quick brown fox jumps over the lazy dog"}
-        muted := TextMuted{text: "The quick brown fox jumps over the lazy dog"}
-        code := TextCode{text: "The quick brown fox jumps over the lazy dog"}
-    }
 }
 
 const PANGRAM: &str = "The quick brown fox jumps over the lazy dog";
@@ -112,25 +111,5 @@ The heading ladder is the label module's and is shown here whole, including `H5`
         subject: "",
         feature: None,
         controls: &[],
-        on_actions: None,
-    },
-    Story {
-        key: "text/text/specimen",
-        category: "Text",
-        component: "Text",
-        also: &[],
-        name: "Specimen",
-        dsl: "TypographySpecimen",
-        added: "2026-09-10",
-        tags: &["new", "type"],
-        doc: "# Specimen
-
-The whole family showing one string, with three strings to put through it: a pangram for the letterforms, a line of figures to check that numbers hold up at the small end, and one long word to find where each rung begins to crowd its neighbours.
-
-Every button writes all six at once. Comparing rungs against six different sentences would measure the sentences.",
-        subject: "sample",
-        feature: None,
-        controls: &[],
         on_actions: Some(typography_actions),
-    },
-];
+    },];

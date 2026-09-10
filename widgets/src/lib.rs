@@ -138,6 +138,12 @@ pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
 pub mod drag_number;
+pub mod chart_more;
+pub mod toolbar;
+pub mod masonry;
+pub mod kanban;
+pub mod splitter_more;
+pub mod scroll_more;
 pub mod tour;
 pub mod wheel_picker;
 pub mod portal_list;
@@ -295,6 +301,12 @@ pub use crate::{
     command_palette::*,
     pie_menu::*,
     drag_number::*,
+    chart_more::*,
+    toolbar::*,
+    masonry::*,
+    kanban::*,
+    splitter_more::*,
+    scroll_more::*,
     tour::*,
     wheel_picker::*,
     portal_list::*,
@@ -569,6 +581,12 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::pie_menu::script_mod(vm);
     crate::drag_number::script_mod(vm);
     crate::tour::script_mod(vm);
+    crate::chart_more::script_mod(vm);
+    crate::toolbar::script_mod(vm);
+    crate::masonry::script_mod(vm);
+    crate::kanban::script_mod(vm);
+    crate::splitter_more::script_mod(vm);
+    crate::scroll_more::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 

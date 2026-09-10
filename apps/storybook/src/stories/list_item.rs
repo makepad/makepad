@@ -10,6 +10,15 @@ script_mod! {
 
     mod.stories.ListItemOverview = StoryPage{
         StoryNote{text: "One row of a list: something at the leading edge, one to three lines of text, and something at the trailing edge. The parts never differ between two hand-written rows; the height, the two type sizes and where the rule starts always do. Those are what the row owns."}
+        StoryHeading{text: "One row, under the controls"}
+        StoryNote{text: "One row. The controls write its lines, its shape, the rule under it and its states."}
+        subject := ListItem{
+            lines: ListItemLines.Three
+            text: "A row of a list"
+            secondary: "and a line about it"
+            tertiary: "and one more line after that"
+            trailing: Label{text: "›"}
+        }
 
         StoryHeading{text: "The three shapes"}
         StoryNote{text: "One line, two or three. The shape brings the height and the line count with it, so two lists in one application cannot disagree by four points about how tall a two-line row is."}
@@ -165,16 +174,6 @@ script_mod! {
         }
     }
 
-    mod.stories.ListItemBasic = StoryPage{
-        StoryNote{text: "One row. The controls write its lines, its shape, the rule under it and its states."}
-        subject := ListItem{
-            lines: ListItemLines.Three
-            text: "A row of a list"
-            secondary: "and a line about it"
-            tertiary: "and one more line after that"
-            trailing: Label{text: "›"}
-        }
-    }
 }
 
 /// The list the rows belong to. Choosing is done here rather than in the
@@ -225,25 +224,6 @@ One row of a list: something at the leading edge, one to three lines of text, an
 **It is not a list.** It does not scroll, does not recycle, and does not decide which row is chosen: `selected` is a flag the list sets and the row draws. It has no keyboard either — one tab stop per row means Tab walks every row of a long list, so the keyboard belongs to whatever owns the rows.",
         subject: "pick_all",
         feature: None,
-        controls: &[],
-        on_actions: Some(list_item_actions),
-    },
-    Story {
-        key: "data-display/list-item/basic",
-        category: "Data display",
-        component: "ListItem",
-        also: &[],
-        name: "Basic",
-        dsl: "ListItemBasic",
-        added: "2026-09-10",
-        tags: &["new", "controls"],
-        doc: "# ListItem
-
-One row under the controls: the three lines, the shape it is in, the rule under it, the width held for the leading slot, and the chosen and disabled states.
-
-A row with more text than its shape has lines for simply does not draw the extra: the shape caps the count, so switching to `One` shows a name and nothing else.",
-        subject: "subject",
-        feature: None,
         controls: &[
             Control { label: "First line", target: "subject", kind: ControlKind::Text { prop: "text", default: "A row of a list" } },
             Control { label: "Second line", target: "subject", kind: ControlKind::Text { prop: "secondary", default: "and a line about it" } },
@@ -276,6 +256,5 @@ A row with more text than its shape has lines for simply does not draw the extra
             Control { label: "Chosen", target: "subject", kind: ControlKind::Bool { prop: "selected", default: false } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: None,
-    },
-];
+        on_actions: Some(list_item_actions),
+    },];

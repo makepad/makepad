@@ -117,13 +117,6 @@ script_mod! {
         }
     }
 
-    mod.stories.SpinnerLoading = StoryPage{
-        StoryNote{text: "The older DSL-only view, unchanged: a ring with a turning gap, styled entirely through its shader."}
-        StoryHeading{text: "Default"}
-        StoryRow{
-            LoadingSpinner{}
-        }
-    }
 }
 
 fn spinner_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -184,22 +177,5 @@ pub const STORIES: &[Story] = &[
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
         on_actions: Some(spinner_actions),
-    },
-    Story {
-        key: "feedback/spinner/loading",
-        category: "Feedback",
-        component: "Spinner",
-        also: &["LoadingSpinner"],
-        name: "Loading spinner",
-        dsl: "SpinnerLoading",
-        added: "2026-02-16",
-        tags: &["ported"],
-        doc: "# Loading spinner
-
-The older `LoadingSpinner`: a DSL-only view whose ring, gap and turning speed are shader properties. Several apps override those properties, so it stays exactly as it was; new work uses the spinner family instead.",
-        subject: "",
-        feature: None,
-        controls: &[],
-        on_actions: None,
     },
 ];

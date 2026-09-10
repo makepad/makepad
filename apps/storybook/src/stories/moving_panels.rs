@@ -65,7 +65,7 @@ script_mod! {
                         draw_bg +: {color: theme.color_surface_container_lowest}
                         Label{text: "behind the panel" draw_text +: {color: theme.color_text_meta}}
                     }
-                    panel: RoundedView{
+                    panel := RoundedView{
                         width: Fill height: Fill
                         flow: Down
                         spacing: theme.space_1
