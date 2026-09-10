@@ -431,9 +431,12 @@ struct Builder {
     ends: Vec<usize>,
     /// Node index of each open element, outermost first.
     open: Vec<usize>,
-    /// How many elements of each name are open, so a close tag with nothing
-    /// to close is rejected without walking the stack.
-    counts: LiveIdMap<u32>,
+    /// For each name, the stack depths of its open elements, ascending. A
+    /// close tag finds the innermost element of its name, and a start tag
+    /// finds the outermost element it implicitly closes above the nearest
+    /// scope boundary, in constant time either way; scanning the stack for
+    /// them made a document of nested `<div>`s quadratic.
+    depths: LiveIdMap<Vec<usize>>,
     /// How many `<pre>`/`<code>` are open.
     preserving: usize,
     /// Attribute names already seen on the tag being parsed; a repeated one
@@ -442,6 +445,9 @@ struct Builder {
     /// Node index of the tag being parsed, so input ending inside it can
     /// drop it whole.
     tag_start: usize,
+    /// A `<pre>` (or `<listing>`/`<textarea>`) just opened: the tree builder
+    /// ignores a newline that immediately follows it.
+    skip_leading_lf: bool,
 }
 
 impl Builder {
@@ -451,10 +457,11 @@ impl Builder {
             closes: Vec::new(),
             ends: Vec::new(),
             open: Vec::new(),
-            counts: LiveIdMap::with_hasher(SeededLiveIdHasher::new_seed()),
+            depths: LiveIdMap::with_hasher(SeededLiveIdHasher::new_seed()),
             preserving: 0,
             attrs_seen: LiveIdSet::with_hasher(SeededLiveIdHasher::new_seed()),
             tag_start: 0,
+            skip_leading_lf: false,
         }
         .with_capacity_hint(body_len)
     }
@@ -495,18 +502,27 @@ impl Builder {
     /// Starts a tag; `tag_start` remembers where, for `drop_tag`.
     fn begin_tag(&mut self) {
         self.tag_start = self.nodes.len();
-        self.attrs_seen.clear();
+        // `clear` is O(buckets) unless the set is empty, and the table never
+        // shrinks, so after one tag with thousands of attributes every later
+        // tag with an attribute would pay that memset. Drop an oversized
+        // table instead; the seed is reused, so hashing stays the same.
+        if self.attrs_seen.capacity() > 64 {
+            self.attrs_seen = LiveIdSet::with_hasher(*self.attrs_seen.hasher());
+        } else {
+            self.attrs_seen.clear();
+        }
     }
 
     fn open_tag(&mut self, name: &str, intern: InternLiveId) {
         let lc = LiveId::from_str_lc(name);
+        self.implicitly_close_for(lc);
         let index = self.push(HtmlNode::OpenTag {
             lc,
             nc: LiveId::from_str_with_intern(name, intern),
         });
         if !is_void_element(lc) {
+            self.depths.entry(lc).or_default().push(self.open.len());
             self.open.push(index);
-            *self.counts.entry(lc).or_insert(0) += 1;
             if preserves_whitespace(lc) {
                 self.preserving += 1;
             }
@@ -521,10 +537,19 @@ impl Builder {
 
     /// The start tag that began at `tag_start` is complete.
     fn end_open_tag(&mut self) {
-        if is_void_element(self.name_at(self.tag_start)) {
+        let lc = self.name_at(self.tag_start);
+        if is_void_element(lc) {
             // Whole at its open tag: it ends right after its attributes.
             self.ends[self.tag_start] = self.nodes.len();
         }
+        self.skip_leading_lf =
+            lc == live_id!(pre) || lc == live_id!(listing) || lc == live_id!(textarea);
+    }
+
+    /// Whether the character that follows should be dropped if it is a
+    /// newline; asking consumes the request.
+    fn take_skip_leading_lf(&mut self) -> bool {
+        std::mem::take(&mut self.skip_leading_lf)
     }
 
     /// `<x/>`: the start tag that began at `tag_start` closes itself. A
@@ -547,6 +572,14 @@ impl Builder {
 
     fn close_tag(&mut self, name: &str, intern: InternLiveId) {
         let lc = LiveId::from_str_lc(name);
+        if lc == live_id!(br) {
+            // The tree builder reads `</br>` as `<br>`: `x</br>y` breaks the
+            // line, where a stray close tag would have closed nothing.
+            self.begin_tag();
+            self.open_tag(name, intern);
+            self.end_open_tag();
+            return;
+        }
         let index = self.push(HtmlNode::CloseTag {
             lc,
             nc: LiveId::from_str_with_intern(name, intern),
@@ -557,41 +590,147 @@ impl Builder {
     /// The close tag at `index` ends the innermost open `lc`, and everything
     /// opened inside it.
     fn close(&mut self, lc: LiveId, index: usize) {
-        if !self.counts.get(&lc).is_some_and(|n| *n > 0) {
-            return;
-        }
-        let Some(pos) = self.open.iter().rposition(|&j| self.name_at(j) == lc) else {
+        // The innermost open element of this name, or nothing to close.
+        let Some(pos) = self.innermost(lc) else {
             return;
         };
-        for depth in pos..self.open.len() {
-            let j = self.open[depth];
-            let name = self.name_at(j);
-            if let Some(n) = self.counts.get_mut(&name) {
-                *n = n.saturating_sub(1);
-            }
-            if preserves_whitespace(name) {
-                self.preserving = self.preserving.saturating_sub(1);
-            }
-            // Its own close tag, or an enclosing element's: either way this
-            // is where the element ends.
-            self.ends[j] = if depth == pos { index + 1 } else { index };
-        }
         self.closes[self.open[pos]] = index;
-        self.open.truncate(pos);
+        self.ends[self.open[pos]] = index + 1;
+        self.end_from(pos + 1, index);
+        self.end_open_element(pos);
+    }
+
+    /// Ends every open element from stack depth `from` up, at node `at` —
+    /// they never had a close tag of their own — and drops them.
+    fn end_from(&mut self, from: usize, at: usize) {
+        for depth in (from..self.open.len()).rev() {
+            self.ends[self.open[depth]] = at;
+            self.end_open_element(depth);
+        }
+    }
+
+    /// Drops the element at stack depth `depth` (which must be the top) from
+    /// the bookkeeping.
+    fn end_open_element(&mut self, depth: usize) {
+        let name = self.name_at(self.open[depth]);
+        if let Some(depths) = self.depths.get_mut(&name) {
+            depths.pop();
+        }
+        if preserves_whitespace(name) {
+            self.preserving = self.preserving.saturating_sub(1);
+        }
+        self.open.truncate(depth);
+    }
+
+    /// Stack depth of the innermost open element named `lc`.
+    fn innermost(&self, lc: LiveId) -> Option<usize> {
+        self.depths.get(&lc).and_then(|d| d.last().copied())
+    }
+
+    /// Ends the outermost open element named in `targets` that lies above
+    /// the nearest open element named in `scope`, and everything inside it,
+    /// at the node about to be pushed. With `current_only`, only the
+    /// innermost open element is considered.
+    fn close_in_scope(&mut self, targets: &[LiveId], scope: &[LiveId], current_only: bool) {
+        let at = self.nodes.len();
+        if current_only {
+            if let Some(&top) = self.open.last() {
+                if targets.contains(&self.name_at(top)) {
+                    self.end_from(self.open.len() - 1, at);
+                }
+            }
+            return;
+        }
+        // Everything at or below the nearest scope boundary is out of reach.
+        let floor = scope
+            .iter()
+            .filter_map(|&name| self.innermost(name))
+            .max()
+            .map_or(0, |boundary| boundary + 1);
+        // The outermost target above it; each name's depths are ascending.
+        let found = targets
+            .iter()
+            .filter_map(|name| {
+                let depths = self.depths.get(name)?;
+                let first_above = depths.partition_point(|&depth| depth < floor);
+                depths.get(first_above).copied()
+            })
+            .min();
+        if let Some(depth) = found {
+            self.end_from(depth, at);
+        }
+    }
+
+    /// What a start tag implicitly closes, per the tree builder's "in body"
+    /// and table insertion modes: a block start tag closes an open `<p>`;
+    /// a heading closes a heading that is the current node; `<li>` closes
+    /// an open item up to its list; `<dd>`/`<dt>` likewise; a cell closes an
+    /// open cell up to its row; a row closes an open row and its cells; a
+    /// table section closes an open section, row and cells; a second `<a>`
+    /// closes the first. This is what makes `<li>a<li>b` two items and
+    /// `<a href=1>x<a href=2>y</a>` two links, for every consumer alike.
+    fn implicitly_close_for(&mut self, lc: LiveId) {
+        const CLOSES_P: &[LiveId] = &[
+            live_id!(address), live_id!(article), live_id!(aside), live_id!(blockquote),
+            live_id!(center), live_id!(details), live_id!(dialog), live_id!(dir),
+            live_id!(div), live_id!(dl), live_id!(fieldset), live_id!(figcaption),
+            live_id!(figure), live_id!(footer), live_id!(form), live_id!(header),
+            live_id!(hgroup), live_id!(hr), live_id!(main), live_id!(menu), live_id!(nav),
+            live_id!(ol), live_id!(p), live_id!(pre), live_id!(listing), live_id!(search),
+            live_id!(section), live_id!(summary), live_id!(table), live_id!(ul),
+            live_id!(xmp), live_id!(plaintext), live_id!(li), live_id!(dd), live_id!(dt),
+            live_id!(h1), live_id!(h2), live_id!(h3), live_id!(h4), live_id!(h5), live_id!(h6),
+        ];
+        const P: &[LiveId] = &[live_id!(p)];
+        // The tree builder's "button scope" and "default scope" boundaries,
+        // restricted to elements this parser's consumers use.
+        const BUTTON_SCOPE: &[LiveId] = &[live_id!(table), live_id!(td), live_id!(th), live_id!(button)];
+        const DEFAULT_SCOPE: &[LiveId] = &[live_id!(table), live_id!(td), live_id!(th)];
+        const HEADINGS: &[LiveId] = &[
+            live_id!(h1), live_id!(h2), live_id!(h3), live_id!(h4), live_id!(h5), live_id!(h6),
+        ];
+        const ITEM: &[LiveId] = &[live_id!(li)];
+        const LIST_ITEM_SCOPE: &[LiveId] = &[live_id!(ul), live_id!(ol), live_id!(table), live_id!(td), live_id!(th)];
+        const DEFINITION: &[LiveId] = &[live_id!(dd), live_id!(dt)];
+        const CELLS: &[LiveId] = &[live_id!(td), live_id!(th)];
+        const ROW_CONTEXT: &[LiveId] = &[live_id!(tr), live_id!(table)];
+        const ROW_AND_CELLS: &[LiveId] = &[live_id!(tr), live_id!(td), live_id!(th)];
+        const SECTIONS: &[LiveId] = &[live_id!(thead), live_id!(tbody), live_id!(tfoot)];
+        const TABLE_BODY_CONTEXT: &[LiveId] = &[live_id!(table), live_id!(thead), live_id!(tbody), live_id!(tfoot)];
+        const SECTION_ROW_AND_CELLS: &[LiveId] = &[
+            live_id!(thead), live_id!(tbody), live_id!(tfoot), live_id!(tr), live_id!(td), live_id!(th),
+        ];
+        const TABLE_CONTEXT: &[LiveId] = &[live_id!(table)];
+        const ANCHOR: &[LiveId] = &[live_id!(a)];
+        const BUTTON: &[LiveId] = &[live_id!(button)];
+
+        if CLOSES_P.contains(&lc) {
+            self.close_in_scope(P, BUTTON_SCOPE, false);
+        }
+        if HEADINGS.contains(&lc) {
+            self.close_in_scope(HEADINGS, &[], true);
+        } else if lc == live_id!(li) {
+            self.close_in_scope(ITEM, LIST_ITEM_SCOPE, false);
+        } else if DEFINITION.contains(&lc) {
+            self.close_in_scope(DEFINITION, DEFAULT_SCOPE, false);
+        } else if CELLS.contains(&lc) {
+            self.close_in_scope(CELLS, ROW_CONTEXT, false);
+        } else if lc == live_id!(tr) {
+            self.close_in_scope(ROW_AND_CELLS, TABLE_BODY_CONTEXT, false);
+        } else if SECTIONS.contains(&lc) {
+            self.close_in_scope(SECTION_ROW_AND_CELLS, TABLE_CONTEXT, false);
+        } else if lc == live_id!(a) {
+            self.close_in_scope(ANCHOR, DEFAULT_SCOPE, false);
+        } else if lc == live_id!(button) {
+            self.close_in_scope(BUTTON, DEFAULT_SCOPE, false);
+        }
     }
 
     /// Input ended inside the tag that began at `tag_start`: drop it whole,
     /// as a browser drops a tag cut off by end of input.
     fn drop_tag(&mut self) {
         if self.open.last() == Some(&self.tag_start) {
-            self.open.pop();
-            let name = self.name_at(self.tag_start);
-            if let Some(n) = self.counts.get_mut(&name) {
-                *n = n.saturating_sub(1);
-            }
-            if preserves_whitespace(name) {
-                self.preserving = self.preserving.saturating_sub(1);
-            }
+            self.end_open_element(self.open.len() - 1);
         }
         self.nodes.truncate(self.tag_start);
         self.closes.truncate(self.tag_start);
@@ -644,6 +783,9 @@ pub fn parse_html(
             /// was never content.
             last_non_whitespace: usize,
             collapse_ws: bool,
+            /// This run follows `<pre>`: a newline as its first character
+            /// is not content, as the tree builder specifies.
+            skip_lf: bool,
         },
         /// `<` seen; holds the byte index after it.
         TagOpen(usize),
@@ -899,11 +1041,12 @@ pub fn parse_html(
     }
 
     /// The text state that follows an element's tag.
-    fn text_after_tag(decoded: &str, builder: &Builder) -> State {
+    fn text_after_tag(decoded: &str, builder: &mut Builder) -> State {
         State::Text {
             dec_start: decoded.len(),
             last_non_whitespace: decoded.len(),
             collapse_ws: builder.collapses(),
+            skip_lf: builder.take_skip_leading_lf(),
         }
     }
 
@@ -915,6 +1058,7 @@ pub fn parse_html(
             dec_start: decoded.len(),
             last_non_whitespace,
             collapse_ws: builder.collapses(),
+            skip_lf: false,
         }
     }
 
@@ -943,30 +1087,45 @@ pub fn parse_html(
         dec_start: 0,
         last_non_whitespace: 0,
         collapse_ws: true,
+        skip_lf: false,
     };
 
-    for (i, c) in body.char_indices() {
-        let c = match c {
-            '\r' => {
-                after_cr = true;
-                '\n'
-            }
-            '\n' if after_cr => {
-                after_cr = false;
+    for (i, mut c) in body.char_indices() {
+        // The input stream's preprocessing: `\r\n` and `\r` become `\n`,
+        // and NUL is dropped from text and replaced in attribute values, as
+        // the tree builder and tokenizer respectively do. Kept to a couple of
+        // compares per character: this is the hot loop.
+        if after_cr {
+            after_cr = false;
+            if c == '\n' {
                 continue;
             }
-            c => {
-                after_cr = false;
-                c
+        }
+        if c == '\r' {
+            after_cr = true;
+            c = '\n';
+        } else if c == '\0' {
+            if matches!(state, State::Text { .. }) {
+                continue;
             }
-        };
+            c = '\u{fffd}';
+        }
         state = match state {
             State::Text {
                 dec_start,
                 mut last_non_whitespace,
                 collapse_ws,
+                skip_lf,
             } => {
-                if c == '<' {
+                if skip_lf && c == '\n' {
+                    // The newline right after `<pre>` is not content.
+                    State::Text {
+                        dec_start,
+                        last_non_whitespace,
+                        collapse_ws,
+                        skip_lf: false,
+                    }
+                } else if c == '<' {
                     end_entity(
                         &mut in_entity,
                         &mut decoded,
@@ -992,6 +1151,7 @@ pub fn parse_html(
                         dec_start,
                         last_non_whitespace,
                         collapse_ws,
+                        skip_lf: false,
                     }
                 }
             }
@@ -1034,6 +1194,7 @@ pub fn parse_html(
                             dec_start,
                             last_non_whitespace,
                             collapse_ws,
+                            skip_lf: false,
                         }
                     }
                 }
@@ -1048,7 +1209,7 @@ pub fn parse_html(
                 } else if c == '>' {
                     b.open_tag(&body[start..i], intern);
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     State::TagName(start)
                 }
@@ -1069,7 +1230,7 @@ pub fn parse_html(
             State::EndTagName(start) => {
                 if c == '>' {
                     b.close_tag(&body[start..i], intern);
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else if is_html_whitespace(c) || c == '/' {
                     State::AfterEndTagName(start, i)
                 } else {
@@ -1079,7 +1240,7 @@ pub fn parse_html(
             State::AfterEndTagName(start, end) => {
                 if c == '>' {
                     b.close_tag(&body[start..end], intern);
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else if is_html_whitespace(c) || c == '/' {
                     State::AfterEndTagName(start, end)
                 } else {
@@ -1092,7 +1253,7 @@ pub fn parse_html(
             State::SelfClosingStartTag => {
                 if c == '>' {
                     b.self_close();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     // `<a/b>`: the slash was not a self-closing marker after
                     // all. Read on as `<a b>`.
@@ -1113,7 +1274,7 @@ pub fn parse_html(
                     State::SelfClosingStartTag
                 } else if c == '>' {
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     State::AttributeName(i)
                 }
@@ -1133,7 +1294,7 @@ pub fn parse_html(
                     let (lc, nc) = attribute_ids(&body[start..i], intern);
                     b.attribute(lc, nc, 0, 0);
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     State::AttributeName(start)
                 }
@@ -1149,7 +1310,7 @@ pub fn parse_html(
                 } else if c == '>' {
                     b.attribute(lc, nc, 0, 0);
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     b.attribute(lc, nc, 0, 0);
                     State::AttributeName(i)
@@ -1167,7 +1328,7 @@ pub fn parse_html(
                     report(errors, "Missing attribute value", i);
                     b.attribute(lc, nc, 0, 0);
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     let start = decoded.len();
                     attr_lnw = start;
@@ -1204,7 +1365,7 @@ pub fn parse_html(
                     end_entity(&mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
                     b.attribute(lc, nc, start, decoded.len());
                     b.end_open_tag();
-                    text_after_tag(&decoded, &b)
+                    text_after_tag(&decoded, &mut b)
                 } else {
                     // Everything else, `/` included, is part of the value:
                     // `<a href=http://host/path>`.
@@ -1311,6 +1472,7 @@ pub fn parse_html(
             dec_start,
             mut last_non_whitespace,
             collapse_ws,
+            ..
         } => {
             end_entity(
                 &mut in_entity,
@@ -3485,6 +3647,12 @@ mod tests {
         fn len_of(body: &str) -> usize {
             parse_html(body, &mut None, InternLiveId::No).nodes.len()
         }
+        fn doc_positions(body: &str, tag: LiveId) -> Vec<usize> {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            (0..doc.nodes.len())
+                .filter(|&i| matches!(&doc.nodes[i], HtmlNode::OpenTag { lc, .. } if *lc == tag))
+                .collect()
+        }
 
         let body = "<p>hello<b>x</b></p>tail";
         let (p_close, b_close) = (close_of(body, live_id!(p)), close_of(body, live_id!(b)));
@@ -3492,20 +3660,24 @@ mod tests {
             (live_id!(p), Some(p_close), p_close + 1),
             (live_id!(b), Some(b_close), b_close + 1),
         ]);
-        // the tokenizer does not know `<li>` closes `<li>` (that is the
-        // widget's tree-builder rule), so both items end at `</ul>`
+        // `<li>` implicitly closes an open `<li>`: the first item ends where
+        // the second begins, and the second at `</ul>`
         let body = "<ul><li>one<li>two</ul>";
         let ul_close = close_of(body, live_id!(ul));
+        let second_li = doc_positions(body, live_id!(li))[1];
         assert_eq!(ends(body), vec![
             (live_id!(ul), Some(ul_close), ul_close + 1),
-            (live_id!(li), None, ul_close),
+            (live_id!(li), None, second_li),
             (live_id!(li), None, ul_close),
         ]);
         // a void element is whole at its open tag, however it is written
-        for body in ["<br>x", "<br/>x", "<br></br>x"] {
+        for body in ["<br>x", "<br/>x"] {
             let br = open_of(body, live_id!(br));
             assert_eq!(ends(body), vec![(live_id!(br), None, br + 1)], "{body:?}");
         }
+        // `</br>` is a second `<br>`, not a close tag
+        let brs = doc_positions("<br></br>x", live_id!(br));
+        assert_eq!(ends("<br></br>x"), vec![(live_id!(br), None, brs[0] + 1), (live_id!(br), None, brs[1] + 1)]);
         let body = "<img src=x alt=y>t";
         let img = open_of(body, live_id!(img));
         assert_eq!(ends(body), vec![(live_id!(img), None, img + 3)]);
@@ -3518,6 +3690,96 @@ mod tests {
             (live_id!(td), Some(td_close), td_close + 1),
             (live_id!(a), None, td_close),
         ]);
+    }
+
+    /// The tree builder's implicit closes are applied as the element stack
+    /// is built, so every consumer sees the same tree a browser would:
+    /// `<li>a<li>b` is two items, `<td>a<td>b` two cells, a block start tag
+    /// closes an open `<p>`, a heading closes a heading it directly follows,
+    /// and a second `<a>` closes the first.
+    #[test]
+    fn start_tags_close_what_the_tree_builder_closes() {
+        fn content(body: &str, tag: LiveId, nth: usize) -> String {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let open = (0..doc.nodes.len())
+                .filter(|&i| matches!(&doc.nodes[i], HtmlNode::OpenTag { lc, .. } if *lc == tag))
+                .nth(nth)
+                .unwrap();
+            let at = doc.new_walker_with_index(open);
+            let end = at.close_index().or(at.end_index()).unwrap();
+            doc.nodes[open + 1..end]
+                .iter()
+                .filter_map(|n| match n {
+                    HtmlNode::Text { start, end, .. } => Some(&doc.decoded[*start..*end]),
+                    _ => None,
+                })
+                .collect()
+        }
+        let li = live_id!(li);
+        assert_eq!(content("<ul><li>one<li>two<li>three</ul>", li, 0), "one");
+        assert_eq!(content("<ul><li>one<li>two<li>three</ul>", li, 1), "two");
+        assert_eq!(content("<ul><li>one<li>two<li>three</ul>", li, 2), "three");
+        // an item's nested list keeps its own items separate from the outer one
+        assert_eq!(content("<ul><li>a<ul><li>b<li>c</ul>d<li>e</ul>", li, 0), "abcd");
+        assert_eq!(content("<ul><li>a<ul><li>b<li>c</ul>d<li>e</ul>", li, 1), "b");
+        let (td, tr) = (live_id!(td), live_id!(tr));
+        let table = "<table><tr><td>a<td>b<tr><td>c<td>d</table>";
+        assert_eq!(content(table, td, 0), "a");
+        assert_eq!(content(table, td, 1), "b");
+        assert_eq!(content(table, tr, 0), "ab");
+        assert_eq!(content(table, tr, 1), "cd");
+        assert_eq!(content("<table><tr><td>a<tbody><tr><td>b</table>", tr, 0), "a");
+        let p = live_id!(p);
+        assert_eq!(content("<p>one<p>two<p>three", p, 0), "one");
+        assert_eq!(content("<p>text<ul><li>x</ul>after", p, 0), "text");
+        assert_eq!(content("<p>text<div>block</div>", p, 0), "text");
+        assert_eq!(content("<p>text<h2>head</h2>", p, 0), "text");
+        assert_eq!(content("<p>a<b>bold<p>b", p, 0), "abold");
+        // but not by an inline element
+        assert_eq!(content("<p>text<b>bold</b>more</p>", p, 0), "textboldmore");
+        assert_eq!(content("<h1>one<h2>two</h2>", live_id!(h1), 0), "one");
+        assert_eq!(content("<h1><b>x<h2>two</h2></b></h1>", live_id!(h1), 0), "xtwo");
+        let a = live_id!(a);
+        assert_eq!(content("<a href=1>x<a href=2>y</a>", a, 0), "x");
+        assert_eq!(content("<a href=1>x<a href=2>y</a>", a, 1), "y");
+        assert_eq!(content("<dl><dt>t<dd>d<dt>u</dl>", live_id!(dt), 0), "t");
+        assert_eq!(content("<dl><dt>t<dd>d<dt>u</dl>", live_id!(dd), 0), "d");
+        // a `<td>` does not reach across its row's boundary
+        assert_eq!(content("<table><tr><td><ul><li>a<li>b</ul><td>c</table>", td, 0), "ab");
+        assert_eq!(content("<table><tr><td><ul><li>a<li>b</ul><td>c</table>", li, 0), "a");
+    }
+
+    /// `</br>` is read as `<br>`, so `x</br>y` breaks the line, and the
+    /// newline right after `<pre>` is not content.
+    #[test]
+    fn br_end_tag_and_pre_newline_follow_the_tree_builder() {
+        let doc = parse_html("x</br>y", &mut None, InternLiveId::No);
+        let tags: Vec<_> = doc.nodes.iter().filter_map(|n| match n {
+            HtmlNode::OpenTag { lc, .. } => Some(("open", *lc)),
+            HtmlNode::CloseTag { lc, .. } => Some(("close", *lc)),
+            _ => None,
+        }).collect();
+        assert_eq!(tags, vec![("open", live_id!(br))]);
+        assert_eq!(text_of("<pre>\nx</pre>"), "x");
+        assert_eq!(text_of("<pre>\n\nx</pre>"), "\nx");
+        assert_eq!(text_of("<pre>\r\nx</pre>"), "x");
+        assert_eq!(text_of("<pre>x\n</pre>"), "x\n");
+        assert_eq!(text_of("<pre class=c>\nx</pre>"), "x");
+        // only pre-like elements do this
+        assert_eq!(text_of("<p>\nx</p>"), " x");
+    }
+
+    /// NUL is dropped from text and replaced in attribute values.
+    #[test]
+    fn nul_is_dropped_from_text_and_replaced_in_values() {
+        assert_eq!(text_of("a\0b"), "ab");
+        let doc = parse_html("<a b=\"x\0y\">t</a>", &mut None, InternLiveId::No);
+        let mut w = doc.new_walker();
+        while !w.done() && w.open_tag_lc().is_none() {
+            w.walk();
+        }
+        assert_eq!(w.find_attr_lc(live_id!(b)), Some("x\u{fffd}y"));
+        assert_nodes_consistent("a\0b<c\0 d=\0>\0</c>");
     }
 
     /// `<pre>` is tracked on the same stack as every other element, so an

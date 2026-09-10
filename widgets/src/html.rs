@@ -213,20 +213,15 @@ pub struct Html {
     #[rust]
     list_stack: Vec<ListLevel>,
 
-    /// The elements this widget has actually opened, innermost last, for the
-    /// draw currently in progress.
-    ///
-    /// A close tag only runs its handler when a matching open tag is on this
-    /// stack. Without that, a stray `</td>` or `</li>` in a message reaches
-    /// `cx.end_turtle()` with nothing to end and unbalances the frame.
+    /// The elements this widget has opened and not yet closed, innermost
+    /// last, for the draw in progress. Each carries the node index at which
+    /// the parser resolved it to end, and its close handler runs when the
+    /// walk reaches that index — its own close tag, or the enclosing close
+    /// tag that ended it, or the start tag that implicitly closed it. So a
+    /// stray `</td>` closes nothing, `<li>a<li>b` closes the first item
+    /// where a browser would, and nothing reaches `cx.end_turtle()` twice.
     #[rust]
-    open_elements: Vec<LiveId>,
-
-    /// How many of each tag `open_elements` holds, so an unmatched close tag
-    /// is rejected without scanning the stack. A message can carry both deep
-    /// nesting and many stray close tags.
-    #[rust]
-    open_element_counts: HashMap<LiveId, u32>,
+    open_elements: Vec<OpenElement>,
 
     /// The `<summary>` elements currently open, innermost last. `</summary>`
     /// pops a tracker that `<summary>` pushed, so a message containing only
@@ -389,11 +384,10 @@ impl Html {
     /// Ends the innermost open `<details>`: anything still open inside it —
     /// elements, and a `<summary>` that never closed — ends first.
     fn pop_details_level(&mut self, cx: &mut Cx2d) {
-        let Some(level) = self.details_stack.last() else {
+        if self.details_stack.is_empty() {
             return;
-        };
-        let (depth, index) = (level.open_depth, self.details_stack.len() - 1);
-        self.unwind_open_elements(cx, depth);
+        }
+        let index = self.details_stack.len() - 1;
         while self.open_summaries.last().is_some_and(|s| s.owner == Some(index)) {
             let summary = self.open_summaries.pop();
             self.close_summary(cx, summary.and_then(|s| s.owner));
@@ -406,16 +400,12 @@ impl Html {
 
     /// After a collapsed `<details>`'s summary closes: the index to resume at
     /// so its body is not drawn. That is its own `</details>` when it has
-    /// one, so that handler still runs; otherwise the element was ended by
-    /// an enclosing element, its level is closed here, and drawing resumes
-    /// at that enclosing close tag.
-    fn skip_collapsed_body(&mut self, cx: &mut Cx2d, node: &HtmlWalker) -> Option<usize> {
+    /// one, so that handler pops the level; otherwise the enclosing close tag
+    /// that ended it, where the level's `open_elements` entry pops it.
+    fn skip_collapsed_body(&self, node: &HtmlWalker) -> Option<usize> {
         let open_index = self.details_stack.last()?.open_index;
         let mut probe = node.at(open_index);
         Self::skip_details_body(&mut probe, open_index);
-        if node.at(open_index).close_index().is_none() {
-            self.pop_details_level(cx);
-        }
         Some(probe.index)
     }
 
@@ -443,7 +433,6 @@ impl Html {
             .or(node.end_index())
             .unwrap_or(node.nodes.len());
         let mut count = 0;
-        let mut in_row = false;
         let mut i = node.index + 1;
         while i < end {
             match &node.nodes[i] {
@@ -454,19 +443,19 @@ impl Html {
                         continue;
                     }
                     if *lc == live_id!(tr) {
-                        if in_row {
+                        // A row that contributed no cells does not size the
+                        // table; keep looking for one that does.
+                        if count > 0 {
                             break;
                         }
-                        in_row = true;
                     } else if *lc == live_id!(td) || *lc == live_id!(th) {
-                        in_row = true;
                         count += 1;
                         i = at.end_index().unwrap_or(i + 1);
                         continue;
                     }
                 }
                 HtmlNode::CloseTag { lc, .. } => {
-                    if in_row
+                    if count > 0
                         && (*lc == live_id!(tr) || *lc == live_id!(thead) || *lc == live_id!(tbody))
                     {
                         break;
@@ -646,16 +635,6 @@ impl Html {
         None
     }
 
-    /// Drops one occurrence of `lc` from the open-element tally.
-    fn release_open_element(counts: &mut HashMap<LiveId, u32>, lc: LiveId) {
-        if let Some(n) = counts.get_mut(&lc) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                counts.remove(&lc);
-            }
-        }
-    }
-
     /// Tags whose close handler changes `TextFlow` state, so their open tag
     /// has to be remembered and their close tag ignored when unmatched.
     fn element_is_tracked(lc: LiveId) -> bool {
@@ -675,83 +654,26 @@ impl Html {
         TRACKED.contains(&lc)
     }
 
-    /// Runs the close handler for everything above `depth` on the open stack,
-    /// innermost first, and drops it.
-    fn unwind_open_elements(&mut self, cx: &mut Cx2d, depth: usize) {
-        while self.open_elements.len() > depth {
-            let Some(lc) = self.open_elements.pop() else {
+    /// Runs the close handler of every open element the parser resolved to
+    /// end at or before node `index`, innermost first. Called before each
+    /// node is handled, and with `usize::MAX` once the walk is over.
+    fn close_elements_ending_by(&mut self, cx: &mut Cx2d, index: usize) {
+        while let Some(top) = self.open_elements.last() {
+            if top.until > index {
+                break;
+            }
+            let Some(element) = self.open_elements.pop() else {
                 break;
             };
-            Self::release_open_element(&mut self.open_element_counts, lc);
-            let _ = Self::handle_close_tag(cx, &mut self.text_flow, lc, &mut self.list_stack);
-        }
-    }
-
-    /// Closes the outermost open element in `targets` found before reaching
-    /// one in `scope`, and everything above it. With `top_only`, only the
-    /// innermost open element is considered.
-    fn close_implicitly(
-        &mut self,
-        cx: &mut Cx2d,
-        targets: &[LiveId],
-        scope: &[LiveId],
-        top_only: bool,
-    ) {
-        let mut close_to = None;
-        for (depth, open) in self.open_elements.iter().enumerate().rev() {
-            if targets.contains(open) {
-                close_to = Some(depth);
-            } else if scope.contains(open) {
-                break;
+            if element.lc == live_id!(details) {
+                self.pop_details_level(cx);
+            } else if element.lc == live_id!(summary) {
+                if let Some(summary) = self.open_summaries.pop() {
+                    self.close_summary(cx, summary.owner);
+                }
+            } else {
+                let _ = Self::handle_close_tag(cx, &mut self.text_flow, element.lc, &mut self.list_stack);
             }
-            if top_only {
-                break;
-            }
-        }
-        if let Some(depth) = close_to {
-            self.unwind_open_elements(cx, depth);
-        }
-    }
-
-    /// What opening `tag` implicitly closes, following the tree builder's
-    /// rules: a heading closes a heading it directly follows, `<li>` closes
-    /// an open item up to the enclosing list, a cell closes an open cell up
-    /// to its row, a row closes an open row and its cells, and any block
-    /// element closes an open `<p>`. This is what makes the shorthand real
-    /// documents use — `<li>a<li>b`, `<td>a<td>b`, `<p>a<p>b` — nest the
-    /// way a browser reads it.
-    fn apply_implicit_closes(&mut self, cx: &mut Cx2d, tag: LiveId) {
-        const HEADINGS: &[LiveId] = &[
-            live_id!(h1), live_id!(h2), live_id!(h3),
-            live_id!(h4), live_id!(h5), live_id!(h6),
-        ];
-        const ITEM: &[LiveId] = &[live_id!(li)];
-        const LISTS: &[LiveId] = &[live_id!(ul), live_id!(ol)];
-        const CELLS: &[LiveId] = &[live_id!(td), live_id!(th)];
-        const ROW_SCOPE: &[LiveId] = &[live_id!(tr), live_id!(table)];
-        const ROW_AND_CELLS: &[LiveId] = &[live_id!(tr), live_id!(td), live_id!(th)];
-        const TABLE_SCOPE: &[LiveId] = &[live_id!(table), live_id!(thead), live_id!(tbody)];
-        const PARAGRAPH: &[LiveId] = &[live_id!(p)];
-        const BUTTON_SCOPE: &[LiveId] = &[live_id!(table), live_id!(td), live_id!(th)];
-        const CLOSES_PARAGRAPH: &[LiveId] = &[
-            live_id!(h1), live_id!(h2), live_id!(h3), live_id!(h4), live_id!(h5), live_id!(h6),
-            live_id!(p), live_id!(blockquote), live_id!(pre),
-            live_id!(ul), live_id!(ol), live_id!(li), live_id!(table),
-        ];
-        // The tree builder closes a `<p>` in button scope first, and only
-        // then pops a heading that is the current node.
-        if CLOSES_PARAGRAPH.contains(&tag) {
-            self.close_implicitly(cx, PARAGRAPH, BUTTON_SCOPE, false);
-        }
-        if HEADINGS.contains(&tag) {
-            self.close_implicitly(cx, HEADINGS, &[], true);
-        }
-        if tag == live_id!(li) {
-            self.close_implicitly(cx, ITEM, LISTS, false);
-        } else if CELLS.contains(&tag) {
-            self.close_implicitly(cx, CELLS, ROW_SCOPE, false);
-        } else if tag == live_id!(tr) {
-            self.close_implicitly(cx, ROW_AND_CELLS, TABLE_SCOPE, false);
         }
     }
 
@@ -932,10 +854,14 @@ impl Widget for Html {
         // inside an unclosed element must not bleed into this one.
         self.list_stack.clear();
         self.open_elements.clear();
-        self.open_element_counts.clear();
         self.open_summaries.clear();
         self.table_columns_cache.clear();
         while !node.done() {
+            // Every element the parser resolved to end here ends now, before
+            // this node is handled: inside a `</summary>`, at the next `<li>`,
+            // at an enclosing close tag, or after a jump past its end.
+            self.close_elements_ending_by(cx, node.index);
+
             // Intercept <details> / <summary> open tags before the generic
             // handler, so <details> never falls through to handle_custom_widget
             // (which would jump_to_close and hide all content).
@@ -954,8 +880,17 @@ impl Widget for Html {
                         id: details_id,
                         is_open: initial_open,
                         open_index: node.index,
-                        open_depth: self.open_elements.len(),
                     });
+                    // Its `</details>` pops the level. Without one — ended by
+                    // an enclosing close tag, or never — it has to be popped
+                    // where the parser resolved it to end, like any element;
+                    // a level left behind would claim the next `<summary>`.
+                    if node.close_index().is_none() {
+                        self.open_elements.push(OpenElement {
+                            lc: live_id!(details),
+                            until: node.end_index().unwrap_or(usize::MAX),
+                        });
+                    }
                     // Small top margin so a `<details>` doesn't butt up
                     // against the preceding content. Scaled by the current
                     // font size so it tracks headings, sub/superscript, etc.
@@ -1045,8 +980,14 @@ impl Widget for Html {
                     self.text_flow.bold.push();
                     self.open_summaries.push(OpenSummary {
                         owner: self.details_stack.len().checked_sub(1),
-                        depth: self.open_elements.len(),
                     });
+                    // Likewise a `<summary>` with no `</summary>` of its own.
+                    if node.close_index().is_none() {
+                        self.open_elements.push(OpenElement {
+                            lc: live_id!(summary),
+                            until: node.end_index().unwrap_or(usize::MAX),
+                        });
+                    }
                     node.walk();
                     continue;
                 }
@@ -1060,18 +1001,20 @@ impl Widget for Html {
                         node.walk();
                         continue;
                     };
-                    // Anything opened inside the summary ends with it — an
-                    // `<li>` or a table cell, and any `<details>` nested in it.
-                    self.unwind_open_elements(cx, summary.depth);
+                    // A `<details>` nested inside the summary ends with it.
                     if let Some(owner) = summary.owner {
                         while self.details_stack.len() > owner + 1 {
                             self.pop_details_level(cx);
                         }
                     }
                     if self.close_summary(cx, summary.owner) {
-                        if let Some(resume) = self.skip_collapsed_body(cx, &node) {
-                            node.index = resume;
-                            continue;
+                        // The body lies ahead of the walker; a resume behind
+                        // it would redraw what was already drawn.
+                        if let Some(resume) = self.skip_collapsed_body(&node) {
+                            if resume > node.index {
+                                node.index = resume;
+                                continue;
+                            }
                         }
                     }
                     node.walk();
@@ -1089,10 +1032,6 @@ impl Widget for Html {
 
             // Regular tag/text handling for everything else.
             let open_lc = node.open_tag_lc();
-            if let Some(open_lc) = open_lc {
-                self.apply_implicit_closes(cx, open_lc);
-            }
-
             let tf = &mut self.text_flow;
             match Self::handle_open_tag(
                 cx,
@@ -1111,23 +1050,13 @@ impl Widget for Html {
                 None => {
                     if let Some(lc) = open_lc {
                         if Self::element_is_tracked(lc) {
-                            self.open_elements.push(lc);
-                            *self.open_element_counts.entry(lc).or_insert(0) += 1;
+                            let until = node
+                                .close_index()
+                                .or(node.end_index())
+                                .unwrap_or(usize::MAX);
+                            self.open_elements.push(OpenElement { lc, until });
                         }
                     }
-                }
-            }
-
-            // Run a close handler only for an element this draw actually
-            // opened, unwinding anything left open inside it.
-            if let Some(close_lc) = node.close_tag_lc() {
-                if self.open_element_counts.get(&close_lc).is_some_and(|n| *n > 0) {
-                    let depth = self
-                        .open_elements
-                        .iter()
-                        .rposition(|t| *t == close_lc)
-                        .unwrap_or(0);
-                    self.unwind_open_elements(cx, depth);
                 }
             }
             Self::handle_text_node(cx, &mut self.text_flow, &mut node);
@@ -1136,7 +1065,7 @@ impl Widget for Html {
         // Close anything the document left open, so `<ul><li>item` hands a
         // balanced turtle stack back to `TextFlow::end`, and a `<summary>`
         // that never closed doesn't leave its bold run and tracker behind.
-        self.unwind_open_elements(cx, 0);
+        self.close_elements_ending_by(cx, usize::MAX);
         while let Some(summary) = self.open_summaries.pop() {
             self.close_summary(cx, summary.owner);
         }
@@ -1527,17 +1456,20 @@ struct DetailsLevel {
     /// Node index of the `<details>` open tag, so a collapsed body can be
     /// skipped to the element's resolved end.
     open_index: usize,
-    /// `open_elements.len()` when the element opened; `</details>` unwinds
-    /// back to it, ending anything left open in the body.
-    open_depth: usize,
 }
 
 /// A `<summary>` that has been opened and not yet closed.
 struct OpenSummary {
     /// Index into `details_stack` of the `<details>` it belongs to, if any.
     owner: Option<usize>,
-    /// `open_elements.len()` when it opened; `</summary>` unwinds back to it.
-    depth: usize,
+}
+
+/// An element the widget opened, and the node index at which it ends.
+struct OpenElement {
+    lc: LiveId,
+    /// Its own close tag's index, or, when it has none, the index the
+    /// parser resolved as its end.
+    until: usize,
 }
 
 /// The format and metadata of a list at a given nesting level.

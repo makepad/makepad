@@ -65,6 +65,12 @@ struct ParsedQuery {
     terminal: Terminal,
 }
 
+/// Parses a selector. Each whitespace-separated token (or `>`-separated for
+/// the child combinator) is `[tag|*][.class|.text][#id]` followed by at most
+/// one terminal, `[N]` or `@attr`, in that order: `@attr` takes the rest of
+/// the token, `[N]` overrides `@attr` when both appear, and a suffix written
+/// out of order is folded into the name before it (`a.foo.text` is class
+/// `foo.text`). Only the last token's terminal applies.
 fn parse_query(sel: &str) -> ParsedQuery {
     let sel = sel.trim();
     let mut steps = Vec::new();
@@ -267,11 +273,13 @@ fn execute_query(
             &mut matches,
         );
     } else {
+        // Inside the selection: `querySelectorAll` on an element never
+        // returns the element itself.
         for &(s, e) in ranges {
             find_elements(
                 doc,
                 &steps[0],
-                s as usize,
+                s as usize + 1,
                 e as usize,
                 true,
                 &mut matches,
@@ -283,7 +291,15 @@ fn execute_query(
     for step in &steps[1..] {
         let prev = std::mem::take(&mut matches);
         let is_child = matches!(step.combinator, Combinator::Child);
+        // For a descendant step, a match nested inside a match already
+        // scanned has already had its subtree searched; rescanning it made
+        // `b b` on deeply nested `<b>` quadratic. `prev` is sorted.
+        let mut scanned_end = 0usize;
         for &(s, e) in &prev {
+            if !is_child && (s as usize) < scanned_end {
+                continue;
+            }
+            scanned_end = scanned_end.max(e as usize);
             let child_start = s as usize + 1;
             if child_start < e as usize {
                 find_elements(
@@ -310,13 +326,8 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
     let mut first_text: Option<(usize, usize)> = None;
     let mut count = 0;
     for i in start..end.min(nodes.len()) {
-        if let HtmlNode::Text {
-            start: s,
-            end: e,
-            all_ws,
-        } = &nodes[i]
-        {
-            if !all_ws {
+        if let HtmlNode::Text { start: s, end: e, .. } = &nodes[i] {
+            if s != e {
                 count += 1;
                 if count == 1 {
                     first_text = Some((*s, *e));
@@ -333,21 +344,15 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
     ""
 }
 
+/// The element's text content: its text nodes concatenated as decoded.
+/// Inserting a space between nodes, as this used to, put one inside a word
+/// split by a comment or an inline tag (`a<!-- -->b`, `a<b>b</b>`) and made
+/// `.text` disagree with `.html`.
 fn collect_text_owned(decoded: &str, nodes: &[HtmlNode], start: usize, end: usize) -> String {
     let mut text = String::new();
     for i in start..end.min(nodes.len()) {
-        if let HtmlNode::Text {
-            start: s,
-            end: e,
-            all_ws,
-        } = &nodes[i]
-        {
-            if !all_ws || (text.is_empty() && *all_ws) {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(&decoded[*s..*e]);
-            }
+        if let HtmlNode::Text { start: s, end: e, .. } = &nodes[i] {
+            text.push_str(&decoded[*s..*e]);
         }
     }
     text
@@ -759,26 +764,41 @@ fn reconstruct_html_into(
     let mut i = start;
     while i < end && i < nodes.len() {
         match &nodes[i] {
-            HtmlNode::OpenTag { nc, .. } => {
+            HtmlNode::OpenTag { lc, nc } => {
                 out.push('<');
                 let _ = write!(out, "{}", nc);
                 let mut j = i + 1;
+                // The serializer's rule for `<pre>`: a newline that starts
+                // its content is written twice, because the parser drops
+                // the first one. Otherwise `.html` loses a line each time
+                // it is parsed.
+                let doubles_leading_newline =
+                    *lc == live_id!(pre) || *lc == live_id!(textarea) || *lc == live_id!(listing);
                 while j < end && j < nodes.len() {
                     if let HtmlNode::Attribute { nc, start, end, .. } = &nodes[j] {
                         out.push(' ');
                         let _ = write!(out, "{}", nc);
-                        let val = &decoded[*start..*end];
-                        if !val.is_empty() {
-                            out.push_str("=\"");
-                            push_escaped(out, val, true);
-                            out.push('"');
-                        }
+                        // Always `=""`, as the serializer specifies: a bare
+                        // name followed by an attribute whose name starts
+                        // with `=` would re-parse to a different document.
+                        out.push_str("=\"");
+                        push_escaped(out, &decoded[*start..*end], true);
+                        out.push('"');
                         j += 1;
                     } else {
                         break;
                     }
                 }
                 out.push('>');
+                if doubles_leading_newline {
+                    let first_text = nodes[j..end.min(nodes.len())].iter().find_map(|n| match n {
+                        HtmlNode::Text { start, end, .. } if start != end => Some(&decoded[*start..*end]),
+                        _ => None,
+                    });
+                    if first_text.is_some_and(|t| t.starts_with('\n')) {
+                        out.push('\n');
+                    }
+                }
             }
             HtmlNode::CloseTag { nc, .. } => {
                 out.push_str("</");
