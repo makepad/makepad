@@ -226,6 +226,32 @@ pub struct Html {
     #[rust]
     list_stack: Vec<ListLevel>,
 
+    /// The elements this widget has actually opened, innermost last, for the
+    /// draw currently in progress.
+    ///
+    /// A close tag only runs its handler when a matching open tag is on this
+    /// stack. Without that, a stray `</td>` or `</li>` in a message reaches
+    /// `cx.end_turtle()` with nothing to end and unbalances the frame.
+    #[rust]
+    open_elements: Vec<LiveId>,
+
+    /// How many `<summary>` elements are open. `</summary>` pops a tracker
+    /// that `<summary>` pushed, so a message containing only the close tag
+    /// used to pop an empty stack.
+    #[rust]
+    open_summaries: usize,
+
+    /// Widget ids already claimed during this draw, so a repeated `id`
+    /// attribute cannot bind two elements to the same cached sub-widget.
+    #[rust]
+    used_widget_ids: HashSet<LiveId>,
+
+    /// Column counts already computed for a `<table>` at a given node index.
+    /// Counting scans forward to the first row, so a document that is
+    /// thousands of unclosed `<table>` tags would otherwise be quadratic.
+    #[rust]
+    table_columns_cache: HashMap<usize, usize>,
+
     /// The stack of currently-open `<details>` tags while traversing the
     /// document. Rebuilt on each draw.
     #[rust]
@@ -366,6 +392,7 @@ impl Html {
         ul_markers: &Vec<String>,
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
+        table_columns_cache: &mut HashMap<usize, usize>,
     ) -> (Option<LiveId>, TrimWhitespaceInText) {
         let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
 
@@ -512,7 +539,9 @@ impl Html {
             }
             some_id!(table) => {
                 tf.new_line_collapsed(cx);
-                let col_count = Self::count_table_columns(node.nodes, node.index);
+                let col_count = *table_columns_cache
+                    .entry(node.index)
+                    .or_insert_with(|| Self::count_table_columns(node.nodes, node.index));
                 tf.begin_table(cx, col_count);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
@@ -544,13 +573,51 @@ impl Html {
         (None, trim_whitespace_in_text)
     }
 
+    /// Tags whose close handler changes `TextFlow` state, so their open tag
+    /// has to be remembered and their close tag ignored when unmatched.
+    fn element_is_tracked(lc: LiveId) -> bool {
+        // Every tag `handle_close_tag` has an arm for, minus the void ones
+        // (`<br>`, `<hr>`, `<sep>`), which never carry a close tag.
+        const TRACKED: &[LiveId] = &[
+            live_id!(h1), live_id!(h2), live_id!(h3),
+            live_id!(h4), live_id!(h5), live_id!(h6),
+            live_id!(b), live_id!(strong), live_id!(i), live_id!(em),
+            live_id!(p), live_id!(blockquote), live_id!(code), live_id!(pre),
+            live_id!(sub), live_id!(sup),
+            live_id!(ul), live_id!(ol), live_id!(li),
+            live_id!(u), live_id!(del), live_id!(s), live_id!(strike),
+            live_id!(table), live_id!(thead), live_id!(tbody),
+            live_id!(tr), live_id!(th), live_id!(td),
+        ];
+        TRACKED.contains(&lc)
+    }
+
+    /// The elements a newly-opened `tag` implicitly closes when they are still
+    /// open, so that the shorthand real documents use — `<li>a<li>b`,
+    /// `<td>a<td>b`, `<p>a<p>b` — nests the way a browser reads it.
+    fn implicitly_closed_by(tag: LiveId, top: LiveId) -> bool {
+        if tag == live_id!(li) {
+            top == live_id!(li)
+        } else if tag == live_id!(p) {
+            top == live_id!(p)
+        } else if tag == live_id!(td) || tag == live_id!(th) {
+            top == live_id!(td) || top == live_id!(th)
+        } else if tag == live_id!(tr) {
+            top == live_id!(td) || top == live_id!(th) || top == live_id!(tr)
+        } else {
+            false
+        }
+    }
+
     fn handle_close_tag(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
-        node: &mut HtmlWalker,
+        close_lc: LiveId,
         list_stack: &mut Vec<ListLevel>,
     ) -> Option<LiveId> {
-        match node.close_tag_lc() {
+        // Takes the id rather than reading it off the walker, so the caller can
+        // also drive it for elements a document left open.
+        match Some(close_lc) {
             some_id!(h1)
             | some_id!(h2)
             | some_id!(h3)
@@ -726,14 +793,27 @@ impl Widget for Html {
         let mut node = self.doc.new_walker();
         self.details_stack.clear();
         self.summary_click_areas.clear();
+        // These describe the draw in progress; a previous draw that ended
+        // inside an unclosed element must not bleed into this one.
+        self.list_stack.clear();
+        self.open_elements.clear();
+        self.open_summaries = 0;
+        self.used_widget_ids.clear();
         while !node.done() {
             // Intercept <details> / <summary> open tags before the generic
             // handler, so <details> never falls through to handle_custom_widget
             // (which would jump_to_close and hide all content).
             if let Some(tag) = node.open_tag_lc() {
                 if tag == live_id!(details) {
-                    let details_id = if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
-                        LiveId::from_str(id_str)
+                    let details_id = if let Some(id) = node
+                        .find_attr_lc(live_id!(id))
+                        .map(LiveId::from_str)
+                        .filter(|id| self.used_widget_ids.insert(*id))
+                    {
+                        // As for custom widgets: the first element to claim an
+                        // `id` keeps it, so two `<details>` sharing one id
+                        // don't share a single fold state.
+                        id
                     } else {
                         // Key by the node's stable doc index (a visit-order counter
                         // would renumber when a collapsed <details> hides nodes).
@@ -832,6 +912,7 @@ impl Widget for Html {
                     // click target in handle_event.
                     self.text_flow.areas_tracker.push_tracker();
                     self.text_flow.bold.push();
+                    self.open_summaries += 1;
                     node.walk();
                     continue;
                 }
@@ -840,6 +921,12 @@ impl Widget for Html {
             // Intercept </summary> and </details> close tags.
             if let Some(close_tag) = node.close_tag_lc() {
                 if close_tag == live_id!(summary) {
+                    // A `</summary>` with no `<summary>` has no tracker to pop.
+                    if self.open_summaries == 0 {
+                        node.walk();
+                        continue;
+                    }
+                    self.open_summaries -= 1;
                     self.text_flow.bold.pop();
                     let (start, end) = self.text_flow.areas_tracker.pop_tracker();
                     if let Some(dl) = self.details_stack.last() {
@@ -904,16 +991,37 @@ impl Widget for Html {
                     continue;
                 }
                 if close_tag == live_id!(details) {
-                    self.details_stack.pop();
-                    // Matching bottom margin (see `<details>` open handler).
-                    self.text_flow
-                        .new_line_collapsed_with_spacing(cx, self.details_margin_em());
+                    // Likewise, only balance a `<details>` this draw opened.
+                    if self.details_stack.pop().is_some() {
+                        // Matching bottom margin (see `<details>` open handler).
+                        self.text_flow
+                            .new_line_collapsed_with_spacing(cx, self.details_margin_em());
+                    }
                     node.walk();
                     continue;
                 }
             }
 
             // Regular tag/text handling for everything else.
+            // An open tag that a browser would treat as implicitly closing the
+            // element above it — `<li>a<li>b`, `<td>a<td>b` — closes it here
+            // too, so the turtles nest the way the document reads.
+            if let Some(open_lc) = node.open_tag_lc() {
+                while let Some(&top) = self.open_elements.last() {
+                    if !Self::implicitly_closed_by(open_lc, top) {
+                        break;
+                    }
+                    self.open_elements.pop();
+                    let _ = Self::handle_close_tag(
+                        cx,
+                        &mut self.text_flow,
+                        top,
+                        &mut self.list_stack,
+                    );
+                }
+            }
+
+            let open_lc = node.open_tag_lc();
             let tf = &mut self.text_flow;
             let mut trim = TrimWhitespaceInText::default();
             match Self::handle_open_tag(
@@ -924,17 +1032,50 @@ impl Widget for Html {
                 &self.ul_markers,
                 &self.ol_markers,
                 &self.ol_separator,
+                &mut self.table_columns_cache,
             ) {
                 (Some(_), _tws) => {
-                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node);
+                    handle_custom_widget(
+                        cx,
+                        scope,
+                        tf,
+                        &self.doc,
+                        &mut node,
+                        &mut self.used_widget_ids,
+                    );
                 }
                 (None, tws) => {
                     trim = tws;
+                    if let Some(lc) = open_lc {
+                        if Self::element_is_tracked(lc) {
+                            self.open_elements.push(lc);
+                        }
+                    }
                 }
             }
-            let _ = Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack);
-            Self::handle_text_node(cx, tf, &mut node, trim);
+
+            // Run a close handler only for an element this draw actually
+            // opened, unwinding anything left open inside it.
+            if let Some(close_lc) = node.close_tag_lc() {
+                if let Some(depth) = self.open_elements.iter().rposition(|t| *t == close_lc) {
+                    while self.open_elements.len() > depth {
+                        let lc = self.open_elements.pop().unwrap_or(close_lc);
+                        let _ = Self::handle_close_tag(
+                            cx,
+                            &mut self.text_flow,
+                            lc,
+                            &mut self.list_stack,
+                        );
+                    }
+                }
+            }
+            Self::handle_text_node(cx, &mut self.text_flow, &mut node, trim);
             node.walk();
+        }
+        // Close anything the document left open, so `<ul><li>item` hands a
+        // balanced turtle stack back to `TextFlow::end`.
+        while let Some(lc) = self.open_elements.pop() {
+            let _ = Self::handle_close_tag(cx, &mut self.text_flow, lc, &mut self.list_stack);
         }
         self.text_flow.end(cx);
         DrawStep::done()
@@ -977,6 +1118,7 @@ fn handle_custom_widget(
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
+    used_widget_ids: &mut HashSet<LiveId>,
 ) {
     // A custom widget draws straight into the turtle rather than through
     // `TextFlow::draw_text`, so it has to honour the line budget itself.
@@ -987,8 +1129,15 @@ fn handle_custom_widget(
         return;
     }
 
-    let id = if let Some(id) = node.find_attr_lc(live_id!(id)) {
-        LiveId::from_str(id)
+    let id = if let Some(id) = node.find_attr_lc(live_id!(id))
+        .map(LiveId::from_str)
+        .filter(|id| used_widget_ids.insert(*id))
+    {
+        // The `id` attribute keys the cached sub-widget, but a document may
+        // repeat it. The first element to claim an id keeps it; a later
+        // duplicate falls back to its node index, so two links can't end up
+        // sharing one widget — and with it one `href`.
+        id
     } else {
         // Key by the node's stable index in the parsed doc rather than a
         // visit-order counter: skip mode (a collapsed <details>) doesn't visit
@@ -1348,10 +1497,10 @@ impl OrderedListType {
         match self {
             OrderedListType::Numbers => to_number(),
             OrderedListType::UpperAlpha => {
-                format!("{}{separator}", ('A' as u8 + count as u8 - 1) as char)
+                format!("{}{separator}", alphabetic_marker(count, b'A'))
             }
             OrderedListType::LowerAlpha => {
-                format!("{}{separator}", ('a' as u8 + count as u8 - 1) as char)
+                format!("{}{separator}", alphabetic_marker(count, b'a'))
             }
             OrderedListType::UpperRoman => to_roman_numeral(count)
                 .map(|m| format!("{}{separator}", m))
@@ -1382,6 +1531,22 @@ impl OrderedListType {
 /// Returns `None` if the input is not between 1 and 3999 inclusive.
 ///
 /// This code was adapted from the [`roman` crate](https://crates.io/crates/roman).
+/// Numbers an alphabetic list item the way `list-style-type: lower-alpha`
+/// does: `a`..`z`, then `aa`, `ab`, and so on.
+///
+/// `count` comes from the `start` and `value` attributes, so it is
+/// attacker-controlled and must not be truncated into a byte.
+fn alphabetic_marker(count: i32, base: u8) -> String {
+    let mut remaining = count as i64;
+    let mut letters = Vec::new();
+    while remaining > 0 {
+        let digit = ((remaining - 1) % 26) as u8;
+        letters.push((base + digit) as char);
+        remaining = (remaining - 1) / 26;
+    }
+    letters.iter().rev().collect()
+}
+
 pub fn to_roman_numeral(mut count: i32) -> Option<String> {
     const MAX: i32 = 3999;
     static NUMERALS: &[(i32, &str)] = &[

@@ -71,26 +71,37 @@ impl<'a> HtmlWalker<'a> {
         }
     }
 
+    /// Advances to the close tag matching the open tag the walker is on.
+    ///
+    /// Only tags with the *same* id affect nesting depth. Counting every
+    /// open tag would over-consume, because a void element written without a
+    /// slash (`<br>`, `<img src=x>`, `<hr>`) emits an `OpenTag` with no
+    /// matching `CloseTag`, so each one would leave the depth permanently
+    /// unbalanced and swallow the rest of the document.
+    ///
+    /// The walker does not move when the element has no close tag of its own
+    /// — it is void, or unclosed — so the caller's own `walk()` still visits
+    /// the following nodes and any enclosing close tag is still delivered.
     pub fn jump_to_close(&mut self) {
-        if self.index < self.nodes.len() {
-            let mut depth = 0;
-            for i in self.index + 1..self.nodes.len() {
-                match &self.nodes[i] {
-                    HtmlNode::OpenTag { .. } => {
-                        depth += 1;
-                    }
-                    HtmlNode::CloseTag { .. } => {
-                        if depth == 0 {
-                            self.index = i;
-                            return;
-                        }
-                        depth -= 1;
-                    }
-                    _ => (),
+        let Some(open_lc) = self.open_tag_lc() else {
+            return;
+        };
+        let mut depth = 0u32;
+        for i in self.index + 1..self.nodes.len() {
+            match &self.nodes[i] {
+                HtmlNode::OpenTag { lc, .. } if *lc == open_lc => {
+                    depth += 1;
                 }
+                HtmlNode::CloseTag { lc, .. } if *lc == open_lc => {
+                    if depth == 0 {
+                        self.index = i;
+                        return;
+                    }
+                    depth -= 1;
+                }
+                _ => (),
             }
         }
-        self.index = self.nodes.len();
     }
 
     pub fn done(&self) -> bool {
@@ -174,24 +185,44 @@ impl<'a> HtmlWalker<'a> {
         None
     }
 
+    /// Returns the first non-empty text at or after the current position,
+    /// stopping at the first close tag.
+    ///
+    /// The parser emits a zero-length `Text` node in front of every tag, so
+    /// those are skipped: otherwise `<a href="x"><b>label</b></a>` reports no
+    /// text at all rather than `label`.
     pub fn find_text(&self) -> Option<&'a str> {
         for i in self.index..self.nodes.len() {
             match &self.nodes[i] {
                 HtmlNode::CloseTag { .. } => return None,
-                HtmlNode::Text { start, end, .. } => return Some(&self.decoded[*start..*end]),
+                HtmlNode::Text { start, end, .. } if start != end => {
+                    return Some(&self.decoded[*start..*end]);
+                }
                 _ => (),
             }
         }
         None
     }
 
+    /// Returns the text directly inside the next `tag` open tag at or after
+    /// the current position. `tag` is matched against the lowercased tag id,
+    /// since HTML tag names are case-insensitive.
     pub fn find_tag_text(&self, tag: LiveId) -> Option<&'a str> {
         for i in self.index..self.nodes.len() {
             match &self.nodes[i] {
-                HtmlNode::OpenTag { nc, .. } if *nc == tag => {
-                    // the next one must be a text node
-                    if let Some(HtmlNode::Text { start, end, .. }) = self.nodes.get(i + 1) {
-                        return Some(&self.decoded[*start..*end]);
+                HtmlNode::OpenTag { lc, .. } if *lc == tag => {
+                    // Attributes sit between the open tag and its text, and
+                    // the parser emits a zero-length text node before any
+                    // nested markup; skip both to reach the real content.
+                    for candidate in &self.nodes[i + 1..] {
+                        match candidate {
+                            HtmlNode::Attribute { .. } => (),
+                            HtmlNode::Text { start, end, .. } if start == end => (),
+                            HtmlNode::Text { start, end, .. } => {
+                                return Some(&self.decoded[*start..*end]);
+                            }
+                            _ => break,
+                        }
                     }
                 }
                 _ => (),
@@ -271,6 +302,15 @@ impl HtmlDoc {
     }
 }
 
+/// The five characters HTML treats as whitespace.
+///
+/// `char::is_whitespace` follows Unicode, which also covers U+00A0 and
+/// U+3000. Using it here collapsed `&nbsp;` away and ate the full-width
+/// spaces in CJK text, neither of which HTML permits.
+fn is_html_whitespace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
+}
+
 pub fn parse_html(
     body: &str,
     errors: &mut Option<Vec<HtmlError>>,
@@ -294,6 +334,7 @@ pub fn parse_html(
         AttribValueSq(LiveId, LiveId, usize),
         AttribValueDq(LiveId, LiveId, usize),
         AttribValueBare(LiveId, LiveId, usize),
+        AttribValueBareSlash(LiveId, LiveId, usize),
         CommentStartDash1,
         CommentStartDash2,
         CommentEndDash,
@@ -304,14 +345,34 @@ pub fn parse_html(
         CommentBody,
     }
 
+    /// The longest name in `match_entity` is `DownLeftRightVector`. A run of
+    /// characters longer than this cannot become a named entity, so scanning
+    /// stops there rather than buffering unbounded text.
+    const MAX_ENTITY_NAME: usize = "DownLeftRightVector".len();
+    /// Numeric references (`&#38;`, `&#x26;`) may be zero-padded, so they get
+    /// a longer budget than a name would.
+    const MAX_ENTITY_NUMERIC: usize = 32;
+
+    /// State for an entity currently being scanned.
+    #[derive(Copy, Clone)]
+    struct InEntity {
+        /// Index in `decoded` of the opening `&`.
+        start: usize,
+        /// `last_non_whitespace` as it was *before* the `&` was appended.
+        /// The entity's own characters are appended to `decoded` while it is
+        /// being scanned and then truncated away again on a match, so the
+        /// index has to be restored rather than recomputed.
+        saved_last_non_whitespace: usize,
+    }
+
     fn process_entity(
         c: char,
-        in_entity: &mut Option<usize>,
+        in_entity: &mut Option<InEntity>,
         decoded: &mut String,
         last_non_whitespace: &mut usize,
         collapse_ws: bool,
     ) {
-        if let Some(start) = *in_entity {
+        if let Some(InEntity { start, saved_last_non_whitespace }) = *in_entity {
             // scan entity
             if c == ';' {
                 // potential end of entity
@@ -321,47 +382,64 @@ pub fn parse_html(
                     }
                     Ok(entity) => {
                         *in_entity = None;
-                        decoded.truncate(start);
-                        let ch = std::char::from_u32(entity).unwrap();
-                        decoded.push(ch);
-                        // While the entity body was being scanned, each
-                        // character was appended to `decoded` and (if
-                        // non-whitespace) advanced `last_non_whitespace`.
-                        // After truncating, that index is now stale and
-                        // must be corrected — otherwise the next real
-                        // whitespace char collapses against a phantom
-                        // non-whitespace position past the buffer end, and
-                        // gets silently dropped.
-                        if ch.is_whitespace() {
-                            *last_non_whitespace = (*last_non_whitespace).min(start);
-                        } else {
-                            *last_non_whitespace = decoded.len();
+                        // `match_entity` only yields Unicode scalar values,
+                        // but fall back to leaving the text as-is rather than
+                        // panicking if that ever stops holding.
+                        if let Some(ch) = char::from_u32(entity) {
+                            decoded.truncate(start);
+                            decoded.push(ch);
+                            *last_non_whitespace = if is_html_whitespace(ch) {
+                                saved_last_non_whitespace
+                            } else {
+                                decoded.len()
+                            };
+                            return;
                         }
-                        return;
                     }
                 }
             }
             // definitely not an entity
-            else if c.is_whitespace() || decoded.len() - start > "DOWNLEFTRIGHTVECTOR".len() {
-                *in_entity = None;
+            else {
+                let scanned = decoded.len() - start;
+                let budget = if decoded.as_bytes().get(start + 1) == Some(&b'#') {
+                    MAX_ENTITY_NUMERIC
+                } else {
+                    MAX_ENTITY_NAME
+                };
+                if is_html_whitespace(c) || scanned > budget {
+                    *in_entity = None;
+                }
             }
         }
         if c == '&' {
-            *in_entity = Some(decoded.len());
+            *in_entity = Some(InEntity {
+                start: decoded.len(),
+                saved_last_non_whitespace: *last_non_whitespace,
+            });
         }
-        if collapse_ws && c.is_whitespace() {
+        if collapse_ws && is_html_whitespace(c) {
             if *last_non_whitespace == decoded.len() {
                 decoded.push(' ');
             }
         } else {
             decoded.push(c);
-            if !c.is_whitespace() {
+            if !is_html_whitespace(c) {
                 *last_non_whitespace = decoded.len();
             }
         }
     }
 
+    /// `<pre>` and `<code>` keep their whitespace verbatim.
+    fn preserves_whitespace(lc: LiveId) -> bool {
+        lc == live_id!(pre) || lc == live_id!(code)
+    }
+
     let mut nodes = Vec::new();
+    // How many whitespace-preserving elements are currently open. A single
+    // flag would be wrong: any tag nested inside `<pre>` used to reset
+    // collapsing for the rest of the element, so `<pre>a  <b>b  b</b>  c</pre>`
+    // lost every space after the first text run.
+    let mut pre_depth = 0usize;
     let mut state = State::Text {
         start: 0,
         dec_start: 0,
@@ -379,7 +457,7 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::DocType
@@ -398,7 +476,7 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::HeaderQuestion
@@ -411,7 +489,7 @@ pub fn parse_html(
                 collapse_ws,
             } => {
                 if c == '<' {
-                    if let Some(start) = in_entity {
+                    if let Some(InEntity { start, .. }) = in_entity {
                         if let Some(errors) = errors {
                             errors.push(HtmlError {
                                 message: "Unterminated entity".into(),
@@ -419,6 +497,10 @@ pub fn parse_html(
                             })
                         };
                     }
+                    // An entity cannot span this boundary. Dropping it here is
+                    // what keeps a later `;` from truncating `decoded` back
+                    // past text that has already been committed to a node.
+                    in_entity = None;
                     nodes.push(HtmlNode::Text {
                         start: dec_start,
                         end: decoded.len(),
@@ -447,44 +529,62 @@ pub fn parse_html(
                     State::ElementClose(i + 1)
                 } else if c == '!' && i == start {
                     State::CommentStartDash1
-                } else if c == '?' {
+                } else if c == '?' && i == start {
                     State::HeaderQuestion
-                } else if c.is_whitespace() {
-                    if start == i {
-                        if let Some(errors) = errors {
-                            errors.push(HtmlError {
-                                message: "Found whitespace at beginning of tag".into(),
-                                position: i,
-                            })
-                        };
-                        State::Text {
-                            start: i + 1,
-                            dec_start: decoded.len(),
-                            last_non_whitespace: decoded.len(),
-                            collapse_ws: true,
-                        }
-                    } else {
-                        nodes.push(HtmlNode::OpenTag {
-                            lc: LiveId::from_str_lc(&body[start..i]),
-                            nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                        });
-                        State::ElementAttrs
+                } else if i == start && !c.is_ascii_alphabetic() {
+                    // A tag name has to start with an ASCII letter. Anything
+                    // else means the `<` was never markup — `5<10`, `a < b`,
+                    // `<>` — so put it back as literal text instead of
+                    // parsing a bogus element and losing the rest of the
+                    // line to it.
+                    let dec_start = decoded.len();
+                    decoded.push('<');
+                    let mut last_non_whitespace = decoded.len();
+                    process_entity(
+                        c,
+                        &mut in_entity,
+                        &mut decoded,
+                        &mut last_non_whitespace,
+                        pre_depth == 0,
+                    );
+                    State::Text {
+                        start,
+                        dec_start,
+                        last_non_whitespace,
+                        collapse_ws: pre_depth == 0,
                     }
-                } else if c == '/' {
+                } else if is_html_whitespace(c) {
+                    let lc = LiveId::from_str_lc(&body[start..i]);
+                    if preserves_whitespace(lc) {
+                        pre_depth += 1;
+                    }
                     nodes.push(HtmlNode::OpenTag {
-                        lc: LiveId::from_str_lc(&body[start..i]),
+                        lc,
+                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
+                    });
+                    State::ElementAttrs
+                } else if c == '/' {
+                    let lc = LiveId::from_str_lc(&body[start..i]);
+                    if preserves_whitespace(lc) {
+                        pre_depth += 1;
+                    }
+                    nodes.push(HtmlNode::OpenTag {
+                        lc,
                         nc: LiveId::from_str_with_intern(&body[start..i], intern),
                     });
                     State::ElementSelfClose
                 } else if c == '>' {
                     let lc = LiveId::from_str_lc(&body[start..i]);
                     let nc = LiveId::from_str_with_intern(&body[start..i], intern);
+                    if preserves_whitespace(lc) {
+                        pre_depth += 1;
+                    }
                     nodes.push(HtmlNode::OpenTag { lc, nc });
                     State::Text {
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: lc != live_id!(pre) && lc != live_id!(code),
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::ElementName(start)
@@ -494,16 +594,23 @@ pub fn parse_html(
                 if c == '>' {
                     let lc = LiveId::from_str_lc(&body[start..i]);
                     let nc = LiveId::from_str_with_intern(&body[start..i], intern);
+                    if preserves_whitespace(lc) {
+                        pre_depth = pre_depth.saturating_sub(1);
+                    }
                     nodes.push(HtmlNode::CloseTag { lc, nc });
                     State::Text {
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
-                } else if c.is_whitespace() {
+                } else if is_html_whitespace(c) {
+                    let lc = LiveId::from_str_lc(&body[start..i]);
+                    if preserves_whitespace(lc) {
+                        pre_depth = pre_depth.saturating_sub(1);
+                    }
                     nodes.push(HtmlNode::CloseTag {
-                        lc: LiveId::from_str_lc(&body[start..i]),
+                        lc,
                         nc: LiveId::from_str_with_intern(&body[start..i], intern),
                     });
                     State::ElementCloseScanSpaces
@@ -517,9 +624,9 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
-                } else if !c.is_whitespace() {
+                } else if !is_html_whitespace(c) {
                     if let Some(errors) = errors {
                         errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})
                     };
@@ -527,7 +634,7 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::ElementCloseScanSpaces
@@ -543,26 +650,27 @@ pub fn parse_html(
                     };
                 }
                 // look backwards to the OpenTag
-                let begin = nodes
-                    .iter()
-                    .rev()
-                    .find_map(|v| {
-                        if let HtmlNode::OpenTag { lc, nc } = v {
-                            Some((lc, nc))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                nodes.push(HtmlNode::CloseTag {
-                    lc: *begin.0,
-                    nc: *begin.1,
+                let begin = nodes.iter().rev().find_map(|v| {
+                    if let HtmlNode::OpenTag { lc, nc } = v {
+                        Some((*lc, *nc))
+                    } else {
+                        None
+                    }
                 });
+                // Always present in a well-formed transition into this state,
+                // but a parser fed arbitrary input should not carry an
+                // `unwrap` that a future edit could make reachable.
+                if let Some((lc, nc)) = begin {
+                    if preserves_whitespace(lc) {
+                        pre_depth = pre_depth.saturating_sub(1);
+                    }
+                    nodes.push(HtmlNode::CloseTag { lc, nc });
+                }
                 State::Text {
                     start: i + 1,
                     dec_start: decoded.len(),
                     last_non_whitespace: decoded.len(),
-                    collapse_ws: true,
+                    collapse_ws: pre_depth == 0,
                 }
             }
             State::ElementAttrs => {
@@ -570,32 +678,20 @@ pub fn parse_html(
                     //nodes.push(HtmlNode::BeginElement(HtmlId::new(&body, start, i)));
                     State::ElementSelfClose
                 } else if c == '>' {
-                    let begin = nodes.iter().rev().find_map(|v| {
-                        if let HtmlNode::OpenTag { lc, nc: _ } = v {
-                            Some(*lc)
-                        } else {
-                            None
-                        }
-                    });
-
                     State::Text {
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: if let Some(lc) = begin {
-                            lc != live_id!(pre) && lc != live_id!(code)
-                        } else {
-                            true
-                        },
+                        collapse_ws: pre_depth == 0,
                     }
-                } else if !c.is_whitespace() {
+                } else if !is_html_whitespace(c) {
                     State::AttribName(i)
                 } else {
                     State::ElementAttrs
                 }
             }
             State::AttribName(start) => {
-                if c.is_whitespace() {
+                if is_html_whitespace(c) {
                     State::AttribValueEq(
                         LiveId::from_str_lc(&body[start..i]),
                         LiveId::from_str_with_intern(&body[start..i], intern),
@@ -624,7 +720,7 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::AttribName(start)
@@ -650,11 +746,11 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else if c == '=' {
                     State::AttribValueStart(lc, nc)
-                } else if !c.is_whitespace() {
+                } else if !is_html_whitespace(c) {
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
@@ -667,22 +763,40 @@ pub fn parse_html(
                 }
             }
             State::AttribValueStart(lc, nc) => {
-                if c == '\"' {
+                if c == '>' {
+                    // An empty unquoted value: the tag ends here.
+                    nodes.push(HtmlNode::Attribute {
+                        lc,
+                        nc,
+                        start: 0,
+                        end: 0,
+                    });
+                    State::Text {
+                        start: i + 1,
+                        dec_start: decoded.len(),
+                        last_non_whitespace: decoded.len(),
+                        collapse_ws: pre_depth == 0,
+                    }
+                } else if c == '\"' {
                     // double quoted attrib
                     State::AttribValueDq(lc, nc, decoded.len())
                 } else if c == '\'' {
                     // single quoted attrib
                     State::AttribValueSq(lc, nc, decoded.len())
-                } else if !c.is_whitespace() {
-                    decoded.push(c);
-                    State::AttribValueBare(lc, nc, decoded.len() - 1)
+                } else if !is_html_whitespace(c) {
+                    // Route the first character through `process_entity` too,
+                    // otherwise a value starting with `&` never begins an
+                    // entity scan and `&amp;x` decodes as literal `&amp;x`.
+                    let start = decoded.len();
+                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
+                    State::AttribValueBare(lc, nc, start)
                 } else {
                     State::AttribValueStart(lc, nc)
                 }
             }
             State::AttribValueSq(lc, nc, start) => {
                 if c == '\'' {
-                    if let Some(start) = in_entity {
+                    if let Some(InEntity { start, .. }) = in_entity {
                         if let Some(errors) = errors {
                             errors.push(HtmlError {
                                 message: "Unterminated entity".into(),
@@ -690,6 +804,10 @@ pub fn parse_html(
                             })
                         };
                     }
+                    // An entity cannot span this boundary. Dropping it here is
+                    // what keeps a later `;` from truncating `decoded` back
+                    // past text that has already been committed to a node.
+                    in_entity = None;
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
@@ -704,7 +822,7 @@ pub fn parse_html(
             }
             State::AttribValueDq(lc, nc, start) => {
                 if c == '\"' {
-                    if let Some(start) = in_entity {
+                    if let Some(InEntity { start, .. }) = in_entity {
                         if let Some(errors) = errors {
                             errors.push(HtmlError {
                                 message: "Unterminated entity".into(),
@@ -712,6 +830,10 @@ pub fn parse_html(
                             })
                         };
                     }
+                    // An entity cannot span this boundary. Dropping it here is
+                    // what keeps a later `;` from truncating `decoded` back
+                    // past text that has already been committed to a node.
+                    in_entity = None;
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
@@ -724,16 +846,60 @@ pub fn parse_html(
                     State::AttribValueDq(lc, nc, start)
                 }
             }
-            State::AttribValueBare(lc, nc, start) => {
-                if c == '/' {
+            State::AttribValueBareSlash(lc, nc, start) => {
+                if c == '>' {
+                    // The slash really was the self-closing marker.
+                    in_entity = None;
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
                         start,
                         end: decoded.len(),
                     });
-                    State::ElementSelfClose
+                    let begin = nodes.iter().rev().find_map(|v| {
+                        if let HtmlNode::OpenTag { lc, nc } = v {
+                            Some((*lc, *nc))
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some((lc, nc)) = begin {
+                        if preserves_whitespace(lc) {
+                            pre_depth = pre_depth.saturating_sub(1);
+                        }
+                        nodes.push(HtmlNode::CloseTag { lc, nc });
+                    }
+                    State::Text {
+                        start: i + 1,
+                        dec_start: decoded.len(),
+                        last_non_whitespace: decoded.len(),
+                        collapse_ws: pre_depth == 0,
+                    }
+                } else if is_html_whitespace(c) {
+                    // `<a href=x/ y=2>`: the slash belongs to the value.
+                    decoded.push('/');
+                    in_entity = None;
+                    nodes.push(HtmlNode::Attribute {
+                        lc,
+                        nc,
+                        start,
+                        end: decoded.len(),
+                    });
+                    State::ElementAttrs
+                } else {
+                    // `<a href=http://host/path>`: an ordinary value character.
+                    decoded.push('/');
+                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
+                    State::AttribValueBare(lc, nc, start)
+                }
+            }
+            State::AttribValueBare(lc, nc, start) => {
+                if c == '/' {
+                    // Only a slash immediately before `>` closes the tag, so
+                    // decide once the next character is known.
+                    State::AttribValueBareSlash(lc, nc, start)
                 } else if c == '>' {
+                    in_entity = None;
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
@@ -744,9 +910,10 @@ pub fn parse_html(
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
-                } else if c.is_whitespace() {
+                } else if is_html_whitespace(c) {
+                    in_entity = None;
                     nodes.push(HtmlNode::Attribute {
                         lc,
                         nc,
@@ -755,7 +922,7 @@ pub fn parse_html(
                     });
                     State::ElementAttrs
                 } else {
-                    decoded.push(c);
+                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
                     State::AttribValueBare(lc, nc, start)
                 }
             }
@@ -776,8 +943,11 @@ pub fn parse_html(
                             position: i,
                         })
                     };
+                    State::CommentBody
+                } else {
+                    // `<!--` is complete: a `>` now closes an empty comment.
+                    State::CommentEnd
                 }
-                State::CommentBody
             }
             State::CommentBody => {
                 if c == '-' {
@@ -794,12 +964,15 @@ pub fn parse_html(
                 }
             }
             State::CommentEnd => {
-                if c == '>' {
+                if c == '-' {
+                    // A run of dashes keeps `>` able to close the comment.
+                    State::CommentEnd
+                } else if c == '>' {
                     State::Text {
                         start: i + 1,
                         dec_start: decoded.len(),
                         last_non_whitespace: decoded.len(),
-                        collapse_ws: true,
+                        collapse_ws: pre_depth == 0,
                     }
                 } else {
                     State::CommentBody
@@ -852,7 +1025,7 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "commat" => 64,
         "COMMAT" => 64,
         "Copf" => 8450,
-        "copf" => 8450,
+        "copf" => 120148,
         "COPF" => 8450,
         "incare" => 8453,
         "INCARE" => 8453,
@@ -861,27 +1034,27 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "hamilt" => 8459,
         "HAMILT" => 8459,
         "Hfr" => 8460,
-        "hfr" => 8460,
+        "hfr" => 120101,
         "HFR" => 8460,
         "Hopf" => 8461,
-        "hopf" => 8461,
+        "hopf" => 120153,
         "HOPF" => 8461,
         "planckh" => 8462,
         "PLANCKH" => 8462,
         "planck" => 8463,
         "PLANCK" => 8463,
         "Iscr" => 8464,
-        "iscr" => 8464,
+        "iscr" => 119998,
         "ISCR" => 8464,
         "image" => 8465,
         "IMAGE" => 8465,
         "Lscr" => 8466,
-        "lscr" => 8466,
+        "lscr" => 120001,
         "LSCR" => 8466,
         "ell" => 8467,
         "ELL" => 8467,
         "Nopf" => 8469,
-        "nopf" => 8469,
+        "nopf" => 120159,
         "NOPF" => 8469,
         "numero" => 8470,
         "NUMERO" => 8470,
@@ -890,44 +1063,44 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "weierp" => 8472,
         "WEIERP" => 8472,
         "Popf" => 8473,
-        "popf" => 8473,
+        "popf" => 120161,
         "POPF" => 8473,
         "Qopf" => 8474,
-        "qopf" => 8474,
+        "qopf" => 120162,
         "QOPF" => 8474,
         "Rscr" => 8475,
-        "rscr" => 8475,
+        "rscr" => 120007,
         "RSCR" => 8475,
         "real" => 8476,
         "REAL" => 8476,
         "Ropf" => 8477,
-        "ropf" => 8477,
+        "ropf" => 120163,
         "ROPF" => 8477,
         "rx" => 8478,
         "RX" => 8478,
         "Zopf" => 8484,
-        "zopf" => 8484,
+        "zopf" => 120171,
         "ZOPF" => 8484,
         "mho" => 8487,
         "MHO" => 8487,
         "Zfr" => 8488,
-        "zfr" => 8488,
+        "zfr" => 120119,
         "ZFR" => 8488,
         "iiota" => 8489,
         "IIOTA" => 8489,
         "bernou" => 8492,
         "BERNOU" => 8492,
         "Cfr" => 8493,
-        "cfr" => 8493,
+        "cfr" => 120096,
         "CFR" => 8493,
         "escr" => 8495,
         "ESCR" => 8495,
         "Escr" => 8496,
         "Fscr" => 8497,
-        "fscr" => 8497,
+        "fscr" => 119995,
         "FSCR" => 8497,
         "Mscr" => 8499,
-        "mscr" => 8499,
+        "mscr" => 120002,
         "MSCR" => 8499,
         "oscr" => 8500,
         "OSCR" => 8500,
@@ -940,7 +1113,7 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "daleth" => 8504,
         "DALETH" => 8504,
         "DD" => 8517,
-        "dd" => 8517,
+        "dd" => 8518,
         "ee" => 8519,
         "EE" => 8519,
         "ii" => 8520,
@@ -1033,8 +1206,8 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "VERT" => 124,
         "rbrace" => 125,
         "RBRACE" => 125,
-        "tilde" => 126,
-        "TILDE" => 126,
+        "tilde" => 732,
+        "TILDE" => 732,
         "circ" => 710,
         "CIRC" => 710,
         "nbsp" => 160,
@@ -1107,7 +1280,6 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "NLDR" => 8229,
         "hellip" => 8230,
         "HELLIP" => 8230,
-        "" => 8240,
         "pertenk" => 8241,
         "PERTENK" => 8241,
         "prime" => 8242,
@@ -1205,8 +1377,8 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "DEG" => 176,
         "fnof" => 402,
         "FNOF" => 402,
-        "permil" => 137,
-        "PERMIL" => 137,
+        "permil" => 8240,
+        "PERMIL" => 8240,
         "forall" => 8704,
         "FORALL" => 8704,
         "comp" => 8705,
@@ -1349,7 +1521,7 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "esdot" => 8784,
         "ESDOT" => 8784,
         "eDot" => 8785,
-        "edot" => 8785,
+        "edot" => 279,
         "EDOT" => 8785,
         "efDot" => 8786,
         "efdot" => 8786,
@@ -1384,10 +1556,10 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "lE" => 8806,
         "gE" => 8807,
         "lnE" => 8808,
-        "lne" => 8808,
+        "lne" => 10887,
         "LNE" => 8808,
         "gnE" => 8809,
-        "gne" => 8809,
+        "gne" => 10888,
         "GNE" => 8809,
         "Lt" => 8810,
         "Gt" => 8811,
@@ -1589,10 +1761,10 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "gtdot" => 8919,
         "GTDOT" => 8919,
         "Ll" => 8920,
-        "ll" => 8920,
+        "ll" => 8810,
         "LL" => 8920,
         "Gg" => 8921,
-        "gg" => 8921,
+        "gg" => 8811,
         "GG" => 8921,
         "leg" => 8922,
         "LEG" => 8922,
@@ -1667,81 +1839,81 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "LFLOOR" => 8970,
         "rfloor" => 8971,
         "RFLOOR" => 8971,
-        "lang" => 9001,
-        "LANG" => 9001,
-        "rang" => 9002,
-        "RANG" => 9002,
+        "lang" => 10216,
+        "LANG" => 10216,
+        "rang" => 10217,
+        "RANG" => 10217,
         "Alpha" => 913,
-        "alpha" => 913,
+        "alpha" => 945,
         "ALPHA" => 913,
         "Beta" => 914,
-        "beta" => 914,
+        "beta" => 946,
         "BETA" => 914,
         "Gamma" => 915,
-        "gamma" => 915,
+        "gamma" => 947,
         "GAMMA" => 915,
         "Delta" => 916,
-        "delta" => 916,
+        "delta" => 948,
         "DELTA" => 916,
         "Epsilon" => 917,
-        "epsilon" => 917,
+        "epsilon" => 949,
         "EPSILON" => 917,
         "Zeta" => 918,
-        "zeta" => 918,
+        "zeta" => 950,
         "ZETA" => 918,
         "Eta" => 919,
-        "eta" => 919,
+        "eta" => 951,
         "ETA" => 919,
         "Theta" => 920,
-        "theta" => 920,
+        "theta" => 952,
         "THETA" => 920,
         "Iota" => 921,
-        "iota" => 921,
+        "iota" => 953,
         "IOTA" => 921,
         "Kappa" => 922,
-        "kappa" => 922,
+        "kappa" => 954,
         "KAPPA" => 922,
         "Lambda" => 923,
-        "lambda" => 923,
+        "lambda" => 955,
         "LAMBDA" => 923,
         "Mu" => 924,
-        "mu" => 924,
+        "mu" => 956,
         "MU" => 924,
         "Nu" => 925,
-        "nu" => 925,
+        "nu" => 957,
         "NU" => 925,
         "Xi" => 926,
-        "xi" => 926,
+        "xi" => 958,
         "XI" => 926,
         "Omicron" => 927,
-        "omicron" => 927,
+        "omicron" => 959,
         "OMICRON" => 927,
         "Pi" => 928,
-        "pi" => 928,
+        "pi" => 960,
         "PI" => 928,
         "Rho" => 929,
-        "rho" => 929,
+        "rho" => 961,
         "RHO" => 929,
         "Sigma" => 931,
-        "sigma" => 931,
+        "sigma" => 963,
         "SIGMA" => 931,
         "Tau" => 932,
-        "tau" => 932,
+        "tau" => 964,
         "TAU" => 932,
         "Upsilon" => 933,
-        "upsilon" => 933,
+        "upsilon" => 965,
         "UPSILON" => 933,
         "Phi" => 934,
-        "phi" => 934,
+        "phi" => 966,
         "PHI" => 934,
         "Chi" => 935,
-        "chi" => 935,
+        "chi" => 967,
         "CHI" => 935,
         "Psi" => 936,
-        "psi" => 936,
+        "psi" => 968,
         "PSI" => 936,
         "Omega" => 937,
-        "omega" => 937,
+        "omega" => 969,
         "OMEGA" => 937,
         "sigmaf" => 962,
         "SIGMAF" => 962,
@@ -1752,93 +1924,88 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "piv" => 982,
         "PIV" => 982,
         "Agrave" => 192,
-        "agrave" => 192,
+        "agrave" => 224,
         "AGRAVE" => 192,
         "Aacute" => 193,
-        "aacute" => 193,
+        "aacute" => 225,
         "AACUTE" => 193,
         "Acirc" => 194,
-        "acirc" => 194,
+        "acirc" => 226,
         "ACIRC" => 194,
         "Atilde" => 195,
-        "atilde" => 195,
+        "atilde" => 227,
         "ATILDE" => 195,
         "Auml" => 196,
-        "auml" => 196,
+        "auml" => 228,
         "AUML" => 196,
         "Aring" => 197,
-        "aring" => 197,
+        "aring" => 229,
         "ARING" => 197,
         "AElig" => 198,
-        "aelig" => 198,
+        "aelig" => 230,
         "AELIG" => 198,
         "Ccedil" => 199,
-        "ccedil" => 199,
+        "ccedil" => 231,
         "CCEDIL" => 199,
         "Egrave" => 200,
-        "egrave" => 200,
+        "egrave" => 232,
         "EGRAVE" => 200,
         "Eacute" => 201,
-        "eacute" => 201,
+        "eacute" => 233,
         "EACUTE" => 201,
         "Ecirc" => 202,
-        "ecirc" => 202,
+        "ecirc" => 234,
         "ECIRC" => 202,
         "Euml" => 203,
-        "euml" => 203,
+        "euml" => 235,
         "EUML" => 203,
-        "Lgrave" => 204,
-        "lgrave" => 204,
-        "LGRAVE" => 204,
+        "Igrave" => 204,
+        "Iacute" => 205,
         "Lacute" => 313,
-        "lacute" => 313,
+        "lacute" => 314,
         "LACUTE" => 313,
-        "Lcirc" => 206,
-        "lcirc" => 206,
-        "LCIRC" => 206,
-        "Luml" => 207,
-        "luml" => 207,
-        "LUML" => 207,
+        "Icirc" => 206,
+        "Iuml" => 207,
         "ETH" => 208,
-        "eth" => 208,
+        "eth" => 240,
         "Ntilde" => 209,
-        "ntilde" => 209,
+        "ntilde" => 241,
         "NTILDE" => 209,
         "Ograve" => 210,
-        "ograve" => 210,
+        "ograve" => 242,
         "OGRAVE" => 210,
         "Oacute" => 211,
-        "oacute" => 211,
+        "oacute" => 243,
         "OACUTE" => 211,
         "Ocirc" => 212,
-        "ocirc" => 212,
+        "ocirc" => 244,
         "OCIRC" => 212,
         "Otilde" => 213,
-        "otilde" => 213,
+        "otilde" => 245,
         "OTILDE" => 213,
         "Ouml" => 214,
-        "ouml" => 214,
+        "ouml" => 246,
         "OUML" => 214,
         "Oslash" => 216,
-        "oslash" => 216,
+        "oslash" => 248,
         "OSLASH" => 216,
         "Ugrave" => 217,
-        "ugrave" => 217,
+        "ugrave" => 249,
         "UGRAVE" => 217,
         "Uacute" => 218,
-        "uacute" => 218,
+        "uacute" => 250,
         "UACUTE" => 218,
         "Ucirc" => 219,
-        "ucirc" => 219,
+        "ucirc" => 251,
         "UCIRC" => 219,
         "Uuml" => 220,
-        "uuml" => 220,
+        "uuml" => 252,
         "UUML" => 220,
         "Yacute" => 221,
-        "yacute" => 221,
+        "yacute" => 253,
         "YACUTE" => 221,
         "THORN" => 222,
-        "thorn" => 222,
+        "thorn" => 254,
         "szlig" => 223,
         "SZLIG" => 223,
         "igrave" => 236,
@@ -1852,68 +2019,68 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "yuml" => 255,
         "YUML" => 255,
         "Amacr" => 256,
-        "amacr" => 256,
+        "amacr" => 257,
         "AMACR" => 256,
         "Abreve" => 258,
-        "abreve" => 258,
+        "abreve" => 259,
         "ABREVE" => 258,
         "Aogon" => 260,
-        "aogon" => 260,
+        "aogon" => 261,
         "AOGON" => 260,
         "Cacute" => 262,
-        "cacute" => 262,
+        "cacute" => 263,
         "CACUTE" => 262,
         "Ccirc" => 264,
-        "ccirc" => 264,
+        "ccirc" => 265,
         "CCIRC" => 264,
         "Cdot" => 266,
-        "cdot" => 266,
+        "cdot" => 267,
         "CDOT" => 266,
         "Ccaron" => 268,
-        "ccaron" => 268,
+        "ccaron" => 269,
         "CCARON" => 268,
         "Dcaron" => 270,
-        "dcaron" => 270,
+        "dcaron" => 271,
         "DCARON" => 270,
         "Dstrok" => 272,
-        "dstrok" => 272,
+        "dstrok" => 273,
         "DSTROK" => 272,
         "Emacr" => 274,
-        "emacr" => 274,
+        "emacr" => 275,
         "EMACR" => 274,
         "Edot" => 278,
         "Eogon" => 280,
-        "eogon" => 280,
+        "eogon" => 281,
         "EOGON" => 280,
         "Ecaron" => 282,
-        "ecaron" => 282,
+        "ecaron" => 283,
         "ECARON" => 282,
         "Gcirc" => 284,
-        "gcirc" => 284,
+        "gcirc" => 285,
         "GCIRC" => 284,
         "Gbreve" => 286,
-        "gbreve" => 286,
+        "gbreve" => 287,
         "GBREVE" => 286,
         "Gdot" => 288,
-        "gdot" => 288,
+        "gdot" => 289,
         "GDOT" => 288,
         "Gcedil" => 290,
         "gcedil" => 290,
         "GCEDIL" => 290,
         "Hcirc" => 292,
-        "hcirc" => 292,
+        "hcirc" => 293,
         "HCIRC" => 292,
         "Hstrok" => 294,
-        "hstrok" => 294,
+        "hstrok" => 295,
         "HSTROK" => 294,
         "Itilde" => 296,
-        "itilde" => 296,
+        "itilde" => 297,
         "ITILDE" => 296,
         "Imacr" => 298,
-        "imacr" => 298,
+        "imacr" => 299,
         "IMACR" => 298,
         "Iogon" => 302,
-        "iogon" => 302,
+        "iogon" => 303,
         "IOGON" => 302,
         "Idot" => 304,
         "idot" => 304,
@@ -1921,113 +2088,113 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "imath" => 305,
         "IMATH" => 305,
         "IJlig" => 306,
-        "ijlig" => 306,
+        "ijlig" => 307,
         "IJLIG" => 306,
         "Jcirc" => 308,
-        "jcirc" => 308,
+        "jcirc" => 309,
         "JCIRC" => 308,
         "Kcedil" => 310,
-        "kcedil" => 310,
+        "kcedil" => 311,
         "KCEDIL" => 310,
         "kgreen" => 312,
         "KGREEN" => 312,
         "Lcedil" => 315,
-        "lcedil" => 315,
+        "lcedil" => 316,
         "LCEDIL" => 315,
         "Lcaron" => 317,
-        "lcaron" => 317,
+        "lcaron" => 318,
         "LCARON" => 317,
         "Lmidot" => 319,
-        "lmidot" => 319,
+        "lmidot" => 320,
         "LMIDOT" => 319,
         "Lstrok" => 321,
-        "lstrok" => 321,
+        "lstrok" => 322,
         "LSTROK" => 321,
         "Nacute" => 323,
-        "nacute" => 323,
+        "nacute" => 324,
         "NACUTE" => 323,
         "Ncedil" => 325,
-        "ncedil" => 325,
+        "ncedil" => 326,
         "NCEDIL" => 325,
         "Ncaron" => 327,
-        "ncaron" => 327,
+        "ncaron" => 328,
         "NCARON" => 327,
         "napos" => 329,
         "NAPOS" => 329,
         "ENG" => 330,
-        "eng" => 330,
+        "eng" => 331,
         "Omacr" => 332,
-        "omacr" => 332,
+        "omacr" => 333,
         "OMACR" => 332,
         "Odblac" => 336,
-        "odblac" => 336,
+        "odblac" => 337,
         "ODBLAC" => 336,
         "OElig" => 338,
-        "oelig" => 338,
+        "oelig" => 339,
         "OELIG" => 338,
         "Racute" => 340,
-        "racute" => 340,
+        "racute" => 341,
         "RACUTE" => 340,
         "Rcedil" => 342,
-        "rcedil" => 342,
+        "rcedil" => 343,
         "RCEDIL" => 342,
         "Rcaron" => 344,
-        "rcaron" => 344,
+        "rcaron" => 345,
         "RCARON" => 344,
         "Sacute" => 346,
-        "sacute" => 346,
+        "sacute" => 347,
         "SACUTE" => 346,
         "Scirc" => 348,
-        "scirc" => 348,
+        "scirc" => 349,
         "SCIRC" => 348,
         "Scedil" => 350,
-        "scedil" => 350,
+        "scedil" => 351,
         "SCEDIL" => 350,
         "Scaron" => 352,
-        "scaron" => 352,
+        "scaron" => 353,
         "SCARON" => 352,
         "Tcedil" => 354,
-        "tcedil" => 354,
+        "tcedil" => 355,
         "TCEDIL" => 354,
         "Tcaron" => 356,
-        "tcaron" => 356,
+        "tcaron" => 357,
         "TCARON" => 356,
         "Tstrok" => 358,
-        "tstrok" => 358,
+        "tstrok" => 359,
         "TSTROK" => 358,
         "Utilde" => 360,
-        "utilde" => 360,
+        "utilde" => 361,
         "UTILDE" => 360,
         "Umacr" => 362,
-        "umacr" => 362,
+        "umacr" => 363,
         "UMACR" => 362,
         "Ubreve" => 364,
-        "ubreve" => 364,
+        "ubreve" => 365,
         "UBREVE" => 364,
         "Uring" => 366,
-        "uring" => 366,
+        "uring" => 367,
         "URING" => 366,
         "Udblac" => 368,
-        "udblac" => 368,
+        "udblac" => 369,
         "UDBLAC" => 368,
         "Uogon" => 370,
-        "uogon" => 370,
+        "uogon" => 371,
         "UOGON" => 370,
         "Wcirc" => 372,
-        "wcirc" => 372,
+        "wcirc" => 373,
         "WCIRC" => 372,
         "Ycirc" => 374,
-        "ycirc" => 374,
+        "ycirc" => 375,
         "YCIRC" => 374,
         "Yuml" => 376,
         "Zacute" => 377,
-        "zacute" => 377,
+        "zacute" => 378,
         "ZACUTE" => 377,
         "Zdot" => 379,
-        "zdot" => 379,
+        "zdot" => 380,
         "ZDOT" => 379,
         "Zcaron" => 381,
-        "zcaron" => 381,
+        "zcaron" => 382,
         "ZCARON" => 381,
         "DownBreve" => 785,
         "downbreve" => 785,
@@ -2071,43 +2238,43 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "rlhar" => 8652,
         "RLHAR" => 8652,
         "nlArr" => 8653,
-        "nlarr" => 8653,
+        "nlarr" => 8602,
         "NLARR" => 8653,
         "nhArr" => 8654,
-        "nharr" => 8654,
+        "nharr" => 8622,
         "NHARR" => 8654,
         "nrArr" => 8655,
-        "nrarr" => 8655,
+        "nrarr" => 8603,
         "NRARR" => 8655,
         "lArr" => 8656,
-        "larr" => 8656,
+        "larr" => 8592,
         "LARR" => 8656,
         "uArr" => 8657,
-        "uarr" => 8657,
+        "uarr" => 8593,
         "UARR" => 8657,
         "rArr" => 8658,
-        "rarr" => 8658,
+        "rarr" => 8594,
         "RARR" => 8658,
         "dArr" => 8659,
-        "darr" => 8659,
+        "darr" => 8595,
         "DARR" => 8659,
         "hArr" => 8660,
-        "harr" => 8660,
+        "harr" => 8596,
         "HARR" => 8660,
         "vArr" => 8661,
-        "varr" => 8661,
+        "varr" => 8597,
         "VARR" => 8661,
         "nwArr" => 8662,
-        "nwarr" => 8662,
+        "nwarr" => 8598,
         "NWARR" => 8662,
         "neArr" => 8663,
-        "nearr" => 8663,
+        "nearr" => 8599,
         "NEARR" => 8663,
         "seArr" => 8664,
-        "searr" => 8664,
+        "searr" => 8600,
         "SEARR" => 8664,
         "swArr" => 8665,
-        "swarr" => 8665,
+        "swarr" => 8601,
         "SWARR" => 8665,
         "lAarr" => 8666,
         "laarr" => 8666,
@@ -2154,7 +2321,7 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "nvharr" => 10500,
         "NVHARR" => 10500,
         "Map" => 10501,
-        "map" => 10501,
+        "map" => 8614,
         "MAP" => 10501,
         "lbarr" => 10508,
         "LBARR" => 10508,
@@ -2173,7 +2340,7 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "downarrowbar" => 10515,
         "DOWNARROWBAR" => 10515,
         "Rarrtl" => 10518,
-        "rarrtl" => 10518,
+        "rarrtl" => 8611,
         "RARRTL" => 10518,
         "latail" => 10521,
         "LATAIL" => 10521,
@@ -2349,34 +2516,441 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "dfisht" => 10623,
         "DFISHT" => 10623,
         x => {
-            // check if we are a bare unicode number
-            let x = x.as_bytes();
-            if x[0] == b'#' {
-                if x.len() > 1 && x[1] == b'x' {
-                    // hex
-                    if let Ok(utf8) = std::str::from_utf8(&x[2..]) {
-                        if let Ok(num) = i64::from_str_radix(utf8, 16) {
-                            num as u32
-                        } else {
-                            return Err("Cannot parse hex html entity".into());
-                        }
-                    } else {
-                        return Err("Cannot parse hex html entity".into());
-                    }
-                } else {
-                    if let Ok(utf8) = std::str::from_utf8(&x[1..]) {
-                        if let Ok(num) = utf8.parse::<i64>() {
-                            num as u32
-                        } else {
-                            return Err("Cannot parse digit html entity".into());
-                        }
-                    } else {
-                        return Err("Cannot parse digit html entity".into());
-                    }
-                }
-            } else {
+            // Not a named entity: it may be a numeric character reference.
+            // Everything here is validated rather than cast, because the
+            // caller turns the result into a `char`: an out-of-range value,
+            // a surrogate, or a negative number would otherwise panic.
+            let Some(digits) = x.strip_prefix('#') else {
                 return Err("unknown html entity".into());
+            };
+            // `&#x..;` / `&#X..;` are hex, anything else is decimal. Parsing
+            // as `u32` (not `i64`) rejects a leading `-` or `+` outright.
+            let num = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16)
+                    .map_err(|_| String::from("Cannot parse hex html entity"))?,
+                None => digits
+                    .parse::<u32>()
+                    .map_err(|_| String::from("Cannot parse digit html entity"))?,
+            };
+            // Reject anything that is not a Unicode scalar value: beyond
+            // U+10FFFF, or a UTF-16 surrogate half.
+            if char::from_u32(num).is_none() {
+                return Err("Html entity is not a valid unicode scalar".into());
             }
+            num
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concatenated text of every text node, in document order.
+    fn text_of(body: &str) -> String {
+        let doc = parse_html(body, &mut None, InternLiveId::No);
+        let mut walker = doc.new_walker();
+        let mut out = String::new();
+        while !walker.done() {
+            if let Some(text) = walker.text() {
+                out.push_str(text);
+            }
+            walker.walk();
+        }
+        out
+    }
+
+    /// Every node's byte range must be in bounds, ordered, and on a char
+    /// boundary of `decoded`, and `all_ws` must match the text it describes.
+    fn assert_nodes_consistent(body: &str) {
+        let doc = parse_html(body, &mut None, InternLiveId::No);
+        let mut highest_text_end = 0;
+        for (i, node) in doc.nodes.iter().enumerate() {
+            let (start, end) = match node {
+                HtmlNode::Text { start, end, .. } | HtmlNode::Attribute { start, end, .. } => {
+                    (*start, *end)
+                }
+                _ => continue,
+            };
+            assert!(start <= end, "{body:?}: node {i} has start {start} > end {end}");
+            assert!(
+                end <= doc.decoded.len(),
+                "{body:?}: node {i} ends at {end}, past decoded len {}",
+                doc.decoded.len()
+            );
+            assert!(
+                doc.decoded.is_char_boundary(start) && doc.decoded.is_char_boundary(end),
+                "{body:?}: node {i} range {start}..{end} splits a character"
+            );
+            if let HtmlNode::Text { all_ws, .. } = node {
+                let really_all_ws = doc.decoded[start..end].chars().all(is_html_whitespace);
+                assert_eq!(
+                    *all_ws, really_all_ws,
+                    "{body:?}: node {i} all_ws={all_ws} but text is {:?}",
+                    &doc.decoded[start..end]
+                );
+                assert!(
+                    start >= highest_text_end,
+                    "{body:?}: node {i} overlaps an earlier text node"
+                );
+                highest_text_end = end;
+            }
+        }
+    }
+
+    /// Numeric character references that do not name a Unicode scalar value
+    /// used to reach `char::from_u32(..).unwrap()` and abort the process. Any
+    /// of these is reachable from a hostile chat message.
+    #[test]
+    fn out_of_range_numeric_entities_are_left_as_text() {
+        for body in [
+            "&#xD800;",           // high surrogate
+            "&#xDFFF;",           // low surrogate
+            "&#55296;",           // the same, in decimal
+            "&#x110000;",         // one past the last scalar value
+            "&#-1;",              // negative
+            "&#x-1;",
+            "&#99999999999999;",  // overflows every integer width
+            "&#;",
+            "&#x;",
+        ] {
+            assert_eq!(text_of(body), body, "{body:?} should survive as literal text");
+            assert_nodes_consistent(body);
+        }
+    }
+
+    /// A `&` that never terminates must not stay pending across a tag or a
+    /// closing quote: a later `;` would truncate `decoded` and retroactively
+    /// invalidate the byte ranges of nodes already emitted.
+    #[test]
+    fn an_unterminated_entity_does_not_span_a_tag_boundary() {
+        for body in [
+            "<p>&am<b>p;</b></p>",
+            "<p>&am</p><b>p;</b>",
+            "&<>;",
+            "&#<>1;",
+            "<a href='&am'>p;</a>",
+            "<a href=\"&am\">p;</a>",
+            "<a href=&am>p;</a>",
+        ] {
+            assert_nodes_consistent(body);
+        }
+        assert_eq!(text_of("<p>&am<b>p;</b></p>"), "&amp;");
+    }
+
+    /// `&;` is not an entity. It decoded to `‰` because the table carried an
+    /// empty-string key where `permil` belonged.
+    #[test]
+    fn an_empty_entity_name_is_not_an_entity() {
+        assert_eq!(text_of("&;"), "&;");
+        assert_eq!(match_entity("").is_err(), true);
+        assert_eq!(text_of("&permil;"), "\u{2030}");
+    }
+
+    /// The table was generated by folding names case-insensitively, so every
+    /// entity whose name differs from another only by case took the other's
+    /// code point: `&eacute;` rendered `É`, `&alpha;` rendered `Α`.
+    #[test]
+    fn case_distinct_entities_keep_their_own_code_points() {
+        for (body, expected) in [
+            ("&aacute;", "\u{e1}"),
+            ("&Aacute;", "\u{c1}"),
+            ("&eacute;", "\u{e9}"),
+            ("&Eacute;", "\u{c9}"),
+            ("&alpha;", "\u{3b1}"),
+            ("&Alpha;", "\u{391}"),
+            ("&omega;", "\u{3c9}"),
+            ("&Omega;", "\u{3a9}"),
+            ("&larr;", "\u{2190}"),
+            ("&lArr;", "\u{21d0}"),
+            ("&rarr;", "\u{2192}"),
+            ("&rArr;", "\u{21d2}"),
+            ("&copf;", "\u{1d554}"),
+            ("&Copf;", "\u{2102}"),
+        ] {
+            assert_eq!(text_of(body), expected, "{body:?}");
+        }
+    }
+
+    /// `Igrave`/`Icirc`/`Iuml` had been transcribed as `Lgrave`/`Lcirc`/`Luml`,
+    /// and `Iacute` was missing outright.
+    #[test]
+    fn capital_i_accents_are_reachable() {
+        assert_eq!(text_of("&Igrave;"), "\u{cc}");
+        assert_eq!(text_of("&Iacute;"), "\u{cd}");
+        assert_eq!(text_of("&Icirc;"), "\u{ce}");
+        assert_eq!(text_of("&Iuml;"), "\u{cf}");
+        // the invented l-accent spellings are not entities
+        assert_eq!(text_of("&Lgrave;"), "&Lgrave;");
+        assert_eq!(text_of("&lcirc;"), "&lcirc;");
+    }
+
+    /// Entities that already worked must keep working.
+    #[test]
+    fn common_entities_are_unchanged() {
+        for (body, expected) in [
+            ("&amp;", "&"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&quot;", "\""),
+            ("&apos;", "'"),
+            ("&nbsp;", "\u{a0}"),
+            ("&mdash;", "\u{2014}"),
+            ("&hellip;", "\u{2026}"),
+            ("&#38;", "&"),
+            ("&#x26;", "&"),
+            ("&#X26;", "&"),
+            ("&amp;lt;", "&lt;"),
+            ("&notanentity;", "&notanentity;"),
+            ("&DownLeftRightVector;", "\u{2950}"),
+        ] {
+            assert_eq!(text_of(body), expected, "{body:?}");
+        }
+    }
+
+    /// `<pre>` and `<code>` keep their whitespace. A single flag meant any
+    /// nested tag cancelled that for the rest of the element, so a
+    /// syntax-highlighted code block lost its indentation.
+    #[test]
+    fn whitespace_is_preserved_for_the_whole_pre_element() {
+        assert_eq!(text_of("<pre>a    b</pre>"), "a    b");
+        assert_eq!(
+            text_of("<pre>a    <b>b    b</b>    c</pre>"),
+            "a    b    b    c"
+        );
+        assert_eq!(
+            text_of("<pre><code><span>fn</span>  main()</code></pre>"),
+            "fn  main()"
+        );
+        assert_eq!(text_of("<pre><code>x\n    y</code></pre>"), "x\n    y");
+        // and collapsing resumes once the element closes
+        assert_eq!(text_of("<pre>a  b</pre>c    d"), "a  bc d");
+        assert_eq!(text_of("<p>a    b</p>"), "a b");
+    }
+
+    /// A void element written without a slash emits an open tag and no close
+    /// tag. Counting every open tag as a nesting level therefore left the
+    /// depth permanently unbalanced and swallowed the rest of the document.
+    #[test]
+    fn jump_to_close_steps_over_void_elements() {
+        fn tail_after_first_element(body: &str) -> String {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut walker = doc.new_walker();
+            while !walker.done() && walker.open_tag_lc().is_none() {
+                walker.walk();
+            }
+            walker.jump_to_close();
+            let mut out = String::new();
+            while !walker.done() {
+                if let Some(text) = walker.text() {
+                    out.push_str(text);
+                }
+                walker.walk();
+            }
+            out
+        }
+        assert_eq!(tail_after_first_element("<div><b>x</b></div>AFTER"), "AFTER");
+        assert_eq!(tail_after_first_element("<div><br>x</div>AFTER"), "AFTER");
+        assert_eq!(tail_after_first_element("<div><br/>x</div>AFTER"), "AFTER");
+        assert_eq!(
+            tail_after_first_element("<a href='u'><img src='i'>caption</a>AFTER"),
+            "AFTER"
+        );
+        assert_eq!(tail_after_first_element("<b>x<b>y</b>z</b>AFTER"), "AFTER");
+        // an element with no close tag of its own leaves the walker where it
+        // is, so the caller still sees everything that follows
+        assert_eq!(tail_after_first_element("<img src='i'>AFTER"), "AFTER");
+        assert_eq!(tail_after_first_element("<p>unclosed"), "unclosed");
+    }
+
+    /// Unquoted attribute values were the only value form that never decoded
+    /// entities, and a value beginning with a multi-byte character recorded a
+    /// byte range that split that character.
+    #[test]
+    fn unquoted_attribute_values_are_decoded_and_stay_on_char_boundaries() {
+        fn href(body: &str) -> Option<String> {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut walker = doc.new_walker();
+            while !walker.done() && walker.open_tag_lc().is_none() {
+                walker.walk();
+            }
+            walker.find_attr_lc(live_id!(href)).map(str::to_string)
+        }
+        assert_eq!(href("<a href=a&amp;b>t</a>").as_deref(), Some("a&b"));
+        assert_eq!(href("<a href=&amp;x>t</a>").as_deref(), Some("&x"));
+        assert_eq!(href("<a href=\"a&amp;b\">t</a>").as_deref(), Some("a&b"));
+        assert_eq!(href("<a href='a&amp;b'>t</a>").as_deref(), Some("a&b"));
+        assert_eq!(href("<a href=émile>t</a>").as_deref(), Some("émile"));
+        assert_nodes_consistent("<a href=émile>t</a>");
+        assert_nodes_consistent("<a href=漢字 title=🙂>t</a>");
+    }
+
+    /// `<a href=>` took `>` as the first character of the value, so the tag
+    /// never closed and its content leaked out as literal text.
+    #[test]
+    fn an_empty_unquoted_attribute_value_still_closes_the_tag() {
+        assert_eq!(text_of("<a href=>hello</a><p>after</p>"), "helloafter");
+        let doc = parse_html("<a href=>hello</a>", &mut None, InternLiveId::No);
+        let mut walker = doc.new_walker();
+        while !walker.done() && walker.open_tag_lc().is_none() {
+            walker.walk();
+        }
+        assert_eq!(walker.find_attr_lc(live_id!(href)), Some(""));
+    }
+
+    /// The parser emits a zero-length text node in front of every tag, so
+    /// `find_text` reported no text for any element whose content starts with
+    /// markup, and `find_tag_text` missed any tag carrying an attribute.
+    #[test]
+    fn text_lookups_skip_parser_artifacts() {
+        let doc = parse_html("<a href='x'><b>label</b></a>", &mut None, InternLiveId::No);
+        let mut walker = doc.new_walker();
+        while !walker.done() && walker.open_tag_lc() != Some(live_id!(a)) {
+            walker.walk();
+        }
+        assert_eq!(walker.find_text(), Some("label"));
+
+        let doc = parse_html("<p class='x'>Hello</p>", &mut None, InternLiveId::No);
+        assert_eq!(doc.new_walker().find_tag_text(live_id!(p)), Some("Hello"));
+        // tag names are case-insensitive
+        let doc = parse_html("<P>Hello</P>", &mut None, InternLiveId::No);
+        assert_eq!(doc.new_walker().find_tag_text(live_id!(p)), Some("Hello"));
+    }
+
+    /// Whitespace introduced by an entity has to leave `all_ws` describing the
+    /// text that is actually there.
+    /// HTML's whitespace set is the five ASCII characters, not Unicode's.
+    /// Treating U+00A0 and U+3000 as collapsible ate `&nbsp;` runs and the
+    /// full-width spaces in CJK text.
+    #[test]
+    fn only_ascii_whitespace_collapses() {
+        assert_eq!(text_of("<p>a&nbsp; b</p>"), "a\u{a0} b");
+        assert_eq!(text_of("<p>&nbsp;&nbsp;</p>"), "\u{a0}\u{a0}");
+        assert_eq!(text_of("<p>\u{3000}x\u{3000}</p>"), "\u{3000}x\u{3000}");
+        assert_eq!(text_of("<p>a    b</p>"), "a b");
+        assert_eq!(text_of("<p>a\t\n\r b</p>"), "a b");
+        // a cell holding only &nbsp; is content, not collapsible whitespace
+        let doc = parse_html("<td>&nbsp;</td>", &mut None, InternLiveId::No);
+        let all_ws: Vec<bool> = doc.nodes.iter().filter_map(|n| match n {
+            HtmlNode::Text { all_ws, start, end } if start != end => Some(*all_ws),
+            _ => None,
+        }).collect();
+        assert_eq!(all_ws, vec![false]);
+    }
+
+    /// A `/` only closes the tag when `>` follows it, so unquoted URLs keep
+    /// their path.
+    #[test]
+    fn an_unquoted_value_keeps_slashes_that_are_not_the_self_closing_marker() {
+        fn attr(body: &str, key: LiveId) -> Option<String> {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut walker = doc.new_walker();
+            while !walker.done() && walker.open_tag_lc().is_none() {
+                walker.walk();
+            }
+            walker.find_attr_lc(key).map(str::to_string)
+        }
+        assert_eq!(
+            attr("<a href=http://example.com/page>x</a>", live_id!(href)).as_deref(),
+            Some("http://example.com/page")
+        );
+        assert_eq!(text_of("<a href=http://example.com/page>x</a> rest"), "x rest");
+        assert_eq!(attr("<img src=/media/pic.png>", live_id!(src)).as_deref(), Some("/media/pic.png"));
+        // and the self-closing form still self-closes
+        assert_eq!(attr("<img src=x/>", live_id!(src)).as_deref(), Some("x"));
+        let doc = parse_html("<img src=x/>", &mut None, InternLiveId::No);
+        assert!(doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(img))));
+        assert_eq!(attr("<a href=x/ y=2>t</a>", live_id!(href)).as_deref(), Some("x/"));
+    }
+
+    /// A `<` that cannot begin a tag is literal text, the way a browser
+    /// treats it. Parsing it as an element used to consume the rest of the
+    /// line as a tag name and attributes, and drop it.
+    #[test]
+    fn a_less_than_that_is_not_a_tag_stays_text() {
+        assert_eq!(text_of("5<10 and 6<12"), "5<10 and 6<12");
+        assert_eq!(text_of("a < b"), "a < b");
+        assert_eq!(text_of("<>"), "<>");
+        assert_eq!(text_of("<1a>x"), "<1a>x");
+        assert_eq!(text_of("i <3 you"), "i <3 you");
+        assert_eq!(text_of("<é>text"), "<é>text");
+        // real tags still parse
+        assert_eq!(text_of("<p>x</p>"), "x");
+        assert_eq!(text_of("<P>x</P>"), "x");
+        for body in ["5<10 and 6<12", "a < b", "<>", "<1a>x", "i <3 you", "<é>t"] {
+            assert_nodes_consistent(body);
+        }
+    }
+
+    /// `<!-->` is a complete comment rather than the start of an
+    /// unterminated one that eats the rest of the document.
+    #[test]
+    fn declarations_and_comments_do_not_swallow_the_document() {
+        assert_eq!(text_of("5<10? yes"), "5<10? yes");
+        assert_eq!(text_of("a<!-->b"), "ab");
+        assert_eq!(text_of("a<!--->b"), "ab");
+        assert_eq!(text_of("a<!----->b"), "ab");
+        assert_eq!(text_of("a<!--c-->b"), "ab");
+        assert_eq!(text_of("a<!--c--->b"), "ab");
+        assert_eq!(text_of("a<?xml version='1'?>b"), "ab");
+    }
+
+    #[test]
+    fn all_ws_matches_the_decoded_text() {
+        for body in [
+            " &#11;",
+            "&nbsp;",
+            "&nbsp;&nbsp;",
+            " &nbsp;",
+            "&#32;",
+            "&#32;x",
+            "<td>&nbsp;</td>",
+            "<td>&nbsp;&nbsp;</td>",
+        ] {
+            assert_nodes_consistent(body);
+        }
+    }
+
+    /// Malformed input must still produce a walkable document rather than a
+    /// panic or a corrupted node range.
+    #[test]
+    fn malformed_input_stays_walkable() {
+        for body in [
+            "", "<", ">", "</", "/>", "<>", "</>", "<//>", "< />", "<a", "<a ",
+            "<a href", "<a href=", "<a href='", "<a href=\"", "<!--", "<!---",
+            "<!-->", "<!--->", "<!", "<!DOCTYPE html>", "<?xml version='1'?>",
+            "<?", "<a?b>", "&", "&#", "&#x", "&amp", "<p>&", "</p></p></p>",
+            "<b><i></b></i>", "<a href=x/ y=2>t</a>", "<a//b>", "\u{feff}<p>x</p>",
+            "<é>text</é>", "<p>🙂<br>👨‍👩‍👧</p>", "<p>\r\n\tx</p>",
+        ] {
+            assert_nodes_consistent(body);
+            // walking the whole document must not panic
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut walker = doc.new_walker();
+            while !walker.done() {
+                let _ = walker.text();
+                let _ = walker.open_tag();
+                let _ = walker.close_tag();
+                let _ = walker.find_attr_lc(live_id!(href));
+                let _ = walker.find_text();
+                let _ = walker.text_is_all_ws();
+                let before = walker.index();
+                let mut probe = doc.new_walker_with_index(before);
+                probe.jump_to_close();
+                assert!(probe.index() >= before, "{body:?}: jump_to_close moved backwards");
+                walker.walk();
+            }
+        }
+    }
+
+    /// Interning changes how names are stored, never the shape of the document.
+    #[test]
+    fn interning_does_not_change_the_document() {
+        for body in ["<p class='a'>x</p>", "<a href=y>&amp;</a>", "<pre>a  b</pre>"] {
+            let plain = parse_html(body, &mut None, InternLiveId::No);
+            let interned = parse_html(body, &mut None, InternLiveId::Yes);
+            assert_eq!(plain.decoded, interned.decoded, "{body:?}");
+            assert_eq!(plain.nodes.len(), interned.nodes.len(), "{body:?}");
+        }
+    }
 }

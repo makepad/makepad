@@ -163,12 +163,23 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
 // ---- Query execution (zero-copy, operates on backing) ----
 
+/// Index of the close tag matching the open tag at `open_idx`, or `open_idx`
+/// itself when the element has none.
+///
+/// Only tags with the same id affect depth. Counting every open tag would
+/// over-consume, because a void element written without a slash (`<br>`,
+/// `<img src=x>`) emits an `OpenTag` and no `CloseTag`, leaving the depth
+/// permanently unbalanced and running every element's range to end of input.
 fn find_close_tag(nodes: &[HtmlNode], open_idx: usize) -> usize {
+    let open_lc = match nodes.get(open_idx) {
+        Some(HtmlNode::OpenTag { lc, .. }) => *lc,
+        _ => return open_idx,
+    };
     let mut depth = 0u32;
     for i in (open_idx + 1)..nodes.len() {
         match &nodes[i] {
-            HtmlNode::OpenTag { .. } => depth += 1,
-            HtmlNode::CloseTag { .. } => {
+            HtmlNode::OpenTag { lc, .. } if *lc == open_lc => depth += 1,
+            HtmlNode::CloseTag { lc, .. } if *lc == open_lc => {
                 if depth == 0 {
                     return i;
                 }
@@ -177,7 +188,7 @@ fn find_close_tag(nodes: &[HtmlNode], open_idx: usize) -> usize {
             _ => {}
         }
     }
-    nodes.len().saturating_sub(1)
+    open_idx
 }
 
 fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QueryStep) -> bool {
@@ -385,24 +396,10 @@ fn get_attr<'a>(
     None
 }
 
+/// Counted from the same ranges the callers walk, so a void element can't
+/// make the two disagree.
 fn count_top_level_elements(nodes: &[HtmlNode]) -> usize {
-    let mut count = 0;
-    let mut depth = 0u32;
-    for node in nodes {
-        match node {
-            HtmlNode::OpenTag { .. } => {
-                if depth == 0 {
-                    count += 1;
-                }
-                depth += 1;
-            }
-            HtmlNode::CloseTag { .. } => {
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
-    count
+    top_level_ranges(nodes).len()
 }
 
 fn top_level_ranges(nodes: &[HtmlNode]) -> Vec<(u32, u32)> {
@@ -412,7 +409,8 @@ fn top_level_ranges(nodes: &[HtmlNode]) -> Vec<(u32, u32)> {
         if let HtmlNode::OpenTag { .. } = &nodes[i] {
             let close = find_close_tag(nodes, i);
             out.push((i as u32, close as u32));
-            i = close + 1;
+            // A void element reports itself as its own close tag.
+            i = close.max(i) + 1;
         } else {
             i += 1;
         }
