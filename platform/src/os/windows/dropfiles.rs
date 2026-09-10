@@ -26,6 +26,9 @@ use crate::{
 /// selection in one drop, and refusing all of them because there was more
 /// than one meant a multi-file drag produced no event at all — the window
 /// looked broken rather than merely limited.
+///
+/// A block with no names at all is still a drag when it carries one of
+/// our own ids: that is what a dock tab looks like on the wire.
 pub(crate) fn parse_dropfiles(bytes: &[u8]) -> Option<Vec<DragItem>> {
     // fWide lives at byte 16, so anything shorter is not a DROPFILES.
     if bytes.len() < 20 {
@@ -75,6 +78,19 @@ pub(crate) fn parse_dropfiles(bytes: &[u8]) -> Option<Vec<DragItem>> {
         });
     }
     if items.is_empty() {
+        // A drag from inside the application carries its meaning in the
+        // id, not in a path: the dock hands over an empty path and the
+        // tab's LiveId beside it. Refusing a nameless block is right for
+        // a drop from the shell and wrong for this one — and refusing it
+        // made DragEnter give up, so the tab drag produced no ghost, no
+        // drop preview and no drop, on a code path that otherwise had
+        // everything it needed.
+        if let Some(internal_id) = internal_id {
+            return Some(vec![DragItem::FilePath {
+                path: String::new(),
+                internal_id: Some(internal_id),
+            }]);
+        }
         return None;
     }
     Some(items)
@@ -151,6 +167,27 @@ mod tests {
     /// Build a DROPFILES block by hand: `names_offset` is 20 for an
     /// external drop and 28 for one of ours, `wide` is the `fWide` flag,
     /// and the names are NUL-separated and double-NUL-terminated.
+    /// The bytes `create_hglobal_for_dragitem` writes, without the
+    /// HGLOBAL: the same layout, built from the same item.
+    fn encoded(item: &DragItem) -> Vec<u8> {
+        let DragItem::FilePath { path, internal_id } = item else {
+            unreachable!()
+        };
+        let mut out = vec![0u8; 28];
+        out[0..4].copy_from_slice(&28u32.to_le_bytes());
+        out[16..20].copy_from_slice(&1u32.to_le_bytes());
+        if let Some(id) = internal_id {
+            out[20..24].copy_from_slice(&((id.0 & 0xffff_ffff) as u32).to_le_bytes());
+            out[24..28].copy_from_slice(&((id.0 >> 32) as u32).to_le_bytes());
+        }
+        for unit in path.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
     fn dropfiles(names_offset: u32, wide: u32, internal_id: u64, names: &[&str]) -> Vec<u8> {
         let mut out = vec![0u8; names_offset as usize];
         out[0..4].copy_from_slice(&names_offset.to_le_bytes());
@@ -202,6 +239,30 @@ mod tests {
                 internal_id: Some(LiveId(0x1234_5678_9abc_def0))
             }])
         );
+    }
+
+    #[test]
+    fn an_internal_drag_with_no_path_is_still_a_drag() {
+        // What a dock tab drag actually sends: the tab's id, and an
+        // empty path because there is no file involved.
+        let bytes = dropfiles(28, 1, 0x0f0e_0d0c_0b0a_0908, &[""]);
+        assert_eq!(
+            parse_dropfiles(&bytes),
+            Some(vec![DragItem::FilePath {
+                path: String::new(),
+                internal_id: Some(LiveId(0x0f0e_0d0c_0b0a_0908))
+            }])
+        );
+    }
+
+    #[test]
+    fn what_the_dock_encodes_is_what_comes_back() {
+        // The two halves against each other, because the drag goes out
+        // through one and comes back through the other and nothing in
+        // between would notice them disagreeing.
+        let sent = DragItem::FilePath { path: String::new(), internal_id: Some(LiveId(42)) };
+        let block = encoded(&sent);
+        assert_eq!(parse_dropfiles(&block), Some(vec![sent]));
     }
 
     #[test]
