@@ -34,6 +34,12 @@ script_mod! {
                 width: 240.
                 empty_text: "Search stories"
             }
+            // The two ways of reading the search text sit next to it:
+            // step through the matches, or take everything else away.
+            find_prev := ButtonFlat{text: "▲"}
+            find_next := ButtonFlat{text: "▼"}
+            match_count := Label{text: ""}
+            search_filter := Toggle{text: "Filter"}
             new_only := Toggle{text: "New only"}
             new_count := Label{text: ""}
             theme_select := DropDown{
@@ -179,6 +185,28 @@ impl App {
         self.ui.docs_panel(cx, ids!(docs)).set_subject(cx, subject.as_ref());
     }
 
+    /// Take the walk one step and show what it landed on. Opening the
+    /// story selects its row, which is what scrolls the tree to it, so
+    /// finding and opening are the same movement.
+    fn step_match(&mut self, cx: &mut Cx, delta: isize) {
+        let key = self
+            .ui
+            .story_navigator(cx, ids!(navigator))
+            .step_match(cx, delta);
+        if let Some(key) = key {
+            self.open_story(cx, key);
+        }
+        self.refresh_match_count(cx);
+    }
+
+    /// How many stories the search text picks out, and which one the
+    /// arrows are on. Empty while the box is empty: a count of nothing
+    /// beside an empty box is noise.
+    fn refresh_match_count(&self, cx: &mut Cx) {
+        let report = self.ui.story_navigator(cx, ids!(navigator)).match_report();
+        self.ui.label(cx, ids!(match_count)).set_text(cx, &report);
+    }
+
     fn refresh_new_count(&self, cx: &mut Cx) {
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         let n = navigator.new_count();
@@ -215,6 +243,14 @@ impl MatchEvent for App {
         let baseline = settings::baseline();
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         navigator.set_baseline(cx, &baseline);
+        // Filtering unless the person turned it off last time. Told to
+        // the switch as well as the navigator, for the reason the
+        // new-only switch below says at length.
+        let filtering = settings::get(settings::SEARCH_FILTER).as_deref() != Some("0");
+        navigator.set_filtering(cx, filtering);
+        self.ui
+            .check_box(cx, ids!(search_filter))
+            .set_active(cx, filtering, Animate::No);
         if settings::get(settings::NEW_ONLY).as_deref() == Some("1") {
             navigator.set_new_only(cx, true);
             // The switch has to be told as well as the navigator. Setting
@@ -252,15 +288,30 @@ impl MatchEvent for App {
         }
         if let Some(text) = self.ui.text_input(cx, ids!(story_search)).changed(actions) {
             self.ui.story_navigator(cx, ids!(navigator)).set_filter(cx, &text);
+            self.refresh_match_count(cx);
         }
+        // Return walks the matches, the way a find bar does, so holding
+        // it down goes through them one at a time without reaching for
+        // the arrows. The arrows do the same thing in both directions.
         if self.ui.text_input(cx, ids!(story_search)).returned(actions).is_some() {
-            if let Some(story) = self.ui.story_navigator(cx, ids!(navigator)).first_match() {
-                self.open_story(cx, story.key);
-            }
+            self.step_match(cx, 1);
+        }
+        if self.ui.button(cx, ids!(find_next)).clicked(actions) {
+            self.step_match(cx, 1);
+        }
+        if self.ui.button(cx, ids!(find_prev)).clicked(actions) {
+            self.step_match(cx, -1);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(search_filter)).changed(actions) {
+            self.ui.story_navigator(cx, ids!(navigator)).set_filtering(cx, on);
+            settings::set(settings::SEARCH_FILTER, if on { "1" } else { "0" });
+            self.refresh_match_count(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(new_only)).changed(actions) {
             self.ui.story_navigator(cx, ids!(navigator)).set_new_only(cx, on);
             settings::set(settings::NEW_ONLY, if on { "1" } else { "0" });
+            // It narrows what matches, so the count moves with it.
+            self.refresh_match_count(cx);
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(theme_select)).selected(actions) {
             theme::select(cx, index);

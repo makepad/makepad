@@ -14,6 +14,7 @@ pub const THEME: &str = "theme";
 pub const BASELINE: &str = "baseline";
 pub const LAST_STORY: &str = "last_story";
 pub const NEW_ONLY: &str = "new_only";
+pub const SEARCH_FILTER: &str = "search_filter";
 
 pub fn path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MAKEPAD_STORYBOOK_SETTINGS") {
