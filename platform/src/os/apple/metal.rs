@@ -144,29 +144,37 @@ impl Cx {
         crate::makepad_error_log::trace_enabled("gpu.drawcalls")
     }
 
-    fn upload_instance_buffers(&mut self, root: DrawListId, metal_cx: &MetalCx) -> bool {
-        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::UploadBegin); }
-        let evicted_before = self.draw_lists.1.allocations.evicted_bytes();
-        let retired_before = metal_cx.retired_instance_bytes.get();
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finish_metal_instance_retirements(&mut self, metal_cx: &MetalCx) {
+        if self.draw_lists.has_pending_instance_retirements()
+            || !metal_cx.retired_instances.borrow().is_empty()
+        {
+            self.service_metal_instance_retirements(metal_cx);
+        } else {
+            self.draw_lists.publish_instance_retirement_pending();
+        }
+    }
+
+    /// Maintenance must progress even when no pass needs painting. In
+    /// particular, the final bounded scan/worker receipt cannot depend on a
+    /// widget recording another frame. Repeated calls share this frame's
+    /// byte, handle and metadata allowances.
+    pub(crate) fn service_metal_instance_retirements(&mut self, metal_cx: &MetalCx) -> bool {
         self.draw_lists.1.begin_frame(self.repaint_id);
-        self.retry_metal_pipelines(metal_cx);
-        let requests = self.pending_instance_uploads(root);
-        self.prepare_retained_working_set(root);
         let mut deferred_backend = false;
-        let retiring =
-            self.draw_lists
-                .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
-                    if !metal_cx.has_retirement_room() {
-                        // Keep backing in the physical slot for the rotating
-                        // unused-item census; CPU publication retirement proceeds.
-                        deferred_backend = true;
-                        return;
-                    }
-                    let buffer = std::mem::take(&mut os.instance_buffer);
-                    if buffer.capacity_bytes() != 0 {
-                        metal_cx.retired_instances.borrow_mut().push_back(buffer);
-                    }
-                });
+        self.draw_lists
+            .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
+                if !metal_cx.has_retirement_room() {
+                    // Keep backing in the physical slot for the rotating
+                    // unused-item census; CPU publication retirement proceeds.
+                    deferred_backend = true;
+                    return;
+                }
+                let buffer = std::mem::take(&mut os.instance_buffer);
+                if buffer.capacity_bytes() != 0 {
+                    metal_cx.retired_instances.borrow_mut().push_back(buffer);
+                }
+            });
         if deferred_backend {
             self.draw_lists.1.working_set_scan_passes = 2;
         }
@@ -176,41 +184,49 @@ impl Cx {
         let mut eviction = std::mem::take(&mut self.draw_lists.1.eviction);
         let maintenance_limit = self.draw_lists.1.limit;
         if let Some(trace) = &metal_cx.present_trace { trace.first(PresentStage::EvictionBegin); }
-        self.draw_lists
-            .reclaim_backend_storage_with_usage(&self.task_pool(), |_, _, used, os| {
-                if !metal_cx.has_retirement_room() {
-                    return None;
-                }
-                let buffer = &mut os.instance_buffer;
-                if !used && buffer.capacity_bytes() != 0 {
-                    if !eviction.admit(buffer.capacity_bytes(), buffer.buffer_count(), maintenance_limit) { return None; }
-                    evicted_bytes += buffer.capacity_bytes();
-                    metal_cx
-                        .retired_instances
-                        .borrow_mut()
-                        .push_back(std::mem::take(buffer));
-                    return Some(());
-                }
-                if pressure {
-                    let mut retired = MetalBuffer::default();
-                    for (spare, out) in buffer.spares.iter_mut().zip(&mut retired.spares) {
-                        if spare
-                            .as_ref()
-                            .is_some_and(|b| b.last_bound_seq <= completed)
-                        {
-                            if eviction.admit(spare.as_ref().unwrap().capacity, 1, maintenance_limit) {
-                                evicted_bytes += spare.as_ref().unwrap().capacity;
-                                *out = spare.take();
-                            }
-                        }
+        if self.draw_lists.1.reclaim_frame != Some(self.repaint_id) {
+            self.draw_lists.1.reclaim_frame = Some(self.repaint_id);
+            self.draw_lists
+                .reclaim_backend_storage_with_usage(&self.task_pool(), |_, _, used, os| {
+                    if !metal_cx.has_retirement_room() {
+                        deferred_backend = true;
+                        return None;
                     }
-                    if retired.capacity_bytes() != 0 {
-                        metal_cx.retired_instances.borrow_mut().push_back(retired);
+                    let buffer = &mut os.instance_buffer;
+                    if !used && buffer.capacity_bytes() != 0 {
+                        if !eviction.admit(buffer.capacity_bytes(), buffer.buffer_count(), maintenance_limit) { deferred_backend = true; return None; }
+                        evicted_bytes += buffer.capacity_bytes();
+                        metal_cx
+                            .retired_instances
+                            .borrow_mut()
+                            .push_back(std::mem::take(buffer));
                         return Some(());
                     }
-                }
-                None
-            });
+                    if pressure {
+                        let mut retired = MetalBuffer::default();
+                        for (spare, out) in buffer.spares.iter_mut().zip(&mut retired.spares) {
+                            if spare
+                                .as_ref()
+                                .is_some_and(|b| b.last_bound_seq <= completed)
+                            {
+                                if eviction.admit(spare.as_ref().unwrap().capacity, 1, maintenance_limit) {
+                                    evicted_bytes += spare.as_ref().unwrap().capacity;
+                                    *out = spare.take();
+                                } else {
+                                    deferred_backend = true;
+                                }
+                            }
+                        }
+                        if retired.capacity_bytes() != 0 {
+                            metal_cx.retired_instances.borrow_mut().push_back(retired);
+                            return Some(());
+                        }
+                    }
+                    None
+                });
+        }
+        if deferred_backend { self.draw_lists.1.working_set_scan_passes = 2; }
+        self.draw_lists.1.eviction = eviction;
         self.draw_lists.1.allocations.evicted(evicted_bytes);
         self.draw_lists
             .1
@@ -219,7 +235,23 @@ impl Cx {
         // Replaced publications are never a permanent per-owner spare cache.
         // Rotate the retirement queue on every upload frame and free on the
         // allocation worker only after the last reader's real receipt.
-        let mut retirement_pending = metal_cx.collect_retired_instances(&mut self.draw_lists.1);
+        let retirement_pending = metal_cx.collect_retired_instances(&mut self.draw_lists.1);
+        self.draw_lists.1.allocations.set_pending_backend_retirements(metal_cx.retired_instances.borrow().len());
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::EvictionEnd); }
+        self.draw_lists.publish_instance_retirement_pending() || retirement_pending
+    }
+
+    fn upload_instance_buffers(&mut self, root: DrawListId, metal_cx: &MetalCx) -> bool {
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::UploadBegin); }
+        let evicted_before = self.draw_lists.1.allocations.evicted_bytes();
+        let retired_before = metal_cx.retired_instance_bytes.get();
+        self.draw_lists.1.begin_frame(self.repaint_id);
+        self.retry_metal_pipelines(metal_cx);
+        let requests = self.pending_instance_uploads(root);
+        self.prepare_retained_working_set(root);
+        let mut retirement_pending = self.service_metal_instance_retirements(metal_cx);
+        let mut eviction = std::mem::take(&mut self.draw_lists.1.eviction);
+        let maintenance_limit = self.draw_lists.1.limit;
         self.draw_lists.1.allow_visible_overflow = false;
         if self.draw_lists.1.allocations.reclaim_needed() {
             // Demand membership is only needed when choosing eviction victims.
@@ -340,11 +372,11 @@ impl Cx {
                 budget.stats.install_us, budget.pending_bytes, budget.upload_pending_max.max(budget.pending_bytes),
                 budget.starved_frames, budget.allocations.bytes(), budget.allocations.refusals(), budget.allocations.evicted_bytes(), budget.allocations.waits(), METAL_INSTANCE_ALLOCATIONS.load(Ordering::Relaxed), pool.bytes(), pool.reuses, budget.stats.category_bytes);
         }
+        let queued = self.draw_lists.publish_instance_retirement_pending();
         pending != 0
-            || retiring
+            || queued
             || retirement_pending
             || !metal_cx.retired_instances.borrow().is_empty()
-            || budget.allocations.has_pending_retirements()
     }
 
     /// A draw item of this list or its sub-lists that asks for instances
@@ -486,7 +518,7 @@ impl Cx {
                 let (draw_list, upload_budget) =
                     self.draw_lists.list_and_upload_budget(draw_list_id);
                 let draw_item = draw_list.draw_items.binding_mut(draw_item_id);
-                if !draw_item.retained_binding_ready() {
+                if !draw_item.retained_presentable(draw_item.os.instance_buffer.inner.as_ref().map_or(0, |inner| inner.len)) {
                     self.passes[draw_pass_id].paint_dirty = true;
                     continue;
                 }
@@ -4288,18 +4320,17 @@ impl MetalBuffer {
         // this prefix; replacements never overwrite a buffer with live readers.
         // Consumption/delivery remains incomplete until the entire copy lands.
         if progressive && remaining != 0 && pending.copied != 0
-            && (self.inner.as_ref().is_none_or(|old| old.buffer.as_id() == pending.inner.buffer.as_id()) || metal_cx.has_retirement_room())
+            && self.inner.as_ref().is_none_or(|old| old.buffer.as_id() == pending.inner.buffer.as_id())
         {
             let prefix = MetalBufferInner {
                 buffer: pending.inner.buffer.clone(), len: pending.copied,
                 capacity: pending.inner.capacity, last_bound_seq: pending.inner.last_bound_seq,
                 charge: pending.inner.charge.clone(),
             };
-            if let Some(old) = self.inner.replace(prefix) {
-                if old.buffer.as_id() != pending.inner.buffer.as_id() {
-                    metal_cx.retired_instances.borrow_mut().push_back(MetalBuffer {inner:Some(old),..Default::default()});
-                }
-            }
+            // The existing complete publication survives a progressive
+            // replacement. Only first publication / its append alias can
+            // expose a partial prefix; detail cannot retire resident structure.
+            self.inner = Some(prefix);
         }
         if remaining == 0 {
             if self

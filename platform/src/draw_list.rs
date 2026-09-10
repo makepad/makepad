@@ -1054,7 +1054,7 @@ impl CxDrawListPool {
         frame: u64,
         mut take_backend: impl FnMut(DrawListId, usize, &mut CxOsDrawCall) -> P,
     ) -> bool {
-        self.1.retirement_queued.store(self.has_pending_instance_retirements(), Ordering::Release);
+        self.publish_instance_retirement_pending();
         if self.1.retirement_frame == Some(frame) {
             return self.has_pending_instance_retirements();
         }
@@ -1162,7 +1162,7 @@ impl CxDrawListPool {
         // Settlement includes rotating scans and completion/metadata debt,
         // not just the queue of freed CPU publications. Otherwise a view can
         // announce rest while the backend still evicts on later paint beats.
-        self.1.retirement_queued.store(self.has_pending_instance_retirements(), Ordering::Release);
+        self.publish_instance_retirement_pending();
         self.has_pending_instance_retirements()
     }
     /// Snapshot only non-demanded owners. Callers supply world/camera distance
@@ -1389,13 +1389,25 @@ impl CxDrawListPool {
             )
         });
         format!(
-            "frame={:?} cursor={cursor:?} pending_slots={} staged={} batches={:?} workers={}",
+            "frame={:?} cursor={cursor:?} pending_slots={} staged={} batches={:?} workers={} scan_passes={} allocation_pending={} published={}",
             self.1.retirement_frame,
             self.0.has_pending_retirements(),
             self.3.values.borrow().len(),
             batches.map(|b| (b.initialized, b.preparing.is_some(), b.available.len())),
-            self.1.retirements.load(Ordering::Acquire)
+            self.1.retirements.load(Ordering::Acquire),
+            self.1.working_set_scan_passes,
+            self.1.allocations.has_pending_retirements(),
+            self.1.retirement_queued.load(Ordering::Acquire)
         )
+    }
+
+    /// Publish a current receipt, including after the last bounded backend
+    /// service or on a frame with no dirty passes. The previous publication
+    /// is never itself evidence of outstanding work.
+    pub fn publish_instance_retirement_pending(&self) -> bool {
+        let pending = self.has_pending_instance_retirements();
+        self.1.retirement_queued.store(pending, Ordering::Release);
+        pending
     }
 
     pub fn has_pending_instance_retirements(&self) -> bool {
@@ -1652,6 +1664,20 @@ impl CxDrawItem {
             && self.consumed_serial != 0
             && self.consumed_serial <= completed
     }
+    /// A progressive replacement may keep drawing its previous complete
+    /// backing under the same instance/uniform schema. This is presentation
+    /// only: upload and consumption receipts still require the new identity.
+    pub fn retained_presentable(&self, resident_instances: usize) -> bool {
+        self.retained_binding_ready()
+            || (self.retained_progressive
+                && self.instance_upload_pending
+                && !self.retained_gpu_evicted
+                && self.retained_instances.is_some()
+                && self.retained_instance_id != 0
+                && self.retained_schema == self.resident_schema
+                && resident_instances != 0)
+    }
+
     pub fn retained_binding_ready(&self) -> bool {
         if self.retained_gpu_evicted && !self.retained_zero_ink() {
             return false;
@@ -2858,6 +2884,35 @@ mod tests {
 mod retained_sub_list_tests {
     use super::*;
 
+    #[test]
+    fn retirement_receipt_clears_after_the_final_scan_without_another_upload() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        cx.draw_lists.1.working_set_valid = true;
+        cx.draw_lists.1.working_set_scan_passes = 2;
+        assert!(cx.draw_lists.publish_instance_retirement_pending());
+        let pool = cx.task_pool();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while cx.draw_lists.1.working_set_scan_passes != 0 {
+            cx.draw_lists.reclaim_backend_storage(&pool, |_| None::<()>);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // No new upload/retire_free_items call: this is the maintenance-only
+        // beat following the final content draw, as used by macOS.
+        assert!(!cx.draw_lists.publish_instance_retirement_pending());
+        assert!(!cx.draw_lists.1.retirement_queued.load(Ordering::Acquire));
+        assert!(!cx.draw_lists.is_id_freed(list.id()));
+        // A bounded deferred backend queue remains real debt until drained.
+        cx.draw_lists.1.allocations.set_pending_backend_retirements(1);
+        assert!(cx.draw_lists.publish_instance_retirement_pending());
+        cx.draw_lists.1.allocations.set_pending_backend_retirements(0);
+        assert!(!cx.draw_lists.publish_instance_retirement_pending());
+        // A stale published bit cannot perpetuate itself on an empty beat.
+        cx.draw_lists.1.retirement_queued.store(true, Ordering::Release);
+        assert!(!cx.draw_lists.publish_instance_retirement_pending());
+    }
+
     /// The retained-sub-list contract: a parent list may keep naming a child
     /// list that its owner dropped (a map tile evicted at event time, a hidden
     /// page). The dropped id stays dead — before AND after the pool hands its
@@ -3202,6 +3257,17 @@ mod uniform_generation_tests {
             .unwrap();
         item.retained_instances = Some(next);
         item.retained_schema = 8;
+        item.instance_upload_pending = true;
+        assert!(item.retained_presentable(1), "progressive replacement keeps same-schema resident ink");
+        assert!(!item.retained_presentable(0), "no fabricated backing");
+        item.retained_schema = 9;
+        assert!(!item.retained_presentable(1), "layout/stage change cannot reuse stale structure bindings");
+        item.retained_schema = 8;
+        item.retained_gpu_evicted = true;
+        assert!(!item.retained_presentable(1), "an evicted allocation is not resident ink");
+        item.retained_gpu_evicted = false;
+        assert!(!item.draw_consumption_complete(100), "kept ink does not acknowledge the new publication");
+        item.instance_upload_pending = false;
         assert!(
             !item.retained_binding_ready(),
             "old bytes cannot use new layout/font metadata"
