@@ -45,9 +45,9 @@ pub fn image_cache_use_mipmaps() -> bool {
 /// it inserts at most one outstanding fence and reclaims retired allocations.
 /// Unavailable/failed fences leave the completed serial unchanged. Headless
 /// completes synchronously. WebGL deletion safely delegates in-flight ownership
-/// to the browser/driver, but this Rust bridge cannot report GPU completion or
-/// actual allocation sizes: its completion serial stays zero and allocated
-/// bytes return `None` (pool totals omit these unknown allocations). Do not use
+/// to the browser/driver. The Rust bridge does not report
+/// actual allocation sizes. Completion uses the nonblocking WebGL2 fence
+/// bridge; allocated bytes return `None` (pool totals omit these unknown allocations). Do not use
 /// WebGL pool totals for admission. Vulkan/OHOS/direct-DRM support is not implemented.
 ///
 /// Byte counts describe allocated texture storage, including mip levels, cube
@@ -162,10 +162,12 @@ pub(crate) struct TextureReadbacks {
 /// A one-shot completion sender. Capacity is reserved per ticket; unrelated
 /// completions can never fill it. A dropped sender becomes an explicit error
 /// when the owning renderer polls the receiver.
+#[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
 pub(crate) struct ReadbackCompletion(
     pub std::sync::mpsc::SyncSender<Result<Arc<[u8]>, ReadbackError>>,
 );
 
+#[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
 impl ReadbackCompletion {
     pub fn finish(self, result: Result<Arc<[u8]>, ReadbackError>) {
         // There is exactly one producer and one message in this channel. The
@@ -175,6 +177,7 @@ impl ReadbackCompletion {
     }
 }
 
+#[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
 pub(crate) struct ReadbackWork {
     pub ticket: ReadbackTicket,
     pub texture_id: TextureId,
@@ -218,6 +221,7 @@ impl Cx {
         }
     }
 
+    #[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
     pub(crate) fn take_readback_work(&mut self, pass: Option<crate::draw_pass::DrawPassId>, order: ReadbackChannelOrder, origin: ReadbackOrigin) -> Vec<ReadbackWork> {
         let mut work = Vec::new();
         for index in 0..self.textures.1.readbacks.slots.len() {
@@ -351,6 +355,9 @@ impl Default for TextureId {
 }
 
 impl Texture {
+    pub fn readers(&self) -> usize {
+        Rc::strong_count(&self.0)
+    }
     pub fn texture_id(&self) -> TextureId {
         TextureId(self.0.id, self.0.generation)
     }
@@ -459,7 +466,7 @@ impl FrameSerials {
         serial
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
+    #[cfg(any(test, headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
     pub(crate) fn complete(&self, serial: u64) {
         self.completed.fetch_max(
             serial.min(self.submitted.load(Ordering::Acquire)),
@@ -490,6 +497,7 @@ pub(crate) struct TextureLifetime {
 }
 
 pub(crate) struct RetiredTexture {
+    #[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
     pub(crate) serial: u64,
     pub(crate) bytes: u64,
     pub(crate) os: CxOsTexture,
@@ -945,6 +953,7 @@ pub(crate) enum TexturePixel {
 }
 
 impl CxTexture {
+    #[cfg(any(headless, not(any(use_vulkan, linux_direct, target_env = "ohos"))))]
     pub(crate) fn reset_allocation(&mut self) {
         self.allocation_generation = self.allocation_generation.saturating_add(1);
         self.producer_serial = 0;

@@ -838,12 +838,41 @@ impl Cx {
         configured_render_threads(cpu_threads.max(1))
     }
 
+    /// Serial hooks for the headless upload recorder's software queue model.
+    /// These do not render pixels and must not be used as GPU evidence.
+    pub fn headless_simulated_submit(&mut self) -> u64 {
+        self.textures.1.serials.submit()
+    }
+    pub fn headless_simulated_complete(&mut self, serial: u64) {
+        self.headless_simulated_complete_with_storage(serial, |_, _| ());
+    }
+    pub fn headless_simulated_complete_with_storage<P: Send + 'static>(
+        &mut self,
+        serial: u64,
+        mut take_storage: impl FnMut(DrawListId, usize) -> P,
+    ) {
+        self.textures.1.serials.complete(serial);
+        self.draw_lists
+            .retire_free_items_with_ids(&self.task_pool(), serial, |id, item, _| {
+                take_storage(id, item)
+            });
+    }
+
     /// Render all dirty passes; returns the window ids whose framebuffer was
     /// repainted. The pixels stay in `os.window_framebuffers`, which the caller
     /// reads — a 2400x1520 window is 73 MB of colour plus depth, and building
     /// that mapping fresh every frame cost more in page faults than clearing it
     /// does.
     pub fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
+        if self
+            .draw_lists
+            .retire_free_items(&self.task_pool(), self.repaint_id, |_| ())
+        {
+            self.demo_time_repaint = true;
+        }
+        // This is also the public offscreen rendering entry point. Direct
+        // callers need the same shader readiness as the event-loop path.
+        self.headless_compile_shaders();
         let frame_start = std::time::Instant::now();
         let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
 
@@ -852,6 +881,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         let options = RenderOptions::from_env(self.headless_render_thread_count());
 
+        let serial = (!passes_todo.is_empty()).then(|| self.textures.1.serials.submit());
         let mut results = Vec::new();
         let mut window_framebuffers = std::mem::take(&mut self.os.window_framebuffers);
         let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
@@ -954,8 +984,7 @@ impl Cx {
         self.headless_prune_render_targets(&mut render_targets, profile_enabled);
         self.os.render_targets = render_targets;
 
-        if !passes_todo.is_empty() {
-            let serial = self.textures.1.serials.submit();
+        if let Some(serial) = serial {
             self.textures.1.serials.complete(serial);
         }
         let elapsed = frame_start.elapsed();
@@ -1215,8 +1244,8 @@ impl Cx {
 
         render_targets.framebuffers.insert(texture_id.0, fb);
         render_targets.touch(texture_id.0);
-        self.textures[texture_id].producer_serial =
-            self.frame_submission_serial().saturating_add(1);
+        // headless_render_all_passes reserves the serial before rendering.
+        self.textures[texture_id].producer_serial = self.frame_submission_serial();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1576,7 +1605,14 @@ impl Cx {
             };
             if instance_count == 0 {
                 let item = &mut self.draw_lists[draw_list_id].draw_items[draw_item_id];
+                item.instance_upload_pending = false;
+                item.retained_gpu_evicted = false;
                 item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+            item.resident_schema = item.retained_schema;
+            item.consumed_instance_id = item.retained_instance_id;
+                    item.consumed_schema = item.resident_schema;
+            item.consumed_serial=self.textures.1.serials.submitted.load(std::sync::atomic::Ordering::Acquire);
+            item.consumed_uniforms_gen=item.kind.draw_call().map_or(0,|call|call.uniforms_gen);
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.instance_dirty = false;
                 }
@@ -1755,6 +1791,22 @@ impl Cx {
                 }
             }
 
+            // Vertex processing consumed this exact publication even when
+            // clipping/zero opacity produces no fragments. Readiness must not
+            // depend on fragments that those same readiness uniforms gate.
+            let item = &mut self.draw_lists[draw_list_id].draw_items[draw_item_id];
+            item.instance_upload_pending = false;
+            item.retained_gpu_evicted = false;
+            item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+            item.resident_schema = item.retained_schema;
+            item.consumed_instance_id = item.retained_instance_id;
+            item.consumed_schema = item.resident_schema;
+            item.consumed_serial=self.textures.1.serials.submitted.load(std::sync::atomic::Ordering::Acquire);
+            item.consumed_uniforms_gen=item.kind.draw_call().map_or(0,|call|call.uniforms_gen);
+            if let Some(call) = item.kind.draw_call_mut() {
+                call.instance_dirty = false;
+            }
+
             if setups.is_empty() {
                 if let Some(p) = profile.as_deref_mut() {
                     p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
@@ -1842,13 +1894,7 @@ impl Cx {
             if let Some(p) = profile.as_deref_mut() {
                 p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
             }
-            // Software consumption is synchronous. Recording alone never
-            // advances the resident publication identity.
-            let item = &mut self.draw_lists[draw_list_id].draw_items[draw_item_id];
-            item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
-            if let Some(call) = item.kind.draw_call_mut() {
-                call.instance_dirty = false;
-            }
+
         }
     }
 }

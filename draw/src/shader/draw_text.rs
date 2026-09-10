@@ -13,6 +13,7 @@ use {
         cx_draw::CxDraw,
         draw_list_2d::ManyInstances,
         makepad_platform::*,
+        makepad_platform::recording_buffer::RecordingBuffer,
         text::{
             color::Color,
             font::FontId,
@@ -1286,6 +1287,10 @@ pub enum TextOverflow {
     Ellipsis,
 }
 
+#[derive(Default)]
+#[repr(align(16))]
+struct DrawTextInstanceAlign;
+
 #[derive(Script)]
 #[repr(C, align(16))]
 pub struct DrawText {
@@ -1363,6 +1368,15 @@ pub struct DrawText {
     /// Useful when drawing multiple text chunks that should be treated as one area.
     #[live]
     pub extend_area: bool,
+
+    // Align the instance payload, not just the whole struct. Otherwise
+    // DrawText can have trailing padding that derived shaders read as their
+    // first instance fields (for example a dropdown's focus and hover).
+    // Keep all alignment padding before DrawVars and its contiguous payload.
+    #[rust]
+    draw_vars_align: DrawTextInstanceAlign,
+    #[rust]
+    draw_vars_padding: [u8; (16 - std::mem::size_of::<DrawVars>() % 16) % 16],
 
     #[deref]
     pub draw_vars: DrawVars,
@@ -2099,8 +2113,11 @@ impl DrawText {
     }
 
     pub fn draw_rasterized_glyphs_abs_with_storage(
-        &mut self, cx: &mut Cx2d, glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
-        color: Vec4f, storage: Option<&mut Vec<f32>>,
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
+        color: Vec4f,
+        storage: Option<&mut RecordingBuffer>,
     ) {
         if glyphs.is_empty() {
             return;
@@ -2148,11 +2165,14 @@ impl DrawText {
         self.finish_many_instances(cx, instances);
     }
 
-    fn reserve_glyph_storage(instances: &mut Vec<f32>, additional: usize, storage: Option<&mut Vec<f32>>) {
+    fn reserve_glyph_storage(
+        instances: &mut RecordingBuffer,
+        additional: usize,
+        storage: Option<&mut RecordingBuffer>,
+    ) {
         if instances.is_empty() {
             if let Some(storage) = storage.filter(|storage| storage.capacity() >= additional) {
-                std::mem::swap(instances, storage);
-                instances.clear();
+                if instances.swap_storage(storage) { instances.clear(); }
             }
         }
         instances.reserve(additional);
@@ -3135,7 +3155,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         row: &LaidoutRow,
-        out_instances: &mut Vec<f32>,
+        out_instances: &mut RecordingBuffer,
     ) {
         for glyph in &row.glyphs {
             self.draw_glyph(
@@ -3200,7 +3220,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         use crate::text::geom::Point;
         let glyph_origin = Point::new(
@@ -3238,7 +3258,7 @@ impl DrawText {
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: crate::text::slug_atlas::SlugGlyphInfo,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         let bounds_in_lpxs = TextRect::new(
             Point::new(
@@ -3286,7 +3306,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) -> bool {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         let should_use_slug = cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs);
@@ -3326,7 +3346,7 @@ impl DrawText {
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: RasterizedGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(

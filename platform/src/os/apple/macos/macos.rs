@@ -604,7 +604,7 @@ impl Cx {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         crate::startup_trace("event_loop: MetalCx::new begin");
-        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new(&mut cx.borrow_mut().draw_lists.1.allocations)));
         crate::startup_trace("event_loop: MetalCx::new done");
 
         // store device object ID for double buffering

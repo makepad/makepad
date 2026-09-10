@@ -14,9 +14,7 @@ use crate::{
     makepad_script::shader_backend::*,
     makepad_script::*,
     os::{
-        windows::win32_app::{
-            try_with_win32_app, with_win32_app, FALSE, TRUE,
-        },
+        windows::win32_app::{try_with_win32_app, with_win32_app, FALSE, TRUE},
         windows::win32_window::Win32Window,
     },
     script::vm::*,
@@ -35,33 +33,36 @@ use crate::{
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
-                    D3D_SRV_DIMENSION, D3D_SRV_DIMENSION_TEXTURECUBE,
+                    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_SRV_DIMENSION,
+                    D3D_SRV_DIMENSION_TEXTURECUBE,
                 },
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
-                    ID3D11DepthStencilView, ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11InputLayout,
-                    ID3D11PixelShader, ID3D11Query, ID3D11RasterizerState, ID3D11RenderTargetView,
-                    ID3D11Resource, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+                    ID3D11DepthStencilView, ID3D11Device, ID3D11Device1, ID3D11DeviceContext,
+                    ID3D11InputLayout, ID3D11PixelShader, ID3D11Query, ID3D11RasterizerState,
+                    ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
+                    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
                     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_FLAG,
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
-                    D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_ALWAYS,
-                    D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_FLAG,
-                    D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC,
-                    D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_STENCIL_VIEW_DESC,
-                    D3D11_DEPTH_WRITE_MASK_ALL, D3D11_DEPTH_WRITE_MASK_ZERO,
-                    D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC,
-                    D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
-                    D3D11_MAP, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
-                    D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
+                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BOX, D3D11_BUFFER_DESC,
+                    D3D11_CLEAR_DEPTH, D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL,
+                    D3D11_COMPARISON_ALWAYS, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
+                    D3D11_CREATE_DEVICE_FLAG, D3D11_CULL_BACK, D3D11_CULL_NONE,
+                    D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
+                    D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
+                    D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
+                    D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
+                    D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE,
+                    D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
+                    D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
                     D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
                     D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
                     D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV, D3D11_TEX2D_SRV,
-                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_MODE, D3D11_USAGE, D3D11_USAGE_DEFAULT,
+                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
+                    D3D11_TEX2D_SRV, D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC,
+                    D3D11_TEXTURE_ADDRESS_MODE, D3D11_USAGE, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
@@ -89,13 +90,11 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex,
-                    IDXGIResource1, IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2,
-                    DXGI_CREATE_FACTORY_FLAGS,
+                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource1,
+                    IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
-                    DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
-                    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-                    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                    DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+                    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
@@ -115,7 +114,58 @@ impl Cx {
         zbias_step: f32,
         d3d11_cx: &D3d11Cx,
     ) {
-        let _phase = crate::thread::ui_hang::ui_phase_detail(crate::thread::UiPhase::DrawList, draw_list_id.index() as u32);
+        if !self.draw_lists.1.allocations.has_device_limit() {
+            use crate::windows::Win32::Graphics::Dxgi::{
+                IDXGIAdapter3, DXGI_MEMORY_SEGMENT_GROUP, DXGI_QUERY_VIDEO_MEMORY_INFO,
+            };
+            let reported = unsafe {
+                d3d11_cx.factory.EnumAdapters(0).ok().map_or(0, |adapter| {
+                    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                    if adapter.cast::<IDXGIAdapter3>().is_ok_and(|adapter| {
+                        adapter
+                            .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP(0), &mut info)
+                            .is_ok()
+                    }) && info.Budget != 0
+                    {
+                        info.Budget
+                    } else {
+                        adapter
+                            .GetDesc()
+                            .map_or(0, |desc| desc.DedicatedVideoMemory as u64)
+                    }
+                })
+            };
+            let allowance = if reported != 0 {
+                reported.min(usize::MAX as u64) as usize
+            } else {
+                self.memory_budget()
+            };
+            self.draw_lists
+                .1
+                .allocations
+                .set_device_limit(allowance / 4);
+            crate::log!("retained-upload budgets: adapter_bytes={} process_allowance={} allocation_limit={} source={}", reported, self.memory_budget(), allowance / 4, if reported != 0 { "DXGI_adapter_budget" } else { "process_allowance_fallback" });
+        }
+        self.draw_lists.1.allocations.collect_for_frame(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        let _phase = crate::thread::ui_hang::ui_phase_detail(
+            crate::thread::UiPhase::DrawList,
+            draw_list_id.index() as u32,
+        );
+        if self
+            .draw_lists
+            .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
+                std::mem::take(&mut os.inst_vbuf)
+            })
+        {
+            self.demo_time_repaint = true;
+        }
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -167,7 +217,8 @@ impl Cx {
                     self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
                 }
             } else {
-                let draw_list = &mut self.draw_lists[draw_list_id];
+                let (draw_list, upload_budget) =
+                    self.draw_lists.list_and_upload_budget(draw_list_id);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
@@ -206,11 +257,14 @@ impl Cx {
                     let sh = &self.draw_shaders.shaders[draw_call.draw_shader_id.index];
                     if let Some(os_id) = sh.os_shader_id {
                         let shp = &mut self.draw_shaders.os_shaders[os_id];
-                        if (shp.scope_uniforms_gen != sh.mapping.scope_uniforms_gen || shp.scope_uniforms.buffer.is_none())
+                        if (shp.scope_uniforms_gen != sh.mapping.scope_uniforms_gen
+                            || shp.scope_uniforms.buffer.is_none())
                             && !sh.mapping.scope_uniforms_buf.is_empty()
                         {
-                            shp.scope_uniforms
-                                .update_with_f32_constant_data(d3d11_cx, &sh.mapping.scope_uniforms_buf);
+                            shp.scope_uniforms.update_with_f32_constant_data(
+                                d3d11_cx,
+                                &sh.mapping.scope_uniforms_buf,
+                            );
                             shp.scope_uniforms_gen = sh.mapping.scope_uniforms_gen;
                         }
                     }
@@ -225,10 +279,50 @@ impl Cx {
                 }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
 
-                if draw_call.instance_dirty {
+                if (draw_call.instance_dirty || draw_item.retained_gpu_evicted)
+                    && !(draw_item.retained_gpu_evicted
+                        && draw_item.retained_instances.is_some()
+                        && draw_item.retained_instance_count == 0)
+                {
+                    upload_budget.allocations.collect_for_frame(
+                        self.repaint_id,
+                        self.textures
+                            .1
+                            .serials
+                            .completed
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    );
+                    let slots = draw_item.retained_instances.as_ref().map_or_else(
+                        || draw_item.instances.as_ref().map_or(0, |v| v.len()),
+                        |p| p.data().len(),
+                    );
+                    let replaces = draw_item.retained_instances.is_none()
+                        || draw_item.retained_upload_range.start == 0
+                        || draw_item.os.inst_vbuf.buffer.is_none()
+                        || slots > draw_item.os.inst_vbuf.last_size;
+                    if replaces {
+                        let capacity = if draw_item.retained_instances.is_none() {
+                            slots * 4
+                        } else if draw_item.os.inst_vbuf.buffer.is_none()
+                            || slots > draw_item.os.inst_vbuf.last_size
+                        {
+                            slots.next_power_of_two().max(64) * 4
+                        } else {
+                            draw_item.os.inst_vbuf.last_size * 4
+                        };
+                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
+                            draw_item.instance_upload_pending = true;
+                            self.demo_time_repaint = true;
+                            continue;
+                        };
+                        draw_item.os.inst_vbuf.charge = Some(charge);
+                    }
+                    draw_item.instance_upload_pending = false;
                     draw_call.instance_dirty = false;
                     draw_item.retained_instance_id =
                         draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    draw_item.resident_schema = draw_item.retained_schema;
+                    draw_item.retained_gpu_evicted = false;
                     if draw_item
                         .retained_instances
                         .as_ref()
@@ -263,7 +357,8 @@ impl Cx {
                 let instances = if draw_item.retained_instances.is_some() {
                     draw_item.retained_instance_count as u64
                 } else {
-                    (draw_item.instances.as_ref().map_or(0, Vec::len) / sh.mapping.instances.total_slots) as u64
+                    (draw_item.instances.as_ref().map_or(0, |v| v.len())
+                        / sh.mapping.instances.total_slots) as u64
                 };
 
                 if instances == 0 {
@@ -361,9 +456,11 @@ impl Cx {
                     };
                     if let Some(blend_state) = blend_state {
                         let blend_factor = [0., 0., 0., 0.];
-                        d3d11_cx
-                            .context
-                            .OMSetBlendState(blend_state, Some(&blend_factor), 0xffffffff);
+                        d3d11_cx.context.OMSetBlendState(
+                            blend_state,
+                            Some(&blend_factor),
+                            0xffffffff,
+                        );
                     }
                     let raster_state = if draw_call.options.backface_culling {
                         self.passes[pass_id].os.raster_state_backface_cull.as_ref()
@@ -557,6 +654,22 @@ impl Cx {
                         0,
                     )
                 };
+                draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                draw_item.consumed_schema = draw_item.resident_schema;
+                draw_item.consumed_serial = self
+                    .textures
+                    .1
+                    .serials
+                    .submitted
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    + 1;
+                if let Some(charge) = &draw_item.os.inst_vbuf.charge {
+                    charge.submitted(draw_item.consumed_serial);
+                }
+                draw_item.consumed_uniforms_gen = draw_item
+                    .kind
+                    .draw_call()
+                    .map_or(0, |call| call.uniforms_gen);
                 // Release keyed mutexes acquired for shared textures in this draw call.
                 for km in &acquired_mutexes {
                     unsafe {
@@ -586,11 +699,7 @@ impl Cx {
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         if !self.passes[pass_id].keep_camera_matrix {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[pass_id].set_ortho_matrix(
-                pass_rect.pos,
-                pass_rect.size,
-                uniforms_gen,
-            );
+            self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size, uniforms_gen);
         }
         self.passes[pass_id].paint_dirty = false;
 
@@ -852,7 +961,10 @@ impl Cx {
         if let Some(texture_id) = texture_id {
             let cxtexture = &self.textures[texture_id];
             let render_target_view = cxtexture.os.render_target_view.clone();
-            let target_alloc = cxtexture.alloc.as_ref().map(|alloc| (alloc.width, alloc.height));
+            let target_alloc = cxtexture
+                .alloc
+                .as_ref()
+                .map(|alloc| (alloc.width, alloc.height));
             self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx);
         } else {
             self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx);
@@ -878,10 +990,13 @@ impl Cx {
                 self.draw_shaders.compile_set.insert(*id);
                 return false;
             }
-            let Some(result) = task.try_take() else { return true };
+            let Some(result) = task.try_take() else {
+                return true;
+            };
             match result {
                 Ok(Ok(shader)) => {
-                    self.draw_shaders.shaders[*id].os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.shaders[*id].os_shader_id =
+                        Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shader);
                     adopted = true;
                 }
@@ -889,16 +1004,20 @@ impl Cx {
                     d3d11_cx.note_error("background shader creation", &error);
                     self.draw_shaders.compile_set.insert(*id);
                 }
-                Ok(Err(D3dShaderError::Compile)) => {},
+                Ok(Err(D3dShaderError::Compile)) => {}
                 Err(error) => crate::error!("Background shader {}: {:?}", id, error),
             }
             false
         });
-        if adopted { self.redraw_all(); }
+        if adopted {
+            self.redraw_all();
+        }
         let pool = self.task_pool();
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
         for id in compile_set {
-            if self.os.async_hlsl_compile.pending.contains_key(&id) { continue; }
+            if self.os.async_hlsl_compile.pending.contains_key(&id) {
+                continue;
+            }
             // Reserve before cloning a mapping. A full queue leaves its source
             // in compile_set for the next frame; the UI never runs the job.
             let Ok(slot) = pool.reserve(crate::thread::Lane::Heavy) else {
@@ -913,15 +1032,27 @@ impl Cx {
                     crate::error!("D3D11 does not support separate vertex/fragment sources");
                     return Err(D3dShaderError::Compile);
                 };
-                if mapping.flags.debug_code { crate::log!("{}", code); }
+                if mapping.flags.debug_code {
+                    crate::log!("{}", code);
+                }
                 // Cache I/O, D3DCompile AND device shader/layout/sampler
                 // creation all run here. The immediate context stays on UI.
-                CxOsDrawShader::new(&compile_device, code, shader_cache_dir(),
-                    &mapping, &mapping.uniform_buffer_bindings)
+                CxOsDrawShader::new(
+                    &compile_device,
+                    code,
+                    shader_cache_dir(),
+                    &mapping,
+                    &mapping.uniform_buffer_bindings,
+                )
             });
-            self.os.async_hlsl_compile.pending.insert(id, (device, task));
+            self.os
+                .async_hlsl_compile
+                .pending
+                .insert(id, (device, task));
         }
-        if !self.os.async_hlsl_compile.pending.is_empty() || !self.draw_shaders.compile_set.is_empty() {
+        if !self.os.async_hlsl_compile.pending.is_empty()
+            || !self.draw_shaders.compile_set.is_empty()
+        {
             self.demo_time_repaint = true;
         }
     }
@@ -998,8 +1129,7 @@ impl Cx {
     /// argument `debug_read_render_texture` already relies on.
     fn capture_window_screenshot(&mut self, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
         let capture_window_id = Some(d3d11_window.window_id.id());
-        let request_ids =
-            self.take_studio_screenshot_request_ids_for_window(0, capture_window_id);
+        let request_ids = self.take_studio_screenshot_request_ids_for_window(0, capture_window_id);
         let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
         if request_ids.is_empty() && !wants_capture {
             return;
@@ -1041,10 +1171,7 @@ impl Cx {
     /// implemented here — callers fall back to `debug_read_render_texture`
     /// (D3D11 immediate-context commands are ordered against the staging
     /// copy, so the sync path is safe).
-    pub fn request_render_texture_capture(
-        &mut self,
-        _texture: &crate::texture::Texture,
-    ) -> bool {
+    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
         false
     }
 
@@ -1124,12 +1251,13 @@ impl Cx {
             return;
         };
         let keyed_mutex = cxtexture.os.keyed_mutex.clone();
-        let (width, height) = if let TextureFormat::SharedBGRAu8 { width, height, .. } = &cxtexture.format {
-            (*width as u32, *height as u32)
-        } else {
-            crate::log!("WINDBG[{}]: readback: not SharedBGRAu8", tag);
-            return;
-        };
+        let (width, height) =
+            if let TextureFormat::SharedBGRAu8 { width, height, .. } = &cxtexture.format {
+                (*width as u32, *height as u32)
+            } else {
+                crate::log!("WINDBG[{}]: readback: not SharedBGRAu8", tag);
+                return;
+            };
         if width == 0 || height == 0 {
             return;
         }
@@ -1151,7 +1279,10 @@ impl Cx {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE(3), // D3D11_USAGE_STAGING (const stripped from bindings)
                 BindFlags: 0,
                 CPUAccessFlags: 0x20000, // D3D11_CPU_ACCESS_READ (const stripped from bindings)
@@ -1272,14 +1403,25 @@ struct D3dReadback {
 
 impl Cx {
     pub(crate) fn poll_texture_readbacks(&mut self) {
-        if self.textures.1.readbacks.slots.is_empty() && self.textures.1.d3d_readbacks.jobs.is_empty() { return; }
+        if self.textures.1.readbacks.slots.is_empty()
+            && self.textures.1.d3d_readbacks.jobs.is_empty()
+        {
+            return;
+        }
         self.d3d_capture_texture_readbacks(None);
     }
 
     fn d3d_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
         use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
         if self.textures.1.d3d_readbacks.jobs.is_empty()
-            && !self.textures.1.readbacks.slots.iter().any(|slot| slot.pending && slot.pass == pass) {
+            && !self
+                .textures
+                .1
+                .readbacks
+                .slots
+                .iter()
+                .any(|slot| slot.pending && slot.pass == pass)
+        {
             return;
         }
         let Some(device) = self.os.d3d11_device.clone() else {
@@ -1295,23 +1437,32 @@ impl Cx {
         if self.textures.1.d3d_readbacks.worker.is_none() {
             match ReadbackWorker::new(self) {
                 Ok(worker) => self.textures.1.d3d_readbacks.worker = Some(worker),
-                Err(error) => { self.fail_pending_readbacks(error); return; }
+                Err(error) => {
+                    self.fail_pending_readbacks(error);
+                    return;
+                }
             }
         }
-        let work = self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft);
+        let work =
+            self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft);
         for work in work {
             debug_assert_ne!(work.ticket.0, 0);
             let Some(source) = self.textures[work.texture_id].os.texture.clone() else {
-                work.completion.finish(Err(ReadbackError::NotRendered)); continue;
+                work.completion.finish(Err(ReadbackError::NotRendered));
+                continue;
             };
             unsafe {
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 source.GetDesc(&mut desc);
                 if desc.SampleDesc.Count != 1 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-                    work.completion.finish(Err(ReadbackError::UnsupportedFormat)); continue;
+                    work.completion
+                        .finish(Err(ReadbackError::UnsupportedFormat));
+                    continue;
                 }
                 if desc.Width as usize != work.width || desc.Height as usize != work.height {
-                    work.completion.finish(Err(ReadbackError::AllocationChanged)); continue;
+                    work.completion
+                        .finish(Err(ReadbackError::AllocationChanged));
+                    continue;
                 }
                 desc.MipLevels = 1;
                 desc.ArraySize = 1;
@@ -1323,32 +1474,54 @@ impl Cx {
                     let mut staging = None;
                     let mut query = None;
                     device.CreateTexture2D(&desc, None, Some(&mut staging))?;
-                    device.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query))?;
-                    let staging = staging.ok_or_else(windows::core::Error::empty)?.cast::<ID3D11Resource>()?;
+                    device.CreateQuery(
+                        &D3D11_QUERY_DESC {
+                            Query: D3D11_QUERY_EVENT,
+                            MiscFlags: 0,
+                        },
+                        Some(&mut query),
+                    )?;
+                    let staging = staging
+                        .ok_or_else(windows::core::Error::empty)?
+                        .cast::<ID3D11Resource>()?;
                     let query = query.ok_or_else(windows::core::Error::empty)?;
                     Ok((staging, query))
                 };
                 let Ok((staging, query)) = create() else {
-                    work.completion.finish(Err(ReadbackError::DeviceLost)); continue;
+                    work.completion.finish(Err(ReadbackError::DeviceLost));
+                    continue;
                 };
                 context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &source, 0, None);
                 context.End(&query);
-                if pass.is_none() { self.textures.1.serials.submit(); }
-                self.textures.1.d3d_readbacks.jobs.push(D3dReadback { work, source, staging, query,
+                if pass.is_none() {
+                    self.textures.1.serials.submit();
+                }
+                self.textures.1.d3d_readbacks.jobs.push(D3dReadback {
+                    work,
+                    source,
+                    staging,
+                    query,
                     context: context.clone(),
-                    mapped: false, copy: None, receive: None });
+                    mapped: false,
+                    copy: None,
+                    receive: None,
+                });
             }
         }
         if !self.textures.1.d3d_readbacks.jobs.is_empty() {
             // Submit even when this is an ordered copy with no window present.
-            unsafe { context.Flush(); }
+            unsafe {
+                context.Flush();
+            }
         }
         self.d3d_poll_readback_leases();
     }
 
     fn d3d_poll_readback_leases(&mut self) {
         use crate::texture::ReadbackError;
-        if self.textures.1.d3d_readbacks.jobs.is_empty() { return; }
+        if self.textures.1.d3d_readbacks.jobs.is_empty() {
+            return;
+        }
         let mut jobs = std::mem::take(&mut self.textures.1.d3d_readbacks.jobs);
         let mut pending = Vec::new();
         let worker = self.textures.1.d3d_readbacks.worker.as_ref().unwrap();
@@ -1358,17 +1531,32 @@ impl Cx {
             unsafe {
                 if !job.mapped {
                     let mut done = 0u32;
-                    if context.GetData(&job.query, Some((&mut done as *mut u32).cast()), 4, 1).is_err() {
+                    if context
+                        .GetData(&job.query, Some((&mut done as *mut u32).cast()), 4, 1)
+                        .is_err()
+                    {
                         result = Some(Err(ReadbackError::DeviceLost));
                     } else if done != 0 {
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                        match context.Map(&job.staging, 0, D3D11_MAP(1), 0x100000, Some(&mut mapped)) { // DO_NOT_WAIT
+                        match context.Map(
+                            &job.staging,
+                            0,
+                            D3D11_MAP(1),
+                            0x100000,
+                            Some(&mut mapped),
+                        ) {
+                            // DO_NOT_WAIT
                             Ok(()) => {
                                 job.mapped = true;
                                 let pitch = mapped.RowPitch as usize;
                                 let width = job.work.width;
                                 let height = job.work.height;
-                                if mapped.pData.is_null() || pitch < width * 4 || pitch.checked_mul(height).is_none_or(|bytes| bytes > job.work.reserved_bytes) {
+                                if mapped.pData.is_null()
+                                    || pitch < width * 4
+                                    || pitch
+                                        .checked_mul(height)
+                                        .is_none_or(|bytes| bytes > job.work.reserved_bytes)
+                                {
                                     result = Some(Err(ReadbackError::Failed));
                                 } else {
                                     let address = mapped.pData as usize;
@@ -1378,7 +1566,9 @@ impl Cx {
                                     job.copy = Some(Box::new(move || {
                                         // The lease owns a COM reference even
                                         // if Cx is destroyed while copying.
-                                        let bytes = crate::texture::copy_readback_rows(address, pitch, width, height);
+                                        let bytes = crate::texture::copy_readback_rows(
+                                            address, pitch, width, height,
+                                        );
                                         drop(owner);
                                         let _ = send.try_send(bytes);
                                     }));
@@ -1394,22 +1584,30 @@ impl Cx {
                         if disconnected {
                             drop(copy);
                             result = Some(Err(ReadbackError::Failed));
-                        } else { job.copy = Some(copy); }
+                        } else {
+                            job.copy = Some(copy);
+                        }
                     }
                 }
                 if let Some(receive) = &job.receive {
                     match receive.try_recv() {
                         Ok(bytes) => result = Some(Ok(bytes)),
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => result = Some(Err(ReadbackError::Failed)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            result = Some(Err(ReadbackError::Failed))
+                        }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     }
                 }
                 if let Some(result) = result {
-                    if job.mapped { context.Unmap(&job.staging, 0); }
+                    if job.mapped {
+                        context.Unmap(&job.staging, 0);
+                    }
                     // Immediate-context calls all occur on this owning thread.
                     drop(job.source);
                     job.work.completion.finish(result);
-                } else { pending.push(job); }
+                } else {
+                    pending.push(job);
+                }
             }
         }
         worker.set_active(!pending.is_empty());
@@ -1577,10 +1775,12 @@ unsafe fn clear_and_flush(context: &ID3D11DeviceContext) {
 fn main_window_latency() -> u32 {
     use std::sync::OnceLock;
     static V: OnceLock<u32> = OnceLock::new();
-    *V.get_or_init(|| match std::env::var("MAKEPAD_WIN_LATENCY").ok().as_deref() {
-        Some("1") => 1,
-        _ => 2,
-    })
+    *V.get_or_init(
+        || match std::env::var("MAKEPAD_WIN_LATENCY").ok().as_deref() {
+            Some("1") => 1,
+            _ => 2,
+        },
+    )
 }
 
 /// Buffer count must stay one ahead of the frame latency, and `ResizeBuffers`
@@ -2099,7 +2299,8 @@ impl D3d11Window {
                 // would then time out the frame-latency wait every frame. Report it
                 // as not-presented and let the occlusion probe back us off, the same
                 // way the macOS backend handles `occlusionState`.
-                self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                self.occluded_since
+                    .get_or_insert_with(std::time::Instant::now);
                 try_with_win32_app(|app| app.frame_trace.present_occluded());
                 return false;
             }
@@ -2284,8 +2485,12 @@ impl D3d11Cx {
     /// Fallible because recovery calls it while the display driver may still be restarting,
     /// when `EnumAdapters` and `D3D11CreateDevice` fail transiently for a few hundred
     /// milliseconds. Every argument is a literal, so nothing here depends on retained state.
-    fn create_device_tier(
-    ) -> windows_core::Result<(IDXGIFactory2, ID3D11Device, ID3D11DeviceContext, ID3D11Query)> {
+    fn create_device_tier() -> windows_core::Result<(
+        IDXGIFactory2,
+        ID3D11Device,
+        ID3D11DeviceContext,
+        ID3D11Query,
+    )> {
         unsafe {
             // A DXGI factory snapshots its adapter enumeration when it is created, so one made
             // before a hybrid-GPU transition or a driver reinstall keeps handing back the
@@ -2411,7 +2616,10 @@ impl D3d11Cx {
             // A removed device fails `GetData` rather than answering it, and `!= S_FALSE` would
             // read that as "the GPU finished this frame" forever — the only device-loss signal
             // the studio-hosted path has, since it renders to a texture and never presents.
-            self.note_error("ID3D11DeviceContext::GetData", &windows_core::Error::from(hresult));
+            self.note_error(
+                "ID3D11DeviceContext::GetData",
+                &windows_core::Error::from(hresult),
+            );
             return true;
         }
         hresult != S_FALSE
@@ -2446,6 +2654,7 @@ pub struct CxOsUniformBuffer {
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ID3D11Buffer>,
+    pub charge: Option<crate::retained_instances::RetainedAllocation>,
 }
 
 impl D3d11Buffer {
@@ -2542,9 +2751,10 @@ impl D3d11Buffer {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let p_mapped: *mut _ = &mut mapped;
         unsafe {
-            if let Err(e) = d3d11_cx
-                .context
-                .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+            if let Err(e) =
+                d3d11_cx
+                    .context
+                    .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
             {
                 // Nothing was mapped, so there is no `Unmap` to pair on this path.
                 d3d11_cx.note_error("ID3D11DeviceContext::Map", &e);
@@ -2750,36 +2960,95 @@ impl CxTexture {
 
             // Resolve the pixel format, dimensions, bytes-per-pixel and source data pointer for the
             // general (non-cube) Vec* texture formats.
-            let (dxgi_format, width, height, bpp, data_ptr): (DXGI_FORMAT, usize, usize, usize, *const u8) =
-                match &self.format {
-                    TextureFormat::VecBGRAu8_32 { width, height, data, .. } => (
-                        DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    TextureFormat::VecRGBAf32 { width, height, data, .. } => (
-                        DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    TextureFormat::VecRu8 { width, height, data, .. } => (
-                        DXGI_FORMAT_R8_UNORM, *width, *height, 1,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    TextureFormat::VecRGu8 { width, height, data, .. } => (
-                        DXGI_FORMAT_R8G8_UNORM, *width, *height, 2,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    TextureFormat::VecRf32 { width, height, data, .. } => (
-                        DXGI_FORMAT_R32_FLOAT, *width, *height, 4,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    // Mipmapped images: upload level 0 only for now (safe). Real per-level mip
-                    // upload is a TODO before MAKEPAD_IMAGE_MIPMAPS helps on D3D11.
-                    TextureFormat::VecMipBGRAu8_32 { width, height, data, .. } => (
-                        DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4,
-                        data.as_ref().map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
-                    ),
-                    _ => panic!(),
-                };
+            let (dxgi_format, width, height, bpp, data_ptr): (
+                DXGI_FORMAT,
+                usize,
+                usize,
+                usize,
+                *const u8,
+            ) = match &self.format {
+                TextureFormat::VecBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    *width,
+                    *height,
+                    4,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                TextureFormat::VecRGBAf32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_R32G32B32A32_FLOAT,
+                    *width,
+                    *height,
+                    16,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                TextureFormat::VecRu8 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_R8_UNORM,
+                    *width,
+                    *height,
+                    1,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                TextureFormat::VecRGu8 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_R8G8_UNORM,
+                    *width,
+                    *height,
+                    2,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                TextureFormat::VecRf32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_R32_FLOAT,
+                    *width,
+                    *height,
+                    4,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                // Mipmapped images: upload level 0 only for now (safe). Real per-level mip
+                // upload is a TODO before MAKEPAD_IMAGE_MIPMAPS helps on D3D11.
+                TextureFormat::VecMipBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    *width,
+                    *height,
+                    4,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
+                _ => panic!(),
+            };
 
             if width == 0 || height == 0 || data_ptr.is_null() {
                 // The pixel buffer is out on loan: `Texture::take_vec_*` leaves `data` as
@@ -2798,7 +3067,12 @@ impl CxTexture {
                 TextureUpdated::Partial(r) => {
                     let bx = r.origin.x.min(width);
                     let by = r.origin.y.min(height);
-                    (bx, by, r.size.width.min(width - bx), r.size.height.min(height - by))
+                    (
+                        bx,
+                        by,
+                        r.size.width.min(width - bx),
+                        r.size.height.min(height - by),
+                    )
                 }
                 _ => (0, 0, width, height),
             };
@@ -2827,11 +3101,17 @@ impl CxTexture {
             if can_reuse {
                 if bw != 0 && bh != 0 {
                     let dst_box = D3D11_BOX {
-                        left: bx as u32, top: by as u32, front: 0,
-                        right: (bx + bw) as u32, bottom: (by + bh) as u32, back: 1,
+                        left: bx as u32,
+                        top: by as u32,
+                        front: 0,
+                        right: (bx + bw) as u32,
+                        bottom: (by + bh) as u32,
+                        back: 1,
                     };
-                    let src = unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
-                    let resource: ID3D11Resource = self.os.texture.as_ref().unwrap().cast().unwrap();
+                    let src =
+                        unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
+                    let resource: ID3D11Resource =
+                        self.os.texture.as_ref().unwrap().cast().unwrap();
                     unsafe {
                         d3d11_cx.context.UpdateSubresource(
                             &resource,
@@ -2866,7 +3146,10 @@ impl CxTexture {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: dxgi_format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
                 CPUAccessFlags: 0,
@@ -2896,7 +3179,12 @@ impl CxTexture {
             // texture. Rows height..cap_height stay unused — the glyph shader addresses by absolute
             // texel index, so the extra capacity is never sampled.
             let dst_box = D3D11_BOX {
-                left: 0, top: 0, front: 0, right: width as u32, bottom: height as u32, back: 1,
+                left: 0,
+                top: 0,
+                front: 0,
+                right: width as u32,
+                bottom: height as u32,
+                back: 1,
             };
             unsafe {
                 d3d11_cx.context.UpdateSubresource(
@@ -2910,9 +3198,11 @@ impl CxTexture {
             }
             let mut shader_resource_view = None;
             if let Err(e) = unsafe {
-                d3d11_cx
-                    .device
-                    .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                d3d11_cx.device.CreateShaderResourceView(
+                    &resource,
+                    None,
+                    Some(&mut shader_resource_view),
+                )
             } {
                 // Publishing the texture without its view would leave the alloc bookkeeping
                 // claiming a usable texture that nothing can sample.
@@ -3029,9 +3319,11 @@ impl CxTexture {
                     .unwrap();
                 }
             } else if let Err(e) = unsafe {
-                d3d11_cx
-                    .device
-                    .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+                d3d11_cx.device.CreateRenderTargetView(
+                    &resource,
+                    None,
+                    Some(&mut render_target_view),
+                )
             } {
                 d3d11_cx.note_error("CreateRenderTargetView(render target)", &e);
                 self.alloc = None;
@@ -3052,7 +3344,11 @@ impl CxTexture {
             match alloc.pixel {
                 TexturePixel::D32 => {
                     // DXGI_FORMAT_R32_TYPELESS (the trimmed bindings omit this alias).
-                    format = if self.format.is_sampled_depth() { DXGI_FORMAT(39) } else { DXGI_FORMAT_D32_FLOAT };
+                    format = if self.format.is_sampled_depth() {
+                        DXGI_FORMAT(39)
+                    } else {
+                        DXGI_FORMAT_D32_FLOAT
+                    };
                 }
                 _ => {
                     panic!("Wrong format for update_depth_stencil");
@@ -3070,7 +3366,11 @@ impl CxTexture {
                 },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32
-                    | if self.format.is_sampled_depth() { D3D11_BIND_SHADER_RESOURCE.0 as u32 } else { 0 },
+                    | if self.format.is_sampled_depth() {
+                        D3D11_BIND_SHADER_RESOURCE.0 as u32
+                    } else {
+                        0
+                    },
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
             };
@@ -3112,10 +3412,22 @@ impl CxTexture {
                     Format: DXGI_FORMAT_R32_FLOAT,
                     ViewDimension: D3D_SRV_DIMENSION(4), // TEXTURE2D
                     Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                        Texture2D: D3D11_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1 },
+                        Texture2D: D3D11_TEX2D_SRV {
+                            MostDetailedMip: 0,
+                            MipLevels: 1,
+                        },
                     },
                 };
-                unsafe { d3d11_cx.device.CreateShaderResourceView(&resource, Some(&desc), Some(&mut self.os.shader_resource_view)).unwrap(); }
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateShaderResourceView(
+                            &resource,
+                            Some(&desc),
+                            Some(&mut self.os.shader_resource_view),
+                        )
+                        .unwrap();
+                }
             }
         }
     }
@@ -3148,11 +3460,14 @@ impl CxTexture {
             };
 
             let mut texture = None;
-            let create_res = unsafe {
-                d3d11_device.CreateTexture2D(&texture_desc, None, Some(&mut texture))
-            };
+            let create_res =
+                unsafe { d3d11_device.CreateTexture2D(&texture_desc, None, Some(&mut texture)) };
             if let Err(err) = &create_res {
-                crate::error!("WINHOST: CreateTexture2D(shared keyed-mutex) FAILED: {:?} miscflags={:x}", err, texture_desc.MiscFlags);
+                crate::error!(
+                    "WINHOST: CreateTexture2D(shared keyed-mutex) FAILED: {:?} miscflags={:x}",
+                    err,
+                    texture_desc.MiscFlags
+                );
                 return;
             }
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
@@ -3186,14 +3501,24 @@ impl CxTexture {
                             &mut handle,
                         )
                     };
-                    crate::log!("WINHOST: CreateSharedHandle hr={:?} handle={:?} size={}x{} id={:x}", hr, handle.0, alloc.width, alloc.height, id_u64);
+                    crate::log!(
+                        "WINHOST: CreateSharedHandle hr={:?} handle={:?} size={}x{} id={:x}",
+                        hr,
+                        handle.0,
+                        alloc.width,
+                        alloc.height,
+                        id_u64
+                    );
                 }
                 Err(err) => {
                     crate::error!("WINHOST: IDXGIResource1 cast failed: {:?}", err);
                 }
             }
             let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
-            crate::log!("WINHOST: update_shared_texture keyed_mutex={}", keyed_mutex.is_some());
+            crate::log!(
+                "WINHOST: update_shared_texture keyed_mutex={}",
+                keyed_mutex.is_some()
+            );
 
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
@@ -3235,16 +3560,22 @@ impl CxTexture {
             )
         };
         if hr.is_err() || resource_ptr.is_null() {
-            crate::error!("WINCHILD: OpenSharedResourceByName FAILED hr={:?} id={:x}", hr, id_u64);
+            crate::error!(
+                "WINCHILD: OpenSharedResourceByName FAILED hr={:?} id={:x}",
+                hr,
+                id_u64
+            );
             return;
         }
         let texture: ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw(resource_ptr) };
         let resource: ID3D11Resource = texture.clone().cast().unwrap();
         let mut shader_resource_view = None;
         let srv = unsafe {
-            d3d11_cx
-                .device
-                .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+            d3d11_cx.device.CreateShaderResourceView(
+                &resource,
+                None,
+                Some(&mut shader_resource_view),
+            )
         };
         let mut render_target_view = None;
         let rtv = unsafe {
@@ -3253,7 +3584,13 @@ impl CxTexture {
                 .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
         };
         let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
-        crate::log!("WINCHILD: OpenSharedResourceByName OK SRV={:?} RTV={:?} keyed_mutex={} id={:x}", srv, rtv, keyed_mutex.is_some(), id_u64);
+        crate::log!(
+            "WINCHILD: OpenSharedResourceByName OK SRV={:?} RTV={:?} keyed_mutex={} id={:x}",
+            srv,
+            rtv,
+            keyed_mutex.is_some(),
+            id_u64
+        );
         self.os.texture = Some(texture);
         self.os.render_target_view = render_target_view;
         self.os.shader_resource_view = shader_resource_view;
@@ -3433,7 +3770,11 @@ impl DrawVars {
             // Cache 1: Check if this exact object has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+                if let Some(&shader_id) = cx
+                    .draw_shaders
+                    .cache_object_id_to_shader
+                    .get(&(heap_key, io_self))
+                {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -3770,10 +4111,15 @@ struct D3dShaderInputs {
 }
 impl From<&CxDrawShaderMapping> for D3dShaderInputs {
     fn from(mapping: &CxDrawShaderMapping) -> Self {
-        Self { code: mapping.code.clone(), flags: mapping.flags.clone(),
-            geometries: mapping.geometries.clone(), instances: mapping.instances.clone(),
-            uniform_buffers: mapping.uniform_buffers.clone(), samplers: mapping.samplers.clone(),
-            uniform_buffer_bindings: mapping.uniform_buffer_bindings.clone() }
+        Self {
+            code: mapping.code.clone(),
+            flags: mapping.flags.clone(),
+            geometries: mapping.geometries.clone(),
+            instances: mapping.instances.clone(),
+            uniform_buffers: mapping.uniform_buffers.clone(),
+            samplers: mapping.samplers.clone(),
+            uniform_buffer_bindings: mapping.uniform_buffer_bindings.clone(),
+        }
     }
 }
 
@@ -3786,10 +4132,13 @@ enum D3dShaderError {
 /// shared lock, disk read, compiler or device state creation in the frame.
 #[derive(Default)]
 pub struct AsyncHlslCompile {
-    pending: std::collections::HashMap<usize, (
-        ID3D11Device,
-        crate::thread::TaskHandle<Result<CxOsDrawShader, D3dShaderError>>,
-    )>,
+    pending: std::collections::HashMap<
+        usize,
+        (
+            ID3D11Device,
+            crate::thread::TaskHandle<Result<CxOsDrawShader, D3dShaderError>>,
+        ),
+    >,
 }
 
 #[derive(Clone)]
@@ -3860,14 +4209,14 @@ impl CxOsDrawShader {
                 },
                 // Compact formats: DXGI enum values (this windows crate subset
                 // does not re-export every DXGI_FORMAT_* alias).
-                DrawShaderAttrFormat::F16x2 => DXGI_FORMAT(34),            // R16G16_FLOAT
-                DrawShaderAttrFormat::F16x4 => DXGI_FORMAT(10),            // R16G16B16A16_FLOAT
-                DrawShaderAttrFormat::U16x2 => DXGI_FORMAT(36),            // R16G16_UINT
-                DrawShaderAttrFormat::I16x2 => DXGI_FORMAT(38),            // R16G16_SINT
-                DrawShaderAttrFormat::U16x2Norm => DXGI_FORMAT(35),        // R16G16_UNORM
-                DrawShaderAttrFormat::I16x2Norm => DXGI_FORMAT(37),        // R16G16_SNORM
+                DrawShaderAttrFormat::F16x2 => DXGI_FORMAT(34), // R16G16_FLOAT
+                DrawShaderAttrFormat::F16x4 => DXGI_FORMAT(10), // R16G16B16A16_FLOAT
+                DrawShaderAttrFormat::U16x2 => DXGI_FORMAT(36), // R16G16_UINT
+                DrawShaderAttrFormat::I16x2 => DXGI_FORMAT(38), // R16G16_SINT
+                DrawShaderAttrFormat::U16x2Norm => DXGI_FORMAT(35), // R16G16_UNORM
+                DrawShaderAttrFormat::I16x2Norm => DXGI_FORMAT(37), // R16G16_SNORM
                 DrawShaderAttrFormat::U8x4Norm => DXGI_FORMAT_R8G8B8A8_UNORM,
-                DrawShaderAttrFormat::I8x4Norm => DXGI_FORMAT(31),         // R8G8B8A8_SNORM,
+                DrawShaderAttrFormat::I8x4Norm => DXGI_FORMAT(31), // R8G8B8A8_SNORM,
             }
         }
         fn slot_chunks(slots: usize) -> Vec<usize> {
@@ -3939,10 +4288,7 @@ impl CxOsDrawShader {
         };
 
         let mut vs = None;
-        if let Err(e) = unsafe {
-            device
-                .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
-        } {
+        if let Err(e) = unsafe { device.CreateVertexShader(&vs_bytes, None, Some(&mut vs)) } {
             // The DXBC is valid — it just came from the compiler or the on-disk cache — so a
             // failure here is the device, not the shader. Returning `None` puts this shader
             // back in the compile queue for a later frame.
@@ -3950,10 +4296,7 @@ impl CxOsDrawShader {
         }
 
         let mut ps = None;
-        if let Err(e) = unsafe {
-            device
-                .CreatePixelShader(&ps_bytes, None, Some(&mut ps))
-        } {
+        if let Err(e) = unsafe { device.CreatePixelShader(&ps_bytes, None, Some(&mut ps)) } {
             return Err(D3dShaderError::Device(e));
         }
 
@@ -4058,10 +4401,8 @@ impl CxOsDrawShader {
         }
 
         let mut input_layout = None;
-        let input_layout_res = unsafe {
-            device
-                .CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout))
-        };
+        let input_layout_res =
+            unsafe { device.CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout)) };
         if let Err(err) = input_layout_res {
             // A mismatched layout is a build-time bug worth shouting about, but a device that
             // died mid-compile fails here too, and killing the process is the one outcome no

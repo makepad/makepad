@@ -38,7 +38,7 @@ makepad-diskmap = { path = "../../libs/diskmap" }
 makepad-terminal = { path = "../terminal" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-aichat = { path = "../aichat" }
+makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"] }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
 makepad-bounded-http = { path = "../../libs/bounded_http" }
