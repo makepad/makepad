@@ -6487,6 +6487,73 @@ fn parse_synth_mix(body: &str) -> Option<SynthMixUiState> {
     Some(state)
 }
 
+/// The one spelling of what the program mix says about a deck's channel.
+/// The head line, the log line and the tests all start from here, so one
+/// grep finds every place it is said.
+const MIX_NOT_CARRYING: &str = "MIX is not carrying ";
+
+/// Why the program mix is passing nothing from a deck's channel, when it
+/// is passing nothing.
+///
+/// The mix page owns three ways to shut a channel and the DJ tab showed
+/// none of them: the channel's own mute, its fader at the bottom, and
+/// another channel soloed with this one not. Two of the three are written
+/// down and come back at the next launch, so a deck could be loaded,
+/// played and metered -- the deck meter is taken before the channel --
+/// with the room hearing nothing and no word anywhere.
+///
+/// It says only what it knows: that the PROGRAM MIX is not carrying this
+/// channel. It does not say the room hears nothing, because it cannot --
+/// the crossfader is applied after the deck meter and before the channel,
+/// and the deck's own mute and the master sit outside this array
+/// entirely. A line that claimed the room would teach a converse that is
+/// false the first time the fader is parked on the other deck.
+///
+/// Mute first, then the fader, then the solo mask: that is the order they
+/// outlast a session in. The first two are in the file; the third is the
+/// only one a relaunch clears by itself.
+fn mix_not_carrying(mix: &SynthMixUiState, deck: DeckId) -> Option<String> {
+    // The one place decks are mapped to channels, and the same one the
+    // engine's routing follows. If it ever stopped answering, the head
+    // says nothing rather than something wrong.
+    let strip = ChainTarget::from(deck).strip()?;
+    let index = strip.index();
+    let why = if mix.strip_mutes[index] {
+        "muted"
+    } else if !(mix.strip_gains[index] > 0.0) {
+        // NOT `<= 0.0`. A gain that is not a number reaches the file and
+        // comes back out of it: parsing "NaN" succeeds and the clamp
+        // keeps it, so the file's reader stores it and the engine's own
+        // setter turns it into a hard zero on the way in. NaN is not less
+        // than or equal to zero, and it is not greater than zero either.
+        "turned down"
+    } else if mix.strip_solos.iter().any(|&on| on) && !mix.strip_solos[index] {
+        "another channel soloed"
+    } else {
+        return None;
+    };
+    Some(format!("{MIX_NOT_CARRYING}{} · {why}", strip.name()))
+}
+
+/// The head's second line, given the line the deck's load state already
+/// wants there and what the program mix is doing with its channel.
+///
+/// The loader's word and a failed load's error are never displaced: they
+/// are what an operator has to see first, and a settled record is the
+/// only state whose second line is otherwise blank. An empty deck says
+/// "empty" in its title and is silent for a reason it is already giving.
+fn deck_head_second_line(
+    load_line: String,
+    settled: bool,
+    mix: &SynthMixUiState,
+    deck: DeckId,
+) -> String {
+    if !load_line.is_empty() || !settled {
+        return load_line;
+    }
+    mix_not_carrying(mix, deck).unwrap_or(load_line)
+}
+
 /// The explorer's lane: exactly one chip at a time (radio; the selected
 /// chip clicked again returns to ALL). Audio has no chip here — that is
 /// the DJ surface's lane.
@@ -6952,6 +7019,113 @@ mod synth_mix_file_tests {
         assert!(parse_synth_mix("VJ_SYNTH_MIX 2\n0\n").is_none());
         assert!(parse_synth_mix("").is_none());
         assert!(parse_synth_mix("junk").is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod deck_head_tests {
+    use super::*;
+
+    fn shut(strip: StripId) -> SynthMixUiState {
+        let mut state = SynthMixUiState::default();
+        state.strip_mutes[strip.index()] = true;
+        state
+    }
+
+    fn head(mix: &SynthMixUiState, deck: DeckId) -> String {
+        deck_head_second_line(String::new(), true, mix, deck)
+    }
+
+    /// A shut channel speaks on ITS deck's head and on no other. The
+    /// mapping that line rests on is asserted here too: the mixer's own
+    /// tests pin the chain a deck belongs to and never the channel.
+    #[test]
+    fn a_settled_record_whose_channel_the_mix_has_shut_says_so_on_its_own_head() {
+        assert_eq!(ChainTarget::from(DeckId::A).strip(), Some(StripId::DjA));
+        assert_eq!(ChainTarget::from(DeckId::B).strip(), Some(StripId::DjB));
+        let state = shut(StripId::DjA);
+        let line = head(&state, DeckId::A);
+        assert!(line.contains("DJ A"), "{line}");
+        assert!(line.contains("muted"), "{line}");
+        assert_eq!(head(&state, DeckId::B), "");
+    }
+
+    /// The line is not there in any state that is working, which is what
+    /// lets it ride an otherwise blank line with no switch over it.
+    #[test]
+    fn a_channel_the_program_mix_is_carrying_leaves_the_head_blank() {
+        let state = SynthMixUiState::default();
+        assert_eq!(head(&state, DeckId::A), "");
+        assert_eq!(head(&state, DeckId::B), "");
+        let mut up = SynthMixUiState::default();
+        up.strip_gains[StripId::DjA.index()] = 1.5;
+        assert_eq!(head(&up, DeckId::A), "");
+        // A soloed channel carries, however many others are soloed with it.
+        let mut solo = SynthMixUiState::default();
+        solo.strip_solos[StripId::DjA.index()] = true;
+        assert_eq!(head(&solo, DeckId::A), "");
+        solo.strip_solos[StripId::Piano.index()] = true;
+        assert_eq!(head(&solo, DeckId::A), "");
+    }
+
+    /// What the load state wants on that line always wins, and an empty
+    /// deck is silent for a reason its title is already giving.
+    #[test]
+    fn the_loader_and_a_failed_load_keep_the_head_and_an_empty_deck_stays_empty() {
+        let state = shut(StripId::DjA);
+        assert_eq!(deck_head_second_line(String::new(), false, &state, DeckId::A), "");
+        assert_eq!(
+            deck_head_second_line("loading…".to_string(), false, &state, DeckId::A),
+            "loading…"
+        );
+        let error = "could not be decoded (bad header)".to_string();
+        assert_eq!(
+            deck_head_second_line(error.clone(), false, &state, DeckId::A),
+            error
+        );
+    }
+
+    /// Three ways to shut a channel, three different words: an operator is
+    /// told which control to undo, not merely that something is wrong.
+    #[test]
+    fn the_mix_page_has_three_ways_to_shut_a_channel_and_the_head_names_which() {
+        let muted = shut(StripId::DjA);
+        let mut down = SynthMixUiState::default();
+        down.strip_gains[StripId::DjA.index()] = 0.0;
+        let mut elsewhere = SynthMixUiState::default();
+        elsewhere.strip_solos[StripId::Piano.index()] = true;
+        let said: Vec<String> = [&muted, &down, &elsewhere]
+            .iter()
+            .map(|state| mix_not_carrying(state, DeckId::A).expect("a shut channel says so"))
+            .collect();
+        assert!(said[0].contains("muted"), "{}", said[0]);
+        assert!(said[1].contains("turned down"), "{}", said[1]);
+        assert!(said[2].contains("another channel soloed"), "{}", said[2]);
+        assert!(said.iter().all(|line| line.starts_with(MIX_NOT_CARRYING)));
+        assert_eq!(said.iter().collect::<std::collections::BTreeSet<_>>().len(), 3);
+    }
+
+    /// Its own law, because the obvious spelling passes every obvious
+    /// test and ships a silent channel: a gain that is not a number
+    /// survives the file and reaches the engine as a hard zero.
+    #[test]
+    fn a_channel_turned_down_to_a_number_that_is_not_one_is_still_turned_down() {
+        let mut state = SynthMixUiState::default();
+        state.strip_gains[StripId::DjA.index()] = f32::NAN;
+        let line = mix_not_carrying(&state, DeckId::A).expect("not a number is not carrying");
+        assert!(line.contains("turned down"), "{line}");
+    }
+
+    /// The whole persistence claim without a mixer, an audio thread or a
+    /// clock: what the file remembers is what the head reads back.
+    #[test]
+    fn the_saved_file_brings_the_shut_channel_back_and_the_head_still_says_so() {
+        let mut before = shut(StripId::DjA);
+        before.strip_gains[StripId::Sfx.index()] = 0.25;
+        let after = parse_synth_mix(&synth_mix_text(&before)).expect("our own file reads back");
+        assert!(head(&after, DeckId::A).contains("muted"));
+        assert_eq!(head(&after, DeckId::B), "");
     }
 }
 
@@ -28407,7 +28581,24 @@ p2 {}
             let base = (index as u64) << 8;
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
-            self.set_label(cx, base + 1, &refs.artist, &artist);
+            // The head's second line, when a settled record leaves it
+            // empty and the program mix is not carrying this deck's
+            // channel. `set_label` already dedups, so its return is what
+            // makes the log line fire once on the way in rather than
+            // twenty times a second while it stands.
+            //
+            // Said in the log as well, not on the head alone: the artist
+            // line is where a failed load used to live and nobody across
+            // the booth could read it. At note level and not error: a
+            // channel the operator shut on purpose is a routing state,
+            // not a fault, and the one line under the lists is not the
+            // place for it.
+            let artist = deck_head_second_line(artist, loaded, &self.synth_mix, deck);
+            if self.set_label(cx, base + 1, &refs.artist, &artist)
+                && artist.starts_with(MIX_NOT_CARRYING)
+            {
+                log!("deck {deck:?}: {artist}");
+            }
             // While a gesture owns the record the tempo readout says what
             // the record is DOING, minus sign and all — the one place in
             // the tab that can say it is running backwards. The readout
