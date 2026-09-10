@@ -2893,6 +2893,9 @@ struct Shared {
 /// and the commands a full ring handed back.
 struct UiShadow {
     backlog: VecDeque<MixCmd>,
+    /// The callback is never going to run again, so nothing is going to
+    /// drain what is sent to it.
+    abandoned: bool,
     cue_deck: [bool; 2],
     cue_mode: CueMode,
     deck: [DeckShadow; 2],
@@ -3009,6 +3012,7 @@ impl Mixer {
             shared,
             ui: Arc::new(UiCell::new(UiShadow {
                 backlog: VecDeque::new(),
+                abandoned: false,
                 cue_deck: [false; 2],
                 cue_mode: CueMode::default(),
                 deck: [DeckShadow::default(); 2],
@@ -3069,6 +3073,21 @@ impl Mixer {
         self.shared.buffer_frames.store(0, Ordering::Relaxed);
     }
 
+    /// The output this engine was moved into is never going to run again.
+    ///
+    /// Stop sending to it and let go of what is already queued. There is
+    /// no way back: the engine went into the callback by value and a
+    /// second take answers with nothing, so an output the platform has
+    /// retired is silent for the rest of the run whatever is done here.
+    /// What this prevents is the leak that would otherwise follow it --
+    /// an unbounded queue holding decoded tracks nobody will ever read.
+    pub fn abandon_commands(&self) {
+        self.ui.with(|ui| {
+            ui.abandoned = true;
+            ui.backlog.clear();
+        });
+    }
+
     /// Callbacks whose render outran its own buffer period. On this engine
     /// nothing else can silence a buffer, so this is THE dropout counter.
     pub fn audio_overruns(&self) -> u64 {
@@ -3082,6 +3101,13 @@ impl Mixer {
     }
 
     fn send_in(shared: &Shared, ui: &mut UiShadow, cmd: MixCmd) {
+        // Nothing is going to read it. Dropped rather than queued: a
+        // retired callback never drains, so every command after it would
+        // park in an unbounded queue for the rest of the night, holding
+        // whatever payload it carries -- whole decoded tracks among them.
+        if ui.abandoned {
+            return;
+        }
         // Order is the whole contract: once anything is backlogged, every
         // later command queues behind it.
         if !ui.backlog.is_empty() {
@@ -7681,6 +7707,27 @@ mod tests {
     /// Assert the INDEX, not an underflow: in a release build the
     /// subtraction before it wraps rather than panicking, and the panic
     /// lands one line later.
+    /// A callback the platform has retired never drains again, so a
+    /// command sent to it would park in an unbounded queue for the rest
+    /// of the night -- holding whatever it carries, decoded tracks
+    /// included.
+    #[test]
+    fn nothing_is_queued_for_a_callback_that_is_never_going_to_read_again() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        // Fill the ring so the next send has to backlog, then abandon.
+        for _ in 0..4_096 {
+            mixer.run_cmd(MixCmd::SetMaster(0.5));
+        }
+        assert!(mixer.backlog_len() > 0, "the ring did not fill, so nothing was backlogged");
+        mixer.abandon_commands();
+        assert_eq!(mixer.backlog_len(), 0, "what was queued is let go of");
+        for _ in 0..4_096 {
+            mixer.run_cmd(MixCmd::SetMaster(0.25));
+        }
+        assert_eq!(mixer.backlog_len(), 0, "and nothing new is queued");
+    }
+
     #[test]
     fn a_voice_whose_clip_has_no_frames_is_retired_rather_than_read() {
         let mixer = TestMixer::new();

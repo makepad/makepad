@@ -19144,8 +19144,10 @@ p2 {}
             }
             // The render figures froze at the last buffer that finished.
             // Stop the console quoting a budget for a device nothing is
-            // rendering into.
+            // rendering into, and stop sending to a callback that will
+            // never read again.
             self.mixer.forget_device();
+            self.mixer.abandon_commands();
         }
         // The monitor's own dropout: heard in the cans, invisible in the
         // room, and until now counted nowhere at all.
