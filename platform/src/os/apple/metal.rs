@@ -195,7 +195,8 @@ impl Cx {
                     let buffer = &mut os.instance_buffer;
                     if !used && buffer.capacity_bytes() != 0 {
                         if !eviction.admit(buffer.capacity_bytes(), buffer.buffer_count(), maintenance_limit) { deferred_backend = true; return None; }
-                        evicted_bytes += buffer.capacity_bytes();
+                        // Obsolete recording tails are lifecycle retirement,
+                        // not pressure eviction of a reusable cache entry.
                         metal_cx
                             .retired_instances
                             .borrow_mut()
@@ -262,6 +263,8 @@ impl Cx {
             let (candidates, scan_complete) = self.draw_lists.retained_eviction_batch(128);
             'victims: for (id, items) in candidates {
                 for index in items {
+                    if self.draw_lists.retained_list_demanded(id)
+                        && !self.draw_lists[id].draw_items[index].retained_zero_ink() { continue; }
                     if !metal_cx.has_retirement_room() {
                         break;
                     }
@@ -288,6 +291,10 @@ impl Cx {
                 if evicted >= required {
                     break;
                 }
+            }
+            if evicted != 0 {
+                crate::log!("retained-cache eviction reason=pressure bytes={} allocation_bytes={} high={} low={}",
+                    evicted, self.draw_lists.1.allocations.bytes(), self.draw_lists.1.allocations.pressure_high(), self.draw_lists.1.allocations.pressure_low());
             }
             retirement_pending |= metal_cx.collect_retired_instances(&mut self.draw_lists.1);
             self.draw_lists.1.allow_visible_overflow = scan_complete
@@ -3025,7 +3032,7 @@ impl MetalCx {
         let envelope =
             crate::retained_instances::retained_device_envelope(recommended, physical, unified);
         budget.set_device_limit(envelope);
-        crate::log!("retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 source={}", recommended, physical, unified, envelope,
+        crate::log!("retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
             if !unified && recommended != 0 { "recommendedMaxWorkingSetSize" } else { "physicalMemory/2" });
         let render_setup = Arc::new(std::sync::OnceLock::new());
         let render_setup_queued = metal_buffer_allocator()

@@ -128,6 +128,7 @@ pub struct RetainedAllocationBudget {
     collected_frame: Option<u64>,
     refusals: usize,
     reclaim_bytes: usize,
+    cache_pressure: std::cell::Cell<bool>,
     pending_backend_retirements: usize,
 }
 #[derive(Debug)]
@@ -266,6 +267,7 @@ impl RetainedAllocationBudget {
             collected_frame: None,
             refusals: 0,
             reclaim_bytes: 0,
+            cache_pressure: std::cell::Cell::new(false),
             pending_backend_retirements: 0,
         }
     }
@@ -296,8 +298,12 @@ impl RetainedAllocationBudget {
     pub fn waits(&self) -> usize {
         self.waits
     }
+    pub fn pressure_high(&self) -> usize { self.limit() / 4 * 3 }
+    pub fn pressure_low(&self) -> usize { self.limit() / 8 * 5 }
     pub fn reclaim_bytes(&self) -> usize {
-        self.reclaim_bytes
+        self.reclaim_bytes.max(if self.cache_pressure.get() {
+            self.bytes.saturating_sub(self.pressure_low())
+        } else { 0 })
     }
     pub fn has_pending_retirements(&self) -> bool {
         self.pending_backend_retirements != 0
@@ -331,7 +337,14 @@ impl RetainedAllocationBudget {
         self.refusals
     }
     pub fn reclaim_needed(&self) -> bool {
-        self.reclaim_bytes > self.limit().saturating_sub(self.bytes)
+        // Cache pressure has a Schmitt band. Allocation/receipt maintenance
+        // remains bounded by its existing frame credits and never runs at rest.
+        if self.bytes > self.pressure_high() {
+            self.cache_pressure.set(true);
+        } else if self.bytes <= self.pressure_low() {
+            self.cache_pressure.set(false);
+        }
+        self.cache_pressure.get() || self.reclaim_bytes > self.limit().saturating_sub(self.bytes)
     }
     pub fn take_reclaim_request(&mut self) -> bool {
         let needed = self.reclaim_needed();
@@ -708,6 +721,27 @@ impl RetainedInstancePool {
 #[cfg(test)]
 mod upload_tests {
     use super::*;
+
+    #[test]
+    fn machine_residency_pressure_has_fractional_hysteresis() {
+        for physical in [8u64 << 30, 128u64 << 30] {
+            let limit = retained_device_envelope(physical * 9 / 10, physical, true);
+            assert_eq!(limit, physical as usize / 8);
+            let mut budget = RetainedAllocationBudget::new(limit);
+            assert_eq!(budget.pressure_high(), limit * 3 / 4);
+            assert_eq!(budget.pressure_low(), limit * 5 / 8);
+            let near = budget.reserve(limit * 11 / 16).unwrap();
+            assert!(!budget.reclaim_needed(), "below 3/4 is a cache, not garbage");
+            let crossing = budget.reserve(limit / 8).unwrap();
+            assert!(budget.reclaim_needed());
+            drop(crossing);
+            budget.collect(0);
+            assert!(budget.reclaim_needed(), "hold pressure through the hysteresis band");
+            drop(near);
+            budget.collect(0);
+            assert!(!budget.reclaim_needed());
+        }
+    }
 
     #[test]
     fn append_publications_preserve_a_partially_copied_prefix() {

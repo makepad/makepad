@@ -431,9 +431,8 @@ impl Cx {
     pub fn prepare_retained_working_set(&mut self, root: DrawListId) {
         let count = self.draw_lists.0.slot_count();
         let mut next = std::mem::take(&mut self.draw_lists.1.working_set);
-        let old_len = next.len();
         next.resize(count, true);
-        let mut changed = !self.draw_lists.1.working_set_valid || old_len != count;
+        let mut obsolete_tail = false;
         let root_scan = self.draw_lists[root].upload_collection.borrow();
         for index in 0..count {
             let mut demanded = root_scan.best.get(index).is_none_or(|rank| *rank != 3);
@@ -456,15 +455,20 @@ impl Cx {
                     }
                 }
             }
-            changed |= next[index] != demanded;
             next[index] = demanded;
+            let list = &self.draw_lists.0.pool[index];
+            if demanded { list.gpu_cache_last_used.set(self.repaint_id); }
+            let used = list.draw_items.used;
+            let previous = list.gpu_cache_recorded_len.replace(used).min(list.draw_items.buffer.len());
+            obsolete_tail |= previous > used && list.draw_items.buffer[used..previous].iter()
+                .any(|item| item.draw_call().is_some());
         }
         drop(root_scan);
         self.draw_lists.1.working_set = next;
         self.draw_lists.1.working_set_valid = true;
-        if changed {
-            self.draw_lists.1.working_set_scan_passes = 2;
-        }
+        // Camera membership is no longer retirement debt. Only a recording
+        // that actually discarded backend slots needs the bounded tail scan.
+        if obsolete_tail { self.draw_lists.1.working_set_scan_passes = 2; }
     }
 
     /// Protect the complete current pass graph, including clean leaves that
@@ -1186,9 +1190,9 @@ impl CxDrawListPool {
                 .total_cmp(&self[*a].gpu_eviction_distance)
                 .then_with(|| {
                     self[*a]
-                        .gpu_demand_epoch
+                        .gpu_cache_last_used
                         .get()
-                        .cmp(&self[*b].gpu_demand_epoch.get())
+                        .cmp(&self[*b].gpu_cache_last_used.get())
                 })
         });
         candidates
@@ -1211,7 +1215,7 @@ impl CxDrawListPool {
             let index = self.1.eviction_cursor;
             let slot = &self.0.pool[index];
             self.1.eviction_scanned += 1;
-            if slot.gpu_demand_epoch.get() != self.1.demand_epoch {
+            {
                 // Resume within a large physical list as well as between owners.
                 // Otherwise its first 128 empty slots can strand every later
                 // buffer forever and falsely certify a victim-free sweep.
@@ -1229,7 +1233,8 @@ impl CxDrawListPool {
             self.1.eviction_item_cursor = 0;
         }
         candidates.sort_unstable_by(|(a,_),(b,_)| self[*b].gpu_eviction_distance.total_cmp(&self[*a].gpu_eviction_distance)
-            .then_with(|| self[*a].gpu_demand_epoch.get().cmp(&self[*b].gpu_demand_epoch.get())));
+            .then_with(|| self[*a].gpu_cache_last_used.get().cmp(&self[*b].gpu_cache_last_used.get()))
+            .then_with(|| a.index().cmp(&b.index())));
         let complete = self.1.eviction_cursor == self.0.pool.len();
         (candidates, complete)
     }
@@ -1240,6 +1245,7 @@ impl CxDrawListPool {
     /// and invalidate all upload/consumption proofs so re-entry retries it.
     pub fn evict_retained_item(&mut self, id: DrawListId, index: usize) {
         let item = &mut self[id].draw_items[index];
+        item.retained_gpu_evicted = true;
         item.retained_instance_id = 0;
         item.resident_schema = 0;
         item.consumed_instance_id = 0;
@@ -1319,11 +1325,13 @@ impl CxDrawListPool {
                     .is_some_and(|p| p.id() == item.retained_instance_id);
             let off_demand = self.1.working_set_valid
                 && !self.1.working_set.get(id.index()).copied().unwrap_or(true);
-            let used =
-                in_recording && (!hidden_resident || item.retained_prefetched) && !off_demand;
+            // A live recording is a cache entry, including hidden LOD slots
+            // and offscreen owners. Only obsolete tails are garbage here.
+            // Resident victims go through the pressure-ranked eviction path.
+            let used = in_recording;
             self.5 .1 += 1;
             if let Some(payload) = take_backend(id, index, used, &mut item.os) {
-                if hidden_resident {
+                if !used && hidden_resident {
                     item.retained_gpu_evicted = true;
                     // Zero instances need no new receipt. Preserve the logical
                     // publication for CodeView's zero-ink delivery contract;
@@ -1336,7 +1344,7 @@ impl CxDrawListPool {
                     }
                     list.draw_items.clean_leaf.set(false);
                     list.draw_items.instance_counters.set(None);
-                } else if off_demand {
+                } else if !used && off_demand {
                     item.retained_gpu_evicted = true;
                     item.retained_instance_id = 0;
                     item.resident_schema = 0;
@@ -1637,7 +1645,7 @@ impl CxDrawItem {
         self.retained_instance_count == 0 && self.retained_instances.is_some()
     }
     pub fn retained_upload_suspended(&self) -> bool {
-        self.retained_gpu_evicted && self.retained_zero_ink()
+        self.retained_zero_ink() && !self.retained_prefetched
     }
     pub fn retained_upload_needed(&self) -> bool {
         !self.retained_upload_suspended()
@@ -1931,19 +1939,16 @@ impl CxDrawItems {
         item.kind.draw_call_mut().unwrap().instance_dirty = true;
     }
 
-    /// A zero-ink receipt represents no GPU work, not a hidden prefetch. Cancel
-    /// pending uploads and let the backend reclaim the previous allocation.
+    /// Hide a retained stage without discarding its backing or real receipts.
+    /// A cold/pending publication pauses copying until it can submit ink again.
     pub fn suspend_retained(&mut self, index: usize) -> bool {
+        let item = &self.buffer[index];
+        if item.retained_instances.is_none()
+            || (item.retained_instance_count == 0 && !item.retained_prefetched) { return false; }
         let item = &mut self[index];
-        let Some(publication) = &item.retained_instances else {return false;};
         let changed = item.retained_instance_count != 0;
         item.retained_instance_count = 0;
         item.retained_prefetched = false;
-        item.retained_gpu_evicted = true;
-        item.retained_instance_id = publication.id();
-        item.resident_schema = item.retained_schema;
-        item.instance_upload_pending = false;
-        item.kind.draw_call_mut().unwrap().instance_dirty = false;
         changed
     }
     /// Presentation bindings do not change instance counts or upload ranges.
@@ -2257,6 +2262,8 @@ pub struct CxDrawList {
     /// then background. Zero is the pointer owner's highest priority.
     pub upload_priority: u8,
     gpu_demand_epoch: std::cell::Cell<u64>,
+    gpu_cache_last_used: std::cell::Cell<u64>,
+    gpu_cache_recorded_len: std::cell::Cell<usize>,
     /// Squared distance from the owner's current bounds to the demand viewport.
     /// Owners with a custom projection update this with their demand census.
     pub gpu_eviction_distance: f64,
@@ -3060,7 +3067,9 @@ mod retained_sub_list_tests {
         );
         assert!(
             !cx.draw_lists.has_pending_instance_retirements(),
-            "bounded retirement backlog must drain within 100 frames"
+            "bounded retirement backlog must drain within 100 frames: workers={} scans={} allocations={} freed={} pool={}",
+            cx.draw_lists.1.retirements.load(Ordering::Acquire), cx.draw_lists.1.working_set_scan_passes,
+            cx.draw_lists.1.allocations.has_pending_retirements(), cx.draw_lists.0.has_pending_retirements(), pool.summary()
         );
         assert!(
             backend_slots.is_empty(),
@@ -3147,9 +3156,8 @@ mod retained_sub_list_tests {
             !cx.draw_lists.is_id_freed(restored.id()),
             "spare reclamation preserves the live recording"
         );
-        // A hidden preloaded LOD remains real backend demand only while its
-        // recording is in the working set. Ordinary hidden streams and owners
-        // leaving that set must remain reclaimable.
+        // Every live recording remains cache storage below pressure, whether
+        // hidden, prefetched or offscreen. Obsolete tails still retire above.
         let publication =
             crate::retained_instances::RetainedInstances::new(4, vec![1.0; 16].into()).unwrap();
         let item = &mut cx.draw_lists[restored.id()].draw_items[0];
@@ -3164,8 +3172,8 @@ mod retained_sub_list_tests {
         cx.draw_lists.1.working_set_valid = true;
         for (prefetched, demanded, expected_used) in [
             (true, true, true),
-            (false, true, false),
-            (true, false, false),
+            (false, true, true),
+            (true, false, true),
         ] {
             cx.draw_lists[restored.id()].draw_items[0].retained_prefetched = prefetched;
             cx.draw_lists.1.working_set[restored.id().index()] = demanded;
@@ -3210,6 +3218,41 @@ mod uniform_generation_tests {
             uniforms_gen,
             turtle_depth: 0.0,
         }
+    }
+
+    #[test]
+    fn inactive_retained_slots_preserve_real_upload_receipts() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        let publication = crate::retained_instances::RetainedInstances::new(3, Arc::from([1.0,2.0,3.0])).unwrap();
+        let items = &mut cx.draw_lists[list.id()].draw_items;
+        items.push_item(1, CxDrawKind::DrawCall(test_draw_call(1)));
+        let item = &mut items[0];
+        item.retained_instances = Some(publication.clone());
+        item.retained_instance_id = publication.id();
+        item.retained_instance_count = 1;
+        item.retained_schema = 7;
+        item.resident_schema = 7;
+        item.consumed_instance_id = publication.id();
+        item.consumed_schema = 7;
+        item.consumed_serial = 12;
+        item.instance_upload_pending = false;
+        item.kind.draw_call_mut().unwrap().instance_dirty = false;
+        assert!(items.suspend_retained(0));
+        assert!(!items[0].retained_gpu_evicted);
+        assert_eq!(items[0].retained_instance_id, publication.id());
+        assert_eq!(items[0].consumed_serial,12);
+        assert!(!items[0].retained_upload_needed());
+        items[0].retained_instance_count = 1;
+        assert!(!items[0].retained_upload_needed(), "returning to a resident stage needs no copy");
+        assert!(items[0].retained_consumption_complete(12));
+        items[0].retained_gpu_evicted = true;
+        items[0].instance_upload_pending = true;
+        items.suspend_retained(0);
+        assert!(!items[0].retained_upload_needed(), "cold hidden content pauses admission");
+        items[0].retained_instance_count = 1;
+        assert!(items[0].retained_upload_needed(), "pressure-evicted visible content must retry");
+        assert!(!items[0].retained_consumption_complete(12), "never forge a resident receipt");
     }
 
     #[test]
@@ -3391,6 +3434,7 @@ mod uniform_generation_tests {
                 .draw_items
                 .push_item(1, CxDrawKind::DrawCall(call));
             item.retained_instances = Some(publication.clone());
+            item.retained_instance_count = publication.count();
             item.retained_upload_range = 0..publication.data().len();
             item.retained_schema = 7;
             let mut copied = vec![0.0; publication.data().len()];
@@ -3455,6 +3499,9 @@ mod uniform_generation_tests {
                 .unwrap(),
         );
         items[0].retained_instance_count = 0;
+        // Explicit prefetch remains schedulable with zero draw calls. Ordinary
+        // hidden cache slots are covered by the no-upload regression above.
+        items[0].retained_prefetched = true;
         items[0].retained_upload_range = 0..3;
         items[0].kind.draw_call_mut().unwrap().instance_dirty = true;
         let zero = items.leaf_instance_counters().unwrap();
