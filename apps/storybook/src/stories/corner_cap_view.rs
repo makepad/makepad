@@ -43,11 +43,11 @@ script_mod! {
         StoryNote{text: "Nothing on this page is rounded. CornerCapView draws its children square and then paints four small patches of the surrounding colour over the corners, so what reads as a curve is really the chrome arriving early. On a flat ground of exactly that colour nobody can tell. Anywhere else they can, and the rows below are arranged so you can."}
 
         StoryHeading{text: "On the page, where the trick holds"}
-        StoryNote{text: "All three sit on the window's own ground, which is what the cap colour defaults to. The capped one and the cached one are indistinguishable; the bare one is the same picture with nothing done to it. Only one of the three costs a render target."}
+        StoryNote{text: "All three sit on the window's own ground, which is what the cap colour defaults to. The first is the one the controls drive. It and the cached one read as the same corner at any dpi, because both feather across the same band — one layout point's diagonal, a shade under one and a half device pixels; the third is the same picture with nothing done to it. Only the cached one costs a render target."}
         StoryRow{
             Tile{
                 caption: Label{text: "CornerCapView"}
-                CornerCapView{width: 200. height: 120. Surface{}}
+                subject := CornerCapView{width: 200. height: 120. Surface{}}
             }
             Tile{
                 caption: Label{text: "CachedRoundedView"}
@@ -154,10 +154,25 @@ script_mod! {
                     }
                 }
             }
+        }
+
+        StoryHeading{text: "Padding follows the children"}
+        StoryNote{text: "Padding written on a CornerCapView is forwarded to the children, and the caps go where the children went. The two below are the same widget and the same radius; the second is padded, and what it rounds is the picture, not the empty border around it. Capping the outer box instead would leave the picture's own corners square a padding's width inside the curve — a silent nothing, from the one widget whose whole job is that curve."}
+        StoryRow{
             Tile{
-                caption: Label{text: "one to drive"}
-                subject := CornerCapView{
+                caption: Label{text: "no padding"}
+                CornerCapView{
                     width: 240. height: 110.
+                    radius: 24.0
+                    Surface{}
+                }
+            }
+            Tile{
+                caption: Label{text: "padded"}
+                CornerCapView{
+                    width: 240. height: 110.
+                    radius: 24.0
+                    padding: theme.space_5
                     Surface{}
                 }
             }
@@ -173,7 +188,7 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "CornerCapViewOverview",
     added: "2026-09-10",
-    tags: &["new", "layout"],
+    tags: &["new", "layout", "rounded", "corners", "radius", "mask", "clip", "video", "surface"],
     doc: "# CornerCapView
 
 **It is a fake.** Nothing is rounded. The children are drawn square and four small patches of the surrounding colour are painted over the corners afterwards, so the curve you see is the chrome arriving a few pixels early. Over a flat ground of exactly that colour the illusion is complete. Over a gradient, a picture, a shadow or a glass panel each corner shows as a slightly wrong square, and no property on this widget fixes it, because none could. **`CachedRoundedView` is the version that is right in every case** — it draws its children into a texture and samples that inside a real rounded path — and it is the one to reach for unless the next paragraph is about your content.
@@ -186,7 +201,7 @@ pub const STORIES: &[Story] = &[Story {
 
 **`radius` here is the visual radius.** That is worth saying because `CachedRoundedView`'s `border_radius` is *half* of one — `sdf.box` draws twice what it is handed — so matching the two by eye means writing 4 in one place and 8 in the other.
 
-**What it will not do.** It does not clip: a child painting into the corner still paints there and is merely covered up, so a corner is only ever as clean as the colour is right. It claims no hits and reads no events, so a press in a fake corner reaches the content under it — the one respect in which the fake behaves better than the real thing. And it is a container, not an overlay: it draws its own children and caps its own rect, so there is no ordering rule to remember and no way to forget to put it last.",
+**What it will not do.** It does not clip: a child painting into the corner still paints there and is merely covered up, so a corner is only ever as clean as the colour is right. It claims no hits and reads no events, so a press in a fake corner reaches the content under it — and so does a press in a `CachedRoundedView`'s corner, whose rounding lives in a fragment shader that hit testing never runs. Neither of them clips a hit; there is no difference to trade on. `padding` is forwarded to the children, and the caps follow the padding in: a padded one rounds the box its children were given, not the empty border around it — a child's own `margin` or `align` is not followed, and a background the padded view paints itself stays square at the outer corners. And it is a container, not an overlay: it draws its own children and caps its own rect, so there is no ordering rule to remember and no way to forget to put it last.",
     subject: "subject",
     feature: None,
     controls: &[
