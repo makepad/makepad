@@ -119,6 +119,26 @@ pub mod rating;
 pub mod tags;
 pub mod radio_group;
 pub mod kbd;
+pub mod typography;
+pub mod tree;
+pub mod list_item;
+pub mod avatar;
+pub mod card;
+pub mod media;
+pub mod table;
+pub mod empty_state;
+pub mod timeline;
+pub mod chat;
+pub mod code_block;
+pub mod carousel;
+pub mod upload;
+pub mod form;
+pub mod color;
+pub mod column_picker;
+pub mod command_palette;
+pub mod pie_menu;
+pub mod drag_number;
+pub mod tour;
 pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
@@ -256,6 +276,26 @@ pub use crate::{
     tags::*,
     radio_group::*,
     kbd::*,
+    typography::*,
+    tree::*,
+    list_item::*,
+    avatar::*,
+    card::*,
+    media::*,
+    table::*,
+    empty_state::*,
+    timeline::*,
+    chat::*,
+    code_block::*,
+    carousel::*,
+    upload::*,
+    form::*,
+    color::*,
+    column_picker::*,
+    command_palette::*,
+    pie_menu::*,
+    drag_number::*,
+    tour::*,
     wheel_picker::*,
     portal_list::*,
     progress::*,
@@ -509,6 +549,26 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::radio_group::script_mod(vm);
     crate::kbd::script_mod(vm);
     crate::wheel_picker::script_mod(vm);
+    crate::typography::script_mod(vm);
+    crate::tree::script_mod(vm);
+    crate::list_item::script_mod(vm);
+    crate::avatar::script_mod(vm);
+    crate::card::script_mod(vm);
+    crate::media::script_mod(vm);
+    crate::table::script_mod(vm);
+    crate::empty_state::script_mod(vm);
+    crate::timeline::script_mod(vm);
+    crate::chat::script_mod(vm);
+    crate::code_block::script_mod(vm);
+    crate::carousel::script_mod(vm);
+    crate::upload::script_mod(vm);
+    crate::form::script_mod(vm);
+    crate::color::script_mod(vm);
+    crate::column_picker::script_mod(vm);
+    crate::command_palette::script_mod(vm);
+    crate::pie_menu::script_mod(vm);
+    crate::drag_number::script_mod(vm);
+    crate::tour::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 

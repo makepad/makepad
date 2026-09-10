@@ -41,6 +41,26 @@ pub mod tags;
 pub mod radio_group;
 pub mod kbd;
 pub mod wheel_picker;
+pub mod typography;
+pub mod tree;
+pub mod list_item;
+pub mod avatar;
+pub mod card;
+pub mod media;
+pub mod table;
+pub mod empty_state;
+pub mod timeline;
+pub mod chat;
+pub mod code_block;
+pub mod carousel;
+pub mod upload;
+pub mod form;
+pub mod color;
+pub mod column_picker;
+pub mod command_palette;
+pub mod pie_menu;
+pub mod drag_number;
+pub mod tour;
 pub mod range_slider;
 pub mod slider;
 pub mod textinput;
@@ -109,6 +129,26 @@ pub fn script_mod(vm: &mut ScriptVm) {
     label::script_mod(vm);
     slider::script_mod(vm);
     range_slider::script_mod(vm);
+    tour::script_mod(vm);
+    drag_number::script_mod(vm);
+    pie_menu::script_mod(vm);
+    command_palette::script_mod(vm);
+    column_picker::script_mod(vm);
+    color::script_mod(vm);
+    form::script_mod(vm);
+    upload::script_mod(vm);
+    carousel::script_mod(vm);
+    code_block::script_mod(vm);
+    chat::script_mod(vm);
+    timeline::script_mod(vm);
+    empty_state::script_mod(vm);
+    table::script_mod(vm);
+    media::script_mod(vm);
+    card::script_mod(vm);
+    avatar::script_mod(vm);
+    list_item::script_mod(vm);
+    tree::script_mod(vm);
+    typography::script_mod(vm);
     wheel_picker::script_mod(vm);
     kbd::script_mod(vm);
     radio_group::script_mod(vm);
@@ -205,6 +245,26 @@ pub fn tables() -> &'static [&'static [Story]] {
         label::STORIES,
         slider::STORIES,
         range_slider::STORIES,
+        tour::STORIES,
+        drag_number::STORIES,
+        pie_menu::STORIES,
+        command_palette::STORIES,
+        column_picker::STORIES,
+        color::STORIES,
+        form::STORIES,
+        upload::STORIES,
+        carousel::STORIES,
+        code_block::STORIES,
+        chat::STORIES,
+        timeline::STORIES,
+        empty_state::STORIES,
+        table::STORIES,
+        media::STORIES,
+        card::STORIES,
+        avatar::STORIES,
+        list_item::STORIES,
+        tree::STORIES,
+        typography::STORIES,
         wheel_picker::STORIES,
         kbd::STORIES,
         radio_group::STORIES,
