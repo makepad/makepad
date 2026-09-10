@@ -23,7 +23,7 @@ script_mod! {
 
     mod.stories.WaveformOverview = StoryPage{
         stage := mod.storybook.StoryWaveformStage{
-        StoryNote{text: "Six lanes and one ninety-second recording. Four of them are handed the same four and a half thousand min/max pairs; one is handed the same series as plain magnitudes, to show what that costs; and one is handed nothing at all. Two carry regions and marks set from Rust and one carries the same ones written as markup, so three lanes carry neither. Every lane shows the whole recording across its own width, because that is the only thing this widget draws \u{2014} there is no zoom and nothing to scroll."}
+        StoryNote{text: "Six lanes and one ninety-second recording. Four of them are handed the same four and a half thousand min/max pairs; one is handed the same recording reduced to one magnitude a column, to show what that reduction costs; and one is handed nothing at all. Two carry regions and marks set from Rust and one carries the same ones written as markup, so three lanes carry neither. Every lane shows the whole recording across its own width, because that is the only thing this widget draws \u{2014} there is no zoom and nothing to scroll."}
 
         StoryHeading{text: "Peaks, and nothing else"}
         StoryNote{text: "A lane with no regions, no marks and no playhead: just the shape, with a rule down the middle at the level the peaks are measured from. The lowest and the highest sample in each column are kept apart, and this series leans downward on its transients by about a third, so the two halves of the envelope are visibly not the same half twice. From seventy-four seconds to seventy-eight the whole signal sits above the centre line, the way a recording with an offset on it does."}
@@ -37,7 +37,7 @@ script_mod! {
         }
 
         StoryHeading{text: "One number a column"}
-        StoryNote{text: "The same recording through set_peaks, which takes one magnitude per column and mirrors it. Hold it against the lane above: every column here is exactly symmetric, so the lean on the hits is gone and so is the offset passage, which comes back as an ordinary quiet stretch. That is the whole difference between the two setters, and it is why set_peak_pairs is the one to use when the numbers came off real audio."}
+        StoryNote{text: "The same recording through set_peaks, which takes one magnitude per column and mirrors it. The magnitude here is half the distance between a column's two ends, which is what a host with pairs computes when something downstream wants one number. Hold this lane against the one above: every column is exactly symmetric, so the lean on the hits is gone, and the four offset seconds from seventy-four to seventy-eight come back as an ordinary quiet stretch \u{2014} nothing in them is taller than the fade either side, and nothing says they were ever off the centre line. That is the whole difference between the two setters, and it is why set_peak_pairs is the one to use when the numbers came off real audio."}
         StoryRow{
             mirrored := Waveform{
                 width: Fill
@@ -81,8 +81,8 @@ script_mod! {
         }
 
         StoryHeading{text: "Written in markup, and the one to drive"}
-        StoryNote{text: "The same three regions and six marks as the Rust lane above, written here as string lists instead \u{2014} one line each, fields separated by bars. The fourth field is an intent word, which is how the library colours anything that means something: a region marked warning is the same amber as a badge that means warning, in every theme. The last mark takes a raw #4f9d69 instead, which is the escape hatch for a host with a palette of its own. Note the colour has no x in front of the hex: the x that a colour needs in DSL source is there to stop the Rust tokenizer reading 4f as a float, and there is no tokenizer inside a string."}
-        StoryNote{text: "This is also the lane the controls panel writes on, and the one the property table beside it reflects \u{2014} so the regions and markers rows in that table are the very lines written below. Nothing on this page calls set_regions on it: that setter drops the string list a lane was written with, which is exactly what makes markup and Rust two ways and not one. The panel does not follow the lane either: it writes values and never reads them back, so after dragging the playhead here the Playhead slider still stands where it was, and the next nudge of it will move the playhead to the slider's number. That is the panel's shape, not the widget's."}
+        StoryNote{text: "The same three regions and six marks as the Rust lane above, written here as string lists instead \u{2014} one line each, fields separated by bars. The fourth field is an intent word, which is how the library colours anything that means something: a region marked warning is the same amber as a badge that means warning, in every theme. The last mark takes a raw #4f9d69 instead, which is the escape hatch for a host with a palette of its own. Note the colour has no x in front of the hex: the x that a colour needs in DSL source is there to stop the Rust tokenizer reading the digits as a suffixed numeric literal \u{2014} 1e2 is the clean example \u{2014} and there is no tokenizer inside a string. The hash is not optional either: without it, ace, decade and beaded are all runs of hex digits, and a lane that read one of them as a colour would be answering a typo."}
+        StoryNote{text: "This is also the lane the controls panel writes on, and the one the property table beside it reflects \u{2014} so the regions and markers rows in that table are read off this lane rather than off the Rust ones. The table clips a value at twenty-four characters, so what those two rows show is the first line and an ellipsis: they are worth reading for provenance, not for content. Nothing on this page calls set_regions on it: that setter drops the string list a lane was written with, which is exactly what makes markup and Rust two ways and not one. The panel does not follow the lane either: it writes values and never reads them back, so after dragging the playhead here the Playhead slider still stands where it was, and the next nudge of it will move the playhead to the slider's number. That is the panel's shape, not the widget's."}
         StoryRow{
             subject := Waveform{
                 width: Fill
@@ -108,7 +108,7 @@ script_mod! {
         }
 
         StoryHeading{text: "A name that does not fit is not drawn"}
-        StoryNote{text: "Turnaround runs two and a half seconds and its name is far wider than that stretch of lane, so it is left out rather than clipped or shortened: half a word says less than no word and costs a second working out that it is half a word, and the host has the whole name anyway. The same rule leaves out Drop and Fill, which are two seconds apart \u{2014} a fiftieth of the lane, which is a couple of dozen points at the width this page lays out at. That is room for two chips and not for two names: two chips need twice marker_grab, fourteen points, to be taken one at a time, and both names need several times that. Two marks closer together than fourteen points cannot be taken apart at all; the nearer one wins, the earlier one on a tie, and the widget does not pretend otherwise."}
+        StoryNote{text: "Turnaround runs two and a half seconds and its name is far wider than that stretch of lane, so it is left out rather than clipped or shortened: half a word says less than no word and costs a second working out that it is half a word, and the host has the whole name anyway. A mark's name is measured against the NEXT MARK IN TIME, which is why crowding drops the earlier name of a pair and never the later one. Drop and Fill are two seconds apart \u{2014} a forty-fifth of the lane, twenty-odd points at the width this page lays out at, and under ten once the two chip halves and the inset come off \u{2014} so Drop is the one left out. Fill is drawn: its own room is the thirty-four seconds to Out. Aiming is a different number again. Two chips closer together than twice marker_grab, fourteen points, have overlapping reaches, so a press in the band between them goes to whichever mark is nearer and to the earlier one on a tie \u{2014} but a press on either chip still takes that chip, because nearest wins. What takes the target away is chip_width: below nine points the chips themselves overlap and there is nothing separate left to point at."}
         }
     }
 }
@@ -146,11 +146,14 @@ const COLUMNS_PER_HALF_BEAT: usize = 25;
 /// envelope cannot show that, and the lane below the first one is on the
 /// page so the two can be compared.
 ///
-/// And nothing here reaches the rail. The loudest column in the loud section
-/// comes to 0.96 and the loudest in the offset passage to 0.93, so neither
-/// half of the envelope is ever pinned flat against the edge — a rail is a
-/// straight line, and a straight line is the smear this widget exists to
-/// avoid. The clamp is in the arithmetic, not in a `min` at the end of it.
+/// And nothing here reaches the rail. The deepest column in the whole
+/// recording goes to -0.9532, in the loud section at 42 seconds, and the
+/// highest to +0.9196, inside the offset passage at 76.5 — so neither half
+/// of the envelope is ever pinned flat against the edge, and a rail is a
+/// straight line, which is the smear this widget exists to avoid. The clamp
+/// is in the arithmetic, not in a `min` at the end of it, and
+/// `the_sample_recording_is_asymmetric_off_centre_and_never_clipped` pins
+/// both figures so this paragraph cannot drift away from the series.
 fn sample_pairs() -> Vec<(f32, f32)> {
     let count = (RECORDING_SECONDS * COLUMNS_PER_SECOND as f64) as usize;
     let mut out = Vec::with_capacity(count);
@@ -197,11 +200,19 @@ fn sample_pairs() -> Vec<(f32, f32)> {
     out
 }
 
-/// The same series as one magnitude a column, for the mirrored lane. Taken
-/// from the upward half so the two lanes are the same recording and not two
-/// different ones.
+/// The same recording as one magnitude a column, for the mirrored lane.
+///
+/// Half the distance between a column's two ends, which is what a host with
+/// pairs computes when something downstream wants one number. NOT the upward
+/// half: the upward half of a signal with an offset on it carries the offset
+/// as loudness, so the four offset seconds would arrive in the mirrored lane
+/// as the tallest, most solid block on the page — louder than the loud part
+/// — and the note beside that lane would be describing the opposite of what
+/// a reader can see. Half the peak-to-peak cancels the offset exactly, which
+/// is the honest demonstration: what mirroring loses is not the size of the
+/// passage, it is the fact that the passage was off centre at all.
 fn sample_magnitudes() -> Vec<f32> {
-    peaks().iter().map(|(_, hi)| *hi).collect()
+    peaks().iter().map(|(lo, hi)| (hi - lo) * 0.5).collect()
 }
 
 /// Built once and kept for as long as the app runs.
@@ -236,10 +247,12 @@ fn sample_regions() -> Vec<WaveformRegion> {
     ]
 }
 
-/// Six marks. Drop and Fill are two seconds apart on purpose: wider than the
-/// fourteen points two chips need to be taken separately, and narrower than
-/// either name, so they are the pair that shows the name-skip rule without
-/// being the pair a finger cannot resolve. Tail is the escape hatch, in the
+/// Six marks. Drop and Fill are two seconds apart on purpose: far enough
+/// that their nine-point chips do not overlap and each can be aimed at, and
+/// close enough that there is no room for the EARLIER name between them, so
+/// they are the pair that shows the name-skip rule. Fill's own name has the
+/// thirty-four seconds to Out and is drawn — the rule looks forward, which
+/// is the point the page makes with them. Tail is the escape hatch, in the
 /// Rust form of the same colour the markup lane writes as a hex.
 fn sample_markers() -> Vec<WaveformMarker> {
     vec![
@@ -272,22 +285,32 @@ impl StoryWaveformStage {
     /// Hand each lane its numbers, once.
     ///
     /// This runs on every draw, so it has to cost nothing once the page is
-    /// up. The setters do compare before they store, but they take their
-    /// arrays BY VALUE and this page keeps its own copy in a `OnceLock`, so
-    /// handing the same series over every frame would mean cloning
-    /// thirty-six kilobytes per lane per frame to have it compared and
-    /// dropped. Instead each lane is asked what it is already holding — a
-    /// length and a count, neither of which copies anything — and only a
-    /// lane holding nothing is given anything at all.
+    /// up. What it costs then is seven lookups by name down the view's
+    /// children and a length comparison off each lane — no copy, and no
+    /// borrow held past the comparison. That is the whole per-frame bill,
+    /// and the lookups are the larger half of it.
+    ///
+    /// What it must not cost is the arrays. The setters do compare before
+    /// they store, but they take their arrays BY VALUE and this page keeps
+    /// its own copy in a `OnceLock`, so handing the same series over every
+    /// frame would mean cloning thirty-six kilobytes per lane per frame to
+    /// have it compared and dropped. Hence the count first, the clone only
+    /// behind it — and the `is_empty` check in front of both, because a
+    /// lane that cannot be found reports a count of zero forever and would
+    /// otherwise be handed a fresh clone on every frame, silently, in the
+    /// one place this page is trying not to copy.
     fn seed(&mut self, cx: &mut Cx) {
         for path in [ids!(pairs), ids!(marked), ids!(strip), ids!(subject)] {
             let lane = self.view.widget(cx, path).as_waveform();
+            if lane.is_empty() {
+                continue;
+            }
             if lane.peak_count() != peaks().len() {
                 lane.set_peak_pairs(cx, peaks().clone());
             }
         }
         let mirrored = self.view.widget(cx, ids!(mirrored)).as_waveform();
-        if mirrored.peak_count() != magnitudes().len() {
+        if !mirrored.is_empty() && mirrored.peak_count() != magnitudes().len() {
             mirrored.set_peaks(cx, magnitudes().clone());
         }
         // The markup lane is not in this list. `set_regions` drops the
@@ -296,6 +319,9 @@ impl StoryWaveformStage {
         // the page reflects.
         for path in [ids!(marked), ids!(strip)] {
             let lane = self.view.widget(cx, path).as_waveform();
+            if lane.is_empty() {
+                continue;
+            }
             if lane.region_count() == 0 {
                 lane.set_regions(cx, sample_regions());
                 lane.set_markers(cx, sample_markers());
@@ -306,14 +332,24 @@ impl StoryWaveformStage {
 
 impl Widget for StoryWaveformStage {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let step = self.view.draw_walk(cx, scope, walk);
-        // After the page has drawn, not before: that is when its lanes are
-        // in the widget tree to be found by name. A lane that was given
-        // something asks for a redraw, so a freshly built page carries its
-        // numbers on the very next frame; a lane that already had them
-        // costs one length comparison apiece.
+        // Before the inner draw, not after it. The lanes are in
+        // `View::children` from the moment the template is applied, not from
+        // the moment it is drawn — `the_page_builds_and_every_named_lane_is_on_it`
+        // finds all five on a page that has never drawn — so seeding first
+        // finds them just as well and they draw WITH their numbers on the
+        // very first frame.
+        //
+        // Seeding afterwards looked equivalent and was not: the setters ask
+        // for a redraw through `Area::redraw`, and `Cx::redraw_list`
+        // (platform/src/cx_api.rs:1585-1590) returns without recording
+        // anything while `in_draw_event` is true, which it is for the whole
+        // draw pass. The request was dropped, so the page was correct only
+        // if something unrelated happened to schedule a second frame — and
+        // the case that matters most, a theme change rebuilding every widget
+        // from its template with no action to follow, is exactly the case
+        // where nothing does.
         self.seed(cx);
-        step
+        self.view.draw_walk(cx, scope, walk)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -502,11 +538,14 @@ mod tests {
             assert!(lo <= hi);
         }
         // Nothing is even close to the rail, so no stretch of either half
-        // is a flat line.
+        // is a flat line. These are the two figures the doc comment above
+        // `sample_pairs` states, held to a hundredth either side: that
+        // paragraph's whole point is that the series stops short, so its
+        // numbers are the ones that must not drift away from the series.
         let deepest = peaks.iter().fold(0.0f32, |acc, (lo, _)| acc.min(*lo));
         let highest = peaks.iter().fold(0.0f32, |acc, (_, hi)| acc.max(*hi));
-        assert!(deepest > -0.98 && deepest < -0.9, "the deepest column is {deepest}");
-        assert!(highest < 0.98 && highest > 0.6, "the highest column is {highest}");
+        assert!((-0.96..-0.95).contains(&deepest), "the deepest column is {deepest}");
+        assert!((0.91..0.925).contains(&highest), "the highest column is {highest}");
 
         // A hit leans downward by about a third: the picture a mirrored
         // envelope flattens.
@@ -529,6 +568,54 @@ mod tests {
         // Either side of it the signal straddles the centre again.
         assert!(peaks[from - 1].0 < 0.0);
         assert!(peaks[to].0 < 0.0);
+    }
+
+    /// What the mirrored lane actually shows — the page's second-largest
+    /// claim, and the one series nothing here used to read.
+    ///
+    /// The note beside that lane says the offset passage "comes back as an
+    /// ordinary quiet stretch". That is true of half the peak-to-peak and
+    /// false of the upward half: take `hi` instead and those four seconds
+    /// arrive as the loudest, most solid block on the page, mean 0.64
+    /// against 0.09 for the fade either side of them. So the sentence is
+    /// pinned to the numbers here — the passage has to sit INSIDE the range
+    /// of its surroundings at both ends, and average the same as them.
+    #[test]
+    fn the_mirrored_series_drops_the_offset_instead_of_showing_it_as_loudness() {
+        let mags = magnitudes();
+        assert_eq!(mags.len(), peaks().len(), "one magnitude a column");
+
+        let from = 74 * COLUMNS_PER_SECOND;
+        let to = 78 * COLUMNS_PER_SECOND;
+        let passage = &mags[from..to];
+        // The rest of the closing section: the same loudness rung, either
+        // side of the passage, with nothing else different about it.
+        let rest: Vec<f32> = mags[66 * COLUMNS_PER_SECOND..from]
+            .iter()
+            .chain(mags[to..].iter())
+            .copied()
+            .collect();
+
+        let least = |v: &[f32]| v.iter().copied().fold(f32::INFINITY, f32::min);
+        let most = |v: &[f32]| v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        assert!(
+            least(passage) >= least(&rest),
+            "the passage dips to {} and its surroundings to {}",
+            least(passage),
+            least(&rest)
+        );
+        assert!(
+            most(passage) <= most(&rest),
+            "the passage reaches {} and its surroundings {}",
+            most(passage),
+            most(&rest)
+        );
+        let (a, b) = (mean(passage), mean(&rest));
+        assert!(
+            (a - b).abs() < b * 0.05,
+            "the passage averages {a} and its surroundings {b}"
+        );
     }
 }
 
@@ -573,6 +660,8 @@ A pick and a move are told apart by how far the finger travelled, not by whether
 
 The keyboard gets the playhead and nothing else. It has one selection and this lane has three kinds of thing on it; giving it the regions and the marks would need a selection model, and a selection model is a bigger widget than this.
 
+A lane holding key focus draws a ring in `color_primary` inside its own edge. That is a ring and not a tint of the ground on purpose: `color_inset_hover`, `color_inset_focus` and `color_inset_drag` are aliases of `color_inset` in both shipped desktop themes, so a ground tint would leave a focused lane pixel-identical to an unfocused one — on a tab stop whose arrow keys edit a value. The peaks carry hover, focus and drag instead, through the `color_val` ladder, which does step per state in all three themes.
+
 ## Reading it
 
 Each of the three continuous gestures reports twice: `seeking` / `region_moving` / `marker_moving` on every frame of it, and `seeked` / `region_moved` / `marker_moved` where it stopped. Use the first for anything that must keep up with the finger and the second for anything expensive — a drag across the lane passes through several hundred values on the way. `grabbed` fires on the press and says which part was taken, which is the only way to know what a drag is about to be before it has moved anything. `marker_picked` is the click. An arrow key reports `seeked` and nothing else, because a key press is settled the moment it happens.
@@ -602,12 +691,13 @@ At two hundred peaks per second of audio, an hour is seven hundred thousand pair
 * **A lane has a fixed height and never asks for one.** There is no content to size to, so `height: Fit` on the waveform itself resolves to nothing and the lane is laid out with no body and never painted. The preset gives it 96 points; override the number, not the kind. A parent that sizes to fit is fine — it sizes to that number.
 * **The peaks must cover exactly `0..peaks_span`, and nothing checks it.** A short array against the full duration draws the wrong audio under every mark, silently. Set `peaks_span` while a file is still decoding.
 * **The times in a line are plain numbers**, in the unit `duration` is counted in. `\"1:30\"` reads as zero. There is no clock-time parser here for the same reason there is none in `Timeline`: a minute and a half to one caller is a bar and three beats to another.
-* **A colour in a line is written `#rrggbb`, without the `x`.** The `x` in `#x4f9d69` is there to stop the Rust tokenizer reading a hex string as a float, and there is no tokenizer inside a string. Written with it the field parses as neither an intent word nor a colour, and the item stays neutral. Most lines should carry an intent word anyway.
+* **A colour in a line is written `#rrggbb`, without the `x`.** The `x` in `#x4f9d69` is there to stop the Rust tokenizer reading the digits as a suffixed numeric literal — `1e2` is the clean example — and there is no tokenizer inside a string. Written with it the field parses as neither an intent word nor a colour, and the item stays neutral. The `#` on the other hand is required: without it `ace`, `decade` and `beaded` are runs of hex digits, and a field that read one of them as a colour would be answering a typo. Most lines should carry an intent word anyway.
 * **A name may not contain a `|`.**
 * **`set_regions` and `set_markers` drop the markup list.** They have to: leaving it would let the next draw take it back. A lane written in markup is driven in markup, and a lane driven from Rust should not be written in markup as well.
 * **Setting the playhead reports nothing.** A host that moved it already knows where it put it, and a widget that answered back would put every transport into a loop.
 * **The default `duration` is 1**, which makes every number a fraction of the whole. That is a real axis and a working widget, but it is not seconds, and a host that forgot to set the duration will get fractions back and read them as seconds.
-* **Two marks closer than twice `marker_grab` cannot be taken apart.** There is no x at which only one of them is in reach; the nearer one wins, and the earlier one on a tie. The host owns how close it puts them.
+* **Two marks closer than twice `marker_grab` have overlapping reaches.** A press in the band between them goes to whichever is nearer, and to the earlier one on a tie; a press on either chip still takes that chip, because nearest wins. What removes the target altogether is `chip_width`: below that the chips overlap and there is nothing separate to aim at. The host owns how close it puts them.
+* **A name is measured against the next mark in TIME.** Crowding therefore drops the EARLIER name of a pair and leaves the later one drawn, however wide it is — its own room runs to the mark after it.
 
 ## What it deliberately does not do
 

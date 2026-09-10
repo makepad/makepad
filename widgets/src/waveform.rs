@@ -62,6 +62,14 @@
 //! than this one. The wheel is left alone, so a page with a waveform on it
 //! still scrolls when the pointer is over the waveform.
 //!
+//! A lane holding key focus draws a RING inside its own edge, and not a
+//! tint of its ground: `color_inset_hover`, `color_inset_focus` and
+//! `color_inset_drag` are aliases of `color_inset` in both shipped desktop
+//! themes, so a ground tint would leave a focused lane pixel-identical to
+//! an unfocused one — on a tab stop whose arrow keys edit a value. Hover,
+//! focus and drag go on the PEAKS instead, through the `color_val` ladder,
+//! which does step per state in all three themes.
+//!
 //! # What it costs
 //!
 //! One quad for the lane, one per region, one per mark, one for the
@@ -187,8 +195,10 @@ script_mod! {
 
             // Uniforms, so they cost no instance slot: nothing here varies
             // between the draws of one lane.
-            /** how far a disabled lane's peaks fade toward its ground 0..1 step 0.05 */
+            /** how far a disabled lane's peaks fade toward the quiet ink 0..1 step 0.05 */
             disabled_fade: uniform(0.7)
+            /** the keyboard ring's thickness, in points 0..6 step 0.5 */
+            ring_size: uniform(theme.size_focus_ring)
 
             color: uniform(theme.color_inset)
             color_hover: uniform(theme.color_inset_hover)
@@ -198,16 +208,34 @@ script_mod! {
 
             /** the peaks */
             color_wave: uniform(theme.color_val)
+            color_wave_hover: uniform(theme.color_val_hover)
+            color_wave_focus: uniform(theme.color_val_focus)
+            color_wave_drag: uniform(theme.color_val_drag)
+            /** the opaque ink a played or a disabled column fades toward */
+            color_wave_quiet: uniform(theme.color_bg_app)
             /** the line the peaks are measured from */
             color_centre: uniform(theme.color_outline_variant)
+            /** the keyboard ring, and what it is when nothing has focus */
+            ring_color: uniform(theme.color_primary)
+            ring_color_off: uniform(theme.color_u_hidden)
 
             pixel: fn() {
                 let py = self.pos.y * self.rect_size.y
 
+                // The library's settled state chain — slider.rs:204-208 and
+                // range_slider.rs:137-140 — with drag nested inside hover, so
+                // a drag at half a hover cannot throw the focus tint away.
+                // The four inset tokens it reads are aliases of ONE colour in
+                // both desktop themes (theme_desktop_dark.rs:299-304,
+                // theme_desktop_light.rs:302-307) and differ by 2/255 of
+                // alpha in the skeleton, so the ground does not in fact move
+                // on hover, focus or drag today. What moves is the peaks
+                // below, whose ladder does step; the chain stays here so a
+                // theme that gives the inset states their own values gets
+                // them without a code change.
                 let ground = self.color
                     .mix(self.color_focus, self.focus)
-                    .mix(self.color_hover, self.hover)
-                    .mix(self.color_drag, self.drag)
+                    .mix(self.color_hover.mix(self.color_drag, self.drag), self.hover)
                     .mix(self.color_disabled, self.disabled)
 
                 // Where the marks' band ends and the body starts. The region
@@ -235,62 +263,98 @@ script_mod! {
                 // the number on the property means points.
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.border_radius * 0.5)
 
+                // The peaks carry the states the ground cannot: `color_val`
+                // and its hover, focus and drag rungs are three different
+                // colours in all three themes (dark 375-378, light 378-381,
+                // skeleton 329-332), so these are the mixes a pointer and the
+                // keyboard actually show.
+                let ink = self.color_wave
+                    .mix(self.color_wave_focus, self.focus)
+                    .mix(self.color_wave_hover.mix(self.color_wave_drag, self.drag), self.hover)
+
+                // Behind the playhead the recording has been played, and a
+                // disabled lane is not to be operated: both read quieter.
+                // Quieter means NEARER WHAT THE LANE IS STANDING ON, and that
+                // has to be an opaque colour. The disabled value token is
+                // alpha 0 in both desktop themes and would punch the peaks
+                // out as holes; the lane's own ground is not a colour either
+                // but 5-to-15% black over the app, so fading toward it takes
+                // the peaks' alpha down with it and makes the same hole more
+                // slowly. `theme.color_bg_app` is opaque in all three themes
+                // and is the ground the lane's own wash is laid over, so a
+                // peak mixed toward it approaches invisible from whichever
+                // side the theme is on — downward in the dark one, upward in
+                // the light one — and never through transparency.
+                let played = step(self.pos.x, self.head) * self.head_on
+                let quiet = clamp(played * self.played_fade + self.disabled * self.disabled_fade, 0.0, 1.0)
+                let peak = ink.mix(self.color_wave_quiet, quiet)
+
                 // Where this pixel falls inside the stretch of lane the
                 // peaks cover. Past it the host has not sent peaks for this
                 // part of the recording, and the honest picture of that is
-                // empty lane rather than stretched audio.
+                // empty lane rather than stretched audio. Written as a
+                // guarded block and not an early return so the ring at the
+                // bottom is drawn from one place.
                 let u = self.pos.x / max(self.covered, 0.0001)
-                if self.cols < 1.0 || u > 1.0 {
-                    sdf.fill(base)
-                    return sdf.result
+                let mut cover = 0.0
+                if self.cols >= 1.0 && u <= 1.0 {
+                    // One texel a pixel by construction, so the column is
+                    // picked and never filtered: a filtered fetch would blend
+                    // the high byte of one column with the low byte of the
+                    // next, which is not a wrong value but a meaningless one.
+                    let col = clamp(floor(u * self.cols), 0.0, self.cols - 1.0)
+                    let t = self.wave_tex.sample_nearest(vec2((col + 0.5) / self.cols, 0.5))
+                    // Sixteen bits a value, two channels each: the high of
+                    // the column in alpha and red, the low in green and blue.
+                    // That is the layout voice_wave packs and reads back
+                    // against this same texture format. Mirrored in Rust by
+                    // `unpack_column`; keep the two in step.
+                    let hi_u = t.w + t.x / 256.0
+                    let lo_u = t.y + t.z / 256.0
+                    let top = clamp(hi_u * 2.0 - 1.0, -1.0, 1.0) * self.envelope
+                    let bot = clamp(lo_u * 2.0 - 1.0, -1.0, 1.0) * self.envelope
+
+                    // Every column gets at least half a pixel either side of
+                    // ITS OWN midpoint. Silence in a recording is still
+                    // recording, and a column that draws as nothing reads as
+                    // a hole in the file — but widening toward the centre
+                    // line would drag a signal that sits off centre back onto
+                    // it, and showing that is the whole reason the low and
+                    // the high are kept apart.
+                    let mid = (top + bot) * 0.5
+                    let half = max((top - bot) * 0.5, feather * 0.5)
+                    let hi = mid + half
+                    let lo = mid - half
+
+                    cover = (1.0 - smoothstep(hi - feather, hi + feather, v))
+                        * smoothstep(lo - feather, lo + feather, v)
+                        * in_body
                 }
 
-                // One texel a pixel by construction, so the column is picked
-                // and never filtered: a filtered fetch would blend the high
-                // byte of one column with the low byte of the next, which is
-                // not a wrong value but a meaningless one.
-                let col = clamp(floor(u * self.cols), 0.0, self.cols - 1.0)
-                let t = self.wave_tex.sample_nearest(vec2((col + 0.5) / self.cols, 0.5))
-                // Sixteen bits a value, two channels each: the high of the
-                // column in alpha and red, the low in green and blue. That
-                // is the layout voice_wave packs and reads back against this
-                // same texture format. Mirrored in Rust by `unpack_column`;
-                // keep the two in step.
-                let hi_u = t.w + t.x / 256.0
-                let lo_u = t.y + t.z / 256.0
-                let top = clamp(hi_u * 2.0 - 1.0, -1.0, 1.0) * self.envelope
-                let bot = clamp(lo_u * 2.0 - 1.0, -1.0, 1.0) * self.envelope
-
-                // Every column gets at least half a pixel either side of ITS
-                // OWN midpoint. Silence in a recording is still recording,
-                // and a column that draws as nothing reads as a hole in the
-                // file — but widening toward the centre line would drag a
-                // signal that sits off centre back onto it, and showing that
-                // is the whole reason the low and the high are kept apart.
-                let mid = (top + bot) * 0.5
-                let half = max((top - bot) * 0.5, feather * 0.5)
-                let hi = mid + half
-                let lo = mid - half
-
-                let cover = (1.0 - smoothstep(hi - feather, hi + feather, v))
-                    * smoothstep(lo - feather, lo + feather, v)
-                    * in_body
-
-                // Behind the playhead the recording has been played, and a
-                // disabled lane is not to be operated: both read quieter. A
-                // second ink for either would have to be a second theme
-                // token, and the light and dark ladders do not step the same
-                // way — the one that is dimmer in one is brighter in the
-                // other, and the disabled value token is transparent in
-                // both, which would punch the peaks out of the lane as holes
-                // rather than dimming them. Fading toward the lane's OWN
-                // ground is quieter in every theme by construction, so both
-                // are a factor and neither is a colour.
-                let played = step(self.pos.x, self.head) * self.head_on
-                let quiet = clamp(played * self.played_fade + self.disabled * self.disabled_fade, 0.0, 1.0)
-                let peak = self.color_wave.mix(ground, quiet)
-
                 sdf.fill(base.mix(peak, cover))
+
+                // The keyboard ring, and not a tint of the ground: this is a
+                // nav stop whose arrows edit a value, and the ground's own
+                // focus token is an alias of its base in both desktop themes,
+                // so a lane holding key focus would otherwise be pixel-exact
+                // with one that does not. The form is svg_select.rs:122-155's
+                // and rating.rs:119-136's — `color_primary` over
+                // `color_u_hidden`, gated so a disabled lane never rings.
+                // The box is inset half the ring and the stroke is given half
+                // its width, because `sdf.stroke` paints that far EITHER side
+                // of the shape: the ring is then `ring_size` points thick and
+                // sits inside the lane rather than over its neighbour.
+                sdf.box(
+                    self.ring_size * 0.5,
+                    self.ring_size * 0.5,
+                    max(self.rect_size.x - self.ring_size, 1.0),
+                    max(self.rect_size.y - self.ring_size, 1.0),
+                    self.border_radius * 0.5
+                )
+                sdf.stroke(
+                    self.ring_color_off.mix(self.ring_color, self.focus * (1.0 - self.disabled)),
+                    self.ring_size * 0.5
+                )
                 return sdf.result
             }
         }
@@ -653,7 +717,9 @@ impl WaveformMarker {
 /// is the form to use: it is the theme's, and it survives a theme change.
 /// A `#rrggbb` or `#rrggbbaa` is also accepted, as the escape hatch for a
 /// host that owns its palette; a word that is neither leaves the region
-/// neutral rather than throwing the line away.
+/// neutral rather than throwing the line away. The `#` is not optional
+/// there: `ace`, `decade` and `beaded` are all runs of hex digits, and a lane
+/// that read one of them as a colour would be answering a typo.
 ///
 /// A colour in a line is written WITHOUT the `x` that a colour needs in
 /// `script_mod!` source. That `x` is there to stop the Rust tokenizer
@@ -708,8 +774,14 @@ fn read_number(field: Option<&str>) -> f64 {
 
 /// An intent word first, a `#rrggbb` second, neutral for anything else.
 /// The word is tried first because it is the form callers should be
-/// reaching for; the colour is the escape hatch, and it looks like nothing
-/// else, so trying it second costs no ambiguity.
+/// reaching for; the colour is the escape hatch.
+///
+/// The `#` is REQUIRED here even though `parse_hex_color` treats it as
+/// optional (color.rs:139). Without that guard the fall-through accepts any
+/// bare run of three, six or eight hex digits, so a tint field of `bad`,
+/// `ace`, `decade` or `beaded` would quietly become a colour instead of
+/// leaving the item neutral — and a word that is not an intent word is
+/// almost always a typo, not a request for a shade of green.
 fn read_tint(field: Option<&str>) -> (BadgeIntent, Option<Vec4f>) {
     let text = field.unwrap_or("").trim();
     if text.is_empty() {
@@ -718,8 +790,10 @@ fn read_tint(field: Option<&str>) -> (BadgeIntent, Option<Vec4f>) {
     if let Some(intent) = read_intent(text) {
         return (intent, None);
     }
-    if let Some((c, _had_alpha)) = parse_hex_color(text) {
-        return (BadgeIntent::Neutral, Some(vec4(c[0], c[1], c[2], c[3])));
+    if text.starts_with('#') {
+        if let Some((c, _had_alpha)) = parse_hex_color(text) {
+            return (BadgeIntent::Neutral, Some(vec4(c[0], c[1], c[2], c[3])));
+        }
     }
     (BadgeIntent::Neutral, None)
 }
@@ -1257,10 +1331,13 @@ impl Lane {
                 if d > self.marker_grab {
                     continue;
                 }
-                // The nearer chip, and the earlier one on a tie: two marks
-                // closer together than twice `marker_grab` cannot be told
-                // apart by a finger at all, and the widget does not pretend
-                // otherwise.
+                // The nearer chip, and the earlier one on a tie. Below twice
+                // `marker_grab` the two reaches overlap, so a press in the
+                // band between the marks is ambiguous and goes to the nearer
+                // — but a press ON either chip still takes that chip, because
+                // nearest wins. What actually stops a finger aiming is
+                // `chip_width`: below that the chips themselves overlap and
+                // there is no separate thing left to point at.
                 if best.map(|(_, bd)| d < bd).unwrap_or(true) {
                     best = Some((i, d));
                 }
@@ -1392,9 +1469,11 @@ pub struct Waveform {
     #[live(6.0)]
     pub edge_grab: f64,
     /// How close a press must come to a mark's chip to take it, in points.
-    /// Two marks closer together than twice this cannot be told apart by a
-    /// finger; which one a press takes is then whichever is nearer, and on
-    /// a tie the earlier one.
+    /// Below twice this two marks' reaches overlap, so a press in the band
+    /// between them is ambiguous and goes to the nearer, the earlier one on
+    /// a tie; a press on either chip still takes that chip. It is
+    /// [`chip_width`](Self::chip_width) that decides whether there are two
+    /// things to aim at in the first place.
     #[live(7.0)]
     pub marker_grab: f64,
     /// A mark chip's width, in points.
@@ -1599,9 +1678,17 @@ impl Waveform {
     /// lane whose right-hand part is empty. A host that lengthens it and
     /// leaves `peaks_span` at 0 is saying "the same peaks now cover more
     /// time", which is a resample it did not do.
+    ///
+    /// The playhead comes back onto the axis with it. Every other path holds
+    /// it inside 0..duration — [`set_playhead`](Self::set_playhead) clamps,
+    /// and so does `Lane::time_at` under a drag — so a shortened axis that
+    /// left it outside would be the one way to make `playhead()` answer with
+    /// a number the lane cannot draw, and the first arrow key after that
+    /// would jump the value from wherever it was to the end of the new axis.
     pub fn set_duration(&mut self, cx: &mut Cx, secs: f64) {
         if self.duration != secs {
             self.duration = secs;
+            self.playhead = self.playhead.clamp(0.0, self.duration.max(0.0));
             self.stale = true;
             self.area.redraw(cx);
         }
@@ -2027,7 +2114,6 @@ impl Widget for Waveform {
                 });
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.area);
                 let lane = self.lane_of(fe.rect.size);
                 let x = fe.abs.x - fe.rect.pos.x;
                 let y = fe.abs.y - fe.rect.pos.y;
@@ -2038,6 +2124,12 @@ impl Widget for Waveform {
                     // makes the band the marks' own.
                     return;
                 };
+                // Key focus is taken AFTER that guard and not before it.
+                // Taking it first would make the press that the widget
+                // documents as doing nothing pull focus off whatever had it
+                // and play the focus track — which is a visible edit to the
+                // rest of the window, and "nothing" has to mean nothing.
+                cx.set_key_focus(self.area);
                 self.grab = Some(part);
                 self.press_x = fe.abs.x;
                 self.animator_play(cx, ids!(drag.on));
@@ -2170,6 +2262,17 @@ impl Widget for Waveform {
         let lane = self.lane_of(rect.size);
         let body_top = lane.body_top();
 
+        // Everything below is clipped into the lane's own rect. Two things
+        // are drawn centred on a point rather than inside a box — a chip on
+        // its mark, and the playhead quad, which is `max(2 * halo, 2)` points
+        // wide so the shader's halo is a real distance inside it — so a mark
+        // at 0 and a playhead at 0 both reach several points to the left of
+        // the lane. Unclipped that is a halo painted over whatever the lane is
+        // standing next to. Clipping rather than clamping, because clamping
+        // would move the chip and the head off the times they name, and where
+        // the head is is the one thing this widget must not round.
+        cx.push_clip_rect(rect);
+
         let width_px = rect.size.x * cx.current_dpi_factor();
         let cols = self.refresh_picture(cx, width_px);
         self.draw_lane.cols = cols as f32;
@@ -2263,6 +2366,8 @@ impl Widget for Waveform {
             );
         }
 
+        cx.pop_clip_rect();
+
         if !self.animator_in_state(cx, ids!(disabled.on)) {
             cx.add_nav_stop(self.area, NavRole::Slider, Inset::default());
         }
@@ -2340,6 +2445,27 @@ mod tests {
     }
 
     #[test]
+    fn shortening_the_axis_brings_the_playhead_back_onto_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut wave = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            Waveform::script_new_with_default(vm)
+        });
+        wave.set_duration(&mut cx, 90.0);
+        wave.set_playhead(&mut cx, 80.0);
+        assert_eq!(wave.playhead(), 80.0);
+        // Ten seconds of axis cannot hold a playhead at eighty. Every other
+        // path holds it inside the axis, so this one has to as well, or
+        // `playhead()` answers with a number the lane cannot draw and the
+        // first arrow key jumps the value from eighty to ten.
+        wave.set_duration(&mut cx, 10.0);
+        assert_eq!(wave.playhead(), 10.0);
+        // A longer axis leaves it alone: nothing is off the lane.
+        wave.set_duration(&mut cx, 120.0);
+        assert_eq!(wave.playhead(), 10.0);
+    }
+
+    #[test]
     fn a_region_line_reads_its_fields_in_the_order_they_are_written() {
         // The name and the tint are the pair that was swapped once: the
         // tint has to be read after the name, so a line carrying both comes
@@ -2368,6 +2494,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tint_word_that_is_not_an_intent_stays_neutral_even_when_it_is_hex() {
+        // `parse_hex_color` treats the '#' as optional (color.rs:139) and
+        // takes any run of three, six or eight hex digits, so without the
+        // guard in `read_tint` every word below came back as a colour
+        // instead of as the typo it is. Each of these is a legal length.
+        for word in ["bad", "ace", "beaded", "decade", "facade", "deadbeef"] {
+            let region = parse_region(&format!("1 | 2 | Name | {word}"));
+            assert_eq!(region.intent, BadgeIntent::Neutral, "{word} is not an intent word");
+            assert_eq!(region.color, None, "and it is not a colour either");
+        }
+        // The documented form still is one, and the DSL spelling still is
+        // not — the `x` that a colour needs in source has no tokenizer to
+        // protect it from inside a string.
+        assert!(parse_region("1 | 2 | Name | #4f9d69").color.is_some());
+        assert_eq!(parse_region("1 | 2 | Name | #x4f9d69").color, None);
+    }
+
+    #[test]
     fn a_marker_line_reads_its_three_fields_in_order() {
         let marker = parse_marker("30 | Drop | error");
         assert_eq!(marker.at, 30.0);
@@ -2389,9 +2533,12 @@ mod tests {
             assert_eq!(lo, v, "the low of {v} came back as {lo}");
             assert_eq!(hi, v, "the high of {v} came back as {hi}");
         }
-        // Half a step in value space is 1/TEXEL_FULL; the slack is one
-        // whole step, which leaves room for the float division as well.
-        let half_step = 2.0 / TEXEL_FULL;
+        // A step in value space is 2/TEXEL_FULL, so half a step — what the
+        // round in `pack_value` can be out by — is 1/TEXEL_FULL. That is the
+        // number this asserts, not twice it: the name says half a step and
+        // the slack has to mean it, or the test would still pass with the
+        // round replaced by a truncation.
+        let half_step = 1.0 / TEXEL_FULL;
         for v in [-0.9137f32, -0.123, 0.3, 0.6667, 0.98765] {
             let (lo, hi) = unpack_column(pack_column((v, v)));
             assert!((lo - v).abs() <= half_step, "{v} came back as {lo}");
@@ -2399,16 +2546,20 @@ mod tests {
         }
     }
 
+    /// A PACKING test, and named as one. The silence floor itself lives in
+    /// the lane's shader and no Rust here can execute it; what pins that is
+    /// `test_the_silence_floor_widens_about_the_columns_own_midpoint` below,
+    /// which reads the expression out of the source.
     #[test]
-    fn an_off_centre_column_keeps_its_floor() {
+    fn an_off_centre_column_packs_with_both_ends_above_the_line() {
         // Both ends above the centre line: the picture the mirrored setter
         // cannot show, and the reason the low and the high are packed
         // separately.
         let (lo, hi) = unpack_column(pack_column((0.2, 0.6)));
         assert!(lo > 0.0, "the low is still above the centre line, at {lo}");
         assert!(hi > lo);
-        assert!((lo - 0.2).abs() <= 2.0 / TEXEL_FULL);
-        assert!((hi - 0.6).abs() <= 2.0 / TEXEL_FULL);
+        assert!((lo - 0.2).abs() <= 1.0 / TEXEL_FULL);
+        assert!((hi - 0.6).abs() <= 1.0 / TEXEL_FULL);
     }
 
     #[test]
@@ -2536,8 +2687,13 @@ mod tests {
         assert_eq!(lane.x_of(5.0), 0.0);
     }
 
+    /// What `scan` does with a two-action pass, and nothing more than that:
+    /// the pass here is built by hand, so this cannot say whether
+    /// `handle_event` still emits both. That claim is pinned by
+    /// `test_a_body_press_emits_the_grab_and_then_the_seek` below, which
+    /// reads the arm out of the source.
     #[test]
-    fn a_body_press_pass_yields_both_the_grab_and_the_seek() {
+    fn scan_finds_either_action_in_a_two_action_pass() {
         // The pass a press on the body puts out, in the order it puts it
         // out. A reader built on `find_widget_action` takes the first and
         // stops, which is how every reader here was once blind to one of
@@ -2640,5 +2796,102 @@ mod waveform_registration_tests {
         // And Rust's hit test clamps the same number into the same range.
         let rust_split = format!("self.strip.clamp(0.0, self.{})", "height");
         assert!(wave.contains(&rust_split));
+    }
+
+    /// The one pass that carries two actions, read out of the arm that
+    /// emits them.
+    ///
+    /// The pair is contract — the table above `WaveformAction` says so, and
+    /// every reader on `WaveformRef` scans a pass instead of taking the
+    /// first action because of it. A test that builds the pair by hand
+    /// cannot tell whether the arm still emits it, so this reads the arm.
+    /// Delete either `widget_action` line and it goes red.
+    #[test]
+    fn test_a_body_press_emits_the_grab_and_then_the_seek() {
+        let wave = include_str!("waveform.rs");
+        let arm = format!("{}{}", "Hit::FingerDown", "(fe) if fe.device.is_primary_hit()");
+        let from = wave.find(&arm).expect("the press arm");
+        let next = format!("{}{}", "Hit::FingerMove", "(fe) =>");
+        let to = wave[from..].find(&next).expect("the arm after it") + from;
+        let body = &wave[from..to];
+
+        let grabbed = format!("{}{}", "WaveformAction::Grabbed", "(part)");
+        let seeking = format!("{}{}", "WaveformAction::Seeking", "(self.playhead)");
+        let g = body.find(&grabbed).expect("the press says what it took");
+        let s = body.find(&seeking).expect("and where it put the playhead");
+        assert!(g < s, "Grabbed is the first of the pair");
+
+        // And key focus is taken AFTER the "took hold of nothing" guard, or
+        // a press in the strip on no chip would pull focus off whatever had
+        // it — which the module doc and the story's gesture table both say
+        // is nothing.
+        let asked = format!("{}{}", "lane.grab_at", "(x, y, &self.parsed_regions");
+        let focus = format!("{}{}", "cx.set_key", "_focus(self.area)");
+        let a = body.find(&asked).expect("the press asks what is under it");
+        let f = body.find(&focus).expect("the press takes key focus");
+        assert!(a < f, "focus is taken after the grab, not before it");
+    }
+
+    /// Every reader on the handle scans its pass. `find_widget_action`
+    /// (widget.rs:1715-1724) answers with the FIRST action from a uid and
+    /// stops, so a reader built on it would be blind to one half of the
+    /// press pass above; the library ships the filtering iterator for
+    /// exactly this and says so at widget.rs:1595-1601.
+    #[test]
+    fn test_every_reader_scans_the_pass_rather_than_taking_the_first() {
+        let wave = include_str!("waveform.rs");
+        let scanning = format!("{}{}", "filter_widget_actions", "_cast::<WaveformAction>");
+        assert_eq!(
+            wave.matches(scanning.as_str()).count(),
+            8,
+            "one scan apiece for the eight readers on WaveformRef"
+        );
+        let first_only = format!("{}{}", "find_widget_action", "(");
+        assert_eq!(wave.matches(first_only.as_str()).count(), 0, "and none of the first-only helper");
+    }
+
+    /// The silence floor is widened about the column's OWN midpoint.
+    ///
+    /// Nothing in Rust runs the lane's shader, so the only way to hold this
+    /// line is to read it. Widening toward the centre line instead would
+    /// drag a signal that sits off centre back onto it, and showing that a
+    /// signal sits off centre is the whole reason the low and the high are
+    /// carried separately.
+    #[test]
+    fn test_the_silence_floor_widens_about_the_columns_own_midpoint() {
+        let wave = include_str!("waveform.rs");
+        let mid = format!("{}{}", "let mid = (top + bot)", " * 0.5");
+        let half = format!("{}{}", "let half = max((top - bot) * 0.5,", " feather * 0.5)");
+        let hi = format!("{}{}", "let hi = mid", " + half");
+        let lo = format!("{}{}", "let lo = mid", " - half");
+        assert!(wave.contains(&mid), "the midpoint is the column's own");
+        assert!(wave.contains(&half), "and the floor is half a pixel of it");
+        assert!(wave.contains(&hi) && wave.contains(&lo), "both ends move off that midpoint");
+    }
+
+    /// Key focus is shown with a ring, not with a tint of the ground.
+    ///
+    /// `color_inset_hover`, `color_inset_focus` and `color_inset_drag` are
+    /// aliases of `color_inset` in both shipped desktop themes
+    /// (theme_desktop_dark.rs:299-304, theme_desktop_light.rs:302-307), so a
+    /// lane that showed focus by tinting its ground would be pixel-identical
+    /// to one that has none — on a nav stop whose arrow keys edit a value.
+    /// The ring is `color_primary` and the peaks take the `color_val`
+    /// ladder, and both of those are three different colours in all three
+    /// themes.
+    #[test]
+    fn test_focus_is_a_ring_and_the_peaks_take_the_ladder_that_steps() {
+        let wave = include_str!("waveform.rs");
+        let ring = format!("{}{}", "ring_color: uniform(theme.", "color_primary)");
+        assert!(wave.contains(&ring), "the ring is the theme's primary");
+        let stroked = format!(
+            "{}{}",
+            "self.ring_color_off.mix(self.ring_color,", " self.focus * (1.0 - self.disabled))"
+        );
+        assert!(wave.contains(&stroked), "and it is gated on focus, off when disabled");
+        for token in ["color_val_hover)", "color_val_focus)", "color_val_drag)"] {
+            let needle = format!("{}{}", "uniform(theme.", token);
+            assert!(wave.contains(&needle), "the peaks need theme.{token}");
+        }
     }
 }
