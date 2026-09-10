@@ -286,5 +286,5 @@ It does not scroll: a card whose body scrolls is a panel. It carries no title or
                 kind: ControlKind::Disabled { default: false },
             },
         ],
-        on_actions: Some(card_actions),
+        on_actions: Some(card_actions_all),
     },];
