@@ -2,14 +2,17 @@
 //! and a latching out-of-range lamp.
 //!
 //! The library already had every shape of "how far along is it": bars,
-//! rings, arcs and a dial. None of them can do this. `progress.rs` says so
-//! outright — its easing only ever runs forward, because a bar that slides
-//! backwards looks like a bar that is lying, and a value set below the one
-//! on screen snaps there instead. That is the right rule for a download and
-//! the wrong one for load, throughput, latency, temperature or headroom,
-//! where going down IS the news and the fall is the part being read. So this
-//! is a separate widget rather than a flag on that one: the two disagree
-//! about what a falling number means.
+//! rings, arcs and a dial. None of them can do this. The bars and rings in
+//! `progress.rs` ease forward only, because a bar that slides backwards
+//! looks like a bar that is lying, and a value set below the one on screen
+//! snaps there instead. That is the right rule for a download and the wrong
+//! one for load, throughput, latency, temperature or headroom, where going
+//! down IS the news and the fall is the part being read. The one member of
+//! that family allowed to fall is the `Gauge`, and it eases a needle toward
+//! a target in both directions at one speed: no instant attack, no
+//! high-water mark, no repaint gate. A dial, not a meter. So this is a
+//! separate widget rather than a flag on that family: the two disagree about
+//! what a falling number means.
 //!
 //! # What makes it readable
 //!
@@ -88,7 +91,7 @@ script_mod! {
         lamp: true
         /** the lamp, lit; the widget latches this and only clearing puts it out 0..1 step 1 */
         over: false
-        /** seconds for the bar to cover nine tenths of a fall 0.05..3 step 0.05 */
+        /** the fall's time constant in seconds; nine tenths of a fall takes about 2.3 of them 0.05..3 step 0.05 */
         release_secs: 0.74
         /** seconds the mark stands before it follows the bar down 0..5 step 0.1 */
         hold_secs: 1.0
@@ -279,7 +282,11 @@ pub enum LevelMeterAction {
 /// a widget copies its own live properties over them between ticks.
 #[derive(Clone, Copy, Debug)]
 pub struct MeterBallistics {
-    /// Seconds for the bar to cover nine tenths of a fall.
+    /// The fall's TIME CONSTANT in seconds, which is not the time a fall
+    /// takes: `tick` covers `1 - e^(-dt/release_secs)` of the distance left,
+    /// so one of these is about two thirds of the way down and nine tenths
+    /// of a fall is ln(10) — about 2.3 — of them. The default 0.74 is the
+    /// 1.7 s nine-tenths fall `RELEASE_SECS` describes.
     pub release_secs: f32,
     /// Seconds the mark stands before it starts to follow the bar down.
     pub hold_secs: f32,
@@ -491,15 +498,25 @@ pub struct LevelMeter {
     /// The lamp, lit. `set_over` latches this on; only clearing puts it out.
     #[live]
     pub over: bool,
+    /// The fall's time constant in seconds, not the time a fall takes: nine
+    /// tenths of a fall is about 2.3 of them. `MeterBallistics::release_secs`
+    /// has the arithmetic. Nothing acts on it until something feeds the
+    /// meter; a standing `level` never ticks.
     #[live(0.74)]
     pub release_secs: f64,
+    /// Seconds the mark stands where it is before it follows the bar down.
     #[live(1.0)]
     pub hold_secs: f64,
+    /// The exponent the reading is DRAWN on; one is linear, below one lifts
+    /// the quiet end. It never touches what `value` reports.
     #[live(1.0)]
     pub taper: f64,
     /// A press anywhere on the meter puts the lamp out.
     #[live(true)]
     pub clear_on_press: bool,
+    /// Greys the meter and stops a press from clearing the lamp. The
+    /// readings still land: a disabled meter is one nobody may touch, not
+    /// one that has stopped listening.
     #[live]
     pub disabled: bool,
     #[rust]
@@ -593,7 +610,10 @@ impl Widget for LevelMeter {
         self.draw_bg.over = if self.over { 1.0 } else { 0.0 };
         self.draw_bg.lamp = if self.lamp { 1.0 } else { 0.0 };
         self.draw_bg.vertical = if self.vertical { 1.0 } else { 0.0 };
-        self.draw_bg.opacity = if self.disabled { 0.4 } else { 1.0 };
+        // The same dim as the bars, rings and dial in `progress.rs`: a meter
+        // beside a disabled bar that was fainter than it would read as a
+        // second state rather than the same one.
+        self.draw_bg.opacity = if self.disabled { 0.6 } else { 1.0 };
         self.draw_bg.draw_abs(cx, rect);
         cx.end_turtle();
         DrawStep::done()
@@ -874,27 +894,47 @@ mod tests {
     /// The deadband watches both numbers, because they move independently:
     /// a steady reading holds the bar still while the mark is still coming
     /// down over it, and a gate watching only the bar would freeze it there.
+    ///
+    /// The bar is made to stand EXACTLY still first, which is what makes
+    /// this test about the mark. A bar merely asymptoting onto a steady
+    /// reading is still crossing the deadband on its own for most of a
+    /// minute, so a count taken from the top would come back healthy with
+    /// the mark's half of the gate deleted. Dropping the bar BELOW the
+    /// reading first puts every later tick through the instant-attack
+    /// branch, which stands it on the reading to the bit: from there the
+    /// only thing that can move is the mark, and with the hold half of the
+    /// gate removed this window reports nothing at all.
     #[test]
     fn the_mark_gets_through_the_deadband_while_the_bar_stands_still() {
         let mut m = meter();
         m.tick(1.0, 0.05);
+        for _ in 0..12 {
+            m.tick(0.0, 0.05);
+        }
+        assert!(m.level() < 0.5, "the bar is under the reading: {:.3}", m.level());
+        // From here a steady half is a rise every tick, so the bar is stood
+        // at exactly it and stays there while the mark comes down over it.
+        m.tick(0.5, 0.05);
+        let bar = m.level();
+        assert_eq!(bar, 0.5);
         m.take_push();
-        // A steady half: the bar settles onto it and sits there while the
-        // mark, which started at the top, is still coming down over it.
+        let mark_before = m.hold();
         let mut moved = 0;
         for _ in 0..60 {
             m.tick(0.5, 0.05);
+            assert_eq!(m.level(), bar, "the bar has not moved a bit");
             if m.take_push().is_some() {
                 moved += 1;
             }
         }
+        assert!(moved > 0, "the mark's journey over a still bar was reported");
         assert!(
-            (m.level() - 0.5).abs() < 0.01,
-            "the bar has been sitting on the reading: {:.4}",
-            m.level()
+            m.hold() < mark_before - DEADBAND,
+            "and it was a journey: {:.3} to {:.3}",
+            mark_before,
+            m.hold()
         );
         assert!(m.hold() > m.level(), "the mark is still above it: {:.3}", m.hold());
-        assert!(moved > 0, "and its journey was reported");
     }
 
     /// A seeded meter is a picture, not a measurement: it stands where it
