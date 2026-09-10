@@ -35,7 +35,7 @@ use current source for API signatures and working examples.
 - When adding an example crate, update its Cargo workspace and
   `makepad.splash`.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
-  `widgets/src/`, `code_editor/`, and `apps/studio/` before changing Splash syntax.
+  `widgets/src/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
 ## Software installation requires explicit approval
@@ -94,7 +94,7 @@ use current source for API signatures and working examples.
   `dev` remains useful for bisecting. Public squash/push operations must expose
   their source, destination, included changes, validation, and conflicts.
 - Agents working in Studio flows must also follow
-  [Studio flow instructions](apps/studio/AGENTS.md). This covers todo deltas,
+  [Director flow instructions](apps/director/AGENTS.md). This covers todo deltas,
   terminal image delivery, test ownership, recordings, and revision feedback.
 
 ## Builds and runtime verification

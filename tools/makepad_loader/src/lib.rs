@@ -152,7 +152,7 @@ fn dwell(stage: &str, detail: &str, frac: f32) {
 
 const APP_CATALOG: &[(&str, &str)] = &[
     ("makepad-vj", "VJ"),
-    ("makepad-studio", "Studio"),
+    ("makepad-director", "Director"),
     ("makepad-wm", "Desktop"),
     ("makepad-files", "Files"),
     ("makepad-browser", "Browser"),

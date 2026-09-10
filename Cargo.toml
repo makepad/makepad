@@ -3,13 +3,20 @@ workspace.members = [
     "apps/browser",
     "apps/terminal",
     "apps/wm",
+    "apps/wm-all",
     "apps/aichat",
     "apps/finance",
     "apps/sheets",
     "apps/photos",
     "apps/clock",
     "apps/weather",
+    "apps/mail",
+    "apps/notes",
+    "apps/calendar",
+    "apps/reminders",
+    "apps/calculator",
     "libs/wm_theme",
+    "libs/civil_time",
     "libs/wm_api",
     "libs/app_module",
     "apps/task",
@@ -18,6 +25,8 @@ workspace.members = [
     "apps/pdf",
     "apps/files",
     "libs/diskmap",
+    "libs/workspace",
+    "libs/code_arch",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
@@ -44,8 +53,8 @@ workspace.members = [
     "libs/fab",
     "libs/fab_tour",
     "apps/fab/loaders/gltf",
-    "libs/sim",
-    "libs/sim/math",
+    "libs/scene",
+    "libs/soft_body",
     "libs/show_control",
     "libs/asset/creator",
     "libs/bounded_http",
@@ -102,11 +111,8 @@ workspace.members = [
     "libs/fabric/draft",
     # === xr app ===
     "xr",
-    # === studio ===
-    "apps/studio",
-    "libs/code_arch",
-    "libs/code_graph",
-    "libs/code_atlas",
+    # === director ===
+    "apps/director",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
@@ -171,6 +177,11 @@ workspace.members = [
 ]
 
 workspace.exclude = [
+    # Private Scope (the Architecture map) and its code-intelligence crates.
+    # Clone into apps/scope; path deps stay ../../ like a subdirectory. Not a
+    # required member so a clean makepad tree still loads.
+    "apps/scope",
+    "apps/scope-private",
     # Private Arcade frontend. Clone into apps/sandbox; path deps stay ../../
     # like a subdirectory. Not a required member so a clean makepad tree
     # still loads.
@@ -178,6 +189,8 @@ workspace.exclude = [
     # Private Source Library picture wall. Same shape as sandbox: clone into
     # apps/source-library; path deps stay ../../.
     "apps/source-library",
+    # Private Stage performance app. Own workspace with ../../ path deps.
+    "apps/stage",
     "libs/terminal_core",
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/ai/hub",

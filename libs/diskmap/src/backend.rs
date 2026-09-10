@@ -80,9 +80,13 @@ pub trait ScanBackend: Send + Sync {
 }
 
 /// One source filter per native scan; no source bytes are read or hashed.
+/// A code file counts as source when the repository's ignore rules admit
+/// it (tracked files always do), it is not under a `target*` build
+/// directory, an untracked `local/` scratch directory or a nested
+/// repository. Constructed fresh per scan to observe changed rules.
 struct SourceKinds {
     root: std::path::PathBuf,
-    sources: makepad_code_graph::FsSourceSet,
+    ignore: Option<makepad_git::ignore::GitIgnore>,
     reported_error: bool,
 }
 
@@ -90,16 +94,48 @@ impl SourceKinds {
     fn new(root: &Path) -> Self {
         Self {
             root: root.into(),
-            sources: makepad_code_graph::FsSourceSet::new(root.into(), Default::default()),
+            ignore: None,
             reported_error: false,
         }
+    }
+
+    fn allows_path(&mut self, rel: &str) -> Result<bool, makepad_git::ignore::IgnoreError> {
+        let rel = rel.trim_start_matches("./");
+        if rel.is_empty() || rel.split('/').any(|part| part == "..") {
+            return Ok(false);
+        }
+        let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+        if dir
+            .split('/')
+            .any(|part| matches!(part, ".git" | "node_modules") || part.starts_with("target"))
+        {
+            return Ok(false);
+        }
+        if self.ignore.is_none() {
+            self.ignore = Some(makepad_git::ignore::GitIgnore::new(&self.root)?);
+        }
+        let ignore = self.ignore.as_mut().unwrap();
+        if ignore.ignored(rel, false)? {
+            return Ok(false);
+        }
+        if !ignore.is_tracked(rel) {
+            if dir.split('/').any(|part| part == "local") {
+                return Ok(false);
+            }
+            for (end, _) in rel.match_indices('/') {
+                if self.root.join(&rel[..end]).join(".git").exists() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn classify(&mut self, path: &Path, is_dir: bool) -> u8 {
         let kind = kind_for(path, is_dir);
         if kind != kind::FileKind::Code { return kind as u8; }
         let allowed = path.strip_prefix(&self.root).ok().is_some_and(|path| {
-            match self.sources.allows_path(&path.to_string_lossy().replace('\\', "/")) {
+            match self.allows_path(&path.to_string_lossy().replace('\\', "/")) {
                 Ok(allowed) => allowed,
                 Err(error) => {
                     if !self.reported_error {

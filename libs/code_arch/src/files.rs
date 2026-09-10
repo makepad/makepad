@@ -325,7 +325,7 @@ fn hash_file(path: &Path, root: &Path) -> Result<String, ArchError> {
         ));
     }
     let bytes = fs::read(full).map_err(|e| io_error(path, e))?;
-    let hash = makepad_code_graph::keys::content_hash(&bytes);
+    let hash = *makepad_git::oid::hash_object("blob", &bytes).as_bytes();
     let mut hex = String::with_capacity(40);
     use std::fmt::Write;
     for byte in hash {
