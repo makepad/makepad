@@ -10,6 +10,7 @@ struct IdPoolFreeState {
     generations: Vec<u64>,
     retirement_pending: VecDeque<usize>,
     retirement_queued: Vec<bool>,
+    reuse_cursor: usize,
 }
 
 #[derive(Default, Debug)]
@@ -110,11 +111,42 @@ where
     }
 
     /// Whether drops are waiting to be examined at the next safe point.
-    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn has_pending_retirements(&self) -> bool {
         !self.free.0.borrow().retirement_pending.is_empty()
     }
 
+    /// Reuse an existing allocation without first constructing a replacement.
+    /// Bounded scans rotate across retries so a large free pool cannot hide a
+    /// suitable warm slot or force one frame to fault its entire inventory.
+    pub fn try_alloc_reusing(
+        &mut self,
+        limit: usize,
+        mut suitable: impl FnMut(&T) -> bool,
+    ) -> Option<PoolId> {
+        let mut state = self.free.0.borrow_mut();
+        let count = state.free.len();
+        if count == 0 {
+            return None;
+        }
+        for _ in 0..count.min(limit) {
+            let index = state.reuse_cursor % count;
+            state.reuse_cursor = state.reuse_cursor.wrapping_add(1);
+            let id = state.free[index];
+            if !suitable(&self.pool[id].item) {
+                continue;
+            }
+            state.free.swap_remove(index);
+            state.is_free[id] = false;
+            self.pool[id].generation += 1;
+            state.generations[id] = self.pool[id].generation;
+            return Some(PoolId {
+                id,
+                generation: self.pool[id].generation,
+                free: self.free.clone(),
+            });
+        }
+        None
+    }
     pub fn alloc(&mut self) -> PoolId {
         let last_from_free_pool = {
             let mut state = self.free.0.borrow_mut();
@@ -216,16 +248,19 @@ where
     /// free at this safe point.
     /// Drops are coalesced per slot, so pending metadata is bounded by the
     /// pool's slot count and allocation never needs to search it.
-    #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn take_free_retirements(&mut self, limit: usize) -> Vec<usize> {
+    pub(crate) fn take_free_retirement(&mut self) -> Option<usize> {
         let mut state = self.free.0.borrow_mut();
-        let mut retired = Vec::with_capacity(limit.min(state.retirement_pending.len()));
+        let id = state.retirement_pending.pop_front()?;
+        state.retirement_queued[id] = false;
+        state.is_free[id].then_some(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_free_retirements(&mut self, limit: usize) -> Vec<usize> {
+        let mut retired =
+            Vec::with_capacity(limit.min(self.free.0.borrow().retirement_pending.len()));
         for _ in 0..limit {
-            let Some(id) = state.retirement_pending.pop_front() else {
-                break;
-            };
-            state.retirement_queued[id] = false;
-            if state.is_free[id] {
+            if let Some(id) = self.take_free_retirement() {
                 retired.push(id);
             }
         }

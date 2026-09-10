@@ -45,12 +45,13 @@ pub mod video_file;
 
 mod draw_list;
 pub mod retained_instances;
+pub mod recording_buffer;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
-#[cfg(all(not(headless), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(all(not(headless), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;
 pub mod component;
@@ -141,7 +142,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,

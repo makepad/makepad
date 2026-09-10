@@ -1215,6 +1215,7 @@ struct PoolInner {
     offenders: [LightOffender; MAX_LIGHT_LABELS],
     next_report_us: AtomicU64,
     reported_completed: AtomicU64,
+    heavy_turn: AtomicUsize,
 }
 
 impl PoolInner {
@@ -1224,6 +1225,11 @@ impl PoolInner {
             while self.lanes[0].try_take().is_some() {}
             while self.lanes[1].try_take().is_some() {}
             return None;
+        }
+        // Reserved Light workers stay available; utility workers alternate
+        // preference so a continuous short-job stream cannot starve Heavy.
+        if heavy_capable && self.heavy_turn.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+            if let Some(job) = self.lanes[Lane::Heavy.index()].try_take() { return Some(job); }
         }
         if let Some(job) = self.lanes[Lane::Light.index()].try_take() {
             return Some(job);
@@ -1577,6 +1583,7 @@ impl TaskPool {
             offenders: std::array::from_fn(|_| LightOffender::default()),
             next_report_us: AtomicU64::new(0),
             reported_completed: AtomicU64::new(0),
+            heavy_turn: AtomicUsize::new(0),
         });
         let pool = Self {
             inner: inner.clone(),
@@ -1632,6 +1639,7 @@ impl TaskPool {
             offenders: std::array::from_fn(|_| LightOffender::default()),
             next_report_us: AtomicU64::new(0),
             reported_completed: AtomicU64::new(0),
+            heavy_turn: AtomicUsize::new(0),
         });
         inner.shutdown_state.complete(Ok(()));
         Self { inner }
@@ -2957,6 +2965,31 @@ mod tests {
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
         pool.inner.reported_completed.store(1, Ordering::Relaxed);
         assert!(pool.inner.report_delay().is_none());
+    }
+
+    #[test]
+    fn heavy_work_has_bounded_service_under_continuous_light_demand() {
+        let pool=test_pool(2,1,16,16);
+        let (started,started_rx)=std::sync::mpsc::channel();
+        let (release_light,light_rx)=std::sync::mpsc::channel();
+        let (release_heavy,heavy_rx)=std::sync::mpsc::channel();
+        // Park the only Heavy-capable worker first. A Light job may run on
+        // either worker; starting it first can block Heavy before the test
+        // reaches the scheduling scenario it intends to exercise.
+        let heavy=pool.submit(Lane::Heavy,gate_job(started.clone(),heavy_rx)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let light=pool.submit(Lane::Light,gate_job(started,light_rx)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let order=Arc::new(AtomicUsize::new(0));
+        let mut lights=Vec::new();
+        for _ in 0..8 {let order=order.clone();lights.push(pool.submit(Lane::Light,move ||order.fetch_add(1,Ordering::SeqCst)).unwrap());}
+        let observed=order.clone();
+        let target=pool.submit(Lane::Heavy,move ||observed.load(Ordering::SeqCst)).unwrap();
+        release_heavy.send(0).unwrap();
+        let rank=worker_join(target).unwrap();
+        release_light.send(0).unwrap();worker_join(light).unwrap();worker_join(heavy).unwrap();
+        for light in lights {worker_join(light).unwrap();}
+        assert!(rank<=2,"heavy producer starved behind {rank} short jobs");
     }
 
     #[test]

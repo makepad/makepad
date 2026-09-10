@@ -1,7 +1,7 @@
 use {
     crate::{
         cx::{Cx, IosParams, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace, ScreenEdges},
         draw_pass::CxDrawPassParent,
         event::{
             drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
@@ -496,7 +496,7 @@ impl Cx {
             system_version,
         });
 
-        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new(&mut cx.borrow_mut().draw_lists.1.allocations)));
         //let cx = Rc::new(RefCell::new(self));
         //crate::log!("Makepad iOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));
@@ -509,7 +509,20 @@ impl Cx {
                 move |event| {
                     let mut cx_ref = cx.borrow_mut();
                     let mut metal_cx = metal_cx.borrow_mut();
-                    let event_flow = cx_ref.ios_event_callback(event, &mut metal_cx);
+                    // `do_callback` catches what unwinds out of here and
+                    // goes on with the next event; `Cx` is put back in
+                    // order first, so that next event finds it consistent.
+                    let event_flow = match catch_unwind(AssertUnwindSafe(|| {
+                        cx_ref.ios_event_callback(event, &mut metal_cx)
+                    })) {
+                        Ok(event_flow) => event_flow,
+                        Err(payload) => {
+                            cx_ref.recover_after_caught_panic();
+                            drop(metal_cx);
+                            drop(cx_ref);
+                            resume_unwind(payload);
+                        }
+                    };
                     let executor = cx_ref.executor.take().unwrap();
                     drop(cx_ref);
                     // Put the executor back even if a spawned task panics, so
@@ -534,6 +547,14 @@ impl Cx {
     }
 
     pub(crate) fn handle_repaint(&mut self, metal_cx: &mut MetalCx) {
+        // Bound whole repaints by GPU completion, as the macOS present gate
+        // does: MTKView beats on regardless, and a phone shell's frame is
+        // ~30 command buffers that would otherwise queue past the pool.
+        metal_cx.begin_repaint();
+        if metal_cx.frames_in_flight() >= crate::os::apple::metal::REPAINTS_IN_FLIGHT_MAX {
+            metal_cx.backpressure_skips = metal_cx.backpressure_skips.saturating_add(1);
+            return;
+        }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -702,6 +723,10 @@ impl Cx {
 
                     self.run_live_edit_if_needed("ios");
                     self.handle_networking_events();
+                    // The studio control channel and the `--remote` bridge
+                    // (grabs, snapshots, injected input, the log tail): every
+                    // backend services them from its tick through this one call.
+                    self.poll_control_channel();
                     self.handle_permission_events();
                 } else if te.timer_id == ios_app::IOS_TEXT_EVENT_DRAIN_TIMER_ID {
                     with_ios_app(|app| app.text_event_drain_timer_scheduled = false);
@@ -1569,6 +1594,9 @@ impl Cx {
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     IosApp::set_status_bar_dark_icons(dark_icons);
                 }
+                CxOsOp::DeferSystemGestures(edges) => {
+                    IosApp::set_deferred_system_gesture_edges(ui_rect_edges(edges));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -1576,6 +1604,26 @@ impl Cx {
         }
     }
 
+}
+
+/// `UIRectEdge` bits (UIKit: top 1, left 2, bottom 4, right 8) for a
+/// [`ScreenEdges`] set.
+fn ui_rect_edges(edges: ScreenEdges) -> u64 {
+    let mut bits = 0u64;
+    for (edge, bit) in [
+        (ScreenEdges::TOP, 1u64),
+        (ScreenEdges::LEFT, 2),
+        (ScreenEdges::BOTTOM, 4),
+        (ScreenEdges::RIGHT, 8),
+    ] {
+        if edges.contains(edge) {
+            bits |= bit;
+        }
+    }
+    bits
+}
+
+impl Cx {
     /*
     let _ = self.live_file_change_sender.send(vec![LiveFileChange{
         file_name:file_name.to_string(),
