@@ -1835,6 +1835,34 @@ impl std::ops::IndexMut<usize> for CxDrawItems {
 }
 
 impl CxDrawItems {
+    /// Replace a screen-derived immutable view without recording its parent.
+    /// The producer still owns the complete CPU publication; backend storage
+    /// follows its ordinary asynchronous replacement/retirement path.
+    pub fn set_retained_publication(&mut self, index: usize, publication: &crate::retained_instances::RetainedInstances) {
+        let item = &mut self[index];
+        if item.retained_instances.as_ref().is_some_and(|p|p.id()==publication.id()) {return;}
+        item.retained_upload_range = publication.upload_since(item.retained_instance_id);
+        item.retained_instances = Some(publication.clone());
+        item.retained_gpu_evicted = false;
+        item.instance_upload_pending = true;
+        item.kind.draw_call_mut().unwrap().instance_dirty = true;
+    }
+
+    /// A zero-ink receipt represents no GPU work, not a hidden prefetch. Cancel
+    /// pending uploads and let the backend reclaim the previous allocation.
+    pub fn suspend_retained(&mut self, index: usize) -> bool {
+        let item = &mut self[index];
+        let Some(publication) = &item.retained_instances else {return false;};
+        let changed = item.retained_instance_count != 0;
+        item.retained_instance_count = 0;
+        item.retained_prefetched = false;
+        item.retained_gpu_evicted = true;
+        item.retained_instance_id = publication.id();
+        item.resident_schema = item.retained_schema;
+        item.instance_upload_pending = false;
+        item.kind.draw_call_mut().unwrap().instance_dirty = false;
+        changed
+    }
     /// Presentation bindings do not change instance counts or upload ranges.
     /// Preserve those cached proofs unless the actual retained count changes.
     pub fn update_retained_presentation(

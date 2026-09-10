@@ -26,23 +26,28 @@ use std::{
 pub(crate) struct GpuTimeQuery {
     pub(crate) recorder: GpuTimeRecorder,
     receiver: Rc<Receiver<(u64, f64)>>,
+    breakdown: Rc<Receiver<(u64, String)>>,
 }
 #[derive(Clone)]
 pub(crate) struct GpuTimeRecorder {
     sender: SyncSender<(u64, f64)>,
+    breakdown: SyncSender<(u64, String)>,
     tag: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
 }
 impl Default for GpuTimeQuery {
     fn default() -> Self {
         let (sender, receiver) = sync_channel(1024);
+        let (breakdown_sender, breakdown) = sync_channel(8);
         Self {
             recorder: GpuTimeRecorder {
                 sender,
+                breakdown: breakdown_sender,
                 tag: Arc::new(AtomicU64::new(0)),
                 dropped: Arc::new(AtomicU64::new(0)),
             },
             receiver: Rc::new(receiver),
+            breakdown: Rc::new(breakdown),
         }
     }
 }
@@ -50,6 +55,11 @@ impl Default for GpuTimeQuery {
 // recording half; the other backends still compile it.
 #[allow(dead_code)]
 impl GpuTimeRecorder {
+    pub(crate) fn record_breakdown(&self, tag: u64, line: String) {
+        if self.breakdown.try_send((tag, line)).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub(crate) fn record_seconds_tagged(&self, tag: u64, seconds: f64) {
         let ms = seconds * 1000.0;
         if !ms.is_finite() || ms < 0.0 {
@@ -590,6 +600,11 @@ impl CxDrawPass {
         self.gpu_time_query
             .as_ref()
             .map_or(0, |q| q.recorder.dropped.load(Ordering::Relaxed))
+    }
+    pub fn drain_gpu_breakdown(&self, out: &mut Vec<(u64, String)>) {
+        if let Some(query) = &self.gpu_time_query {
+            out.extend(query.breakdown.try_iter());
+        }
     }
 }
 
