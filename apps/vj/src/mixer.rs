@@ -6387,6 +6387,21 @@ impl MixEngine {
             let mut sfx = (0.0f32, 0.0f32);
             for v in s.sfx.iter_mut() {
                 let gain = v.gain.tick(rate);
+                // A clip with no frames has nothing to read and nothing to
+                // loop. Retired like one that ran off its end, because the
+                // looping arm below resets the cursor and does NOT continue,
+                // so an empty clip fell straight through to index an empty
+                // buffer -- a panic on the audio thread, and under a build
+                // that aborts on panic, the process. The preview player and
+                // the decks both refuse an empty buffer already; this is the
+                // one read that did not.
+                if v.pcm.frames.is_empty() {
+                    if !v.done {
+                        v.done = true;
+                        push_event(shared, MixEvent::VoiceEnded(v.id));
+                    }
+                    continue;
+                }
                 let end = (v.pcm.frames.len() as u64) << 32;
                 if v.cursor_fp >= end {
                     if v.loop_on {
@@ -7657,6 +7672,41 @@ mod tests {
     /// chain costs the signal nothing until an effect is switched on. The
     /// same contract the master's chain keeps, on the first of the five
     /// sources that got a chain of their own.
+    /// A pad voice whose clip has no frames. Every decoder in this tree
+    /// refuses to hand one over, which is the only reason this was never
+    /// hit -- but the read is on the audio callback, so it may not depend
+    /// on that. A LOOPING empty clip is the case: the looping arm resets
+    /// the cursor and falls through, straight into an empty buffer.
+    ///
+    /// Assert the INDEX, not an underflow: in a release build the
+    /// subtraction before it wraps rather than panicking, and the panic
+    /// lands one line later.
+    #[test]
+    fn a_voice_whose_clip_has_no_frames_is_retired_rather_than_read() {
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.start_voice(
+            VoiceAlloc {
+                id: 7,
+                pad: PadKey::from_bytes([2; 16]),
+                choke_group: 0,
+                loop_on: true,
+                gain: 1.0,
+                started_ms: 0,
+            },
+            Arc::new(TrackPcm { frames: Vec::new(), sample_rate: 48_000 }),
+        );
+        let out = render(&mixer, 48_000.0, 512);
+        assert!(
+            out.channel(0).iter().all(|sample| *sample == 0.0),
+            "an empty clip is silence, not a sound"
+        );
+        assert!(
+            mixer.drain_ended_voices().contains(&7),
+            "and it is retired, so nothing waits on a voice that can never end"
+        );
+    }
+
     #[test]
     fn a_source_chain_is_transparent_until_asked() {
         let mixer = TestMixer::new();
