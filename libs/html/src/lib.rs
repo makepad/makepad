@@ -1,4 +1,29 @@
 use makepad_live_id::*;
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A `LiveId` is already a 64-bit hash, so hashing it again with SipHash only
+/// costs time. This hasher passes the id through unchanged.
+#[derive(Default)]
+struct LiveIdHasher(u64);
+
+impl Hasher for LiveIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Only reached if something other than a `LiveId` is hashed; fold
+        // the bytes in so the map still behaves.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+    fn write_u64(&mut self, id: u64) {
+        self.0 = id;
+    }
+}
+
+type LiveIdMap<V> = HashMap<LiveId, V, BuildHasherDefault<LiveIdHasher>>;
 
 #[derive(Debug)]
 pub struct HtmlError {
@@ -6,10 +31,18 @@ pub struct HtmlError {
     pub position: usize,
 }
 
+/// Marks a node in [`HtmlDoc::closes`] that opens no element, or opens one
+/// that has no close tag of its own.
+const NO_CLOSE: usize = usize::MAX;
+
 #[derive(Default, PartialEq)]
 pub struct HtmlDoc {
     pub decoded: String,
     pub nodes: Vec<HtmlNode>,
+    /// For each node, the index of the close tag ending the element it opens,
+    /// or [`NO_CLOSE`]. Computed once by `compute_closes` so that finding an
+    /// element's end is a lookup rather than a scan.
+    closes: Vec<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -48,6 +81,7 @@ pub struct HtmlAttribute {
 
 pub struct HtmlWalker<'a> {
     decoded: &'a str,
+    closes: &'a [usize],
     pub nodes: &'a [HtmlNode],
     pub index: usize,
 }
@@ -71,46 +105,28 @@ impl<'a> HtmlWalker<'a> {
         }
     }
 
+    /// Index of the close tag that ends the element whose open tag the
+    /// walker is on, or `None` when the walker is not on an open tag or the
+    /// element has no close tag of its own — a void element such as `<br>`,
+    /// or one the document never closed.
+    pub fn close_index(&self) -> Option<usize> {
+        match self.closes.get(self.index) {
+            Some(&close) if close != NO_CLOSE => Some(close),
+            _ => None,
+        }
+    }
+
     /// Advances to the close tag matching the open tag the walker is on.
     ///
-    /// Only tags with the *same* id affect nesting depth. Counting every
-    /// open tag would over-consume, because a void element written without a
-    /// slash (`<br>`, `<img src=x>`, `<hr>`) emits an `OpenTag` with no
-    /// matching `CloseTag`, so each one would leave the depth permanently
-    /// unbalanced and swallow the rest of the document.
-    ///
-    /// The walker does not move when the element has no close tag of its own
-    /// — it is void, or unclosed — so the caller's own `walk()` still visits
-    /// the following nodes and any enclosing close tag is still delivered.
+    /// The walker does not move when the element has no close tag of its own,
+    /// so the caller's own `walk()` still visits the following nodes and any
+    /// enclosing close tag is still delivered. It used to count every open tag
+    /// toward a nesting depth; a void element written without a slash emits
+    /// no close tag, so each one left the depth unbalanced and the jump
+    /// swallowed the rest of the document.
     pub fn jump_to_close(&mut self) {
-        let Some(open_lc) = self.open_tag_lc() else {
-            return;
-        };
-        // Elements opened inside this one and not yet closed. Empty for the
-        // common case of an element whose content is plain text, so this
-        // usually does not allocate.
-        let mut inner: Vec<LiveId> = Vec::new();
-        for i in self.index + 1..self.nodes.len() {
-            match &self.nodes[i] {
-                HtmlNode::OpenTag { lc, .. } => inner.push(*lc),
-                HtmlNode::CloseTag { lc, .. } => {
-                    if let Some(pos) = inner.iter().rposition(|t| t == lc) {
-                        // Closes a descendant. Anything still above it was
-                        // void or left unclosed, so it ends here too.
-                        inner.truncate(pos);
-                    } else if *lc == open_lc {
-                        self.index = i;
-                        return;
-                    } else {
-                        // An enclosing element closes first, so this one never
-                        // had a close tag of its own. Stop here rather than
-                        // reading to the end of the document for every void
-                        // element, which would make a draw quadratic.
-                        return;
-                    }
-                }
-                _ => (),
-            }
+        if let Some(close) = self.close_index() {
+            self.index = close;
         }
     }
 
@@ -296,16 +312,13 @@ impl<'a> HtmlWalker<'a> {
 
 impl HtmlDoc {
     pub fn new_walker(&self) -> HtmlWalker<'_> {
-        HtmlWalker {
-            decoded: &self.decoded,
-            index: 0,
-            nodes: &self.nodes,
-        }
+        self.new_walker_with_index(0)
     }
 
     pub fn new_walker_with_index(&self, index: usize) -> HtmlWalker<'_> {
         HtmlWalker {
             decoded: &self.decoded,
+            closes: &self.closes,
             index,
             nodes: &self.nodes,
         }
@@ -321,40 +334,77 @@ fn is_html_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
+/// Parses `body` into a flat node list.
+///
+/// The tokenizer follows the WHATWG HTML tokenizer's states and its recovery
+/// rules for malformed input, so a broken document produces the same tokens a
+/// browser would build from it. There is one deliberate departure: `<x/>`
+/// emits a close tag for `x`, where HTML would ignore the slash on a non-void
+/// element, because the SVG parser is built on this walker and XML needs it.
+///
+/// Parsing never fails. When `errors` is `Some`, everything that was wrong
+/// with the input is recorded there with its byte offset in `body`.
 pub fn parse_html(
     body: &str,
     errors: &mut Option<Vec<HtmlError>>,
     intern: InternLiveId,
 ) -> HtmlDoc {
+    /// Tokenizer states, named after their WHATWG counterparts where one
+    /// exists.
     enum State {
+        /// Between tags.
         Text {
-            start: usize,
+            /// Where this text run starts in `decoded`.
             dec_start: usize,
+            /// One past the last non-whitespace character in `decoded`, or
+            /// `dec_start` while there has been none. Drives whitespace
+            /// collapsing and the node's `all_ws` flag.
             last_non_whitespace: usize,
             collapse_ws: bool,
         },
-        ElementName(usize),
-        ElementClose(usize),
-        ElementAttrs,
-        ElementCloseScanSpaces,
-        /// Discarding a malformed tag up to its `>`.
-        BogusTag,
-        ElementSelfClose,
-        AttribName(usize),
-        AttribValueEq(LiveId, LiveId),
-        AttribValueStart(LiveId, LiveId),
-        AttribValueSq(LiveId, LiveId, usize),
-        AttribValueDq(LiveId, LiveId, usize),
-        AttribValueBare(LiveId, LiveId, usize),
-        AttribValueBareSlash(LiveId, LiveId, usize),
-        CommentStartDash1,
-        CommentStartDash2,
+        /// `<` seen; holds the byte index after it.
+        TagOpen(usize),
+        /// Inside a start tag's name; holds the name's first byte index.
+        TagName(usize),
+        /// `</` seen; holds the byte index after it.
+        EndTagOpen(usize),
+        /// Inside an end tag's name; holds the name's first byte index.
+        EndTagName(usize),
+        /// After an end tag's name. End tags carry no attributes, so
+        /// everything up to `>` is discarded.
+        AfterEndTagName,
+        /// `/` seen inside a start tag; `>` now self-closes it.
+        SelfClosingStartTag,
+        /// Between attributes.
+        BeforeAttributeName,
+        /// Inside an attribute name; holds its first byte index.
+        AttributeName(usize),
+        /// After an attribute name, before knowing whether `=` follows.
+        AfterAttributeName(LiveId, LiveId),
+        /// `=` seen; waiting for the value to begin.
+        BeforeAttributeValue(LiveId, LiveId),
+        /// Inside a value; the index is where it starts in `decoded`.
+        AttributeValueDq(LiveId, LiveId, usize),
+        AttributeValueSq(LiveId, LiveId, usize),
+        AttributeValueUnquoted(LiveId, LiveId, usize),
+        /// `<!` seen.
+        MarkupDeclarationOpen,
+        /// `<!-` seen.
+        MarkupDeclarationDash,
+        /// `<!--` seen; a `>` here closes the comment straight away.
+        CommentStart,
+        /// `<!---` seen.
+        CommentStartDash,
+        Comment,
+        /// `-` seen inside a comment.
         CommentEndDash,
+        /// `--` seen inside a comment.
         CommentEnd,
-        DocType,
-        HeaderQuestion,
-        HeaderAngle,
-        CommentBody,
+        /// `--!` seen inside a comment.
+        CommentEndBang,
+        /// Discarding everything up to `>`: a doctype, `<?...>`, `<!x...>`,
+        /// `</3...>`, or junk after an end tag's name.
+        BogusComment,
     }
 
     /// The longest name in `match_entity` is `DownLeftRightVector`. A run of
@@ -365,11 +415,13 @@ pub fn parse_html(
     /// a longer budget than a name would.
     const MAX_ENTITY_NUMERIC: usize = 32;
 
-    /// State for an entity currently being scanned.
+    /// An entity currently being scanned.
     #[derive(Copy, Clone)]
     struct InEntity {
         /// Index in `decoded` of the opening `&`.
         start: usize,
+        /// Index in `body` of the opening `&`, for error reporting.
+        src_start: usize,
         /// `last_non_whitespace` as it was *before* the `&` was appended.
         /// The entity's own characters are appended to `decoded` while it is
         /// being scanned and then truncated away again on a match, so the
@@ -377,42 +429,47 @@ pub fn parse_html(
         saved_last_non_whitespace: usize,
     }
 
+    /// Appends `c` to `decoded`, collapsing whitespace when asked to and
+    /// decoding character references as they complete.
     #[inline]
     fn process_entity(
         c: char,
+        src_pos: usize,
         in_entity: &mut Option<InEntity>,
         decoded: &mut String,
         last_non_whitespace: &mut usize,
         collapse_ws: bool,
     ) {
-        if let Some(InEntity { start, saved_last_non_whitespace }) = *in_entity {
-            // scan entity
+        if let Some(InEntity {
+            start,
+            saved_last_non_whitespace,
+            ..
+        }) = *in_entity
+        {
             if c == ';' {
-                // potential end of entity
-                match match_entity(&decoded[start + 1..]) {
-                    Err(_e) => {
-                        *in_entity = None;
-                    }
-                    Ok(entity) => {
-                        *in_entity = None;
-                        // `match_entity` only yields Unicode scalar values,
-                        // but fall back to leaving the text as-is rather than
-                        // panicking if that ever stops holding.
-                        if let Some(ch) = char::from_u32(entity) {
-                            decoded.truncate(start);
+                // Whether or not the name matches, the scan is over.
+                *in_entity = None;
+                if let Some(ch) = match_entity(&decoded[start + 1..])
+                    .ok()
+                    .and_then(char::from_u32)
+                {
+                    decoded.truncate(start);
+                    if is_html_whitespace(ch) {
+                        // A decoded space is subject to the same collapsing
+                        // as a literal one: `a &#32; b` reads "a b".
+                        *last_non_whitespace = saved_last_non_whitespace;
+                        if !collapse_ws {
                             decoded.push(ch);
-                            *last_non_whitespace = if is_html_whitespace(ch) {
-                                saved_last_non_whitespace
-                            } else {
-                                decoded.len()
-                            };
-                            return;
+                        } else if *last_non_whitespace == decoded.len() {
+                            decoded.push(' ');
                         }
+                    } else {
+                        decoded.push(ch);
+                        *last_non_whitespace = decoded.len();
                     }
+                    return;
                 }
-            }
-            // definitely not an entity
-            else {
+            } else {
                 let scanned = decoded.len() - start;
                 let budget = if decoded.as_bytes().get(start + 1) == Some(&b'#') {
                     MAX_ENTITY_NUMERIC
@@ -420,6 +477,7 @@ pub fn parse_html(
                     MAX_ENTITY_NAME
                 };
                 if is_html_whitespace(c) || scanned > budget {
+                    // Definitely not an entity; what was scanned stays text.
                     *in_entity = None;
                 }
             }
@@ -427,6 +485,7 @@ pub fn parse_html(
         if c == '&' {
             *in_entity = Some(InEntity {
                 start: decoded.len(),
+                src_start: src_pos,
                 saved_last_non_whitespace: *last_non_whitespace,
             });
         }
@@ -442,616 +501,594 @@ pub fn parse_html(
         }
     }
 
-    /// `<pre>` and `<code>` keep their whitespace verbatim.
-    fn preserves_whitespace(lc: LiveId) -> bool {
-        lc == live_id!(pre) || lc == live_id!(code)
+    fn report(errors: &mut Option<Vec<HtmlError>>, message: &str, position: usize) {
+        if let Some(errors) = errors {
+            errors.push(HtmlError {
+                message: message.into(),
+                position,
+            });
+        }
+    }
+
+    /// Forgets an entity still being scanned when its text run ends, and
+    /// reports it. Letting it survive across a tag or a closing quote is what
+    /// used to let a later `;` truncate `decoded` back past text already
+    /// committed to a node.
+    fn drop_entity(in_entity: &mut Option<InEntity>, errors: &mut Option<Vec<HtmlError>>) {
+        if let Some(InEntity { src_start, .. }) = in_entity.take() {
+            report(errors, "Unterminated entity", src_start);
+        }
+    }
+
+    /// The whitespace-preserving elements (`<pre>`, `<code>`) currently open.
+    ///
+    /// A stack rather than a flag or a counter: any tag nested inside `<pre>`
+    /// used to switch collapsing back on for the rest of the element, and a
+    /// bare counter lets a stray `</code>` cancel an enclosing `<pre>`.
+    #[derive(Default)]
+    struct PreserveStack {
+        open: Vec<LiveId>,
+        pre: usize,
+        code: usize,
+    }
+
+    impl PreserveStack {
+        fn slot(&mut self, lc: LiveId) -> Option<&mut usize> {
+            if lc == live_id!(pre) {
+                Some(&mut self.pre)
+            } else if lc == live_id!(code) {
+                Some(&mut self.code)
+            } else {
+                None
+            }
+        }
+
+        fn open_tag(&mut self, lc: LiveId) {
+            if let Some(n) = self.slot(lc) {
+                *n += 1;
+                self.open.push(lc);
+            }
+        }
+
+        /// Closes the innermost open `lc`, and anything opened inside it.
+        fn close_tag(&mut self, lc: LiveId) {
+            // Reject a close tag with nothing to close in O(1), so a run of
+            // stray `</pre>`s cannot make this quadratic.
+            if !matches!(self.slot(lc), Some(n) if *n > 0) {
+                return;
+            }
+            if let Some(pos) = self.open.iter().rposition(|t| *t == lc) {
+                while self.open.len() > pos {
+                    if let Some(t) = self.open.pop() {
+                        if let Some(n) = self.slot(t) {
+                            *n = n.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn collapses(&self) -> bool {
+            self.open.is_empty()
+        }
+    }
+
+    /// The text state that follows a tag.
+    fn text_state(decoded: &str, preserve: &PreserveStack) -> State {
+        State::Text {
+            dec_start: decoded.len(),
+            last_non_whitespace: decoded.len(),
+            collapse_ws: preserve.collapses(),
+        }
+    }
+
+    fn push_open_tag(
+        nodes: &mut Vec<HtmlNode>,
+        preserve: &mut PreserveStack,
+        name: &str,
+        intern: InternLiveId,
+    ) {
+        let lc = LiveId::from_str_lc(name);
+        preserve.open_tag(lc);
+        nodes.push(HtmlNode::OpenTag {
+            lc,
+            nc: LiveId::from_str_with_intern(name, intern),
+        });
+    }
+
+    fn push_close_tag(
+        nodes: &mut Vec<HtmlNode>,
+        preserve: &mut PreserveStack,
+        lc: LiveId,
+        nc: LiveId,
+    ) {
+        preserve.close_tag(lc);
+        nodes.push(HtmlNode::CloseTag { lc, nc });
+    }
+
+    /// `<x/>`: a close tag for the start tag that began at `tag_node_start`.
+    fn push_self_close(
+        nodes: &mut Vec<HtmlNode>,
+        preserve: &mut PreserveStack,
+        tag_node_start: usize,
+    ) {
+        if let Some(HtmlNode::OpenTag { lc, nc }) = nodes.get(tag_node_start) {
+            let (lc, nc) = (*lc, *nc);
+            push_close_tag(nodes, preserve, lc, nc);
+        }
+    }
+
+    fn push_attribute(nodes: &mut Vec<HtmlNode>, lc: LiveId, nc: LiveId, start: usize, end: usize) {
+        nodes.push(HtmlNode::Attribute { lc, nc, start, end });
+    }
+
+    fn attribute_ids(name: &str, intern: InternLiveId) -> (LiveId, LiveId) {
+        (
+            LiveId::from_str_lc(name),
+            LiveId::from_str_with_intern(name, intern),
+        )
     }
 
     let mut nodes = Vec::new();
-    // How many whitespace-preserving elements are currently open. A single
-    // flag would be wrong: any tag nested inside `<pre>` used to reset
-    // collapsing for the rest of the element, so `<pre>a  <b>b  b</b>  c</pre>`
-    // lost every space after the first text run.
-    let mut pre_depth = 0usize;
-    let mut state = State::Text {
-        start: 0,
-        dec_start: 0,
-        last_non_whitespace: 0,
-        collapse_ws: true,
-    };
     // Decoded output never exceeds the source length, and reserving it up
     // front measurably beats growing it. `nodes` deliberately gets no such
     // hint: its length tracks tag count, not byte count, so sizing it from
     // `body.len()` made a tag-sparse document pay a large pointless alloc.
     let mut decoded = String::with_capacity(body.len());
+    let mut preserve = PreserveStack::default();
     let mut in_entity = None;
+    // Attribute values are never whitespace-collapsed, so this only exists to
+    // satisfy `process_entity`; it is reset whenever a value begins.
+    let mut attr_lnw = 0usize;
+    // Index in `nodes` where the tag being parsed began. If the input ends
+    // inside the tag, everything from here on is dropped, as a browser drops
+    // a tag cut off by end of input.
+    let mut tag_node_start = 0usize;
+    let mut state = State::Text {
+        dec_start: 0,
+        last_non_whitespace: 0,
+        collapse_ws: true,
+    };
 
     for (i, c) in body.char_indices() {
         state = match state {
-            State::DocType => {
-                if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else {
-                    State::DocType
-                }
-            }
-            State::HeaderQuestion => {
-                if c == '?' {
-                    State::HeaderAngle
-                } else {
-                    State::HeaderQuestion
-                }
-            }
-            State::HeaderAngle => {
-                if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else {
-                    State::HeaderQuestion
-                }
-            }
             State::Text {
-                start,
                 dec_start,
-                last_non_whitespace,
+                mut last_non_whitespace,
                 collapse_ws,
             } => {
                 if c == '<' {
-                    if let Some(InEntity { start, .. }) = in_entity {
-                        if let Some(errors) = errors {
-                            errors.push(HtmlError {
-                                message: "Unterminated entity".into(),
-                                position: start,
-                            })
-                        };
-                    }
-                    // An entity cannot span this boundary. Dropping it here is
-                    // what keeps a later `;` from truncating `decoded` back
-                    // past text that has already been committed to a node.
-                    in_entity = None;
+                    drop_entity(&mut in_entity, errors);
                     nodes.push(HtmlNode::Text {
                         start: dec_start,
                         end: decoded.len(),
                         all_ws: dec_start == last_non_whitespace,
                     });
-                    State::ElementName(i + 1)
+                    tag_node_start = nodes.len();
+                    State::TagOpen(i + 1)
                 } else {
-                    let mut last_non_whitespace = last_non_whitespace;
                     process_entity(
                         c,
+                        i,
                         &mut in_entity,
                         &mut decoded,
                         &mut last_non_whitespace,
                         collapse_ws,
                     );
                     State::Text {
-                        start,
                         dec_start,
                         last_non_whitespace,
                         collapse_ws,
                     }
                 }
             }
-            State::ElementName(start) => {
-                if c == '/' && i == start {
-                    State::ElementClose(i + 1)
-                } else if c == '!' && i == start {
-                    State::CommentStartDash1
-                } else if c == '?' && i == start {
-                    State::HeaderQuestion
-                } else if i == start && !c.is_ascii_alphabetic() {
-                    // A tag name has to start with an ASCII letter. Anything
-                    // else means the `<` was never markup — `5<10`, `a < b`,
-                    // `<>` — so put it back as literal text instead of
-                    // parsing a bogus element and losing the rest of the
-                    // line to it.
-                    let dec_start = decoded.len();
-                    decoded.push('<');
-                    let mut last_non_whitespace = decoded.len();
-                    process_entity(
-                        c,
-                        &mut in_entity,
-                        &mut decoded,
-                        &mut last_non_whitespace,
-                        pre_depth == 0,
-                    );
-                    State::Text {
-                        start,
-                        dec_start,
-                        last_non_whitespace,
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if is_html_whitespace(c) {
-                    let lc = LiveId::from_str_lc(&body[start..i]);
-                    if preserves_whitespace(lc) {
-                        pre_depth += 1;
-                    }
-                    nodes.push(HtmlNode::OpenTag {
-                        lc,
-                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                    });
-                    State::ElementAttrs
+            State::TagOpen(start) => {
+                if c == '!' {
+                    State::MarkupDeclarationOpen
                 } else if c == '/' {
-                    let lc = LiveId::from_str_lc(&body[start..i]);
-                    if preserves_whitespace(lc) {
-                        pre_depth += 1;
-                    }
-                    nodes.push(HtmlNode::OpenTag {
-                        lc,
-                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                    });
-                    State::ElementSelfClose
-                } else if c == '>' {
-                    let lc = LiveId::from_str_lc(&body[start..i]);
-                    let nc = LiveId::from_str_with_intern(&body[start..i], intern);
-                    if preserves_whitespace(lc) {
-                        pre_depth += 1;
-                    }
-                    nodes.push(HtmlNode::OpenTag { lc, nc });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
+                    State::EndTagOpen(i + 1)
+                } else if c.is_ascii_alphabetic() {
+                    State::TagName(start)
+                } else if c == '?' {
+                    report(errors, "Unexpected `?` after `<`", i);
+                    State::BogusComment
                 } else {
-                    State::ElementName(start)
-                }
-            }
-            State::ElementClose(start) => {
-                if i == start && !c.is_ascii_alphabetic() {
-                    // `</3`, `</ ` — not a close tag, so keep it as text.
+                    // A tag name has to start with an ASCII letter, so this
+                    // `<` was never markup — `5<10`, `a < b`, `<>` — and it
+                    // goes back into the text rather than starting a bogus
+                    // element that would eat the rest of the line.
                     let dec_start = decoded.len();
                     decoded.push('<');
-                    decoded.push('/');
                     let mut last_non_whitespace = decoded.len();
-                    process_entity(
-                        c,
-                        &mut in_entity,
-                        &mut decoded,
-                        &mut last_non_whitespace,
-                        pre_depth == 0,
-                    );
-                    State::Text {
-                        start,
-                        dec_start,
-                        last_non_whitespace,
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if c == '>' {
-                    let lc = LiveId::from_str_lc(&body[start..i]);
-                    let nc = LiveId::from_str_with_intern(&body[start..i], intern);
-                    if preserves_whitespace(lc) {
-                        pre_depth = pre_depth.saturating_sub(1);
-                    }
-                    nodes.push(HtmlNode::CloseTag { lc, nc });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if is_html_whitespace(c) {
-                    let lc = LiveId::from_str_lc(&body[start..i]);
-                    if preserves_whitespace(lc) {
-                        pre_depth = pre_depth.saturating_sub(1);
-                    }
-                    nodes.push(HtmlNode::CloseTag {
-                        lc,
-                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                    });
-                    State::ElementCloseScanSpaces
-                } else {
-                    State::ElementClose(start)
-                }
-            }
-            State::ElementCloseScanSpaces => {
-                if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if !is_html_whitespace(c) {
-                    if let Some(errors) = errors {
-                        errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})
-                    };
-                    State::BogusTag
-                } else {
-                    State::ElementCloseScanSpaces
-                }
-            }
-            State::ElementSelfClose => {
-                let malformed = c != '>';
-                if malformed {
-                    if let Some(errors) = errors {
-                        errors.push(HtmlError {
-                            message: "Expected > after / self closed tag".into(),
-                            position: i,
-                        })
-                    };
-                }
-                // look backwards to the OpenTag
-                let begin = nodes.iter().rev().find_map(|v| {
-                    if let HtmlNode::OpenTag { lc, nc } = v {
-                        Some((*lc, *nc))
+                    let collapse_ws = preserve.collapses();
+                    if c == '<' {
+                        // `<<b>`: the second `<` may still open a tag.
+                        nodes.push(HtmlNode::Text {
+                            start: dec_start,
+                            end: decoded.len(),
+                            all_ws: false,
+                        });
+                        tag_node_start = nodes.len();
+                        State::TagOpen(i + 1)
                     } else {
-                        None
-                    }
-                });
-                // Always present in a well-formed transition into this state,
-                // but a parser fed arbitrary input should not carry an
-                // `unwrap` that a future edit could make reachable.
-                if let Some((lc, nc)) = begin {
-                    if preserves_whitespace(lc) {
-                        pre_depth = pre_depth.saturating_sub(1);
-                    }
-                    nodes.push(HtmlNode::CloseTag { lc, nc });
-                }
-                if malformed {
-                    // Drop the rest of the malformed tag instead of resuming
-                    // text inside it, which leaked its `>` into the output.
-                    State::BogusTag
-                } else {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
+                        process_entity(
+                            c,
+                            i,
+                            &mut in_entity,
+                            &mut decoded,
+                            &mut last_non_whitespace,
+                            collapse_ws,
+                        );
+                        State::Text {
+                            dec_start,
+                            last_non_whitespace,
+                            collapse_ws,
+                        }
                     }
                 }
             }
-            State::BogusTag => {
-                if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else {
-                    State::BogusTag
-                }
-            }
-            State::ElementAttrs => {
-                if c == '/' {
-                    //nodes.push(HtmlNode::BeginElement(HtmlId::new(&body, start, i)));
-                    State::ElementSelfClose
-                } else if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if !is_html_whitespace(c) {
-                    State::AttribName(i)
-                } else {
-                    State::ElementAttrs
-                }
-            }
-            State::AttribName(start) => {
+            State::TagName(start) => {
                 if is_html_whitespace(c) {
-                    State::AttribValueEq(
-                        LiveId::from_str_lc(&body[start..i]),
-                        LiveId::from_str_with_intern(&body[start..i], intern),
-                    )
-                } else if c == '=' {
-                    State::AttribValueStart(
-                        LiveId::from_str_lc(&body[start..i]),
-                        LiveId::from_str_with_intern(&body[start..i], intern),
-                    )
+                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
+                    State::BeforeAttributeName
                 } else if c == '/' {
-                    nodes.push(HtmlNode::Attribute {
-                        lc: LiveId::from_str_lc(&body[start..i]),
-                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                        start: 0,
-                        end: 0,
-                    });
-                    State::ElementSelfClose
+                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
+                    State::SelfClosingStartTag
                 } else if c == '>' {
-                    nodes.push(HtmlNode::Attribute {
-                        lc: LiveId::from_str_lc(&body[start..i]),
-                        nc: LiveId::from_str_with_intern(&body[start..i], intern),
-                        start: 0,
-                        end: 0,
-                    });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
+                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
+                    text_state(&decoded, &preserve)
                 } else {
-                    State::AttribName(start)
+                    State::TagName(start)
                 }
             }
-            State::AttribValueEq(lc, nc) => {
-                if c == '/' {
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start: 0,
-                        end: 0,
-                    });
-                    State::ElementSelfClose
+            State::EndTagOpen(start) => {
+                if c.is_ascii_alphabetic() {
+                    State::EndTagName(start)
                 } else if c == '>' {
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start: 0,
-                        end: 0,
-                    });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
+                    // `</>` has no name to close. Ignored, as a browser does.
+                    report(errors, "Missing end tag name", i);
+                    text_state(&decoded, &preserve)
+                } else {
+                    // `</3`: a bogus comment running to the next `>`.
+                    report(errors, "Invalid first character of end tag name", i);
+                    State::BogusComment
+                }
+            }
+            State::EndTagName(start) => {
+                if c == '>' {
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    push_close_tag(&mut nodes, &mut preserve, lc, nc);
+                    text_state(&decoded, &preserve)
+                } else if is_html_whitespace(c) || c == '/' {
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    push_close_tag(&mut nodes, &mut preserve, lc, nc);
+                    State::AfterEndTagName
+                } else {
+                    State::EndTagName(start)
+                }
+            }
+            State::AfterEndTagName => {
+                if c == '>' {
+                    text_state(&decoded, &preserve)
+                } else if is_html_whitespace(c) || c == '/' {
+                    State::AfterEndTagName
+                } else {
+                    report(errors, "Attributes on an end tag are ignored", i);
+                    State::BogusComment
+                }
+            }
+            State::SelfClosingStartTag => {
+                if c == '>' {
+                    push_self_close(&mut nodes, &mut preserve, tag_node_start);
+                    text_state(&decoded, &preserve)
+                } else {
+                    // `<a/b>`: the slash was not a self-closing marker after
+                    // all. Read on as `<a b>`.
+                    report(errors, "Unexpected `/` in tag", i);
+                    if is_html_whitespace(c) {
+                        State::BeforeAttributeName
+                    } else if c == '/' {
+                        State::SelfClosingStartTag
+                    } else {
+                        State::AttributeName(i)
                     }
+                }
+            }
+            State::BeforeAttributeName => {
+                if is_html_whitespace(c) {
+                    State::BeforeAttributeName
+                } else if c == '/' {
+                    State::SelfClosingStartTag
+                } else if c == '>' {
+                    text_state(&decoded, &preserve)
+                } else {
+                    State::AttributeName(i)
+                }
+            }
+            State::AttributeName(start) => {
+                if is_html_whitespace(c) {
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    State::AfterAttributeName(lc, nc)
                 } else if c == '=' {
-                    State::AttribValueStart(lc, nc)
-                } else if !is_html_whitespace(c) {
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start: 0,
-                        end: 0,
-                    });
-                    State::AttribName(i)
-                } else {
-                    State::AttribValueEq(lc, nc)
-                }
-            }
-            State::AttribValueStart(lc, nc) => {
-                if c == '>' {
-                    // An empty unquoted value: the tag ends here.
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start: 0,
-                        end: 0,
-                    });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if c == '\"' {
-                    // double quoted attrib
-                    State::AttribValueDq(lc, nc, decoded.len())
-                } else if c == '\'' {
-                    // single quoted attrib
-                    State::AttribValueSq(lc, nc, decoded.len())
-                } else if !is_html_whitespace(c) {
-                    // Route the first character through `process_entity` too,
-                    // otherwise a value starting with `&` never begins an
-                    // entity scan and `&amp;x` decodes as literal `&amp;x`.
-                    let start = decoded.len();
-                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
-                    State::AttribValueBare(lc, nc, start)
-                } else {
-                    State::AttribValueStart(lc, nc)
-                }
-            }
-            State::AttribValueSq(lc, nc, start) => {
-                if c == '\'' {
-                    if let Some(InEntity { start, .. }) = in_entity {
-                        if let Some(errors) = errors {
-                            errors.push(HtmlError {
-                                message: "Unterminated entity".into(),
-                                position: start,
-                            })
-                        };
-                    }
-                    // An entity cannot span this boundary. Dropping it here is
-                    // what keeps a later `;` from truncating `decoded` back
-                    // past text that has already been committed to a node.
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    State::ElementAttrs
-                } else {
-                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
-                    State::AttribValueSq(lc, nc, start)
-                }
-            }
-            State::AttribValueDq(lc, nc, start) => {
-                if c == '\"' {
-                    if let Some(InEntity { start, .. }) = in_entity {
-                        if let Some(errors) = errors {
-                            errors.push(HtmlError {
-                                message: "Unterminated entity".into(),
-                                position: start,
-                            })
-                        };
-                    }
-                    // An entity cannot span this boundary. Dropping it here is
-                    // what keeps a later `;` from truncating `decoded` back
-                    // past text that has already been committed to a node.
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    State::ElementAttrs
-                } else {
-                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
-                    State::AttribValueDq(lc, nc, start)
-                }
-            }
-            State::AttribValueBareSlash(lc, nc, start) => {
-                if c == '>' {
-                    // The slash really was the self-closing marker.
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    let begin = nodes.iter().rev().find_map(|v| {
-                        if let HtmlNode::OpenTag { lc, nc } = v {
-                            Some((*lc, *nc))
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some((lc, nc)) = begin {
-                        if preserves_whitespace(lc) {
-                            pre_depth = pre_depth.saturating_sub(1);
-                        }
-                        nodes.push(HtmlNode::CloseTag { lc, nc });
-                    }
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if is_html_whitespace(c) {
-                    // `<a href=x/ y=2>`: the slash belongs to the value.
-                    decoded.push('/');
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    State::ElementAttrs
-                } else {
-                    // `<a href=http://host/path>`: an ordinary value character.
-                    decoded.push('/');
-                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
-                    State::AttribValueBare(lc, nc, start)
-                }
-            }
-            State::AttribValueBare(lc, nc, start) => {
-                if c == '/' {
-                    // Only a slash immediately before `>` closes the tag, so
-                    // decide once the next character is known.
-                    State::AttribValueBareSlash(lc, nc, start)
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    State::BeforeAttributeValue(lc, nc)
+                } else if c == '/' {
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    State::SelfClosingStartTag
                 } else if c == '>' {
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
-                } else if is_html_whitespace(c) {
-                    in_entity = None;
-                    nodes.push(HtmlNode::Attribute {
-                        lc,
-                        nc,
-                        start,
-                        end: decoded.len(),
-                    });
-                    State::ElementAttrs
+                    let (lc, nc) = attribute_ids(&body[start..i], intern);
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    text_state(&decoded, &preserve)
                 } else {
-                    process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
-                    State::AttribValueBare(lc, nc, start)
+                    State::AttributeName(start)
                 }
             }
-            State::CommentStartDash1 => {
-                if c != '-' {
-                    // we should scan for >
-                    State::DocType
-                    // if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected //character looking for - after <!".into(), position:i})};
+            State::AfterAttributeName(lc, nc) => {
+                if is_html_whitespace(c) {
+                    State::AfterAttributeName(lc, nc)
+                } else if c == '=' {
+                    State::BeforeAttributeValue(lc, nc)
+                } else if c == '/' {
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    State::SelfClosingStartTag
+                } else if c == '>' {
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    text_state(&decoded, &preserve)
                 } else {
-                    State::CommentStartDash2
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    State::AttributeName(i)
                 }
             }
-            State::CommentStartDash2 => {
-                if c != '-' {
-                    if let Some(errors) = errors {
-                        errors.push(HtmlError {
-                            message: "Unexpected character looking for - after <!-".into(),
-                            position: i,
-                        })
-                    };
-                    State::CommentBody
+            State::BeforeAttributeValue(lc, nc) => {
+                if is_html_whitespace(c) {
+                    State::BeforeAttributeValue(lc, nc)
+                } else if c == '"' {
+                    State::AttributeValueDq(lc, nc, decoded.len())
+                } else if c == '\'' {
+                    State::AttributeValueSq(lc, nc, decoded.len())
+                } else if c == '>' {
+                    // `<a href=>`: an empty value, and the tag ends here.
+                    report(errors, "Missing attribute value", i);
+                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    text_state(&decoded, &preserve)
                 } else {
-                    // `<!--` is complete: a `>` now closes an empty comment.
+                    let start = decoded.len();
+                    attr_lnw = start;
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    State::AttributeValueUnquoted(lc, nc, start)
+                }
+            }
+            State::AttributeValueDq(lc, nc, start) => {
+                if c == '"' {
+                    drop_entity(&mut in_entity, errors);
+                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    State::BeforeAttributeName
+                } else {
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    State::AttributeValueDq(lc, nc, start)
+                }
+            }
+            State::AttributeValueSq(lc, nc, start) => {
+                if c == '\'' {
+                    drop_entity(&mut in_entity, errors);
+                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    State::BeforeAttributeName
+                } else {
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    State::AttributeValueSq(lc, nc, start)
+                }
+            }
+            State::AttributeValueUnquoted(lc, nc, start) => {
+                if is_html_whitespace(c) {
+                    drop_entity(&mut in_entity, errors);
+                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    State::BeforeAttributeName
+                } else if c == '>' {
+                    drop_entity(&mut in_entity, errors);
+                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    text_state(&decoded, &preserve)
+                } else {
+                    // Everything else, `/` included, is part of the value:
+                    // `<a href=http://host/path>`.
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    State::AttributeValueUnquoted(lc, nc, start)
+                }
+            }
+            State::MarkupDeclarationOpen => {
+                if c == '-' {
+                    State::MarkupDeclarationDash
+                } else {
+                    // `<!DOCTYPE ...>`, `<![CDATA[...]]>`, `<!x`: none of them
+                    // produce a node, and all of them end at the next `>`.
+                    State::BogusComment
+                }
+            }
+            State::MarkupDeclarationDash => {
+                if c == '-' {
+                    State::CommentStart
+                } else {
+                    report(errors, "Expected `--` after `<!`", i);
+                    State::BogusComment
+                }
+            }
+            State::CommentStart => {
+                if c == '-' {
+                    State::CommentStartDash
+                } else if c == '>' {
+                    // `<!-->` is a complete, empty comment.
+                    report(errors, "Abruptly closed empty comment", i);
+                    text_state(&decoded, &preserve)
+                } else {
+                    State::Comment
+                }
+            }
+            State::CommentStartDash => {
+                if c == '-' {
                     State::CommentEnd
+                } else if c == '>' {
+                    // `<!--->` likewise.
+                    report(errors, "Abruptly closed empty comment", i);
+                    text_state(&decoded, &preserve)
+                } else {
+                    State::Comment
                 }
             }
-            State::CommentBody => {
+            State::Comment => {
                 if c == '-' {
                     State::CommentEndDash
                 } else {
-                    State::CommentBody
+                    State::Comment
                 }
             }
             State::CommentEndDash => {
                 if c == '-' {
                     State::CommentEnd
                 } else {
-                    State::CommentBody
+                    State::Comment
                 }
             }
             State::CommentEnd => {
-                if c == '-' {
-                    // A run of dashes keeps `>` able to close the comment.
+                if c == '>' {
+                    text_state(&decoded, &preserve)
+                } else if c == '!' {
+                    State::CommentEndBang
+                } else if c == '-' {
+                    // A longer run of dashes still lets `>` close the comment.
                     State::CommentEnd
-                } else if c == '>' {
-                    State::Text {
-                        start: i + 1,
-                        dec_start: decoded.len(),
-                        last_non_whitespace: decoded.len(),
-                        collapse_ws: pre_depth == 0,
-                    }
                 } else {
-                    State::CommentBody
+                    State::Comment
+                }
+            }
+            State::CommentEndBang => {
+                if c == '-' {
+                    State::CommentEndDash
+                } else if c == '>' {
+                    // `--!>` closes a comment, with a complaint.
+                    report(errors, "Incorrectly closed comment", i);
+                    text_state(&decoded, &preserve)
+                } else {
+                    State::Comment
+                }
+            }
+            State::BogusComment => {
+                if c == '>' {
+                    text_state(&decoded, &preserve)
+                } else {
+                    State::BogusComment
                 }
             }
         }
     }
-    if let State::Text {
-        start: _,
-        dec_start,
-        last_non_whitespace,
-        collapse_ws: _,
-    } = state
-    {
-        nodes.push(HtmlNode::Text {
-            start: dec_start,
-            end: decoded.len(),
-            all_ws: dec_start == last_non_whitespace,
-        });
-    } else {
-        // if we didnt end in text state something is wrong
-        if let Some(errors) = errors {
-            errors.push(HtmlError {
-                message: "HTML Parsing endstate is not HtmlNode::Text".into(),
-                position: body.len(),
-            })
-        };
+
+    match state {
+        State::Text {
+            dec_start,
+            last_non_whitespace,
+            ..
+        } => {
+            drop_entity(&mut in_entity, errors);
+            nodes.push(HtmlNode::Text {
+                start: dec_start,
+                end: decoded.len(),
+                all_ws: dec_start == last_non_whitespace,
+            });
+        }
+        // `a<` and `a</`: the `<` never became a tag, so it is text.
+        State::TagOpen(_) | State::EndTagOpen(_) => {
+            let start = decoded.len();
+            decoded.push('<');
+            if matches!(state, State::EndTagOpen(_)) {
+                decoded.push('/');
+            }
+            nodes.push(HtmlNode::Text {
+                start,
+                end: decoded.len(),
+                all_ws: false,
+            });
+        }
+        State::TagName(_)
+        | State::EndTagName(_)
+        | State::AfterEndTagName
+        | State::SelfClosingStartTag
+        | State::BeforeAttributeName
+        | State::AttributeName(_)
+        | State::AfterAttributeName(..)
+        | State::BeforeAttributeValue(..)
+        | State::AttributeValueDq(..)
+        | State::AttributeValueSq(..)
+        | State::AttributeValueUnquoted(..) => {
+            report(errors, "Unexpected end of input inside a tag", body.len());
+            // A tag cut off by the end of input is dropped whole, as a
+            // browser drops it.
+            nodes.truncate(tag_node_start);
+        }
+        State::MarkupDeclarationOpen
+        | State::MarkupDeclarationDash
+        | State::CommentStart
+        | State::CommentStartDash
+        | State::Comment
+        | State::CommentEndDash
+        | State::CommentEnd
+        | State::CommentEndBang
+        | State::BogusComment => {
+            report(errors, "Unexpected end of input inside a comment", body.len());
+        }
     }
-    HtmlDoc { nodes, decoded }
+
+    let closes = compute_closes(&nodes);
+    HtmlDoc {
+        nodes,
+        decoded,
+        closes,
+    }
+}
+
+/// For each node, the index of the close tag that ends the element opened
+/// there, or [`NO_CLOSE`] for every other node.
+///
+/// A close tag ends the innermost open element of its name. Anything opened
+/// inside that element and still open — a void element such as `<br>`, or an
+/// element the document never closed — ends there as well, without a close
+/// tag of its own. A close tag with no open element of its name is ignored.
+/// This is the recovery a browser applies, and it is what makes the walker's
+/// `jump_to_close` immune to void elements.
+fn compute_closes(nodes: &[HtmlNode]) -> Vec<usize> {
+    let mut closes = vec![NO_CLOSE; nodes.len()];
+    // Indices of the open tags currently unclosed, outermost first.
+    let mut open: Vec<usize> = Vec::new();
+    // How many elements of each name are open, so a stray close tag is
+    // rejected without walking the stack: a message can combine deep nesting
+    // with many stray close tags, and walking would be quadratic.
+    let mut counts: LiveIdMap<u32> = LiveIdMap::default();
+    let name_of = |i: usize| match &nodes[i] {
+        HtmlNode::OpenTag { lc, .. } => *lc,
+        _ => LiveId::empty(),
+    };
+    for (i, node) in nodes.iter().enumerate() {
+        match node {
+            HtmlNode::OpenTag { lc, .. } => {
+                open.push(i);
+                *counts.entry(*lc).or_insert(0) += 1;
+            }
+            HtmlNode::CloseTag { lc, .. } => {
+                if !counts.get(lc).is_some_and(|n| *n > 0) {
+                    continue;
+                }
+                if let Some(pos) = open.iter().rposition(|&j| name_of(j) == *lc) {
+                    closes[open[pos]] = i;
+                    for &j in &open[pos..] {
+                        if let Some(n) = counts.get_mut(&name_of(j)) {
+                            *n = n.saturating_sub(1);
+                        }
+                    }
+                    open.truncate(pos);
+                }
+            }
+            _ => {}
+        }
+    }
+    closes
 }
 
 pub fn match_entity(what: &str) -> Result<u32, String> {
@@ -2575,30 +2612,66 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
 }
 
 /// Decodes `&#38;` / `&#x26;` style references, given the text between the
-/// `&` and the `;`.
+/// `&` and the `;`, the way the HTML tokenizer's numeric character reference
+/// states do.
 ///
-/// Everything is validated rather than cast, because the caller turns the
-/// result into a `char`: an out-of-range value, a surrogate, or a negative
-/// number would otherwise panic.
+/// Values that name no character — zero, a UTF-16 surrogate, or anything past
+/// U+10FFFF — become U+FFFD rather than an error, and the C1 control range is
+/// read as Windows-1252, because that is what legacy content means by it:
+/// `&#151;` is an em dash. Malformed references (`&#;`, `&#x;`, `&#-1;`) are
+/// errors, and the caller leaves them as literal text.
 fn match_numeric_entity(what: &str) -> Result<u32, String> {
     let Some(digits) = what.strip_prefix('#') else {
         return Err("unknown html entity".into());
     };
-    // `&#x..;` / `&#X..;` are hex, anything else is decimal. Parsing as `u32`
-    // (not `i64`) rejects a leading `-` or `+` outright.
-    let num = match digits.strip_prefix(['x', 'X']) {
-        Some(hex) => u32::from_str_radix(hex, 16)
-            .map_err(|_| String::from("Cannot parse hex html entity"))?,
-        None => digits
-            .parse::<u32>()
-            .map_err(|_| String::from("Cannot parse digit html entity"))?,
+    let (radix, digits) = match digits.strip_prefix(['x', 'X']) {
+        Some(hex) => (16, hex),
+        None => (10, digits),
     };
-    // Reject anything that is not a Unicode scalar value: beyond U+10FFFF, or
-    // a UTF-16 surrogate half.
-    if char::from_u32(num).is_none() {
-        return Err("Html entity is not a valid unicode scalar".into());
+    if digits.is_empty() {
+        return Err("Numeric html entity has no digits".into());
     }
-    Ok(num)
+    // Saturate rather than overflow: anything past U+10FFFF is U+FFFD, so a
+    // 40-digit reference must land there too, not in an error and not wrapped.
+    let mut value = 0u32;
+    for digit in digits.chars() {
+        let Some(digit) = digit.to_digit(radix) else {
+            return Err("Cannot parse numeric html entity".into());
+        };
+        value = value.saturating_mul(radix).saturating_add(digit);
+    }
+    Ok(match value {
+        0 | 0xD800..=0xDFFF => 0xFFFD,
+        v if v > 0x10FFFF => 0xFFFD,
+        0x80 => 0x20AC,
+        0x82 => 0x201A,
+        0x83 => 0x0192,
+        0x84 => 0x201E,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02C6,
+        0x89 => 0x2030,
+        0x8A => 0x0160,
+        0x8B => 0x2039,
+        0x8C => 0x0152,
+        0x8E => 0x017D,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201C,
+        0x94 => 0x201D,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02DC,
+        0x99 => 0x2122,
+        0x9A => 0x0161,
+        0x9B => 0x203A,
+        0x9C => 0x0153,
+        0x9E => 0x017E,
+        0x9F => 0x0178,
+        v => v,
+    })
 }
 
 #[cfg(test)]
@@ -2659,23 +2732,36 @@ mod tests {
 
     /// Numeric character references that do not name a Unicode scalar value
     /// used to reach `char::from_u32(..).unwrap()` and abort the process. Any
-    /// of these is reachable from a hostile chat message.
+    /// of these is reachable from a hostile chat message. The tokenizer's
+    /// rule is U+FFFD for a value that names no character, and literal text
+    /// for a reference that is not well-formed at all.
     #[test]
-    fn out_of_range_numeric_entities_are_left_as_text() {
+    fn numeric_entities_follow_the_tokenizer_rules() {
         for body in [
             "&#xD800;",           // high surrogate
             "&#xDFFF;",           // low surrogate
             "&#55296;",           // the same, in decimal
             "&#x110000;",         // one past the last scalar value
-            "&#-1;",              // negative
-            "&#x-1;",
             "&#99999999999999;",  // overflows every integer width
-            "&#;",
-            "&#x;",
+            "&#0;",
         ] {
+            assert_eq!(text_of(body), "\u{fffd}", "{body:?}");
+            assert_nodes_consistent(body);
+        }
+        for body in ["&#-1;", "&#x-1;", "&#;", "&#x;", "&#12a;", "&#xZZ;"] {
             assert_eq!(text_of(body), body, "{body:?} should survive as literal text");
             assert_nodes_consistent(body);
         }
+        // the C1 range is read as Windows-1252, which is what legacy content
+        // means by it
+        assert_eq!(text_of("&#151;"), "\u{2014}");
+        assert_eq!(text_of("&#x96;"), "\u{2013}");
+        assert_eq!(text_of("&#146;"), "\u{2019}");
+        assert_eq!(text_of("&#128;"), "\u{20ac}");
+        // and a decoded space collapses like a literal one
+        assert_eq!(text_of("a &#32; b"), "a b");
+        assert_eq!(text_of("a&#32;&#32;b"), "a b");
+        assert_eq!(text_of("<pre>a&#32;&#32;b</pre>"), "a  b");
     }
 
     /// A `&` that never terminates must not stay pending across a tag or a
@@ -2897,10 +2983,10 @@ mod tests {
         assert_eq!(all_ws, vec![false]);
     }
 
-    /// A `/` only closes the tag when `>` follows it, so unquoted URLs keep
-    /// their path.
+    /// In an unquoted value a `/` is just another character, so unquoted URLs
+    /// keep their path — and `<img src=x/>` is `src="x/"`, not a self-close.
     #[test]
-    fn an_unquoted_value_keeps_slashes_that_are_not_the_self_closing_marker() {
+    fn an_unquoted_value_keeps_its_slashes() {
         fn attr(body: &str, key: LiveId) -> Option<String> {
             let doc = parse_html(body, &mut None, InternLiveId::No);
             let mut walker = doc.new_walker();
@@ -2915,11 +3001,13 @@ mod tests {
         );
         assert_eq!(text_of("<a href=http://example.com/page>x</a> rest"), "x rest");
         assert_eq!(attr("<img src=/media/pic.png>", live_id!(src)).as_deref(), Some("/media/pic.png"));
-        // and the self-closing form still self-closes
-        assert_eq!(attr("<img src=x/>", live_id!(src)).as_deref(), Some("x"));
+        assert_eq!(attr("<img src=x/>", live_id!(src)).as_deref(), Some("x/"));
         let doc = parse_html("<img src=x/>", &mut None, InternLiveId::No);
-        assert!(doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(img))));
+        assert!(!doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { .. })));
         assert_eq!(attr("<a href=x/ y=2>t</a>", live_id!(href)).as_deref(), Some("x/"));
+        // quoted values still self-close, which the SVG parser relies on
+        let doc = parse_html("<img src=\"x\"/>", &mut None, InternLiveId::No);
+        assert!(doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(img))));
     }
 
     /// A `<` that cannot begin a tag is literal text, the way a browser
@@ -2942,22 +3030,56 @@ mod tests {
     }
 
     /// Junk inside a tag is discarded up to its `>` instead of resuming text
-    /// in the middle of it, and `</` that cannot name an element is text.
+    /// in the middle of it, which leaked the tag's own `>` into the output.
     #[test]
     fn malformed_tags_do_not_leak_their_markup_into_the_text() {
         assert_eq!(text_of("a</p x>b"), "ab");
-        assert_eq!(text_of("a<br/x>b"), "ab");
         assert_eq!(text_of("<p>x</p junk>y"), "xy");
-        assert_eq!(text_of("</3 you"), "</3 you");
-        assert_eq!(text_of("i </3 u"), "i </3 u");
-        assert_eq!(text_of("a</ b"), "a</ b");
-        // well-formed close tags are unaffected
         assert_eq!(text_of("<p>x</p >y"), "xy");
+        assert_eq!(text_of("<p>x</p/>y"), "xy");
         assert_eq!(text_of("<br/>ok"), "ok");
         assert_eq!(text_of("<a href=u>t</a>tail"), "ttail");
         for body in ["a</p x>b", "a<br/x>b", "</3 you", "a</ b", "a</>b"] {
             assert_nodes_consistent(body);
         }
+    }
+
+    /// The tokenizer's end-tag-open rules: `</` followed by a letter names an
+    /// element, `</>` is dropped, and `</` followed by anything else opens a
+    /// bogus comment that runs to the next `>`. That last one really does
+    /// eat text — `i </3 u` renders as `i ` in a browser too.
+    #[test]
+    fn end_tag_open_follows_the_tokenizer() {
+        assert_eq!(text_of("a</>b"), "ab");
+        assert_eq!(text_of("i </3 u"), "i ");
+        assert_eq!(text_of("i </3 u> x"), "i  x");
+        assert_eq!(text_of("a</ b>c"), "ac");
+        // but `</` at the very end of input is text
+        assert_eq!(text_of("a</"), "a</");
+        assert_eq!(text_of("a<"), "a<");
+    }
+
+    /// `<a/b>` reads as `<a b>`: the slash was not a self-closing marker, so
+    /// no close tag is synthesized and `b` is an attribute.
+    #[test]
+    fn a_stray_slash_in_a_start_tag_is_not_a_self_close() {
+        let doc = parse_html("<a/b>x</a>", &mut None, InternLiveId::No);
+        let closes = doc.nodes.iter().filter(|n| matches!(n, HtmlNode::CloseTag { .. })).count();
+        assert_eq!(closes, 1, "only the explicit </a> closes anything");
+        let mut walker = doc.new_walker();
+        while !walker.done() && walker.open_tag_lc().is_none() {
+            walker.walk();
+        }
+        assert_eq!(walker.find_attr_lc(live_id!(b)), Some(""));
+        assert_eq!(text_of("a<br/x>b"), "ab");
+        // a tag the input cuts off is dropped whole, as a browser drops it
+        let doc = parse_html("<b>text<a href=\"x", &mut None, InternLiveId::No);
+        let opens: Vec<_> = doc.nodes.iter().filter_map(|n| match n {
+            HtmlNode::OpenTag { lc, .. } => Some(*lc),
+            _ => None,
+        }).collect();
+        assert_eq!(opens, vec![live_id!(b)]);
+        assert_eq!(text_of("<b>text<a href=\"x"), "text");
     }
 
     /// `<!-->` is a complete comment rather than the start of an
@@ -2970,7 +3092,70 @@ mod tests {
         assert_eq!(text_of("a<!----->b"), "ab");
         assert_eq!(text_of("a<!--c-->b"), "ab");
         assert_eq!(text_of("a<!--c--->b"), "ab");
+        assert_eq!(text_of("a<!--c--!>b"), "ab");
+        assert_eq!(text_of("a<!--c--!-->b"), "ab");
+        assert_eq!(text_of("a<!-x>b"), "ab");
+        assert_eq!(text_of("a<!DOCTYPE html>b"), "ab");
+        assert_eq!(text_of("a<![CDATA[x]]>b"), "ab");
         assert_eq!(text_of("a<?xml version='1'?>b"), "ab");
+        assert_eq!(text_of("a<?php echo 1 ?>b"), "ab");
+        // a comment cut off by end of input takes nothing else with it
+        assert_eq!(text_of("a<!-- unterminated"), "a");
+    }
+
+    /// The close of every element is resolved once, at parse time, with the
+    /// same recovery a browser applies: a close tag ends the innermost open
+    /// element of its name, anything left open inside ends with it, and a
+    /// close tag that matches nothing is ignored.
+    #[test]
+    fn close_indices_follow_browser_recovery() {
+        fn closes_of(body: &str) -> Vec<(LiveId, Option<LiveId>)> {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut walker = doc.new_walker();
+            let mut out = Vec::new();
+            while !walker.done() {
+                if let Some(lc) = walker.open_tag_lc() {
+                    let close = walker.close_index().map(|i| match &doc.nodes[i] {
+                        HtmlNode::CloseTag { lc, .. } => *lc,
+                        _ => unreachable!(),
+                    });
+                    out.push((lc, close));
+                }
+                walker.walk();
+            }
+            out
+        }
+        let (a, b, br, div, span) =
+            (live_id!(a), live_id!(b), live_id!(br), live_id!(div), live_id!(span));
+        assert_eq!(closes_of("<div><b>x</b></div>"), vec![(div, Some(div)), (b, Some(b))]);
+        // a void element ends with its parent
+        assert_eq!(closes_of("<div><br>x</div>"), vec![(div, Some(div)), (br, None)]);
+        // a stray close tag matches nothing and is ignored, so `</a>` still
+        // closes the link rather than being consumed by the `</span>`
+        assert_eq!(
+            closes_of("<div><a>x</span>y</a></div>"),
+            vec![(div, Some(div)), (a, Some(a))]
+        );
+        // an unclosed element ends with its parent, or never
+        assert_eq!(closes_of("<div><span>x</div>y"), vec![(div, Some(div)), (span, None)]);
+        assert_eq!(closes_of("<p>unclosed"), vec![(live_id!(p), None)]);
+        // same-name nesting resolves innermost-first
+        assert_eq!(closes_of("<b>x<b>y</b>z</b>"), vec![(b, Some(b)), (b, Some(b))]);
+        let doc = parse_html("<b>x<b>y</b>z</b>", &mut None, InternLiveId::No);
+        let outer = doc.new_walker_with_index(1).close_index().unwrap();
+        assert!(matches!(doc.nodes[outer], HtmlNode::CloseTag { .. }));
+        assert_eq!(outer, doc.nodes.len() - 2);
+    }
+
+    /// `<pre>` and `<code>` are tracked as a stack: a stray `</code>` cannot
+    /// cancel an enclosing `<pre>`, and `</pre>` closes a `<code>` left open
+    /// inside it.
+    #[test]
+    fn whitespace_preservation_is_a_stack() {
+        assert_eq!(text_of("<pre>a  </code>b  c</pre>d  e"), "a  b  cd e");
+        assert_eq!(text_of("<pre><code>a  b</pre>c  d"), "a  bc d");
+        assert_eq!(text_of("<code>a  <pre>b  c</code>d  e</pre>"), "a  b  cd e");
+        assert_eq!(text_of("</pre>a  b"), "a b");
     }
 
     #[test]

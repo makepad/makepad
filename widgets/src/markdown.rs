@@ -406,7 +406,6 @@ impl Markdown {
                         self.code_block_string.clear();
                     } else {
                         tf.push_size_rel_scale(tf.fixed_font_size_scale);
-                        tf.combine_spaces.push(false);
                         tf.fixed.push();
                         tf.begin_code(cx);
                     }
@@ -445,7 +444,6 @@ impl Markdown {
                     } else {
                         tf.font_sizes.pop();
                         tf.fixed.pop();
-                        tf.combine_spaces.pop();
                         tf.end_code(cx);
                     }
                 }

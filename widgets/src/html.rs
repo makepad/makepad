@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -186,20 +187,6 @@ script_mod! {
     }
 }
 
-/// Whether to trim leading and trailing whitespace in the text body of an HTML tag.
-///
-/// Currently, *all* Unicode whitespace characters are trimmed, not just ASCII whitespace.
-///
-/// The default is to keep all whitespace.
-#[derive(Copy, Clone, PartialEq, Default)]
-pub enum TrimWhitespaceInText {
-    /// Leading and trailing whitespace will be preserved in the text.
-    #[default]
-    Keep,
-    /// Leading and trailing whitespace will be trimmed from the text.
-    Trim,
-}
-
 #[derive(Script, Widget)]
 pub struct Html {
     #[source]
@@ -246,11 +233,6 @@ pub struct Html {
     /// used to pop an empty stack.
     #[rust]
     open_summaries: usize,
-
-    /// Widget ids already claimed during this draw, so a repeated `id`
-    /// attribute cannot bind two elements to the same cached sub-widget.
-    #[rust]
-    used_widget_ids: HashSet<LiveId>,
 
     /// Column counts already computed for a `<table>` at a given node index.
     /// Counting scans forward to the first row, so a document that is
@@ -341,6 +323,74 @@ impl Html {
         }
     }
 
+    /// Ends the innermost open `<summary>`: pops the bold run and the glyph
+    /// tracker `<summary>` pushed, and lays the invisible click target over
+    /// the summary line. Returns whether the enclosing `<details>` is
+    /// collapsed, in which case the caller skips its body.
+    ///
+    /// Called for `</summary>`, and also for `</details>` and the end of the
+    /// document when the `<summary>` was never closed — otherwise its bold
+    /// and its tracker would leak into everything drawn after it.
+    fn close_summary(&mut self, cx: &mut Cx2d) -> bool {
+        self.open_summaries = self.open_summaries.saturating_sub(1);
+        if let Some(level) = self.details_stack.last_mut() {
+            level.summary_open = false;
+        }
+        self.text_flow.bold.pop();
+        let (start, end) = self.text_flow.areas_tracker.pop_tracker();
+        if let Some(dl) = self.details_stack.last() {
+            // Compute the bounding rect from the laid-out glyph
+            // rects so we know where to put the invisible hit
+            // target quad. We use `Area::rect` (raw) not
+            // `clipped_rect`, because the draw_clip on rect-areas
+            // isn't populated inside a nested turtle.
+            let mut bounds: Option<Rect> = None;
+            for a in &self.text_flow.areas_tracker.areas[start..end] {
+                let r = a.rect(cx);
+                if r.size.x > 0.0 && r.size.y > 0.0 {
+                    bounds = Some(match bounds {
+                        None => r,
+                        Some(b) => {
+                            let x0 = b.pos.x.min(r.pos.x);
+                            let y0 = b.pos.y.min(r.pos.y);
+                            let x1 = (b.pos.x + b.size.x).max(r.pos.x + r.size.x);
+                            let y1 = (b.pos.y + b.size.y).max(r.pos.y + r.size.y);
+                            Rect {
+                                pos: dvec2(x0, y0),
+                                size: dvec2(x1 - x0, y1 - y0),
+                            }
+                        }
+                    });
+                }
+            }
+            if let Some(b) = bounds {
+                // Emit an invisible DrawQuad covering the summary
+                // line. Its `Area::Instance` has valid rect_pos
+                // and rect_size in the shader instance data, so
+                // `event.hits` can hit-test it correctly — unlike
+                // the glyph-run rect-areas, which need the outer
+                // pass turtle to close before their draw_clip is
+                // populated.
+                //
+                // Seeding `draw_vars.area` from the cache lets
+                // `update_area_refs` (called inside `draw_abs`)
+                // carry hover/capture state from the previous
+                // frame to the fresh instance.
+                let prev_area = self
+                    .summary_area_cache
+                    .get(&dl.id)
+                    .copied()
+                    .unwrap_or(Area::Empty);
+                self.draw_summary_hit.draw_vars.area = prev_area;
+                self.draw_summary_hit.draw_abs(cx, b);
+                let new_area = self.draw_summary_hit.draw_vars.area;
+                self.summary_area_cache.insert(dl.id, new_area);
+                self.summary_click_areas.push((dl.id, new_area));
+            }
+        }
+        matches!(self.details_stack.last(), Some(dl) if !dl.is_open)
+    }
+
     /// Vertical spacing inserted before a `<details>` opens and after it
     /// closes, in pixels, scaled by the current font size. Keeps the block
     /// from butting up against surrounding content. A single helper so the
@@ -399,16 +449,8 @@ impl Html {
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
         table_columns_cache: &mut HashMap<usize, usize>,
-    ) -> (Option<LiveId>, TrimWhitespaceInText) {
-        let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
-
-        fn open_header_tag(
-            cx: &mut Cx2d,
-            tf: &mut TextFlow,
-            scale: f64,
-            trim: &mut TrimWhitespaceInText,
-        ) {
-            *trim = TrimWhitespaceInText::Trim;
+    ) -> Option<LiveId> {
+        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64) {
             tf.bold.push();
             tf.push_size_abs_scale(scale);
             let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
@@ -416,47 +458,38 @@ impl Html {
         }
 
         match node.open_tag_lc() {
-            some_id!(h1) => open_header_tag(cx, tf, 2.0, &mut trim_whitespace_in_text),
-            some_id!(h2) => open_header_tag(cx, tf, 1.5, &mut trim_whitespace_in_text),
-            some_id!(h3) => open_header_tag(cx, tf, 1.17, &mut trim_whitespace_in_text),
-            some_id!(h4) => open_header_tag(cx, tf, 1.0, &mut trim_whitespace_in_text),
-            some_id!(h5) => open_header_tag(cx, tf, 0.83, &mut trim_whitespace_in_text),
-            some_id!(h6) => open_header_tag(cx, tf, 0.67, &mut trim_whitespace_in_text),
+            some_id!(h1) => open_header_tag(cx, tf, 2.0),
+            some_id!(h2) => open_header_tag(cx, tf, 1.5),
+            some_id!(h3) => open_header_tag(cx, tf, 1.17),
+            some_id!(h4) => open_header_tag(cx, tf, 1.0),
+            some_id!(h5) => open_header_tag(cx, tf, 0.83),
+            some_id!(h6) => open_header_tag(cx, tf, 0.67),
 
             some_id!(p) => {
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.top);
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
                 tf.push_size_rel_scale(tf.fixed_font_size_scale);
-                tf.combine_spaces.push(false);
                 tf.fixed.push();
                 tf.inline_code.push();
             }
             some_id!(pre) => {
                 tf.new_line_collapsed(cx);
                 tf.fixed.push();
-                tf.ignore_newlines.push(false);
-                tf.combine_spaces.push(false);
                 tf.begin_code(cx);
             }
             some_id!(blockquote) => {
                 tf.new_line_collapsed(cx);
-                tf.ignore_newlines.push(false);
-                tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(br) => {
                 tf.new_line_with_wrap_spacing(cx);
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(hr) | some_id!(sep) => {
                 tf.new_line_collapsed(cx);
                 tf.sep(cx);
                 tf.new_line_collapsed(cx);
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
             some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.push(),
@@ -481,7 +514,6 @@ impl Html {
                 tf.y_shift_scales.push(-0.2);
             }
             some_id!(ul) => {
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 list_stack.push(ListLevel {
                     list_kind: ListKind::Unordered,
                     numbering_type: None,
@@ -490,7 +522,6 @@ impl Html {
                 });
             }
             some_id!(ol) => {
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let start_attr = node.find_attr_lc(live_id!(start));
                 let start: i32 = start_attr.and_then(|s| s.parse().ok()).unwrap_or(1);
 
@@ -505,15 +536,16 @@ impl Html {
                 });
             }
             some_id!(li) => {
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let indent_level = list_stack.len();
                 let index = indent_level.saturating_sub(1);
                 let marker_and_pad = list_stack.last_mut().map(|ll| {
-                    let marker = match ll.list_kind {
+                    // Borrowed for the common case: a fresh String per item
+                    // per draw was most of a list's draw cost.
+                    let marker: Cow<'_, str> = match ll.list_kind {
                         ListKind::Unordered => ul_markers
                             .get(index)
-                            .cloned()
-                            .unwrap_or_else(|| BULLET.into()),
+                            .map(|m| Cow::Borrowed(m.as_str()))
+                            .unwrap_or(Cow::Borrowed(BULLET)),
                         ListKind::Ordered => {
                             let value_attr = node.find_attr_lc(live_id!(value));
                             let value: i32 = value_attr
@@ -528,8 +560,8 @@ impl Html {
                                 .as_ref()
                                 .or_else(|| ll.numbering_type.as_ref())
                                 .or_else(|| ol_markers.get(index))
-                                .map(|ol_type| ol_type.marker(value, ol_separator))
-                                .unwrap_or_else(|| "#".into())
+                                .map(|ol_type| Cow::Owned(ol_type.marker(value, ol_separator)))
+                                .unwrap_or(Cow::Borrowed("#"))
                         }
                     };
                     ll.li_count = ll.li_count.saturating_add(1);
@@ -537,7 +569,7 @@ impl Html {
                 });
                 let (marker, pad) = marker_and_pad
                     .as_ref()
-                    .map(|(m, p)| (m.as_str(), *p))
+                    .map(|(m, p)| (m.as_ref(), *p))
                     .unwrap_or((BULLET, 2.5));
 
                 tf.new_line_collapsed(cx);
@@ -549,7 +581,6 @@ impl Html {
                     .entry(node.index)
                     .or_insert_with(|| Self::count_table_columns(node.nodes, node.index));
                 tf.begin_table(cx, col_count);
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(thead) => {
                 tf.in_table_header = true;
@@ -561,22 +592,19 @@ impl Html {
                 } else {
                     tf.begin_table_row(cx);
                 }
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(th) => {
                 tf.table_row_is_header = true;
                 tf.begin_table_cell(cx, cell_align_x(node));
                 tf.bold.push();
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(td) => {
                 tf.begin_table_cell(cx, cell_align_x(node));
-                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
-            Some(x) => return (Some(x), trim_whitespace_in_text),
+            Some(x) => return Some(x),
             _ => (),
         }
-        (None, trim_whitespace_in_text)
+        None
     }
 
     /// Drops one occurrence of `lc` from the open-element tally.
@@ -608,20 +636,81 @@ impl Html {
         TRACKED.contains(&lc)
     }
 
-    /// The elements a newly-opened `tag` implicitly closes when they are still
-    /// open, so that the shorthand real documents use — `<li>a<li>b`,
-    /// `<td>a<td>b`, `<p>a<p>b` — nests the way a browser reads it.
-    fn implicitly_closed_by(tag: LiveId, top: LiveId) -> bool {
+    /// Runs the close handler for everything above `depth` on the open stack,
+    /// innermost first, and drops it.
+    fn unwind_open_elements(&mut self, cx: &mut Cx2d, depth: usize) {
+        while self.open_elements.len() > depth {
+            let Some(lc) = self.open_elements.pop() else {
+                break;
+            };
+            Self::release_open_element(&mut self.open_element_counts, lc);
+            let _ = Self::handle_close_tag(cx, &mut self.text_flow, lc, &mut self.list_stack);
+        }
+    }
+
+    /// Closes the outermost open element in `targets` found before reaching
+    /// one in `scope`, and everything above it. With `top_only`, only the
+    /// innermost open element is considered.
+    fn close_implicitly(
+        &mut self,
+        cx: &mut Cx2d,
+        targets: &[LiveId],
+        scope: &[LiveId],
+        top_only: bool,
+    ) {
+        let mut close_to = None;
+        for (depth, open) in self.open_elements.iter().enumerate().rev() {
+            if targets.contains(open) {
+                close_to = Some(depth);
+            } else if scope.contains(open) {
+                break;
+            }
+            if top_only {
+                break;
+            }
+        }
+        if let Some(depth) = close_to {
+            self.unwind_open_elements(cx, depth);
+        }
+    }
+
+    /// What opening `tag` implicitly closes, following the tree builder's
+    /// rules: a heading closes a heading it directly follows, `<li>` closes
+    /// an open item up to the enclosing list, a cell closes an open cell up
+    /// to its row, a row closes an open row and its cells, and any block
+    /// element closes an open `<p>`. This is what makes the shorthand real
+    /// documents use — `<li>a<li>b`, `<td>a<td>b`, `<p>a<p>b` — nest the
+    /// way a browser reads it.
+    fn apply_implicit_closes(&mut self, cx: &mut Cx2d, tag: LiveId) {
+        const HEADINGS: &[LiveId] = &[
+            live_id!(h1), live_id!(h2), live_id!(h3),
+            live_id!(h4), live_id!(h5), live_id!(h6),
+        ];
+        const ITEM: &[LiveId] = &[live_id!(li)];
+        const LISTS: &[LiveId] = &[live_id!(ul), live_id!(ol)];
+        const CELLS: &[LiveId] = &[live_id!(td), live_id!(th)];
+        const ROW_SCOPE: &[LiveId] = &[live_id!(tr), live_id!(table)];
+        const ROW_AND_CELLS: &[LiveId] = &[live_id!(tr), live_id!(td), live_id!(th)];
+        const TABLE_SCOPE: &[LiveId] = &[live_id!(table), live_id!(thead), live_id!(tbody)];
+        const PARAGRAPH: &[LiveId] = &[live_id!(p)];
+        const BUTTON_SCOPE: &[LiveId] = &[live_id!(table), live_id!(td), live_id!(th)];
+        const CLOSES_PARAGRAPH: &[LiveId] = &[
+            live_id!(h1), live_id!(h2), live_id!(h3), live_id!(h4), live_id!(h5), live_id!(h6),
+            live_id!(p), live_id!(blockquote), live_id!(pre),
+            live_id!(ul), live_id!(ol), live_id!(li), live_id!(table),
+        ];
+        if HEADINGS.contains(&tag) {
+            self.close_implicitly(cx, HEADINGS, &[], true);
+        }
         if tag == live_id!(li) {
-            top == live_id!(li)
-        } else if tag == live_id!(p) {
-            top == live_id!(p)
-        } else if tag == live_id!(td) || tag == live_id!(th) {
-            top == live_id!(td) || top == live_id!(th)
+            self.close_implicitly(cx, ITEM, LISTS, false);
+        } else if CELLS.contains(&tag) {
+            self.close_implicitly(cx, CELLS, ROW_SCOPE, false);
         } else if tag == live_id!(tr) {
-            top == live_id!(td) || top == live_id!(th) || top == live_id!(tr)
-        } else {
-            false
+            self.close_implicitly(cx, ROW_AND_CELLS, TABLE_SCOPE, false);
+        }
+        if CLOSES_PARAGRAPH.contains(&tag) {
+            self.close_implicitly(cx, PARAGRAPH, BUTTON_SCOPE, false);
         }
     }
 
@@ -654,20 +743,15 @@ impl Html {
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
             }
             some_id!(blockquote) => {
-                tf.ignore_newlines.pop();
-                tf.combine_spaces.pop();
                 tf.end_quote(cx);
             }
             some_id!(code) => {
                 tf.inline_code.pop();
                 tf.font_sizes.pop();
-                tf.combine_spaces.pop();
                 tf.fixed.pop();
             }
             some_id!(pre) => {
                 tf.fixed.pop();
-                tf.ignore_newlines.pop();
-                tf.combine_spaces.pop();
                 tf.end_code(cx);
             }
             some_id!(sub) => {
@@ -702,18 +786,8 @@ impl Html {
         None
     }
 
-    pub fn handle_text_node(
-        cx: &mut Cx2d,
-        tf: &mut TextFlow,
-        node: &mut HtmlWalker,
-        trim: TrimWhitespaceInText,
-    ) -> bool {
+    pub fn handle_text_node(cx: &mut Cx2d, tf: &mut TextFlow, node: &mut HtmlWalker) -> bool {
         if let Some(text) = node.text() {
-            let text = if trim == TrimWhitespaceInText::Trim {
-                text.trim_matches(char::is_whitespace)
-            } else {
-                text
-            };
             if tf.table_num_columns > 0 && node.text_is_all_ws() {
                 return false;
             }
@@ -806,7 +880,11 @@ impl Widget for Html {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.text_flow.begin(cx, walk);
-        let mut node = self.doc.new_walker();
+        // The walker borrows the document for the whole draw and the handlers
+        // below need `&mut self`, so the document lives in a local for the
+        // duration and goes back at the end.
+        let doc = std::mem::take(&mut self.doc);
+        let mut node = doc.new_walker();
         self.details_stack.clear();
         self.summary_click_areas.clear();
         // These describe the draw in progress; a previous draw that ended
@@ -815,7 +893,6 @@ impl Widget for Html {
         self.open_elements.clear();
         self.open_element_counts.clear();
         self.open_summaries = 0;
-        self.used_widget_ids.clear();
         self.table_columns_cache.clear();
         while !node.done() {
             // Intercept <details> / <summary> open tags before the generic
@@ -823,26 +900,19 @@ impl Widget for Html {
             // (which would jump_to_close and hide all content).
             if let Some(tag) = node.open_tag_lc() {
                 if tag == live_id!(details) {
-                    let details_id = if let Some(id) = node
-                        .find_attr_lc(live_id!(id))
-                        .map(LiveId::from_str)
-                        .filter(|id| self.used_widget_ids.insert(*id))
-                    {
-                        // As for custom widgets: the first element to claim an
-                        // `id` keeps it, so two `<details>` sharing one id
-                        // don't share a single fold state.
-                        id
-                    } else {
-                        // Key by the node's stable doc index (a visit-order counter
-                        // would renumber when a collapsed <details> hides nodes).
-                        // Offset into the high bits to avoid colliding with the
-                        // custom-widget ids (small ints) in the items map.
-                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(node.index as u64))
-                    };
+                    // Key by the node's stable doc index (a visit-order counter
+                    // would renumber when a collapsed <details> hides nodes).
+                    // Offset into the high bits to avoid colliding with the
+                    // custom-widget ids (small ints) in the items map. The
+                    // `id` attribute is deliberately not used: a document that
+                    // repeats one would make two `<details>` share a fold state.
+                    let details_id =
+                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(node.index as u64));
                     let initial_open = node.find_attr_lc(live_id!(open)).is_some();
                     self.details_stack.push(DetailsLevel {
                         id: details_id,
                         is_open: initial_open,
+                        summary_open: false,
                     });
                     // Small top margin so a `<details>` doesn't butt up
                     // against the preceding content. Scaled by the current
@@ -857,6 +927,7 @@ impl Widget for Html {
                     if let Some(&DetailsLevel {
                         id: details_id,
                         is_open: initial_open,
+                        ..
                     }) = self.details_stack.last()
                     {
                         let fb_ref = self.text_flow.item_with_scope(
@@ -931,6 +1002,9 @@ impl Widget for Html {
                     self.text_flow.areas_tracker.push_tracker();
                     self.text_flow.bold.push();
                     self.open_summaries += 1;
+                    if let Some(level) = self.details_stack.last_mut() {
+                        level.summary_open = true;
+                    }
                     node.walk();
                     continue;
                 }
@@ -944,64 +1018,7 @@ impl Widget for Html {
                         node.walk();
                         continue;
                     }
-                    self.open_summaries -= 1;
-                    self.text_flow.bold.pop();
-                    let (start, end) = self.text_flow.areas_tracker.pop_tracker();
-                    if let Some(dl) = self.details_stack.last() {
-                        // Compute the bounding rect from the laid-out glyph
-                        // rects so we know where to put the invisible hit
-                        // target quad. We use `Area::rect` (raw) not
-                        // `clipped_rect`, because the draw_clip on rect-areas
-                        // isn't populated inside a nested turtle.
-                        let mut bounds: Option<Rect> = None;
-                        for a in &self.text_flow.areas_tracker.areas[start..end] {
-                            let r = a.rect(cx);
-                            if r.size.x > 0.0 && r.size.y > 0.0 {
-                                bounds = Some(match bounds {
-                                    None => r,
-                                    Some(b) => {
-                                        let x0 = b.pos.x.min(r.pos.x);
-                                        let y0 = b.pos.y.min(r.pos.y);
-                                        let x1 = (b.pos.x + b.size.x).max(r.pos.x + r.size.x);
-                                        let y1 = (b.pos.y + b.size.y).max(r.pos.y + r.size.y);
-                                        Rect {
-                                            pos: dvec2(x0, y0),
-                                            size: dvec2(x1 - x0, y1 - y0),
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                        if let Some(b) = bounds {
-                            // Emit an invisible DrawQuad covering the summary
-                            // line. Its `Area::Instance` has valid rect_pos
-                            // and rect_size in the shader instance data, so
-                            // `event.hits` can hit-test it correctly — unlike
-                            // the glyph-run rect-areas, which need the outer
-                            // pass turtle to close before their draw_clip is
-                            // populated.
-                            //
-                            // Seeding `draw_vars.area` from the cache lets
-                            // `update_area_refs` (called inside `draw_abs`)
-                            // carry hover/capture state from the previous
-                            // frame to the fresh instance.
-                            let prev_area = self
-                                .summary_area_cache
-                                .get(&dl.id)
-                                .copied()
-                                .unwrap_or(Area::Empty);
-                            self.draw_summary_hit.draw_vars.area = prev_area;
-                            self.draw_summary_hit.draw_abs(cx, b);
-                            let new_area = self.draw_summary_hit.draw_vars.area;
-                            self.summary_area_cache.insert(dl.id, new_area);
-                            self.summary_click_areas.push((dl.id, new_area));
-                        }
-                    }
-                    // Only skip the body when there is an enclosing
-                    // `<details>` that is collapsed. A stray `<summary>` with
-                    // no parent `<details>` must not skip to the end of the
-                    // document, which is what `map_or(true, ...)` would do.
-                    if matches!(self.details_stack.last(), Some(dl) if !dl.is_open) {
+                    if self.close_summary(cx) {
                         Self::skip_details_body(&mut node);
                         continue;
                     }
@@ -1009,6 +1026,10 @@ impl Widget for Html {
                     continue;
                 }
                 if close_tag == live_id!(details) {
+                    // A `<summary>` still open inside this element ends here.
+                    if matches!(self.details_stack.last(), Some(level) if level.summary_open) {
+                        self.close_summary(cx);
+                    }
                     // Likewise, only balance a `<details>` this draw opened.
                     if self.details_stack.pop().is_some() {
                         // Matching bottom margin (see `<details>` open handler).
@@ -1021,28 +1042,12 @@ impl Widget for Html {
             }
 
             // Regular tag/text handling for everything else.
-            // An open tag that a browser would treat as implicitly closing the
-            // element above it — `<li>a<li>b`, `<td>a<td>b` — closes it here
-            // too, so the turtles nest the way the document reads.
-            if let Some(open_lc) = node.open_tag_lc() {
-                while let Some(&top) = self.open_elements.last() {
-                    if !Self::implicitly_closed_by(open_lc, top) {
-                        break;
-                    }
-                    self.open_elements.pop();
-                    Self::release_open_element(&mut self.open_element_counts, top);
-                    let _ = Self::handle_close_tag(
-                        cx,
-                        &mut self.text_flow,
-                        top,
-                        &mut self.list_stack,
-                    );
-                }
+            let open_lc = node.open_tag_lc();
+            if let Some(open_lc) = open_lc {
+                self.apply_implicit_closes(cx, open_lc);
             }
 
-            let open_lc = node.open_tag_lc();
             let tf = &mut self.text_flow;
-            let mut trim = TrimWhitespaceInText::default();
             match Self::handle_open_tag(
                 cx,
                 tf,
@@ -1053,18 +1058,10 @@ impl Widget for Html {
                 &self.ol_separator,
                 &mut self.table_columns_cache,
             ) {
-                (Some(_), _tws) => {
-                    handle_custom_widget(
-                        cx,
-                        scope,
-                        tf,
-                        &self.doc,
-                        &mut node,
-                        &mut self.used_widget_ids,
-                    );
+                Some(_) => {
+                    handle_custom_widget(cx, scope, tf, &doc, &mut node);
                 }
-                (None, tws) => {
-                    trim = tws;
+                None => {
                     if let Some(lc) = open_lc {
                         if Self::element_is_tracked(lc) {
                             self.open_elements.push(lc);
@@ -1083,28 +1080,21 @@ impl Widget for Html {
                         .iter()
                         .rposition(|t| *t == close_lc)
                         .unwrap_or(0);
-                    while self.open_elements.len() > depth {
-                        let lc = self.open_elements.pop().unwrap_or(close_lc);
-                        Self::release_open_element(&mut self.open_element_counts, lc);
-                        let _ = Self::handle_close_tag(
-                            cx,
-                            &mut self.text_flow,
-                            lc,
-                            &mut self.list_stack,
-                        );
-                    }
+                    self.unwind_open_elements(cx, depth);
                 }
             }
-            Self::handle_text_node(cx, &mut self.text_flow, &mut node, trim);
+            Self::handle_text_node(cx, &mut self.text_flow, &mut node);
             node.walk();
         }
         // Close anything the document left open, so `<ul><li>item` hands a
-        // balanced turtle stack back to `TextFlow::end`.
-        while let Some(lc) = self.open_elements.pop() {
-            Self::release_open_element(&mut self.open_element_counts, lc);
-            let _ = Self::handle_close_tag(cx, &mut self.text_flow, lc, &mut self.list_stack);
+        // balanced turtle stack back to `TextFlow::end`, and a `<summary>`
+        // that never closed doesn't leave its bold run and tracker behind.
+        self.unwind_open_elements(cx, 0);
+        while self.open_summaries > 0 {
+            self.close_summary(cx);
         }
         self.text_flow.end(cx);
+        self.doc = doc;
         DrawStep::done()
     }
 
@@ -1145,7 +1135,6 @@ fn handle_custom_widget(
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
-    used_widget_ids: &mut HashSet<LiveId>,
 ) {
     // A custom widget draws straight into the turtle rather than through
     // `TextFlow::draw_text`, so it has to honour the line budget itself.
@@ -1155,40 +1144,31 @@ fn handle_custom_widget(
         node.jump_to_close();
         return;
     }
-
-    let id = if let Some(id) = node.find_attr_lc(live_id!(id))
-        .map(LiveId::from_str)
-        .filter(|id| used_widget_ids.insert(*id))
-    {
-        // The `id` attribute keys the cached sub-widget, but a document may
-        // repeat it. The first element to claim an id keeps it; a later
-        // duplicate falls back to its node index, so two links can't end up
-        // sharing one widget — and with it one `href`.
-        id
-    } else {
-        // Key by the node's stable index in the parsed doc rather than a
-        // visit-order counter: skip mode (a collapsed <details>) doesn't visit
-        // hidden nodes, so a counter would renumber every widget after the
-        // details on toggle, rebinding links and spans to the wrong nodes.
-        LiveId(node.index as u64)
+    let Some(template) = node.open_tag_nc() else {
+        return;
     };
 
-    let template = node.open_tag_nc().unwrap();
+    // Key by the node's stable index in the parsed doc rather than a
+    // visit-order counter: skip mode (a collapsed <details>) doesn't visit
+    // hidden nodes, so a counter would renumber every widget after the
+    // details on toggle, rebinding links and spans to the wrong nodes. The
+    // `id` attribute is deliberately not used: a document that repeats one
+    // would bind two elements to a single cached widget — and one `href`.
     let open_index = node.index;
+    let id = LiveId(open_index as u64);
     let mut scope_with_attrs = Scope::with_props_index(doc, open_index);
 
-    // Find the element's extent first. One with no close tag of its own is
-    // void, so it has no text: reading ahead would pick up the *following*
-    // sibling's text, which the main loop then draws again.
-    node.jump_to_close();
-    let text = if node.index() == open_index {
-        ""
-    } else {
-        doc.new_walker_with_index(open_index).find_text().unwrap_or("")
+    // The label is every text run inside the element. One with no close tag
+    // of its own is void and has none: reading ahead would pick up the
+    // *following* sibling's text, which the main loop then draws again.
+    let label = match node.close_index() {
+        Some(close) => element_text(doc, open_index, close),
+        None => Cow::Borrowed(""),
     };
+    node.jump_to_close();
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
-        item.set_text(cx, text);
+        item.set_text(cx, &label);
         // A widget is walked atomically, so on the last allowed line it has to
         // be kept there rather than relocated onto a row the budget cannot pay
         // for; when it overruns that line it is cut at the edge with an
@@ -1199,6 +1179,28 @@ fn handle_custom_widget(
         item.draw_all(cx, &mut draw_scope);
         tf.end_inline_content(cx, hold);
     }
+}
+
+/// The text between the open tag at `open` and its close tag at `close`:
+/// borrowed when it is a single run, joined otherwise, so
+/// `<a href="x"><b>Click</b> me</a>` labels its link "Click me" rather than
+/// stopping at the first child.
+fn element_text(doc: &HtmlDoc, open: usize, close: usize) -> Cow<'_, str> {
+    let mut runs = doc.nodes[open..close].iter().filter_map(|n| match n {
+        HtmlNode::Text { start, end, .. } if start != end => Some(&doc.decoded[*start..*end]),
+        _ => None,
+    });
+    let Some(first) = runs.next() else {
+        return Cow::Borrowed("");
+    };
+    let Some(second) = runs.next() else {
+        return Cow::Borrowed(first);
+    };
+    let mut joined = String::with_capacity(first.len() + second.len());
+    joined.push_str(first);
+    joined.push_str(second);
+    joined.extend(runs);
+    Cow::Owned(joined)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1299,7 +1301,8 @@ impl Widget for HtmlLink {
 
         self.widget_match_event(cx, event, scope);
 
-        for area in self.drawn_areas.clone().into_iter() {
+        for i in 0..self.drawn_areas.len() {
+            let area = self.drawn_areas[i];
             match event.hits(cx, area) {
                 Hit::FingerDown(fe) => {
                     if fe.is_primary_hit() {
@@ -1470,6 +1473,9 @@ struct DetailsLevel {
     /// Controls whether the body content between `</summary>` and
     /// `</details>` is drawn or skipped.
     is_open: bool,
+    /// Whether a `<summary>` opened inside this element is still open, so
+    /// `</details>` (or the end of the document) can close it.
+    summary_open: bool,
 }
 
 /// The format and metadata of a list at a given nesting level.

@@ -4,19 +4,15 @@ use crate::makepad_live_id::live_id::*;
 use crate::native::*;
 use crate::value::*;
 use crate::*;
-use makepad_html::{parse_html, HtmlNode};
+use makepad_html::{parse_html, HtmlDoc, HtmlNode};
 use makepad_live_id::live_id::InternLiveId;
+use std::fmt::Write as _;
 use std::rc::Rc;
 
-// Shared backing store — the parsed HTML data is Rc'd so query results
-// just reference ranges into it without copying strings or nodes.
-struct HtmlBacking {
-    decoded: String,
-    nodes: Vec<HtmlNode>,
-}
-
 pub struct ScriptHtmlDoc {
-    backing: Rc<HtmlBacking>,
+    // The parsed document is `Rc`'d so query results just reference ranges
+    // into it without copying strings or nodes.
+    backing: Rc<HtmlDoc>,
     // Element ranges as (open_tag_index, close_tag_index) into backing.nodes.
     ranges: Vec<(u32, u32)>,
     // true = root document (empty ranges means whole doc), false = query result (empty = no matches)
@@ -163,32 +159,13 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
 // ---- Query execution (zero-copy, operates on backing) ----
 
-/// Index of the close tag matching the open tag at `open_idx`, or `open_idx`
-/// itself when the element has none.
-///
-/// Only tags with the same id affect depth. Counting every open tag would
-/// over-consume, because a void element written without a slash (`<br>`,
-/// `<img src=x>`) emits an `OpenTag` and no `CloseTag`, leaving the depth
-/// permanently unbalanced and running every element's range to end of input.
-fn find_close_tag(nodes: &[HtmlNode], open_idx: usize) -> usize {
-    let open_lc = match nodes.get(open_idx) {
-        Some(HtmlNode::OpenTag { lc, .. }) => *lc,
-        _ => return open_idx,
-    };
-    let mut depth = 0u32;
-    for i in (open_idx + 1)..nodes.len() {
-        match &nodes[i] {
-            HtmlNode::OpenTag { lc, .. } if *lc == open_lc => depth += 1,
-            HtmlNode::CloseTag { lc, .. } if *lc == open_lc => {
-                if depth == 0 {
-                    return i;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    open_idx
+/// Index of the close tag ending the element opened at `open_idx`, or
+/// `open_idx` itself when the element has none — a void element, or one the
+/// document never closed. The parser resolves these, so this is a lookup.
+fn find_close_tag(doc: &HtmlDoc, open_idx: usize) -> usize {
+    doc.new_walker_with_index(open_idx)
+        .close_index()
+        .unwrap_or(open_idx)
 }
 
 fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QueryStep) -> bool {
@@ -232,43 +209,36 @@ fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QuerySt
 }
 
 fn find_elements(
-    decoded: &str,
-    nodes: &[HtmlNode],
+    doc: &HtmlDoc,
     step: &QueryStep,
     range_start: usize,
     range_end: usize,
     recurse: bool,
     out: &mut Vec<(u32, u32)>,
 ) {
+    let nodes = &doc.nodes;
     let mut i = range_start;
-    let mut depth = 0u32;
-    while i < range_end {
-        match &nodes[i] {
-            HtmlNode::OpenTag { .. } => {
-                if (recurse || depth == 0) && element_matches(decoded, nodes, i, step) {
-                    let close = find_close_tag(nodes, i);
-                    out.push((i as u32, close as u32));
-                    if !recurse {
-                        i = close + 1;
-                        continue;
-                    }
-                }
-                depth += 1;
+    while i < range_end.min(nodes.len()) {
+        if let HtmlNode::OpenTag { .. } = &nodes[i] {
+            let close = find_close_tag(doc, i);
+            if element_matches(&doc.decoded, nodes, i, step) {
+                out.push((i as u32, close as u32));
             }
-            HtmlNode::CloseTag { .. } => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            // A child combinator sees only direct children, so step over
+            // each element's whole subtree; a descendant combinator looks
+            // inside. Using the resolved close index rather than counting
+            // tags keeps void elements from unbalancing the depth.
+            if !recurse {
+                i = close.max(i) + 1;
+                continue;
             }
-            _ => {}
         }
         i += 1;
     }
 }
 
 fn execute_query(
-    decoded: &str,
-    nodes: &[HtmlNode],
+    doc: &HtmlDoc,
     ranges: &[(u32, u32)],
     steps: &[QueryStep],
 ) -> Vec<(u32, u32)> {
@@ -281,19 +251,17 @@ fn execute_query(
     if ranges.is_empty() {
         // Whole document
         find_elements(
-            decoded,
-            nodes,
+            doc,
             &steps[0],
             0,
-            nodes.len(),
+            doc.nodes.len(),
             true,
             &mut matches,
         );
     } else {
         for &(s, e) in ranges {
             find_elements(
-                decoded,
-                nodes,
+                doc,
                 &steps[0],
                 s as usize,
                 e as usize,
@@ -311,8 +279,7 @@ fn execute_query(
             let child_start = s as usize + 1;
             if child_start < e as usize {
                 find_elements(
-                    decoded,
-                    nodes,
+                    doc,
                     step,
                     child_start,
                     e as usize,
@@ -398,16 +365,17 @@ fn get_attr<'a>(
 
 /// Counted from the same ranges the callers walk, so a void element can't
 /// make the two disagree.
-fn count_top_level_elements(nodes: &[HtmlNode]) -> usize {
-    top_level_ranges(nodes).len()
+fn count_top_level_elements(doc: &HtmlDoc) -> usize {
+    top_level_ranges(doc).len()
 }
 
-fn top_level_ranges(nodes: &[HtmlNode]) -> Vec<(u32, u32)> {
+fn top_level_ranges(doc: &HtmlDoc) -> Vec<(u32, u32)> {
+    let nodes = &doc.nodes;
     let mut out = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
         if let HtmlNode::OpenTag { .. } = &nodes[i] {
-            let close = find_close_tag(nodes, i);
+            let close = find_close_tag(doc, i);
             out.push((i as u32, close as u32));
             // A void element reports itself as its own close tag.
             i = close.max(i) + 1;
@@ -431,7 +399,9 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let sself = script_value!(vm, args.self);
             let doc =
                 if let Some(d) = vm.bx.heap.string_mut_self_with(sself, |_heap, s| {
-                    parse_html(s, &mut None, InternLiveId::No)
+                    // Interned, so `.html` can print tag and attribute names
+                    // back out; an un-interned `LiveId` only prints as hex.
+                    parse_html(s, &mut None, InternLiveId::Yes)
                 }) {
                     d
                 } else {
@@ -440,10 +410,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                         "parse_html called on non-string value"
                     );
                 };
-            let backing = Rc::new(HtmlBacking {
-                decoded: doc.decoded,
-                nodes: doc.nodes,
-            });
+            let backing = Rc::new(doc);
             let html_doc = ScriptHtmlDoc {
                 backing,
                 ranges: Vec::new(),
@@ -500,7 +467,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 return vm.bx.heap.new_handle(html_type, Box::new(sub)).into();
             }
 
-            let matches = execute_query(&backing.decoded, &backing.nodes, &ranges, &parsed.steps);
+            let matches = execute_query(&backing, &ranges, &parsed.steps);
 
             match parsed.terminal {
                 Terminal::Attr(attr_id) => {
@@ -658,7 +625,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let (backing, ranges) =
                 if let Some(doc) = vm.bx.heap.handle_ref::<ScriptHtmlDoc>(handle) {
                     let r = if doc.is_root && doc.ranges.is_empty() {
-                        top_level_ranges(doc.nodes())
+                        top_level_ranges(&doc.backing)
                     } else if !doc.ranges.is_empty() {
                         doc.ranges.clone()
                     } else {
@@ -698,7 +665,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 if !doc.is_root || !doc.ranges.is_empty() {
                     return ScriptValue::from_f64(doc.ranges.len() as f64);
                 }
-                return ScriptValue::from_f64(count_top_level_elements(doc.nodes()) as f64);
+                return ScriptValue::from_f64(count_top_level_elements(&doc.backing) as f64);
             }
             return NIL;
         }
@@ -758,6 +725,22 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     });
 }
 
+/// Appends `s` with the characters that would read back as markup escaped,
+/// so the `.html` of a document parses to the same document again. The
+/// decoded text has had its entities resolved, so emitting it verbatim used
+/// to turn a literal `<` in a text node into a tag.
+fn push_escaped(out: &mut String, s: &str, in_attribute: bool) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if in_attribute => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
 fn reconstruct_html(decoded: &str, nodes: &[HtmlNode], start: usize, end: usize) -> String {
     let mut out = String::new();
     reconstruct_html_into(&mut out, decoded, nodes, start, end);
@@ -776,16 +759,16 @@ fn reconstruct_html_into(
         match &nodes[i] {
             HtmlNode::OpenTag { nc, .. } => {
                 out.push('<');
-                out.push_str(&format!("{}", nc));
+                let _ = write!(out, "{}", nc);
                 let mut j = i + 1;
                 while j < end && j < nodes.len() {
                     if let HtmlNode::Attribute { nc, start, end, .. } = &nodes[j] {
                         out.push(' ');
-                        out.push_str(&format!("{}", nc));
+                        let _ = write!(out, "{}", nc);
                         let val = &decoded[*start..*end];
                         if !val.is_empty() {
                             out.push_str("=\"");
-                            out.push_str(val);
+                            push_escaped(out, val, true);
                             out.push('"');
                         }
                         j += 1;
@@ -797,11 +780,11 @@ fn reconstruct_html_into(
             }
             HtmlNode::CloseTag { nc, .. } => {
                 out.push_str("</");
-                out.push_str(&format!("{}", nc));
+                let _ = write!(out, "{}", nc);
                 out.push('>');
             }
             HtmlNode::Text { start, end, .. } => {
-                out.push_str(&decoded[*start..*end]);
+                push_escaped(out, &decoded[*start..*end], false);
             }
             HtmlNode::Attribute { .. } => {}
         }
