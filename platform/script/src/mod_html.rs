@@ -13,7 +13,9 @@ pub struct ScriptHtmlDoc {
     // The parsed document is `Rc`'d so query results just reference ranges
     // into it without copying strings or nodes.
     backing: Rc<HtmlDoc>,
-    // Element ranges as (open_tag_index, close_tag_index) into backing.nodes.
+    // Element ranges as (open_tag_index, end_index) into backing.nodes: the
+    // end is exclusive, one past the element's own close tag, or the index
+    // of the enclosing close tag that ended it.
     ranges: Vec<(u32, u32)>,
     // true = root document (empty ranges means whole doc), false = query result (empty = no matches)
     is_root: bool,
@@ -109,7 +111,9 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
         // [N] index terminal
         if let Some(b) = tag_part.find('[') {
-            if let Some(e) = tag_part.find(']') {
+            // Only a `]` after the `[` closes it; `a]b[` used to slice
+            // backwards and panic.
+            if let Some(e) = tag_part[b..].find(']').map(|e| b + e) {
                 if let Ok(idx) = tag_part[b + 1..e].parse::<usize>() {
                     terminal = Terminal::Index(idx);
                 }
@@ -159,13 +163,17 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
 // ---- Query execution (zero-copy, operates on backing) ----
 
-/// Index of the close tag ending the element opened at `open_idx`, or
-/// `open_idx` itself when the element has none — a void element, or one the
-/// document never closed. The parser resolves these, so this is a lookup.
-fn find_close_tag(doc: &HtmlDoc, open_idx: usize) -> usize {
+/// One past the last node of the element opened at `open_idx`: past its own
+/// close tag, or at the close tag of the enclosing element that ended it, or
+/// the end of the document; for a void element, just past its attributes.
+/// The parser resolves these, so this is a lookup. Mapping an element
+/// without a close tag to itself, as this used to, gave every `<li>a<li>b`
+/// item an empty range: no `.text`, no `.html`, and children promoted to
+/// siblings.
+fn element_end(doc: &HtmlDoc, open_idx: usize) -> usize {
     doc.new_walker_with_index(open_idx)
-        .close_index()
-        .unwrap_or(open_idx)
+        .end_index()
+        .unwrap_or(open_idx + 1)
 }
 
 fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QueryStep) -> bool {
@@ -220,16 +228,16 @@ fn find_elements(
     let mut i = range_start;
     while i < range_end.min(nodes.len()) {
         if let HtmlNode::OpenTag { .. } = &nodes[i] {
-            let close = find_close_tag(doc, i);
+            let end = element_end(doc, i);
             if element_matches(&doc.decoded, nodes, i, step) {
-                out.push((i as u32, close as u32));
+                out.push((i as u32, end as u32));
             }
             // A child combinator sees only direct children, so step over
             // each element's whole subtree; a descendant combinator looks
-            // inside. Using the resolved close index rather than counting
-            // tags keeps void elements from unbalancing the depth.
+            // inside. Using the resolved end rather than counting tags keeps
+            // void elements from unbalancing the depth.
             if !recurse {
-                i = close.max(i) + 1;
+                i = end;
                 continue;
             }
         }
@@ -301,7 +309,7 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
     // Fast path: if there's exactly one text node, return a slice (no alloc)
     let mut first_text: Option<(usize, usize)> = None;
     let mut count = 0;
-    for i in start..=end.min(nodes.len().saturating_sub(1)) {
+    for i in start..end.min(nodes.len()) {
         if let HtmlNode::Text {
             start: s,
             end: e,
@@ -327,7 +335,7 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
 
 fn collect_text_owned(decoded: &str, nodes: &[HtmlNode], start: usize, end: usize) -> String {
     let mut text = String::new();
-    for i in start..=end.min(nodes.len().saturating_sub(1)) {
+    for i in start..end.min(nodes.len()) {
         if let HtmlNode::Text {
             start: s,
             end: e,
@@ -375,10 +383,9 @@ fn top_level_ranges(doc: &HtmlDoc) -> Vec<(u32, u32)> {
     let mut i = 0;
     while i < nodes.len() {
         if let HtmlNode::OpenTag { .. } = &nodes[i] {
-            let close = find_close_tag(doc, i);
-            out.push((i as u32, close as u32));
-            // A void element reports itself as its own close tag.
-            i = close.max(i) + 1;
+            let end = element_end(doc, i);
+            out.push((i as u32, end as u32));
+            i = end;
         } else {
             i += 1;
         }
@@ -675,12 +682,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             if field == id!(text) {
                 let mut text = String::new();
                 if doc.is_root && doc.ranges.is_empty() {
-                    text = collect_text_owned(
-                        doc.decoded(),
-                        doc.nodes(),
-                        0,
-                        doc.nodes().len().saturating_sub(1),
-                    );
+                    text = collect_text_owned(doc.decoded(), doc.nodes(), 0, doc.nodes().len());
                 } else {
                     for &(s, e) in &doc.ranges {
                         let t =
@@ -705,7 +707,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                             doc.decoded(),
                             doc.nodes(),
                             s as usize,
-                            e as usize + 1,
+                            e as usize,
                         );
                     }
                     out

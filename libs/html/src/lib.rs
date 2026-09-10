@@ -1,29 +1,52 @@
 use makepad_live_id::*;
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hasher, RandomState};
 
-/// A `LiveId` is already a 64-bit hash, so hashing it again with SipHash only
-/// costs time. This hasher passes the id through unchanged.
-#[derive(Default)]
-struct LiveIdHasher(u64);
+/// Hashes a `LiveId` — already a 64-bit hash of a name — by mixing it with a
+/// per-parse random seed. Hashing it through the identity let crafted tag
+/// names collide and made the close-tag pass quadratic; hashing it with
+/// SipHash cost a quarter of the parse time. The seed keeps the collisions
+/// unpredictable, and the multiply-fold keeps the cost to a few cycles.
+#[derive(Clone, Copy)]
+struct SeededLiveIdHasher {
+    seed: u64,
+    state: u64,
+}
 
-impl Hasher for LiveIdHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        // Only reached if something other than a `LiveId` is hashed; fold
-        // the bytes in so the map still behaves.
-        for &b in bytes {
-            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+impl SeededLiveIdHasher {
+    fn new_seed() -> Self {
+        SeededLiveIdHasher {
+            seed: RandomState::new().hash_one(0u64),
+            state: 0,
         }
-    }
-    fn write_u64(&mut self, id: u64) {
-        self.0 = id;
     }
 }
 
-type LiveIdMap<V> = HashMap<LiveId, V, BuildHasherDefault<LiveIdHasher>>;
+impl Hasher for SeededLiveIdHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Only reached if something other than a `LiveId` is hashed.
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, id: u64) {
+        let mixed = (id ^ self.seed ^ self.state).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.state = mixed ^ (mixed >> 29);
+    }
+}
+
+impl BuildHasher for SeededLiveIdHasher {
+    type Hasher = SeededLiveIdHasher;
+    fn build_hasher(&self) -> SeededLiveIdHasher {
+        *self
+    }
+}
+
+type LiveIdMap<V> = HashMap<LiveId, V, SeededLiveIdHasher>;
+type LiveIdSet = HashSet<LiveId, SeededLiveIdHasher>;
 
 #[derive(Debug)]
 pub struct HtmlError {
@@ -31,18 +54,24 @@ pub struct HtmlError {
     pub position: usize,
 }
 
-/// Marks a node in [`HtmlDoc::closes`] that opens no element, or opens one
-/// that has no close tag of its own.
+/// Marks a node in [`HtmlDoc::closes`] / [`HtmlDoc::ends`] that opens no
+/// element, or (for `closes`) opens one that has no close tag of its own.
 const NO_CLOSE: usize = usize::MAX;
 
 #[derive(Default, PartialEq)]
 pub struct HtmlDoc {
     pub decoded: String,
     pub nodes: Vec<HtmlNode>,
-    /// For each node, the index of the close tag ending the element it opens,
-    /// or [`NO_CLOSE`]. Computed once by `compute_closes` so that finding an
-    /// element's end is a lookup rather than a scan.
+    /// For each open tag, the index of its own close tag, or [`NO_CLOSE`]
+    /// when it has none: a void element, or one ended by an enclosing
+    /// element's close tag or by the end of input.
     closes: Vec<usize>,
+    /// For each open tag, one past the last node of the element: past its
+    /// own close tag, or the index of the enclosing close tag that ended it,
+    /// or `nodes.len()`; for a void element, just past its attributes.
+    /// Resolved by the parser as it goes (see `Builder`), so an element's
+    /// extent is a lookup rather than a scan.
+    ends: Vec<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -82,6 +111,7 @@ pub struct HtmlAttribute {
 pub struct HtmlWalker<'a> {
     decoded: &'a str,
     closes: &'a [usize],
+    ends: &'a [usize],
     pub nodes: &'a [HtmlNode],
     pub index: usize,
 }
@@ -105,13 +135,38 @@ impl<'a> HtmlWalker<'a> {
         }
     }
 
+    /// A walker over the same document positioned at `index`.
+    pub fn at(&self, index: usize) -> HtmlWalker<'a> {
+        HtmlWalker {
+            decoded: self.decoded,
+            closes: self.closes,
+            ends: self.ends,
+            nodes: self.nodes,
+            index,
+        }
+    }
+
     /// Index of the close tag that ends the element whose open tag the
     /// walker is on, or `None` when the walker is not on an open tag or the
     /// element has no close tag of its own — a void element such as `<br>`,
-    /// or one the document never closed.
+    /// or one ended by an enclosing element's close tag or by the end of
+    /// input. See [`HtmlWalker::end_index`] for where such an element ends.
     pub fn close_index(&self) -> Option<usize> {
         match self.closes.get(self.index) {
             Some(&close) if close != NO_CLOSE => Some(close),
+            _ => None,
+        }
+    }
+
+    /// One past the last node of the element whose open tag the walker is
+    /// on: past its own close tag; or the index of the enclosing close tag
+    /// that ended it, or the end of the document, when it has none; or, for
+    /// a void element, just past its attributes. `None` when the walker is
+    /// not on an open tag. The element's content is
+    /// `nodes[index + 1..close_index().unwrap_or(end_index())]`.
+    pub fn end_index(&self) -> Option<usize> {
+        match self.ends.get(self.index) {
+            Some(&end) if end != NO_CLOSE => Some(end),
             _ => None,
         }
     }
@@ -230,31 +285,21 @@ impl<'a> HtmlWalker<'a> {
         None
     }
 
-    /// Returns the text directly inside the next `tag` open tag at or after
-    /// the current position. `tag` is matched against the lowercased tag id,
-    /// since HTML tag names are case-insensitive.
+    /// Returns the first text inside the next `tag` element at or after the
+    /// current position — anywhere in that element, not only before its
+    /// first child — or `None` if that element has no text. It does not
+    /// move on to a later element of the same name. `tag` is matched
+    /// against the lowercased tag id, since HTML tag names are
+    /// case-insensitive.
     pub fn find_tag_text(&self, tag: LiveId) -> Option<&'a str> {
-        for i in self.index..self.nodes.len() {
-            match &self.nodes[i] {
-                HtmlNode::OpenTag { lc, .. } if *lc == tag => {
-                    // Attributes sit between the open tag and its text, and
-                    // the parser emits a zero-length text node before any
-                    // nested markup; skip both to reach the real content.
-                    for candidate in &self.nodes[i + 1..] {
-                        match candidate {
-                            HtmlNode::Attribute { .. } => (),
-                            HtmlNode::Text { start, end, .. } if start == end => (),
-                            HtmlNode::Text { start, end, .. } => {
-                                return Some(&self.decoded[*start..*end]);
-                            }
-                            _ => break,
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        None
+        let open = (self.index..self.nodes.len())
+            .find(|&i| matches!(&self.nodes[i], HtmlNode::OpenTag { lc, .. } if *lc == tag))?;
+        let at = self.at(open);
+        let content_end = at.close_index().or(at.end_index()).unwrap_or(self.nodes.len());
+        self.nodes[open + 1..content_end].iter().find_map(|node| match node {
+            HtmlNode::Text { start, end, .. } if start != end => Some(&self.decoded[*start..*end]),
+            _ => None,
+        })
     }
 
     pub fn text(&self) -> Option<&'a str> {
@@ -319,6 +364,7 @@ impl HtmlDoc {
         HtmlWalker {
             decoded: &self.decoded,
             closes: &self.closes,
+            ends: &self.ends,
             index,
             nodes: &self.nodes,
         }
@@ -334,13 +380,247 @@ fn is_html_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
+/// The elements HTML defines as void: they never have content or an end tag,
+/// so an open tag is the whole element. Written `<br>` or `<br/>`, they
+/// produce the same single node.
+fn is_void_element(lc: LiveId) -> bool {
+    const VOID: &[LiveId] = &[
+        live_id!(area),
+        live_id!(base),
+        live_id!(basefont),
+        live_id!(bgsound),
+        live_id!(br),
+        live_id!(col),
+        live_id!(embed),
+        live_id!(frame),
+        live_id!(hr),
+        live_id!(img),
+        live_id!(input),
+        live_id!(keygen),
+        live_id!(link),
+        live_id!(meta),
+        live_id!(param),
+        live_id!(source),
+        live_id!(track),
+        live_id!(wbr),
+    ];
+    VOID.contains(&lc)
+}
+
+/// `<pre>` and `<code>` keep their whitespace verbatim.
+fn preserves_whitespace(lc: LiveId) -> bool {
+    lc == live_id!(pre) || lc == live_id!(code)
+}
+
+/// Accumulates the node list while tracking which elements are open, so that
+/// each element's end is resolved as the tags stream past — the recovery a
+/// browser's tree builder applies, in one pass:
+///
+/// - a close tag ends the innermost open element of its name, and everything
+///   still open inside that element ends there too, without a close tag of
+///   its own;
+/// - a close tag that matches nothing is ignored;
+/// - a void element is whole at its open tag;
+/// - whatever is still open at the end of input ends there.
+///
+/// Whitespace collapsing follows the same stack, so a `<pre>` ended by an
+/// enclosing element's close tag stops preserving whitespace at that tag.
+struct Builder {
+    nodes: Vec<HtmlNode>,
+    closes: Vec<usize>,
+    ends: Vec<usize>,
+    /// Node index of each open element, outermost first.
+    open: Vec<usize>,
+    /// How many elements of each name are open, so a close tag with nothing
+    /// to close is rejected without walking the stack.
+    counts: LiveIdMap<u32>,
+    /// How many `<pre>`/`<code>` are open.
+    preserving: usize,
+    /// Attribute names already seen on the tag being parsed; a repeated one
+    /// is dropped, as the tokenizer specifies.
+    attrs_seen: LiveIdSet,
+    /// Node index of the tag being parsed, so input ending inside it can
+    /// drop it whole.
+    tag_start: usize,
+}
+
+impl Builder {
+    fn new(body_len: usize) -> Self {
+        Builder {
+            nodes: Vec::new(),
+            closes: Vec::new(),
+            ends: Vec::new(),
+            open: Vec::new(),
+            counts: LiveIdMap::with_hasher(SeededLiveIdHasher::new_seed()),
+            preserving: 0,
+            attrs_seen: LiveIdSet::with_hasher(SeededLiveIdHasher::new_seed()),
+            tag_start: 0,
+        }
+        .with_capacity_hint(body_len)
+    }
+
+    fn with_capacity_hint(self, _body_len: usize) -> Self {
+        // `nodes` deliberately gets no capacity hint: its length tracks tag
+        // count, not byte count, and sizing it from the body length made a
+        // tag-sparse document pay a large pointless allocation.
+        self
+    }
+
+    fn collapses(&self) -> bool {
+        self.preserving == 0
+    }
+
+    fn push(&mut self, node: HtmlNode) -> usize {
+        self.nodes.push(node);
+        self.closes.push(NO_CLOSE);
+        self.ends.push(NO_CLOSE);
+        self.nodes.len() - 1
+    }
+
+    fn text(&mut self, start: usize, end: usize, all_ws: bool) {
+        self.push(HtmlNode::Text {
+            start,
+            end,
+            all_ws,
+        });
+    }
+
+    fn name_at(&self, index: usize) -> LiveId {
+        match &self.nodes[index] {
+            HtmlNode::OpenTag { lc, .. } => *lc,
+            _ => LiveId::empty(),
+        }
+    }
+
+    /// Starts a tag; `tag_start` remembers where, for `drop_tag`.
+    fn begin_tag(&mut self) {
+        self.tag_start = self.nodes.len();
+        self.attrs_seen.clear();
+    }
+
+    fn open_tag(&mut self, name: &str, intern: InternLiveId) {
+        let lc = LiveId::from_str_lc(name);
+        let index = self.push(HtmlNode::OpenTag {
+            lc,
+            nc: LiveId::from_str_with_intern(name, intern),
+        });
+        if !is_void_element(lc) {
+            self.open.push(index);
+            *self.counts.entry(lc).or_insert(0) += 1;
+            if preserves_whitespace(lc) {
+                self.preserving += 1;
+            }
+        }
+    }
+
+    fn attribute(&mut self, lc: LiveId, nc: LiveId, start: usize, end: usize) {
+        if self.attrs_seen.insert(lc) {
+            self.push(HtmlNode::Attribute { lc, nc, start, end });
+        }
+    }
+
+    /// The start tag that began at `tag_start` is complete.
+    fn end_open_tag(&mut self) {
+        if is_void_element(self.name_at(self.tag_start)) {
+            // Whole at its open tag: it ends right after its attributes.
+            self.ends[self.tag_start] = self.nodes.len();
+        }
+    }
+
+    /// `<x/>`: the start tag that began at `tag_start` closes itself. A
+    /// close tag is synthesized for it — HTML would ignore the slash on a
+    /// non-void element, but the SVG parser is built on this walker and XML
+    /// needs it — except for a void element, which has no close tag by
+    /// definition and whose `<br/>` and `<br>` must be the same node.
+    fn self_close(&mut self) {
+        let Some(HtmlNode::OpenTag { lc, nc }) = self.nodes.get(self.tag_start) else {
+            return;
+        };
+        let (lc, nc) = (*lc, *nc);
+        if is_void_element(lc) {
+            self.ends[self.tag_start] = self.nodes.len();
+        } else {
+            let index = self.push(HtmlNode::CloseTag { lc, nc });
+            self.close(lc, index);
+        }
+    }
+
+    fn close_tag(&mut self, name: &str, intern: InternLiveId) {
+        let lc = LiveId::from_str_lc(name);
+        let index = self.push(HtmlNode::CloseTag {
+            lc,
+            nc: LiveId::from_str_with_intern(name, intern),
+        });
+        self.close(lc, index);
+    }
+
+    /// The close tag at `index` ends the innermost open `lc`, and everything
+    /// opened inside it.
+    fn close(&mut self, lc: LiveId, index: usize) {
+        if !self.counts.get(&lc).is_some_and(|n| *n > 0) {
+            return;
+        }
+        let Some(pos) = self.open.iter().rposition(|&j| self.name_at(j) == lc) else {
+            return;
+        };
+        for depth in pos..self.open.len() {
+            let j = self.open[depth];
+            let name = self.name_at(j);
+            if let Some(n) = self.counts.get_mut(&name) {
+                *n = n.saturating_sub(1);
+            }
+            if preserves_whitespace(name) {
+                self.preserving = self.preserving.saturating_sub(1);
+            }
+            // Its own close tag, or an enclosing element's: either way this
+            // is where the element ends.
+            self.ends[j] = if depth == pos { index + 1 } else { index };
+        }
+        self.closes[self.open[pos]] = index;
+        self.open.truncate(pos);
+    }
+
+    /// Input ended inside the tag that began at `tag_start`: drop it whole,
+    /// as a browser drops a tag cut off by end of input.
+    fn drop_tag(&mut self) {
+        if self.open.last() == Some(&self.tag_start) {
+            self.open.pop();
+            let name = self.name_at(self.tag_start);
+            if let Some(n) = self.counts.get_mut(&name) {
+                *n = n.saturating_sub(1);
+            }
+            if preserves_whitespace(name) {
+                self.preserving = self.preserving.saturating_sub(1);
+            }
+        }
+        self.nodes.truncate(self.tag_start);
+        self.closes.truncate(self.tag_start);
+        self.ends.truncate(self.tag_start);
+    }
+
+    fn finish(mut self, decoded: String) -> HtmlDoc {
+        let end = self.nodes.len();
+        for &j in &self.open {
+            self.ends[j] = end;
+        }
+        HtmlDoc {
+            decoded,
+            nodes: self.nodes,
+            closes: self.closes,
+            ends: self.ends,
+        }
+    }
+}
+
 /// Parses `body` into a flat node list.
 ///
 /// The tokenizer follows the WHATWG HTML tokenizer's states and its recovery
 /// rules for malformed input, so a broken document produces the same tokens a
-/// browser would build from it. There is one deliberate departure: `<x/>`
-/// emits a close tag for `x`, where HTML would ignore the slash on a non-void
-/// element, because the SVG parser is built on this walker and XML needs it.
+/// browser would build from it, and each element's end is resolved as the tree
+/// builder would resolve it (see [`Builder`]). Two deliberate departures:
+/// `<x/>` emits a close tag for a non-void `x`, because the SVG parser is
+/// built on this walker and XML needs it; and named character references
+/// require their `;` — the legacy no-semicolon names are not supported.
 ///
 /// Parsing never fails. When `errors` is `Some`, everything that was wrong
 /// with the input is recorded there with its byte offset in `body`.
@@ -356,9 +636,12 @@ pub fn parse_html(
         Text {
             /// Where this text run starts in `decoded`.
             dec_start: usize,
-            /// One past the last non-whitespace character in `decoded`, or
-            /// `dec_start` while there has been none. Drives whitespace
-            /// collapsing and the node's `all_ws` flag.
+            /// One past the last non-whitespace character in `decoded`.
+            /// Drives whitespace collapsing, and the node's `all_ws` flag
+            /// (`last_non_whitespace <= dec_start` means none in this run).
+            /// It may sit before `dec_start`: a run that follows a comment
+            /// continues the previous run's collapsing, since the comment
+            /// was never content.
             last_non_whitespace: usize,
             collapse_ws: bool,
         },
@@ -371,8 +654,9 @@ pub fn parse_html(
         /// Inside an end tag's name; holds the name's first byte index.
         EndTagName(usize),
         /// After an end tag's name. End tags carry no attributes, so
-        /// everything up to `>` is discarded.
-        AfterEndTagName,
+        /// everything up to `>` is discarded — and the tag is only emitted
+        /// once its `>` arrives.
+        AfterEndTagName(usize, usize),
         /// `/` seen inside a start tag; `>` now self-closes it.
         SelfClosingStartTag,
         /// Between attributes.
@@ -409,13 +693,23 @@ pub fn parse_html(
 
     /// The longest name in `match_entity` is `DownLeftRightVector`. A run of
     /// characters longer than this cannot become a named entity, so scanning
-    /// stops there rather than buffering unbounded text.
+    /// stops there rather than buffering unbounded text. Numeric references
+    /// have no such limit: their digits are consumed until something that
+    /// is not a digit ends them.
     const MAX_ENTITY_NAME: usize = "DownLeftRightVector".len();
-    /// Numeric references (`&#38;`, `&#x26;`) may be zero-padded, so they get
-    /// a longer budget than a name would.
-    const MAX_ENTITY_NUMERIC: usize = 32;
 
-    /// An entity currently being scanned.
+    /// How far a numeric reference has got.
+    #[derive(Copy, Clone, PartialEq)]
+    enum Numeric {
+        /// Not a numeric reference.
+        No,
+        /// `&#` seen; `x`/`X` may still follow.
+        Hash,
+        /// Reading digits in this radix; the count is how many so far.
+        Digits(u32, usize),
+    }
+
+    /// A character reference currently being scanned.
     #[derive(Copy, Clone)]
     struct InEntity {
         /// Index in `decoded` of the opening `&`.
@@ -423,10 +717,59 @@ pub fn parse_html(
         /// Index in `body` of the opening `&`, for error reporting.
         src_start: usize,
         /// `last_non_whitespace` as it was *before* the `&` was appended.
-        /// The entity's own characters are appended to `decoded` while it is
-        /// being scanned and then truncated away again on a match, so the
-        /// index has to be restored rather than recomputed.
+        /// The reference's own characters are appended to `decoded` while
+        /// it is being scanned and then truncated away again on a match, so
+        /// the index has to be restored rather than recomputed.
         saved_last_non_whitespace: usize,
+        numeric: Numeric,
+    }
+
+    /// Replaces the scanned reference text with `ch`, applying the same
+    /// whitespace collapsing a literal character would get: `a &#32; b`
+    /// reads "a b".
+    fn emit_decoded(
+        entity: InEntity,
+        ch: char,
+        decoded: &mut String,
+        last_non_whitespace: &mut usize,
+        collapse_ws: bool,
+    ) {
+        decoded.truncate(entity.start);
+        if is_html_whitespace(ch) {
+            *last_non_whitespace = entity.saved_last_non_whitespace;
+            if !collapse_ws {
+                decoded.push(ch);
+            } else if *last_non_whitespace == decoded.len() {
+                decoded.push(' ');
+            }
+        } else {
+            decoded.push(ch);
+            *last_non_whitespace = decoded.len();
+        }
+    }
+
+    /// Ends a numeric reference that has at least one digit, decoding it.
+    /// The tokenizer decodes at the first non-digit whether or not a `;`
+    /// follows; a missing `;` is only a parse error.
+    fn finish_numeric(
+        entity: InEntity,
+        decoded: &mut String,
+        last_non_whitespace: &mut usize,
+        collapse_ws: bool,
+    ) -> bool {
+        if !matches!(entity.numeric, Numeric::Digits(_, n) if n > 0) {
+            return false;
+        }
+        match match_entity(&decoded[entity.start + 1..])
+            .ok()
+            .and_then(char::from_u32)
+        {
+            Some(ch) => {
+                emit_decoded(entity, ch, decoded, last_non_whitespace, collapse_ws);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Appends `c` to `decoded`, collapsing whitespace when asked to and
@@ -439,46 +782,65 @@ pub fn parse_html(
         decoded: &mut String,
         last_non_whitespace: &mut usize,
         collapse_ws: bool,
+        errors: &mut Option<Vec<HtmlError>>,
     ) {
-        if let Some(InEntity {
-            start,
-            saved_last_non_whitespace,
-            ..
-        }) = *in_entity
-        {
-            if c == ';' {
-                // Whether or not the name matches, the scan is over.
-                *in_entity = None;
-                if let Some(ch) = match_entity(&decoded[start + 1..])
-                    .ok()
-                    .and_then(char::from_u32)
-                {
-                    decoded.truncate(start);
-                    if is_html_whitespace(ch) {
-                        // A decoded space is subject to the same collapsing
-                        // as a literal one: `a &#32; b` reads "a b".
-                        *last_non_whitespace = saved_last_non_whitespace;
-                        if !collapse_ws {
-                            decoded.push(ch);
-                        } else if *last_non_whitespace == decoded.len() {
-                            decoded.push(' ');
+        if let Some(entity) = *in_entity {
+            match entity.numeric {
+                Numeric::No => {
+                    if c == ';' {
+                        // Whether or not the name matches, the scan is over.
+                        *in_entity = None;
+                        if let Some(ch) = match_entity(&decoded[entity.start + 1..])
+                            .ok()
+                            .and_then(char::from_u32)
+                        {
+                            emit_decoded(entity, ch, decoded, last_non_whitespace, collapse_ws);
+                            return;
                         }
-                    } else {
-                        decoded.push(ch);
-                        *last_non_whitespace = decoded.len();
+                    } else if c == '#' && decoded.len() == entity.start + 1 {
+                        in_entity.as_mut().unwrap().numeric = Numeric::Hash;
+                    } else if !c.is_ascii_alphanumeric()
+                        || decoded.len() - entity.start > MAX_ENTITY_NAME
+                    {
+                        // Definitely not a reference; what was scanned stays text.
+                        *in_entity = None;
                     }
-                    return;
                 }
-            } else {
-                let scanned = decoded.len() - start;
-                let budget = if decoded.as_bytes().get(start + 1) == Some(&b'#') {
-                    MAX_ENTITY_NUMERIC
-                } else {
-                    MAX_ENTITY_NAME
-                };
-                if is_html_whitespace(c) || scanned > budget {
-                    // Definitely not an entity; what was scanned stays text.
-                    *in_entity = None;
+                Numeric::Hash => {
+                    if c == 'x' || c == 'X' {
+                        in_entity.as_mut().unwrap().numeric = Numeric::Digits(16, 0);
+                    } else if c.is_ascii_digit() {
+                        in_entity.as_mut().unwrap().numeric = Numeric::Digits(10, 1);
+                    } else {
+                        // `&#` followed by no digits: literal text.
+                        *in_entity = None;
+                    }
+                }
+                Numeric::Digits(radix, count) => {
+                    if c.to_digit(radix).is_some() {
+                        in_entity.as_mut().unwrap().numeric = Numeric::Digits(radix, count + 1);
+                    } else {
+                        *in_entity = None;
+                        if count > 0 {
+                            let decoded_ok =
+                                finish_numeric(entity, decoded, last_non_whitespace, collapse_ws);
+                            if c == ';' {
+                                // The `;` belongs to the reference, decoded or not.
+                                if !decoded_ok {
+                                    decoded.push(c);
+                                    *last_non_whitespace = decoded.len();
+                                }
+                                return;
+                            }
+                            if decoded_ok {
+                                report(
+                                    errors,
+                                    "Missing semicolon after character reference",
+                                    src_pos,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -487,6 +849,7 @@ pub fn parse_html(
                 start: decoded.len(),
                 src_start: src_pos,
                 saved_last_non_whitespace: *last_non_whitespace,
+                numeric: Numeric::No,
             });
         }
         if collapse_ws && is_html_whitespace(c) {
@@ -510,116 +873,49 @@ pub fn parse_html(
         }
     }
 
-    /// Forgets an entity still being scanned when its text run ends, and
-    /// reports it. Letting it survive across a tag or a closing quote is what
-    /// used to let a later `;` truncate `decoded` back past text already
-    /// committed to a node.
-    fn drop_entity(in_entity: &mut Option<InEntity>, errors: &mut Option<Vec<HtmlError>>) {
-        if let Some(InEntity { src_start, .. }) = in_entity.take() {
-            report(errors, "Unterminated entity", src_start);
-        }
-    }
-
-    /// The whitespace-preserving elements (`<pre>`, `<code>`) currently open.
-    ///
-    /// A stack rather than a flag or a counter: any tag nested inside `<pre>`
-    /// used to switch collapsing back on for the rest of the element, and a
-    /// bare counter lets a stray `</code>` cancel an enclosing `<pre>`.
-    #[derive(Default)]
-    struct PreserveStack {
-        open: Vec<LiveId>,
-        pre: usize,
-        code: usize,
-    }
-
-    impl PreserveStack {
-        fn slot(&mut self, lc: LiveId) -> Option<&mut usize> {
-            if lc == live_id!(pre) {
-                Some(&mut self.pre)
-            } else if lc == live_id!(code) {
-                Some(&mut self.code)
+    /// Ends a reference still being scanned when its text run ends. A
+    /// numeric reference with digits is decoded, as the tokenizer would; a
+    /// named one is reported and left as text. Letting it survive across a
+    /// tag or a closing quote is what used to let a later `;` truncate
+    /// `decoded` back past text already committed to a node.
+    fn end_entity(
+        in_entity: &mut Option<InEntity>,
+        decoded: &mut String,
+        last_non_whitespace: &mut usize,
+        collapse_ws: bool,
+        errors: &mut Option<Vec<HtmlError>>,
+    ) {
+        if let Some(entity) = in_entity.take() {
+            if finish_numeric(entity, decoded, last_non_whitespace, collapse_ws) {
+                report(
+                    errors,
+                    "Missing semicolon after character reference",
+                    entity.src_start,
+                );
             } else {
-                None
+                report(errors, "Unterminated entity", entity.src_start);
             }
-        }
-
-        fn open_tag(&mut self, lc: LiveId) {
-            if let Some(n) = self.slot(lc) {
-                *n += 1;
-                self.open.push(lc);
-            }
-        }
-
-        /// Closes the innermost open `lc`, and anything opened inside it.
-        fn close_tag(&mut self, lc: LiveId) {
-            // Reject a close tag with nothing to close in O(1), so a run of
-            // stray `</pre>`s cannot make this quadratic.
-            if !matches!(self.slot(lc), Some(n) if *n > 0) {
-                return;
-            }
-            if let Some(pos) = self.open.iter().rposition(|t| *t == lc) {
-                while self.open.len() > pos {
-                    if let Some(t) = self.open.pop() {
-                        if let Some(n) = self.slot(t) {
-                            *n = n.saturating_sub(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        fn collapses(&self) -> bool {
-            self.open.is_empty()
         }
     }
 
-    /// The text state that follows a tag.
-    fn text_state(decoded: &str, preserve: &PreserveStack) -> State {
+    /// The text state that follows an element's tag.
+    fn text_after_tag(decoded: &str, builder: &Builder) -> State {
         State::Text {
             dec_start: decoded.len(),
             last_non_whitespace: decoded.len(),
-            collapse_ws: preserve.collapses(),
+            collapse_ws: builder.collapses(),
         }
     }
 
-    fn push_open_tag(
-        nodes: &mut Vec<HtmlNode>,
-        preserve: &mut PreserveStack,
-        name: &str,
-        intern: InternLiveId,
-    ) {
-        let lc = LiveId::from_str_lc(name);
-        preserve.open_tag(lc);
-        nodes.push(HtmlNode::OpenTag {
-            lc,
-            nc: LiveId::from_str_with_intern(name, intern),
-        });
-    }
-
-    fn push_close_tag(
-        nodes: &mut Vec<HtmlNode>,
-        preserve: &mut PreserveStack,
-        lc: LiveId,
-        nc: LiveId,
-    ) {
-        preserve.close_tag(lc);
-        nodes.push(HtmlNode::CloseTag { lc, nc });
-    }
-
-    /// `<x/>`: a close tag for the start tag that began at `tag_node_start`.
-    fn push_self_close(
-        nodes: &mut Vec<HtmlNode>,
-        preserve: &mut PreserveStack,
-        tag_node_start: usize,
-    ) {
-        if let Some(HtmlNode::OpenTag { lc, nc }) = nodes.get(tag_node_start) {
-            let (lc, nc) = (*lc, *nc);
-            push_close_tag(nodes, preserve, lc, nc);
+    /// The text state that follows something that produced no node — a
+    /// comment, a doctype, `</>` — so it continues the run it interrupted:
+    /// `a <!-- c --> b` has one space, not two.
+    fn text_after_nothing(decoded: &str, builder: &Builder, last_non_whitespace: usize) -> State {
+        State::Text {
+            dec_start: decoded.len(),
+            last_non_whitespace,
+            collapse_ws: builder.collapses(),
         }
-    }
-
-    fn push_attribute(nodes: &mut Vec<HtmlNode>, lc: LiveId, nc: LiveId, start: usize, end: usize) {
-        nodes.push(HtmlNode::Attribute { lc, nc, start, end });
     }
 
     fn attribute_ids(name: &str, intern: InternLiveId) -> (LiveId, LiveId) {
@@ -629,21 +925,20 @@ pub fn parse_html(
         )
     }
 
-    let mut nodes = Vec::new();
+    let mut b = Builder::new(body.len());
     // Decoded output never exceeds the source length, and reserving it up
-    // front measurably beats growing it. `nodes` deliberately gets no such
-    // hint: its length tracks tag count, not byte count, so sizing it from
-    // `body.len()` made a tag-sparse document pay a large pointless alloc.
+    // front measurably beats growing it.
     let mut decoded = String::with_capacity(body.len());
-    let mut preserve = PreserveStack::default();
     let mut in_entity = None;
     // Attribute values are never whitespace-collapsed, so this only exists to
     // satisfy `process_entity`; it is reset whenever a value begins.
     let mut attr_lnw = 0usize;
-    // Index in `nodes` where the tag being parsed began. If the input ends
-    // inside the tag, everything from here on is dropped, as a browser drops
-    // a tag cut off by end of input.
-    let mut tag_node_start = 0usize;
+    // `last_non_whitespace` of the text run that the current `<` interrupted,
+    // for a construct that turns out to produce no node.
+    let mut lnw_before_tag = 0usize;
+    // A `\r` was just read: the tokenizer's input stream turns `\r\n` and
+    // lone `\r` into `\n`.
+    let mut after_cr = false;
     let mut state = State::Text {
         dec_start: 0,
         last_non_whitespace: 0,
@@ -651,6 +946,20 @@ pub fn parse_html(
     };
 
     for (i, c) in body.char_indices() {
+        let c = match c {
+            '\r' => {
+                after_cr = true;
+                '\n'
+            }
+            '\n' if after_cr => {
+                after_cr = false;
+                continue;
+            }
+            c => {
+                after_cr = false;
+                c
+            }
+        };
         state = match state {
             State::Text {
                 dec_start,
@@ -658,13 +967,16 @@ pub fn parse_html(
                 collapse_ws,
             } => {
                 if c == '<' {
-                    drop_entity(&mut in_entity, errors);
-                    nodes.push(HtmlNode::Text {
-                        start: dec_start,
-                        end: decoded.len(),
-                        all_ws: dec_start == last_non_whitespace,
-                    });
-                    tag_node_start = nodes.len();
+                    end_entity(
+                        &mut in_entity,
+                        &mut decoded,
+                        &mut last_non_whitespace,
+                        collapse_ws,
+                        errors,
+                    );
+                    b.text(dec_start, decoded.len(), last_non_whitespace <= dec_start);
+                    lnw_before_tag = last_non_whitespace;
+                    b.begin_tag();
                     State::TagOpen(i + 1)
                 } else {
                     process_entity(
@@ -674,6 +986,7 @@ pub fn parse_html(
                         &mut decoded,
                         &mut last_non_whitespace,
                         collapse_ws,
+                        errors,
                     );
                     State::Text {
                         dec_start,
@@ -700,15 +1013,12 @@ pub fn parse_html(
                     let dec_start = decoded.len();
                     decoded.push('<');
                     let mut last_non_whitespace = decoded.len();
-                    let collapse_ws = preserve.collapses();
+                    let collapse_ws = b.collapses();
                     if c == '<' {
                         // `<<b>`: the second `<` may still open a tag.
-                        nodes.push(HtmlNode::Text {
-                            start: dec_start,
-                            end: decoded.len(),
-                            all_ws: false,
-                        });
-                        tag_node_start = nodes.len();
+                        b.text(dec_start, decoded.len(), false);
+                        lnw_before_tag = last_non_whitespace;
+                        b.begin_tag();
                         State::TagOpen(i + 1)
                     } else {
                         process_entity(
@@ -718,6 +1028,7 @@ pub fn parse_html(
                             &mut decoded,
                             &mut last_non_whitespace,
                             collapse_ws,
+                            errors,
                         );
                         State::Text {
                             dec_start,
@@ -729,14 +1040,15 @@ pub fn parse_html(
             }
             State::TagName(start) => {
                 if is_html_whitespace(c) {
-                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
+                    b.open_tag(&body[start..i], intern);
                     State::BeforeAttributeName
                 } else if c == '/' {
-                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
+                    b.open_tag(&body[start..i], intern);
                     State::SelfClosingStartTag
                 } else if c == '>' {
-                    push_open_tag(&mut nodes, &mut preserve, &body[start..i], intern);
-                    text_state(&decoded, &preserve)
+                    b.open_tag(&body[start..i], intern);
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
                     State::TagName(start)
                 }
@@ -747,7 +1059,7 @@ pub fn parse_html(
                 } else if c == '>' {
                     // `</>` has no name to close. Ignored, as a browser does.
                     report(errors, "Missing end tag name", i);
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     // `</3`: a bogus comment running to the next `>`.
                     report(errors, "Invalid first character of end tag name", i);
@@ -756,31 +1068,31 @@ pub fn parse_html(
             }
             State::EndTagName(start) => {
                 if c == '>' {
-                    let (lc, nc) = attribute_ids(&body[start..i], intern);
-                    push_close_tag(&mut nodes, &mut preserve, lc, nc);
-                    text_state(&decoded, &preserve)
+                    b.close_tag(&body[start..i], intern);
+                    text_after_tag(&decoded, &b)
                 } else if is_html_whitespace(c) || c == '/' {
-                    let (lc, nc) = attribute_ids(&body[start..i], intern);
-                    push_close_tag(&mut nodes, &mut preserve, lc, nc);
-                    State::AfterEndTagName
+                    State::AfterEndTagName(start, i)
                 } else {
                     State::EndTagName(start)
                 }
             }
-            State::AfterEndTagName => {
+            State::AfterEndTagName(start, end) => {
                 if c == '>' {
-                    text_state(&decoded, &preserve)
+                    b.close_tag(&body[start..end], intern);
+                    text_after_tag(&decoded, &b)
                 } else if is_html_whitespace(c) || c == '/' {
-                    State::AfterEndTagName
+                    State::AfterEndTagName(start, end)
                 } else {
+                    // Attributes on an end tag are discarded — along with
+                    // the tag itself if `>` never comes.
                     report(errors, "Attributes on an end tag are ignored", i);
-                    State::BogusComment
+                    State::AfterEndTagName(start, end)
                 }
             }
             State::SelfClosingStartTag => {
                 if c == '>' {
-                    push_self_close(&mut nodes, &mut preserve, tag_node_start);
-                    text_state(&decoded, &preserve)
+                    b.self_close();
+                    text_after_tag(&decoded, &b)
                 } else {
                     // `<a/b>`: the slash was not a self-closing marker after
                     // all. Read on as `<a b>`.
@@ -800,7 +1112,8 @@ pub fn parse_html(
                 } else if c == '/' {
                     State::SelfClosingStartTag
                 } else if c == '>' {
-                    text_state(&decoded, &preserve)
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
                     State::AttributeName(i)
                 }
@@ -814,12 +1127,13 @@ pub fn parse_html(
                     State::BeforeAttributeValue(lc, nc)
                 } else if c == '/' {
                     let (lc, nc) = attribute_ids(&body[start..i], intern);
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    b.attribute(lc, nc, 0, 0);
                     State::SelfClosingStartTag
                 } else if c == '>' {
                     let (lc, nc) = attribute_ids(&body[start..i], intern);
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
-                    text_state(&decoded, &preserve)
+                    b.attribute(lc, nc, 0, 0);
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
                     State::AttributeName(start)
                 }
@@ -830,13 +1144,14 @@ pub fn parse_html(
                 } else if c == '=' {
                     State::BeforeAttributeValue(lc, nc)
                 } else if c == '/' {
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    b.attribute(lc, nc, 0, 0);
                     State::SelfClosingStartTag
                 } else if c == '>' {
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
-                    text_state(&decoded, &preserve)
+                    b.attribute(lc, nc, 0, 0);
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
+                    b.attribute(lc, nc, 0, 0);
                     State::AttributeName(i)
                 }
             }
@@ -850,54 +1165,60 @@ pub fn parse_html(
                 } else if c == '>' {
                     // `<a href=>`: an empty value, and the tag ends here.
                     report(errors, "Missing attribute value", i);
-                    push_attribute(&mut nodes, lc, nc, 0, 0);
-                    text_state(&decoded, &preserve)
+                    b.attribute(lc, nc, 0, 0);
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
                     let start = decoded.len();
                     attr_lnw = start;
-                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
                     State::AttributeValueUnquoted(lc, nc, start)
                 }
             }
             State::AttributeValueDq(lc, nc, start) => {
                 if c == '"' {
-                    drop_entity(&mut in_entity, errors);
-                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    end_entity(&mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
+                    b.attribute(lc, nc, start, decoded.len());
                     State::BeforeAttributeName
                 } else {
-                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
                     State::AttributeValueDq(lc, nc, start)
                 }
             }
             State::AttributeValueSq(lc, nc, start) => {
                 if c == '\'' {
-                    drop_entity(&mut in_entity, errors);
-                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    end_entity(&mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
+                    b.attribute(lc, nc, start, decoded.len());
                     State::BeforeAttributeName
                 } else {
-                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
                     State::AttributeValueSq(lc, nc, start)
                 }
             }
             State::AttributeValueUnquoted(lc, nc, start) => {
                 if is_html_whitespace(c) {
-                    drop_entity(&mut in_entity, errors);
-                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
+                    end_entity(&mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
+                    b.attribute(lc, nc, start, decoded.len());
                     State::BeforeAttributeName
                 } else if c == '>' {
-                    drop_entity(&mut in_entity, errors);
-                    push_attribute(&mut nodes, lc, nc, start, decoded.len());
-                    text_state(&decoded, &preserve)
+                    end_entity(&mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
+                    b.attribute(lc, nc, start, decoded.len());
+                    b.end_open_tag();
+                    text_after_tag(&decoded, &b)
                 } else {
                     // Everything else, `/` included, is part of the value:
                     // `<a href=http://host/path>`.
-                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false);
+                    process_entity(c, i, &mut in_entity, &mut decoded, &mut attr_lnw, false, errors);
                     State::AttributeValueUnquoted(lc, nc, start)
                 }
             }
             State::MarkupDeclarationOpen => {
                 if c == '-' {
                     State::MarkupDeclarationDash
+                } else if c == '>' {
+                    // `<!>`: an empty bogus comment.
+                    report(errors, "Incorrectly opened comment", i);
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     // `<!DOCTYPE ...>`, `<![CDATA[...]]>`, `<!x`: none of them
                     // produce a node, and all of them end at the next `>`.
@@ -907,8 +1228,12 @@ pub fn parse_html(
             State::MarkupDeclarationDash => {
                 if c == '-' {
                     State::CommentStart
+                } else if c == '>' {
+                    // `<!->` likewise.
+                    report(errors, "Incorrectly opened comment", i);
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
-                    report(errors, "Expected `--` after `<!`", i);
+                    report(errors, "Incorrectly opened comment", i);
                     State::BogusComment
                 }
             }
@@ -918,7 +1243,7 @@ pub fn parse_html(
                 } else if c == '>' {
                     // `<!-->` is a complete, empty comment.
                     report(errors, "Abruptly closed empty comment", i);
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     State::Comment
                 }
@@ -929,7 +1254,7 @@ pub fn parse_html(
                 } else if c == '>' {
                     // `<!--->` likewise.
                     report(errors, "Abruptly closed empty comment", i);
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     State::Comment
                 }
@@ -950,7 +1275,7 @@ pub fn parse_html(
             }
             State::CommentEnd => {
                 if c == '>' {
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else if c == '!' {
                     State::CommentEndBang
                 } else if c == '-' {
@@ -966,14 +1291,14 @@ pub fn parse_html(
                 } else if c == '>' {
                     // `--!>` closes a comment, with a complaint.
                     report(errors, "Incorrectly closed comment", i);
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     State::Comment
                 }
             }
             State::BogusComment => {
                 if c == '>' {
-                    text_state(&decoded, &preserve)
+                    text_after_nothing(&decoded, &b, lnw_before_tag)
                 } else {
                     State::BogusComment
                 }
@@ -984,15 +1309,17 @@ pub fn parse_html(
     match state {
         State::Text {
             dec_start,
-            last_non_whitespace,
-            ..
+            mut last_non_whitespace,
+            collapse_ws,
         } => {
-            drop_entity(&mut in_entity, errors);
-            nodes.push(HtmlNode::Text {
-                start: dec_start,
-                end: decoded.len(),
-                all_ws: dec_start == last_non_whitespace,
-            });
+            end_entity(
+                &mut in_entity,
+                &mut decoded,
+                &mut last_non_whitespace,
+                collapse_ws,
+                errors,
+            );
+            b.text(dec_start, decoded.len(), last_non_whitespace <= dec_start);
         }
         // `a<` and `a</`: the `<` never became a tag, so it is text.
         State::TagOpen(_) | State::EndTagOpen(_) => {
@@ -1001,15 +1328,11 @@ pub fn parse_html(
             if matches!(state, State::EndTagOpen(_)) {
                 decoded.push('/');
             }
-            nodes.push(HtmlNode::Text {
-                start,
-                end: decoded.len(),
-                all_ws: false,
-            });
+            b.text(start, decoded.len(), false);
         }
         State::TagName(_)
         | State::EndTagName(_)
-        | State::AfterEndTagName
+        | State::AfterEndTagName(..)
         | State::SelfClosingStartTag
         | State::BeforeAttributeName
         | State::AttributeName(_)
@@ -1019,9 +1342,7 @@ pub fn parse_html(
         | State::AttributeValueSq(..)
         | State::AttributeValueUnquoted(..) => {
             report(errors, "Unexpected end of input inside a tag", body.len());
-            // A tag cut off by the end of input is dropped whole, as a
-            // browser drops it.
-            nodes.truncate(tag_node_start);
+            b.drop_tag();
         }
         State::MarkupDeclarationOpen
         | State::MarkupDeclarationDash
@@ -1036,59 +1357,7 @@ pub fn parse_html(
         }
     }
 
-    let closes = compute_closes(&nodes);
-    HtmlDoc {
-        nodes,
-        decoded,
-        closes,
-    }
-}
-
-/// For each node, the index of the close tag that ends the element opened
-/// there, or [`NO_CLOSE`] for every other node.
-///
-/// A close tag ends the innermost open element of its name. Anything opened
-/// inside that element and still open — a void element such as `<br>`, or an
-/// element the document never closed — ends there as well, without a close
-/// tag of its own. A close tag with no open element of its name is ignored.
-/// This is the recovery a browser applies, and it is what makes the walker's
-/// `jump_to_close` immune to void elements.
-fn compute_closes(nodes: &[HtmlNode]) -> Vec<usize> {
-    let mut closes = vec![NO_CLOSE; nodes.len()];
-    // Indices of the open tags currently unclosed, outermost first.
-    let mut open: Vec<usize> = Vec::new();
-    // How many elements of each name are open, so a stray close tag is
-    // rejected without walking the stack: a message can combine deep nesting
-    // with many stray close tags, and walking would be quadratic.
-    let mut counts: LiveIdMap<u32> = LiveIdMap::default();
-    let name_of = |i: usize| match &nodes[i] {
-        HtmlNode::OpenTag { lc, .. } => *lc,
-        _ => LiveId::empty(),
-    };
-    for (i, node) in nodes.iter().enumerate() {
-        match node {
-            HtmlNode::OpenTag { lc, .. } => {
-                open.push(i);
-                *counts.entry(*lc).or_insert(0) += 1;
-            }
-            HtmlNode::CloseTag { lc, .. } => {
-                if !counts.get(lc).is_some_and(|n| *n > 0) {
-                    continue;
-                }
-                if let Some(pos) = open.iter().rposition(|&j| name_of(j) == *lc) {
-                    closes[open[pos]] = i;
-                    for &j in &open[pos..] {
-                        if let Some(n) = counts.get_mut(&name_of(j)) {
-                            *n = n.saturating_sub(1);
-                        }
-                    }
-                    open.truncate(pos);
-                }
-            }
-            _ => {}
-        }
-    }
-    closes
+    b.finish(decoded)
 }
 
 pub fn match_entity(what: &str) -> Result<u32, String> {
@@ -2748,10 +3017,28 @@ mod tests {
             assert_eq!(text_of(body), "\u{fffd}", "{body:?}");
             assert_nodes_consistent(body);
         }
-        for body in ["&#-1;", "&#x-1;", "&#;", "&#x;", "&#12a;", "&#xZZ;"] {
+        for body in ["&#-1;", "&#x-1;", "&#;", "&#x;", "&#xZZ;"] {
             assert_eq!(text_of(body), body, "{body:?} should survive as literal text");
             assert_nodes_consistent(body);
         }
+        // a reference ends at the first non-digit whether or not `;` follows
+        assert_eq!(text_of("&#38 b"), "& b");
+        assert_eq!(text_of("&#38<b>x</b>"), "&x");
+        assert_eq!(text_of("&#x26z"), "&z");
+        assert_eq!(text_of("&#12a;"), " a;"); // U+000C, collapsed like any whitespace
+        assert_eq!(text_of("<pre>&#12a;</pre>"), "\u{c}a;");
+        assert_eq!(text_of("a&#38"), "a&");
+        assert_eq!(text_of("&#x26"), "&");
+        // an unquoted attribute value too
+        let doc = parse_html("<a href=x&#38y>t</a>", &mut None, InternLiveId::No);
+        let mut walker = doc.new_walker();
+        while !walker.done() && walker.open_tag_lc().is_none() {
+            walker.walk();
+        }
+        assert_eq!(walker.find_attr_lc(live_id!(href)), Some("x&y"));
+        // and there is no length limit: forty digits saturate to U+FFFD
+        assert_eq!(text_of("&#1111111111111111111111111111111111111111;"), "\u{fffd}");
+        assert_eq!(text_of("&#00000000000000000000000000000038;"), "&");
         // the C1 range is read as Windows-1252, which is what legacy content
         // means by it
         assert_eq!(text_of("&#151;"), "\u{2014}");
@@ -3005,9 +3292,14 @@ mod tests {
         let doc = parse_html("<img src=x/>", &mut None, InternLiveId::No);
         assert!(!doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { .. })));
         assert_eq!(attr("<a href=x/ y=2>t</a>", live_id!(href)).as_deref(), Some("x/"));
-        // quoted values still self-close, which the SVG parser relies on
-        let doc = parse_html("<img src=\"x\"/>", &mut None, InternLiveId::No);
-        assert!(doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(img))));
+        // a quoted value followed by `/>` still self-closes a non-void
+        // element, which the SVG parser relies on; a void element never has
+        // a close tag, so `<img src="x"/>` and `<img src="x">` are one node
+        let doc = parse_html("<path d=\"m\"/>", &mut None, InternLiveId::No);
+        assert!(doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(path))));
+        let with_slash = parse_html("<img src=\"x\"/>", &mut None, InternLiveId::No);
+        let without = parse_html("<img src=\"x\">", &mut None, InternLiveId::No);
+        assert!(with_slash.nodes == without.nodes);
     }
 
     /// A `<` that cannot begin a tag is literal text, the way a browser
@@ -3052,7 +3344,8 @@ mod tests {
     fn end_tag_open_follows_the_tokenizer() {
         assert_eq!(text_of("a</>b"), "ab");
         assert_eq!(text_of("i </3 u"), "i ");
-        assert_eq!(text_of("i </3 u> x"), "i  x");
+        // and the bogus comment is not content, so the run collapses across it
+        assert_eq!(text_of("i </3 u> x"), "i x");
         assert_eq!(text_of("a</ b>c"), "ac");
         // but `</` at the very end of input is text
         assert_eq!(text_of("a</"), "a</");
@@ -3156,6 +3449,146 @@ mod tests {
         assert_eq!(text_of("<pre><code>a  b</pre>c  d"), "a  bc d");
         assert_eq!(text_of("<code>a  <pre>b  c</code>d  e</pre>"), "a  b  cd e");
         assert_eq!(text_of("</pre>a  b"), "a b");
+    }
+
+    /// Where each element ends is resolved by the parser: past its own close
+    /// tag, at the enclosing close tag that ended it, at the end of input,
+    /// or — for a void element — just past its attributes.
+    #[test]
+    fn end_index_resolves_every_element() {
+        fn ends(body: &str) -> Vec<(LiveId, Option<usize>, usize)> {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            let mut out = Vec::new();
+            let mut w = doc.new_walker();
+            while !w.done() {
+                if let Some(lc) = w.open_tag_lc() {
+                    out.push((lc, w.close_index(), w.end_index().unwrap()));
+                }
+                w.walk();
+            }
+            out
+        }
+        fn close_of(body: &str, tag: LiveId) -> usize {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            doc.nodes
+                .iter()
+                .position(|n| matches!(n, HtmlNode::CloseTag { lc, .. } if *lc == tag))
+                .unwrap()
+        }
+        fn open_of(body: &str, tag: LiveId) -> usize {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            doc.nodes
+                .iter()
+                .position(|n| matches!(n, HtmlNode::OpenTag { lc, .. } if *lc == tag))
+                .unwrap()
+        }
+        fn len_of(body: &str) -> usize {
+            parse_html(body, &mut None, InternLiveId::No).nodes.len()
+        }
+
+        let body = "<p>hello<b>x</b></p>tail";
+        let (p_close, b_close) = (close_of(body, live_id!(p)), close_of(body, live_id!(b)));
+        assert_eq!(ends(body), vec![
+            (live_id!(p), Some(p_close), p_close + 1),
+            (live_id!(b), Some(b_close), b_close + 1),
+        ]);
+        // the tokenizer does not know `<li>` closes `<li>` (that is the
+        // widget's tree-builder rule), so both items end at `</ul>`
+        let body = "<ul><li>one<li>two</ul>";
+        let ul_close = close_of(body, live_id!(ul));
+        assert_eq!(ends(body), vec![
+            (live_id!(ul), Some(ul_close), ul_close + 1),
+            (live_id!(li), None, ul_close),
+            (live_id!(li), None, ul_close),
+        ]);
+        // a void element is whole at its open tag, however it is written
+        for body in ["<br>x", "<br/>x", "<br></br>x"] {
+            let br = open_of(body, live_id!(br));
+            assert_eq!(ends(body), vec![(live_id!(br), None, br + 1)], "{body:?}");
+        }
+        let body = "<img src=x alt=y>t";
+        let img = open_of(body, live_id!(img));
+        assert_eq!(ends(body), vec![(live_id!(img), None, img + 3)]);
+        // unclosed at end of input
+        assert_eq!(ends("<b>x"), vec![(live_id!(b), None, len_of("<b>x"))]);
+        // ended by an ancestor: the link ends at `</td>`
+        let body = "<td><a href=u>link</td>";
+        let td_close = close_of(body, live_id!(td));
+        assert_eq!(ends(body), vec![
+            (live_id!(td), Some(td_close), td_close + 1),
+            (live_id!(a), None, td_close),
+        ]);
+    }
+
+    /// `<pre>` is tracked on the same stack as every other element, so an
+    /// enclosing close tag that ends it also ends its whitespace preservation.
+    #[test]
+    fn pre_ended_by_an_ancestor_stops_preserving_whitespace() {
+        assert_eq!(text_of("<div><pre>a  b</div>c  d"), "a  bc d");
+        assert_eq!(text_of("<p><code>x</p>  y  z"), "x y z");
+        assert_eq!(text_of("<blockquote><pre>a  b</blockquote>c  d"), "a  bc d");
+    }
+
+    /// `<!>` and `<!->` are complete (empty) bogus comments, and a comment is
+    /// not content, so the text run continues across it with one space.
+    #[test]
+    fn empty_declarations_and_comments_do_not_split_the_text() {
+        assert_eq!(text_of("a<!>b"), "ab");
+        assert_eq!(text_of("a<!->b"), "ab");
+        assert_eq!(text_of("a<!>b>c"), "ab>c");
+        assert_eq!(text_of("a <!-- c --> b"), "a b");
+        assert_eq!(text_of("a </> b"), "a b");
+        assert_eq!(text_of("a <!DOCTYPE x> b"), "a b");
+        assert_eq!(text_of("<p> a <!-- c --> </p>"), " a ");
+        assert_nodes_consistent("a <!-- c --> b");
+        assert_nodes_consistent("<p> <!-- c --> </p>");
+    }
+
+    /// The input stream turns `\r\n` and a lone `\r` into `\n`.
+    #[test]
+    fn carriage_returns_are_normalized() {
+        assert_eq!(text_of("<pre>a\r\nb\rc</pre>"), "a\nb\nc");
+        let doc = parse_html("<a title=\"x\r\ny\">t</a>", &mut None, InternLiveId::No);
+        let mut w = doc.new_walker();
+        while !w.done() && w.open_tag_lc().is_none() {
+            w.walk();
+        }
+        assert_eq!(w.find_attr_lc(live_id!(title)), Some("x\ny"));
+        assert_eq!(text_of("a\r\nb"), "a b");
+    }
+
+    /// The tokenizer drops every attribute after the first with the same
+    /// name, so a consumer iterating attributes sees one `data-mx-color`.
+    #[test]
+    fn duplicate_attributes_are_dropped() {
+        let doc = parse_html("<a HREF=x Href=y b=1 b=2 c c>t</a>", &mut None, InternLiveId::No);
+        let attrs: Vec<_> = doc.nodes.iter().filter_map(|n| match n {
+            HtmlNode::Attribute { lc, start, end, .. } => Some((*lc, doc.decoded[*start..*end].to_string())),
+            _ => None,
+        }).collect();
+        assert_eq!(attrs, vec![
+            (live_id!(href), "x".into()), (live_id!(b), "1".into()), (live_id!(c), String::new()),
+        ]);
+    }
+
+    /// An end tag followed by junk and then end of input is dropped like any
+    /// other tag cut off by end of input.
+    #[test]
+    fn an_end_tag_cut_off_by_end_of_input_is_dropped() {
+        for body in ["<b>x</b/junk", "<a>t</a x", "<b>x</b "] {
+            let doc = parse_html(body, &mut None, InternLiveId::No);
+            assert!(!doc.nodes.iter().any(|n| matches!(n, HtmlNode::CloseTag { .. })), "{body:?}");
+        }
+        assert_eq!(text_of("<b>x</b/junk"), "x");
+    }
+
+    /// `find_tag_text` answers for the first matching element only.
+    #[test]
+    fn find_tag_text_does_not_fall_through_to_a_later_element() {
+        let doc = parse_html("<p><b>x</b>y</p><p>z</p>", &mut None, InternLiveId::No);
+        assert_eq!(doc.new_walker().find_tag_text(live_id!(p)), Some("x"));
+        let doc = parse_html("<p></p><p>z</p>", &mut None, InternLiveId::No);
+        assert_eq!(doc.new_walker().find_tag_text(live_id!(p)), None);
     }
 
     #[test]
