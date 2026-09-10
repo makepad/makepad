@@ -19,7 +19,7 @@ script_mod! {
         StoryNote{text: "Panels of tabs, split any way round, that a person can take apart and put back together. Eight places in this repository build one; the editor you may know is the biggest of them."}
 
         StoryHeading{text: "Drag a tab"}
-        StoryNote{text: "Drag a tab onto the other bar to move it. Drag it against an edge of a body — the outer tenth — to split THAT panel and take half of it. Drag it right out to the edge of the dock instead and it lies across everything: with two panels sharing the square, a drop down the far left gives the newcomer the whole left half and leaves the other two stacked in the right half. Drop it along the outside of the way they are already stacked and all three end up the same size. Drag the bar between panels to resize them; nothing a drop decides is final. Close a tab with its cross. Everything here is reported below as it happens."}
+        StoryNote{text: "Drag a tab onto the other bar to move it. Drag it against an edge of a body — the outer tenth — to split THAT panel and take half of it. Drag it right out to the edge of the dock instead and it lies across everything: with two panels sharing the square, a drop down the far left gives the newcomer the whole left half and leaves the other two stacked in the right half. Drop it along the outside of the way they are already stacked and all three end up the same size, and so does dropping it straight onto the bar between them. Drag the bar between panels to resize them; nothing a drop decides is final. Close a tab with its cross. Everything here is reported below as it happens."}
         StoryRow{
             View{
                 width: Fill height: 340.
@@ -157,6 +157,8 @@ A drop is read in three passes, and the order between them is the behaviour.
 **A tab, or a tab bar.** Joining a panel that is already there wins over everything else, so the topmost panel's bar is still a place to drop even though it runs along the outside of the dock.
 
 **The outside of the dock**, within 24 points of it. This splits the *root*, so the panel arriving lies across whatever is already in there rather than beside one member of it. Two panels sharing a square top and bottom, and a drop down the far left: the newcomer takes the whole left half and the pair stay stacked in the right one. The preview says which it will be — half the whole dock, not half a panel.
+
+**The bar between two panels**, within a few points of it — the same slop the bar's own drag uses. This puts the newcomer BETWEEN them rather than inside either, and moves both bars so everything sharing that direction ends up the same size: two panels and a newcomer become three thirds. A bar somebody pinned a fixed distance from one side is left where it was pinned and the newcomer goes on the other side of the seam, because a pinned pane is one whose size was decided on purpose.
 
 **The edges and middle of the panel under the pointer.** The outer tenth of a body splits that panel alone and nests a splitter inside it; the middle joins its tabs.
 
