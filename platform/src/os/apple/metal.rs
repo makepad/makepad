@@ -322,6 +322,21 @@ impl Cx {
                 .is_some_and(|(next, pending)| {
                     next.can_continue_upload(pending.publication, pending.copied)
                 });
+            // A re-recorded immediate payload with unchanged bytes (a camera move
+            // re-emitting world-space geometry) keeps its resident copy: no upload.
+            let immediate_hash = if publication.is_none() && call.instance_dirty {
+                crate::draw_list::immediate_payload_hash(data)
+            } else { 0 };
+            if immediate_hash != 0
+                && immediate_hash == item.immediate_hash
+                && item.os.instance_buffer.pending.is_none()
+                && item.os.instance_buffer.inner.as_ref().is_some_and(|inner| inner.len == data.len() * 4)
+            {
+                call.instance_dirty = false;
+                item.instance_upload_pending = false;
+                budget.stats.identical_skips += 1;
+                continue;
+            }
             let before = budget.stats.bytes;
             let was_capacity_waiting = item.os.instance_buffer.capacity_waiting;
             // One hard allowance for the whole repaint, including first and
@@ -348,6 +363,9 @@ impl Cx {
                 self.os.instance_bytes_uploaded.saturating_add(bytes as u64);
             item.instance_upload_pending = remaining != 0;
             call.instance_dirty = false;
+            if remaining == 0 && immediate_hash != 0 {
+                item.immediate_hash = immediate_hash;
+            }
             if remaining == 0 || (item.retained_progressive && item.os.instance_buffer.pending.as_ref().is_some_and(|p|
                 p.publication == target && item.os.instance_buffer.inner.as_ref().is_some_and(|i| i.len > 0 && i.buffer.as_id() == p.inner.buffer.as_id()))) {
                 item.retained_gpu_evicted = false;
@@ -357,6 +375,7 @@ impl Cx {
             pending += remaining;
         }
         self.recycle_instance_uploads(root, requests);
+        let critical_deferred = self.instance_upload_collection_critical_deferred(root);
         let budget = &mut self.draw_lists.1;
         budget.pending_bytes += pending;
         budget
@@ -374,10 +393,10 @@ impl Cx {
             static NAMES: std::sync::Once = std::sync::Once::new();
             NAMES.call_once(|| crate::log!("retained-upload names=[Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other]"));
             let pool = metal_cx.instance_pool.borrow();
-            crate::log!("retained-upload frame={} bytes={} B={} instances_uploaded={} install_us={} pending={} upload_pending_max={} starved={} allocation_bytes={} allocation_refusals={} evicted_bytes={} allocation_waits={} buffer_allocations={} pool_bytes={} pool_reuses={} named_bytes={:?}",
+            crate::log!("retained-upload frame={} bytes={} B={} instances_uploaded={} install_us={} pending={} upload_pending_max={} starved={} allocation_bytes={} allocation_refusals={} evicted_bytes={} allocation_waits={} identical_skips={} critical_deferred={} buffer_allocations={} pool_bytes={} pool_reuses={} named_bytes={:?}",
                 self.repaint_id, budget.stats.bytes, budget.limit, budget.stats.instances_uploaded,
                 budget.stats.install_us, budget.pending_bytes, budget.upload_pending_max.max(budget.pending_bytes),
-                budget.starved_frames, budget.allocations.bytes(), budget.allocations.refusals(), budget.allocations.evicted_bytes(), budget.allocations.waits(), METAL_INSTANCE_ALLOCATIONS.load(Ordering::Relaxed), pool.bytes(), pool.reuses, budget.stats.category_bytes);
+                budget.starved_frames, budget.allocations.bytes(), budget.allocations.refusals(), budget.allocations.evicted_bytes(), budget.allocations.waits(), budget.stats.identical_skips, critical_deferred, METAL_INSTANCE_ALLOCATIONS.load(Ordering::Relaxed), pool.bytes(), pool.reuses, budget.stats.category_bytes);
         }
         let queued = self.draw_lists.publish_instance_retirement_pending();
         pending != 0

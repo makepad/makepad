@@ -48,6 +48,8 @@ pub struct RetainedUploadStats {
     pub bytes: usize,
     pub instances_uploaded: usize,
     pub install_us: u64,
+    /// Immediate re-records whose bytes matched the resident copy: no upload.
+    pub identical_skips: usize,
     pub category_bytes: [usize; 8],
     pub category_instances: [usize; 8],
 }
@@ -108,6 +110,23 @@ pub struct RetainedUploadBudget {
     pub eviction_scanned: usize,
     pub eviction_items_scanned: usize,
     pub eviction_cycle_has_victims: bool,
+}
+
+/// One process allowance, shared by Scope's prepared cache and the platform.
+/// Preparation is peak headroom above the CPU cache, not resident recording
+/// data. Physical GPU probes may further constrain the GPU share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetainedMemoryBudgets {
+    pub cpu: usize,
+    pub preparation: usize,
+    pub recording: usize,
+    pub gpu: usize,
+}
+impl RetainedMemoryBudgets {
+    pub fn from_process(process: usize) -> Self {
+        let cpu = process / 8;
+        Self { cpu, preparation: cpu / 3, recording: process / 16, gpu: process / 4 }
+    }
 }
 
 /// Physical backing allocations, including allocator rounding, spare buffers
