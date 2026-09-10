@@ -315,7 +315,12 @@ impl Widget for NumberSpin {
                     self.draw_bg.hot = hot;
                     self.draw_bg.redraw(cx);
                 }
-                cx.set_cursor(MouseCursor::Hand);
+                // The up and down arrow already say the two halves can
+                // be pressed, and the half under the pointer lights to
+                // say which. What nothing on screen says is that the
+                // column can be DRAGGED, so that is what the cursor is
+                // spent on.
+                cx.set_cursor(MouseCursor::NsResize);
             }
             Hit::FingerHoverOut(_) => {
                 self.draw_bg.hot = 0.0;
@@ -502,6 +507,22 @@ impl NumberField {
         cx.widget_action(self.uid, NumberFieldAction::Changed(v));
     }
 
+    /// Say, with the pointer, that dragging up and down changes the
+    /// number. Nothing in the drawing says it, and the text box under
+    /// the pointer actively says something else: a caret means "this is
+    /// text you can select", which is true of a sideways drag and wrong
+    /// about the gesture the field is for.
+    ///
+    /// Not while it is being typed in. Once the box has the keyboard
+    /// the person is working on the characters, and taking the caret
+    /// away from them to advertise a gesture they have already passed
+    /// over would be the wrong trade.
+    fn offer_drag_cursor(&self, cx: &mut Cx) {
+        if !self.focused {
+            cx.set_cursor(MouseCursor::NsResize);
+        }
+    }
+
     /// Read whatever is in the box. Anything that will not parse is refused
     /// and the last good value is put back: silently keeping nonsense is
     /// worse than refusing it, and clearing the field loses the value the
@@ -673,6 +694,15 @@ impl Widget for NumberField {
             Hit::FingerHoverIn(_) => {
                 self.hovered = true;
                 self.draw_bg.redraw(cx);
+                self.offer_drag_cursor(cx);
+            }
+            Hit::FingerHoverOver(_) => {
+                // Asserted on every move, not once on the way in: the
+                // text box under the pointer sets the caret cursor from
+                // its own hover, and whichever of the two speaks last
+                // is the one the pointer wears. Children are handled
+                // at the top of this function, so this is last.
+                self.offer_drag_cursor(cx);
             }
             Hit::FingerHoverOut(_) => {
                 self.hovered = false;
