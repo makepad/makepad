@@ -33,8 +33,9 @@
 //! widget to write content into. Do not draw it: the tiles of a row are
 //! drawn together, in the row's own turtle, once the last slot of that row
 //! has been handed out. A host that stops the loop early still gets every
-//! row drawn — with the tiles it did not fill left as the template made
-//! them.
+//! row drawn, but the tiles it did not fill are not blank: rows are
+//! recycled, so an unfilled tile is still showing whatever the last item to
+//! stand in it wrote. Run the loop to `None`.
 //!
 //! # What it deliberately does not do
 //!
@@ -120,6 +121,11 @@ pub struct TilePlacement {
     /// How many across this draw settled on.
     pub columns: usize,
     /// The tile to fill. Filling it is the host's job; drawing it is not.
+    ///
+    /// A real widget: a slot is handed out only once the row has a tile
+    /// standing in it, so a list with no `Tile := …` template on it hands
+    /// out nothing at all and says so in the log, rather than handing out
+    /// placements with nothing in them for a host to write into and not see.
     pub widget: WidgetRef,
 }
 
@@ -130,11 +136,25 @@ pub struct TilePlacement {
 /// reason the masonry gives for the same choice: it can be tested without a
 /// draw pass, and the draw pass and everything that asks where an item went
 /// read the same numbers from the same place.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TileGrid {
     /// Never zero. A set laid out none across is not a set laid out.
     columns: usize,
     count: usize,
+}
+
+impl Default for TileGrid {
+    /// One across and nothing in it, which is the state before the first
+    /// draw: no width to divide and no count yet.
+    ///
+    /// Written out rather than derived so that the invariant above holds of
+    /// every grid there is. A derived default is none across, and the
+    /// divisions below would then be by zero the moment a count arrived
+    /// before a width did — which is exactly the order a host restoring a
+    /// saved position uses.
+    fn default() -> Self {
+        Self::new(1, 0)
+    }
 }
 
 impl TileGrid {
@@ -212,6 +232,67 @@ fn retarget_row(first_row: usize, was: usize, now: usize) -> usize {
     first_row.saturating_mul(was) / now
 }
 
+/// Which row belongs at the top of the viewport this draw, or `None` when
+/// there is no row to put there.
+///
+/// `asked` is a [`TileList::scroll_to_item`] made since the last draw, and it
+/// outranks the correction above: a reader who asked to be somewhere is not
+/// being kept where they were. It arrives as an item rather than a row
+/// because the row it is in depends on how many go across, and the widget
+/// does not know that until it has a width — this is the first moment it
+/// does.
+///
+/// Everything is then pinned inside the set. That clamp is not tidiness: a
+/// first row past the end draws NOTHING, and nothing in the portal list's
+/// pass takes it back. It asks for that row, the row is out of range and
+/// draws nothing, it walks up to the one before, that is out of range too,
+/// and the pass ends having drawn nothing at all — on that frame and on
+/// every frame after it, because the bad row is still the first row.
+fn first_row(
+    was_first: usize,
+    was_columns: usize,
+    grid: TileGrid,
+    asked: Option<usize>,
+) -> Option<usize> {
+    let rows = grid.rows();
+    if rows == 0 {
+        return None;
+    }
+    let row = match asked {
+        Some(index) => index / grid.columns,
+        None => retarget_row(was_first, was_columns, grid.columns),
+    };
+    Some(row.min(rows - 1))
+}
+
+/// The grid a question about an item is answered with: how many across the
+/// last draw settled on, at the count the HOST has given.
+///
+/// The two halves come from different places on purpose. The column count is
+/// the draw's answer to a width and nobody outside the draw can know it; the
+/// item count is the host's and is true the moment it is set. Answering from
+/// the draw's grid alone is what makes `item_count()` and `place_of()`
+/// disagree — the host says a thousand, the grid still says none, and every
+/// place is `None` until a frame has gone by.
+fn answer_grid(draw: TileGrid, count: usize) -> TileGrid {
+    TileGrid::new(draw.columns, count)
+}
+
+/// The gap a row carries above it.
+///
+/// Above rather than below, and none at all above the first, so that the gap
+/// falls BETWEEN rows: carried below, the last row ends the scroll extent
+/// with a band of dead space that the reader can scroll to and nothing is
+/// in. The sibling this widget borrows its arithmetic from drops its
+/// trailing gap for the same reason.
+fn gap_above(row: usize, row_gap: f64) -> f64 {
+    if row == 0 {
+        0.0
+    } else {
+        finite(row_gap)
+    }
+}
+
 /// The row being handed out, tile by tile.
 struct RowCursor {
     row: usize,
@@ -270,6 +351,12 @@ pub struct TileList {
     /// turned into a scroll correction before the rows are asked for.
     #[rust]
     was_columns: usize,
+    /// An item the host has asked to be shown, waiting for a draw to turn it
+    /// into a row. Held rather than acted on because the row an item is in
+    /// depends on the column count, and the column count comes from a width
+    /// that a host restoring a saved position has not given the widget yet.
+    #[rust]
+    pending_scroll: Option<usize>,
     #[rust]
     cursor: Option<RowCursor>,
     /// Whether this draw has given the list its row range yet. The host may
@@ -297,6 +384,10 @@ impl ScriptHook for TileList {
     ) {
         if apply.is_reload() {
             self.templates.clear();
+            // Said once per version of the instance, not once per widget:
+            // a reload is where a missing `Tile` template gets added, and a
+            // reload that still has none is worth hearing about again.
+            self.warned = false;
         }
     }
 
@@ -397,19 +488,34 @@ impl TileList {
         self.grid = TileGrid::new(columns, self.count);
     }
 
-    /// Give the list its row range, and keep the reader where they were if
-    /// the column count has just changed under them.
+    /// Give the list its row range, and settle which row is at the top of it.
     fn begin_rows(&mut self, cx: &mut Cx, list: &mut PortalList) {
         if self.ranged {
             return;
         }
         self.ranged = true;
+        // The host may have changed the count since the measurement, so the
+        // grid is rebuilt on the count as it stands now.
         self.grid = TileGrid::new(self.grid.columns, self.count);
         let rows = self.grid.rows();
         list.set_item_range(cx, 0, rows);
-        if self.was_columns != self.grid.columns && rows > 0 {
-            let row = retarget_row(list.first_id(), self.was_columns, self.grid.columns);
-            list.set_first_id_and_scroll(row.min(rows - 1), 0.0);
+        let was_first = list.first_id();
+        let asked = self.pending_scroll.is_some();
+        if let Some(row) = first_row(was_first, self.was_columns, self.grid, self.pending_scroll) {
+            // The ask is spent only now that it has been answered: a set
+            // with nothing in it yet has no row to show, and dropping the
+            // ask there would lose a position restored before the count
+            // arrived.
+            self.pending_scroll = None;
+            // Only when it moves, or when it was asked for. The call pins
+            // the scroll to the top of the row, so making it every draw
+            // would stop the list scrolling at all — it would snap back to
+            // a row edge on every frame. An ask is different: a reader
+            // wheeled part-way down the top row still expects
+            // `scroll_to_item` to put that row's edge back at the top.
+            if row != was_first || asked {
+                list.set_first_id_and_scroll(row, 0.0);
+            }
         }
         self.was_columns = self.grid.columns;
     }
@@ -462,9 +568,11 @@ impl TileList {
             let Some(base) = self.grid.index(row, 0) else {
                 continue;
             };
-            let slots = self.grid.slots_in_row(row);
             let widget = list.item(cx, row, live_id!(Row));
-            self.fill_row(cx, &widget, base, slots);
+            // What the row can actually back, not what the arithmetic asked
+            // for: a slot with no tile behind it would be handed to the host
+            // as a placement it can fill and never see.
+            let slots = self.fill_row(cx, &widget, row, base, self.grid.slots_in_row(row));
             self.cursor = Some(RowCursor {
                 row,
                 base,
@@ -477,8 +585,20 @@ impl TileList {
 
     /// Make sure a row holds `slots` tiles, and tell it the measurements the
     /// list has settled on.
-    fn fill_row(&mut self, cx: &mut Cx2d, row: &WidgetRef, base: usize, slots: usize) {
-        let have = row
+    ///
+    /// Answers how many tiles the row is showing, which is `slots` unless
+    /// there was no tile to build — no `Tile := …` on the instance — and
+    /// then it is fewer, or none. The caller hands out that number and not
+    /// the number it asked for.
+    fn fill_row(
+        &mut self,
+        cx: &mut Cx2d,
+        widget: &WidgetRef,
+        row: usize,
+        base: usize,
+        slots: usize,
+    ) -> usize {
+        let have = widget
             .borrow::<TileRow>()
             .map(|inner| inner.tiles.len())
             .unwrap_or(0);
@@ -489,8 +609,8 @@ impl TileList {
             };
             fresh.push(tile);
         }
-        let Some(mut inner) = row.borrow_mut::<TileRow>() else {
-            return;
+        let Some(mut inner) = widget.borrow_mut::<TileRow>() else {
+            return 0;
         };
         inner.adopt(
             cx,
@@ -499,8 +619,9 @@ impl TileList {
             fresh,
             self.tile_width,
             finite(self.column_gap),
-            finite(self.row_gap),
+            gap_above(row, self.row_gap),
         );
+        inner.used
     }
 
     /// One tile, built from the instance's `Tile` template.
@@ -545,38 +666,65 @@ impl TileList {
         self.was_columns
     }
 
-    /// How many rows the set needs at that count.
+    /// How many rows the set needs at that count, across the column count
+    /// the last draw settled on. Before the first draw there is no width
+    /// and so no column count, and the answer is on the one-across
+    /// fallback — the same caveat as [`Self::place_of`], and
+    /// [`Self::column_count`] answering zero is the tell.
     pub fn row_count(&self) -> usize {
-        self.grid.rows()
+        answer_grid(self.grid, self.count).rows()
     }
 
     /// Where an item sits, as (row, column) — the inverse of what
     /// [`TilePlacement`] reports.
+    ///
+    /// Answered at the count the host has given and the column count the
+    /// last draw settled on. Before the first draw there is no width and so
+    /// no column count, and the answer is the one-across fallback the rest
+    /// of the widget uses for a width it does not have; [`Self::column_count`]
+    /// answers zero until then, which is how a host can tell.
     pub fn place_of(&self, index: usize) -> Option<(usize, usize)> {
-        Some((self.grid.row_of(index)?, self.grid.column_of(index)?))
+        let grid = answer_grid(self.grid, self.count);
+        Some((grid.row_of(index)?, grid.column_of(index)?))
     }
 
-    /// The item in a slot, if the set reaches that far.
+    /// The item in a slot, if the set reaches that far. Answered like
+    /// [`Self::place_of`].
     pub fn index_at(&self, row: usize, column: usize) -> Option<usize> {
-        self.grid.index(row, column)
+        answer_grid(self.grid, self.count).index(row, column)
     }
 
     /// The first item of the row currently at the top of the viewport.
+    ///
+    /// Answered at the count the host has given, like [`Self::place_of`]:
+    /// the list's own top row is corrected against the count only on the
+    /// next draw, so between a `set_item_count` that shrank the set and
+    /// that draw it can stand past the end. This answers the first item of
+    /// the last row instead, which is where that draw will put it.
     pub fn first_visible_item(&self) -> usize {
         let first_row = self
             .list
             .borrow::<PortalList>()
             .map(|list| list.first_id())
             .unwrap_or(0);
-        first_row.saturating_mul(self.grid.columns.max(1))
+        let grid = answer_grid(self.grid, self.count);
+        let rows = grid.rows();
+        if rows == 0 {
+            return 0;
+        }
+        grid.index(first_row.min(rows - 1), 0).unwrap_or(0)
     }
 
     /// Put the row an item is in at the top of the viewport.
+    ///
+    /// Which row that is, is not decided here. It depends on how many go
+    /// across, the column count comes from a width, and a host restoring a
+    /// saved position — `set_item_count` then `scroll_to_item`, before
+    /// anything has been drawn — has given the widget no width to have
+    /// derived one from. So the item is remembered and turned into a row on
+    /// the next draw, which is the first moment both numbers exist.
     pub fn scroll_to_item(&mut self, cx: &mut Cx, index: usize) {
-        let row = index / self.grid.columns.max(1);
-        if let Some(mut list) = self.list.borrow_mut::<PortalList>() {
-            list.set_first_id_and_scroll(row, 0.0);
-        }
+        self.pending_scroll = Some(index);
         self.redraw(cx);
     }
 }
@@ -592,6 +740,8 @@ impl TileListRef {
         self.borrow().map(|inner| inner.column_count()).unwrap_or(0)
     }
 
+    /// See [`TileList::row_count`]: on the one-across fallback until the
+    /// first draw has settled a column count.
     pub fn row_count(&self) -> usize {
         self.borrow().map(|inner| inner.row_count()).unwrap_or(0)
     }
@@ -602,8 +752,9 @@ impl TileListRef {
             .unwrap_or(0)
     }
 
-    /// Where an item sits, as (row, column), at the count the last draw
-    /// settled on. `None` once the set no longer reaches that far.
+    /// Where an item sits, as (row, column), at the column count the last
+    /// draw settled on and the count the host has given. `None` once the set
+    /// no longer reaches that far.
     pub fn place_of(&self, index: usize) -> Option<(usize, usize)> {
         self.borrow().and_then(|inner| inner.place_of(index))
     }
@@ -695,8 +846,10 @@ pub struct TileRow {
     tile_width: f64,
     #[rust]
     column_gap: f64,
+    /// The gap between this row and the one above it, which the row carries
+    /// as top padding. See [`gap_above`].
     #[rust]
-    row_gap: f64,
+    gap_above: f64,
 }
 
 impl WidgetNode for TileRow {
@@ -757,9 +910,11 @@ impl Widget for TileRow {
                     spacing: self.column_gap,
                     // The gap between rows is carried by the row rather than
                     // by the list, because the list stacks its items edge to
-                    // edge and has no spacing of its own to give.
+                    // edge and has no spacing of its own to give. Above the
+                    // row and not below it, so that the last row does not
+                    // end the scroll extent with a band of nothing.
                     padding: Inset {
-                        bottom: self.row_gap,
+                        top: self.gap_above,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -794,12 +949,12 @@ impl TileRow {
         fresh: Vec<WidgetRef>,
         tile_width: f64,
         column_gap: f64,
-        row_gap: f64,
+        gap_above: f64,
     ) {
         self.base = base;
         self.tile_width = tile_width;
         self.column_gap = column_gap;
-        self.row_gap = row_gap;
+        self.gap_above = gap_above;
         self.tiles.extend(fresh);
         self.used = slots.min(self.tiles.len());
         for (slot, tile) in self.tiles.iter().enumerate().take(self.used) {
@@ -940,11 +1095,81 @@ mod tests {
         // part of, which is the row the division answers.
         assert_eq!(retarget_row(5, 3, 2), 7);
         // Nothing changed, nothing moves — including on the first draw,
-        // when there is no previous count to correct from.
+        // when there is no previous count to correct from. A row is only
+        // ever corrected against a count it was actually laid out at; where
+        // the first draw goes is `first_row`'s business, below.
         assert_eq!(retarget_row(40, 3, 3), 40);
         assert_eq!(retarget_row(40, 0, 4), 40);
         assert_eq!(retarget_row(40, 4, 0), 40);
         // A row index that will not multiply saturates instead of wrapping.
         assert_eq!(retarget_row(usize::MAX, 4, 2), usize::MAX / 2);
+    }
+
+    #[test]
+    fn an_item_asked_for_before_the_first_draw_is_shown_when_the_column_count_is_known() {
+        // A host restoring a saved position: the count is set and the item
+        // asked for with nothing drawn yet, so there is no column count to
+        // divide the item by at the time of asking. Item 500 of a thousand,
+        // four across, is row 125 — and the previous column count is 0,
+        // because there was no previous draw.
+        let grid = TileGrid::new(4, 1000);
+        assert_eq!(first_row(0, 0, grid, Some(500)), Some(125));
+        // The ask outranks keeping the reader where they were. Both things
+        // happened between draws; only one of them was asked for.
+        assert_eq!(first_row(40, 3, grid, Some(500)), Some(125));
+        // With nothing asked for, the correction is what is left: row 40 of
+        // three across is item 120, which is row 30 of four.
+        assert_eq!(first_row(40, 3, grid, None), Some(30));
+        assert_eq!(first_row(40, 4, grid, None), Some(40));
+    }
+
+    #[test]
+    fn a_first_row_past_the_end_of_the_set_is_pulled_back_to_the_last_one() {
+        // Four across, a thousand items: 250 rows, numbered 0..=249.
+        let grid = TileGrid::new(4, 1000);
+        // An item past the end of the set is the last row and not row 1250,
+        // which would draw nothing at all and go on drawing nothing.
+        assert_eq!(first_row(0, 4, grid, Some(5000)), Some(249));
+        // The same for a set that shrank under a reader who was standing
+        // near the bottom of the old one.
+        assert_eq!(first_row(900, 4, grid, None), Some(249));
+        // A set with nothing in it has no row to put anywhere, and the ask
+        // is not answered — so the caller can keep holding it.
+        assert_eq!(first_row(40, 4, TileGrid::new(4, 0), Some(3)), None);
+    }
+
+    #[test]
+    fn a_place_asked_for_before_a_draw_uses_the_count_the_host_has_given() {
+        // Nothing drawn yet: no width, so no column count, and the draw's
+        // grid holds nothing. The host has said a thousand, so that is the
+        // number the question is answered against.
+        let asked = answer_grid(TileGrid::default(), 1000);
+        assert_eq!(asked.count, 1000);
+        assert_eq!(asked.row_of(500), Some(500), "one across until a width says otherwise");
+        // Once a draw has settled on four across, the column count is the
+        // draw's and the count is still the host's — including a count set
+        // after that draw, which is the case that used to answer None.
+        let asked = answer_grid(TileGrid::new(4, 12), 1000);
+        assert_eq!(asked.row_of(500), Some(125));
+        assert_eq!(asked.column_of(500), Some(0));
+        assert_eq!(asked.rows(), 250);
+        // And a set the host has just cut is answered at the new count, not
+        // at the one the last draw laid out.
+        let asked = answer_grid(TileGrid::new(4, 1000), 8);
+        assert_eq!(asked.rows(), 2);
+        assert_eq!(asked.row_of(500), None);
+    }
+
+    #[test]
+    fn the_row_gap_falls_between_rows_and_never_after_the_last_one() {
+        // Carried above each row: the first has none, so the top of the
+        // list is flush and the bottom of it is not a band of nothing the
+        // reader can scroll into.
+        assert_eq!(gap_above(0, 8.0), 0.0);
+        assert_eq!(gap_above(1, 8.0), 8.0);
+        assert_eq!(gap_above(249, 8.0), 8.0);
+        // A gap somebody is in the middle of typing is not a request.
+        assert_eq!(gap_above(1, -4.0), 0.0);
+        assert_eq!(gap_above(1, f64::NAN), 0.0);
     }
 }
