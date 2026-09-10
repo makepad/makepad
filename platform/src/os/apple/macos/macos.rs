@@ -967,6 +967,10 @@ impl Cx {
                 }
             }
         }
+        // NextFrame/worker wakes need not dirty a pass. The queued receipt
+        // added to Atlas settlement must still be serviced and cleared on
+        // these beats, including work deferred by the last repaint's budget.
+        self.finish_metal_instance_retirements(metal_cx);
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
