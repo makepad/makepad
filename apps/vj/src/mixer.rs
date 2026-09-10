@@ -6882,6 +6882,29 @@ mod tests {
         buffer
     }
 
+    /// The whole engine meeting a device rate that is not the one every
+    /// chain was built at, which is not a rare event at all: every chain
+    /// is constructed before the first buffer at a fixed 48 kHz, so this
+    /// is what the FIRST CALLBACK BUFFER of every launch does on any
+    /// endpoint that runs at another rate -- a consumer interface, a
+    /// headset. It used to be ninety-six heap allocations, on the audio
+    /// thread, before a note had been played.
+    #[test]
+    fn a_whole_engine_that_meets_a_new_rate_allocates_nothing_in_the_callback() {
+        let mixer = TestMixer::new();
+        // Warm at the rate everything was built at, so the first buffer
+        // below is the only one carrying the change.
+        render(&mixer, 48_000.0, 128);
+        let mut buffer = AudioBuffer::new_with_size(128, 2);
+        let before = crate::music_dsp::alloc_probe::count();
+        mixer.render(44_100.0, &mut buffer);
+        assert_eq!(
+            crate::music_dsp::alloc_probe::count() - before,
+            0,
+            "the first buffer on a device that is not 48 kHz asked for memory"
+        );
+    }
+
     /// Render away the master bus's own latency, so what comes back next
     /// is the audio for what just happened rather than the tail of what
     /// happened before it. The limiter looks ahead, and looking ahead is

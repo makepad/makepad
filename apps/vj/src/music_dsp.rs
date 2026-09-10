@@ -124,6 +124,7 @@ pub(crate) fn set_flush_denormals(on: bool) {
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 pub(crate) fn set_flush_denormals(_on: bool) {}
 
+use crate::verify_or;
 use std::f32::consts::PI;
 
 // ---------------------------------------------------------------------------
@@ -3630,6 +3631,20 @@ const PLATE_REVERB_QUIET: f32 = 1e-5;
 /// `tail_peak`/`period_left` windowing over its tap period exactly.
 const PLATE_REVERB_QUIET_PERIOD_MS: f32 = 50.0;
 
+/// The highest device rate the tank's lines are sized for.
+///
+/// They are allocated once at this rate and the LIVE WINDOW moves inside
+/// them, the way the limiter's look-ahead line already does: a rate change
+/// arrives on the audio callback, and a callback does not allocate. Every
+/// chain that can run a reverb holds one, and all of them are built before
+/// the first buffer at a rate that may not be the device's, so this is not
+/// insurance against a device changing format -- it is what a launch on any
+/// endpoint that is not 48 kHz does on its very first buffer.
+///
+/// A rate above this ceiling windows to the ceiling and plays a slightly
+/// short tail, which is the same trade the limiter's own maximum makes.
+const PLATE_REVERB_MAX_RATE: f32 = 192_000.0;
+
 #[inline]
 fn ms_to_frames(ms: f32, sample_rate: f32) -> usize {
     ((ms / 1000.0) * sample_rate).round().max(1.0) as usize
@@ -3641,14 +3656,25 @@ fn ms_to_frames(ms: f32, sample_rate: f32) -> usize {
 /// feedback into the same slot, so a length-1 line is a trivial one-
 /// sample delay rather than a divide-by-zero.
 struct ReverbComb {
-    line: Vec<f32>,
+    /// Sized once for [`PLATE_REVERB_MAX_RATE`]. Everything at or past
+    /// `len` is zero, so a window that shrank cannot leave a tail behind
+    /// for a later, longer one to pick up.
+    line: Box<[f32]>,
+    len: usize,
     write: usize,
     damp_state: f32,
 }
 
 impl ReverbComb {
-    fn new(frames: usize) -> ReverbComb {
-        ReverbComb { line: vec![0.0; frames.max(1)], write: 0, damp_state: 0.0 }
+    fn new(ms: f32, sample_rate: f32) -> ReverbComb {
+        let mut comb = ReverbComb {
+            line: vec![0.0; ms_to_frames(ms, PLATE_REVERB_MAX_RATE).max(1)].into_boxed_slice(),
+            len: 1,
+            write: 0,
+            damp_state: 0.0,
+        };
+        comb.set_len(ms_to_frames(ms, sample_rate));
+        comb
     }
 
     #[inline]
@@ -3657,14 +3683,34 @@ impl ReverbComb {
         self.damp_state = out * (1.0 - damp) + self.damp_state * damp;
         self.line[self.write] = x + self.damp_state * feedback;
         self.write += 1;
-        if self.write >= self.line.len() {
+        if self.write >= self.len {
             self.write = 0;
         }
         out
     }
 
+    /// Re-window for a new rate. Allocation-free, and it drops what the
+    /// line was carrying: these lengths are physical constants in frames,
+    /// so there is nothing in flight worth carrying across a change.
+    fn set_len(&mut self, frames: usize) {
+        let mut want = frames.max(1);
+        verify_or!(want <= self.line.len(), {
+            want = self.line.len();
+        });
+        // The whole of the window this is establishing, which is all it
+        // takes: nothing reads past the live window, and any later window
+        // that reaches further clears itself on the way in, so content
+        // stranded outside a shrunken one can never be picked up again.
+        self.line[..want].iter_mut().for_each(|s| *s = 0.0);
+        self.len = want;
+        self.write = 0;
+        self.damp_state = 0.0;
+    }
+
     fn silence(&mut self) {
-        self.line.iter_mut().for_each(|s| *s = 0.0);
+        // The live window only: past it is already zero, and this runs on
+        // the callback thread.
+        self.line[..self.len].iter_mut().for_each(|s| *s = 0.0);
         self.damp_state = 0.0;
     }
 }
@@ -3675,13 +3721,21 @@ impl ReverbComb {
 /// one delay line carries both the numerator and denominator halves of
 /// the transfer function, so only `w` needs storing.
 struct ReverbAllpass {
-    line: Vec<f32>,
+    /// Sized and windowed exactly as [`ReverbComb::line`] is.
+    line: Box<[f32]>,
+    len: usize,
     write: usize,
 }
 
 impl ReverbAllpass {
-    fn new(frames: usize) -> ReverbAllpass {
-        ReverbAllpass { line: vec![0.0; frames.max(1)], write: 0 }
+    fn new(ms: f32, sample_rate: f32) -> ReverbAllpass {
+        let mut allpass = ReverbAllpass {
+            line: vec![0.0; ms_to_frames(ms, PLATE_REVERB_MAX_RATE).max(1)].into_boxed_slice(),
+            len: 1,
+            write: 0,
+        };
+        allpass.set_len(ms_to_frames(ms, sample_rate));
+        allpass
     }
 
     #[inline]
@@ -3691,14 +3745,24 @@ impl ReverbAllpass {
         let y = delayed - g * w;
         self.line[self.write] = w;
         self.write += 1;
-        if self.write >= self.line.len() {
+        if self.write >= self.len {
             self.write = 0;
         }
         y
     }
 
+    fn set_len(&mut self, frames: usize) {
+        let mut want = frames.max(1);
+        verify_or!(want <= self.line.len(), {
+            want = self.line.len();
+        });
+        self.line[..want].iter_mut().for_each(|s| *s = 0.0);
+        self.len = want;
+        self.write = 0;
+    }
+
     fn silence(&mut self) {
-        self.line.iter_mut().for_each(|s| *s = 0.0);
+        self.line[..self.len].iter_mut().for_each(|s| *s = 0.0);
     }
 }
 
@@ -3714,8 +3778,19 @@ struct ReverbTank {
 impl ReverbTank {
     fn new(comb_ms: [f32; 4], sample_rate: f32) -> ReverbTank {
         ReverbTank {
-            combs: comb_ms.map(|ms| ReverbComb::new(ms_to_frames(ms, sample_rate))),
-            allpasses: PLATE_REVERB_ALLPASS_MS.map(|ms| ReverbAllpass::new(ms_to_frames(ms, sample_rate))),
+            combs: comb_ms.map(|ms| ReverbComb::new(ms, sample_rate)),
+            allpasses: PLATE_REVERB_ALLPASS_MS.map(|ms| ReverbAllpass::new(ms, sample_rate)),
+        }
+    }
+
+    /// Meet a new device rate without asking for a byte. Every line is
+    /// already long enough; only the window inside it moves.
+    fn set_sample_rate(&mut self, comb_ms: [f32; 4], sample_rate: f32) {
+        for (comb, ms) in self.combs.iter_mut().zip(comb_ms) {
+            comb.set_len(ms_to_frames(ms, sample_rate));
+        }
+        for (allpass, ms) in self.allpasses.iter_mut().zip(PLATE_REVERB_ALLPASS_MS) {
+            allpass.set_len(ms_to_frames(ms, sample_rate));
         }
     }
 
@@ -3804,8 +3879,10 @@ impl PlateReverb {
             return;
         }
         self.sample_rate = sample_rate;
-        self.tank_l = ReverbTank::new(PLATE_REVERB_COMB_MS_L, sample_rate);
-        self.tank_r = ReverbTank::new(PLATE_REVERB_COMB_MS_R, sample_rate);
+        // Re-windowed, not rebuilt: this runs on the audio callback, and
+        // the content is dropped exactly as it was when it was rebuilt.
+        self.tank_l.set_sample_rate(PLATE_REVERB_COMB_MS_L, sample_rate);
+        self.tank_r.set_sample_rate(PLATE_REVERB_COMB_MS_R, sample_rate);
         self.tail_peak = 0.0;
         self.period_left = 0;
         self.quiet = true;
@@ -3854,9 +3931,12 @@ impl PlateReverb {
     /// [`Flanger::silence`]'s watermark trick (advancing a mark so
     /// stale content merely reads as silence, since memsetting THEIR
     /// multi-thousand-frame lines from the callback would be a
-    /// real-time violation) -- but a reasonable one here, since the
-    /// longest comb line is only ~1-2 thousand samples (44.9ms at
-    /// 48kHz), cheap enough to clear directly.
+    /// real-time violation) -- but a reasonable one here, since what is
+    /// cleared is the LIVE WINDOW, only ~1-2 thousand samples (44.9ms at
+    /// 48kHz), and not the whole allocation, which is sized for
+    /// [`PLATE_REVERB_MAX_RATE`] and is four times that. Past the window
+    /// the line is already zero and clearing it again would buy nothing
+    /// but callback time.
     pub fn silence(&mut self) {
         self.tank_l.silence();
         self.tank_r.silence();
@@ -8827,6 +8907,103 @@ mod tests {
         }
         pr.set_sample_rate(44_100.0);
         assert!(pr.quiet, "a rebuilt tank starts with nothing to ring");
+    }
+
+    /// A warmed reverb meeting a new device rate: no byte asked for.
+    ///
+    /// This is a callback path -- the chain's per-buffer preparation calls
+    /// it unconditionally -- and it used to rebuild twelve lines. Twelve
+    /// allocations, and there are eight chains that can hold a reverb.
+    #[test]
+    fn a_reverb_that_meets_a_new_rate_allocates_nothing() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_wet(1.0);
+        pr.set_size(0.9);
+        for _ in 0..2_000 {
+            pr.process([1.0, 1.0], 48_000.0);
+        }
+        let before = crate::music_dsp::alloc_probe::count();
+        pr.set_sample_rate(44_100.0);
+        assert_eq!(
+            crate::music_dsp::alloc_probe::count() - before,
+            0,
+            "a rate change on the callback may not allocate"
+        );
+    }
+
+    /// The window really moves: an implementation that allocated nothing
+    /// and also windowed nothing would pass every allocation test here.
+    #[test]
+    fn a_rewindowed_line_is_the_length_the_new_rate_asks_for() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_sample_rate(44_100.0);
+        for (comb, ms) in pr.tank_l.combs.iter().zip(PLATE_REVERB_COMB_MS_L) {
+            assert_eq!(comb.len, ms_to_frames(ms, 44_100.0));
+        }
+        for (allpass, ms) in pr.tank_l.allpasses.iter().zip(PLATE_REVERB_ALLPASS_MS) {
+            assert_eq!(allpass.len, ms_to_frames(ms, 44_100.0));
+        }
+    }
+
+    /// The law the existing test only pretends to hold: it asserts a FLAG
+    /// the setter raises unconditionally. This one asserts the sound.
+    #[test]
+    fn a_rate_change_drops_what_the_tank_was_ringing() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_wet(1.0);
+        pr.set_size(0.9);
+        for _ in 0..4_000 {
+            pr.process([1.0, 1.0], 48_000.0);
+        }
+        pr.set_sample_rate(44_100.0);
+        // Silence in, over a window longer than the longest line: with the
+        // tank emptied there is nothing left to come back out of it.
+        let longest = ms_to_frames(PLATE_REVERB_COMB_MS_L[3], 44_100.0);
+        let mut loudest = 0.0f32;
+        for _ in 0..longest {
+            let [l, r] = pr.process([0.0, 0.0], 44_100.0);
+            loudest = loudest.max(l.abs()).max(r.abs());
+        }
+        assert!(loudest < 1e-6, "the old rate's energy came back: {loudest}");
+    }
+
+    /// The failure the union clear exists to prevent, and the reason the
+    /// per-callback silence may stay narrow: a window that shrank and grew
+    /// again must not pick up what it left outside itself.
+    #[test]
+    fn a_window_that_shrank_and_grew_again_brings_nothing_back() {
+        let mut pr = PlateReverb::new(96_000.0);
+        pr.set_wet(1.0);
+        pr.set_size(0.9);
+        for _ in 0..8_000 {
+            pr.process([1.0, 1.0], 96_000.0);
+        }
+        pr.set_sample_rate(48_000.0);
+        pr.set_sample_rate(96_000.0);
+        let longest = ms_to_frames(PLATE_REVERB_COMB_MS_L[3], 96_000.0);
+        let mut loudest = 0.0f32;
+        for _ in 0..longest {
+            let [l, r] = pr.process([0.0, 0.0], 96_000.0);
+            loudest = loudest.max(l.abs()).max(r.abs());
+        }
+        assert!(loudest < 1e-6, "the wider window found what the narrow one left: {loudest}");
+    }
+
+    /// A rate past the ceiling windows to the ceiling and plays a slightly
+    /// short tail. It does NOT index past the line: that would be a panic
+    /// on the audio thread, which under a build that aborts on panic is
+    /// the whole process.
+    #[test]
+    fn a_rate_above_the_ceiling_windows_to_the_ceiling_and_does_not_panic() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_wet(1.0);
+        pr.set_sample_rate(384_000.0);
+        for comb in pr.tank_l.combs.iter() {
+            assert_eq!(comb.len, comb.line.len(), "windowed to what there is");
+        }
+        for _ in 0..512 {
+            pr.process([0.5, -0.5], 384_000.0);
+        }
     }
 
     /// Off, a fresh unit is exactly its input.
