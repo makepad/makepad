@@ -447,6 +447,18 @@ impl MeterBallistics {
 
 /// The one line, in the order a glance wants it: what the render cost, then
 /// anything that has actually gone wrong, then the master level.
+/// What to say when the output device's rate moves under the app.
+///
+/// Nothing on the first reading -- an app that has just started has not
+/// CHANGED rate -- and nothing from a device that reports no rate at all,
+/// which is what a device that has gone reports.
+pub fn rate_change_line(seen: f64, now: f64) -> Option<String> {
+    if !(now > 0.0) || !(seen > 0.0) || (seen - now).abs() < 0.5 {
+        return None;
+    }
+    Some(format!("audio: the output device moved from {seen:.0} Hz to {now:.0} Hz"))
+}
+
 pub fn summary_line(health: &AudioHealth, master: f32, clipped: bool) -> String {
     let mut line = String::with_capacity(64);
     match health.budget_used() {
@@ -590,6 +602,30 @@ mod tests {
         hurt.panicked = 3;
         let text = detail_text(&hurt, &[0.0; 5], [0.0, 0.0]);
         assert!(text.contains("PANICKED 3"), "and it is unmissable when there is: {text}");
+    }
+
+    /// A device that has just been opened has not CHANGED its rate, and a
+    /// device reporting no rate at all is a device that has gone.
+    #[test]
+    fn the_first_rate_reading_is_not_a_change() {
+        assert_eq!(rate_change_line(0.0, 48_000.0), None);
+        assert_eq!(rate_change_line(48_000.0, 0.0), None);
+        assert_eq!(rate_change_line(0.0, 0.0), None);
+    }
+
+    /// Both numbers, because which way it moved is the whole point.
+    #[test]
+    fn a_rate_that_moved_says_both_numbers() {
+        let line = rate_change_line(48_000.0, 44_100.0).expect("a rate that moved says so");
+        assert!(line.contains("48000"), "{line}");
+        assert!(line.contains("44100"), "{line}");
+    }
+
+    /// A rate that did not move says nothing, at twenty pumps a second.
+    #[test]
+    fn a_rate_that_did_not_move_says_nothing() {
+        assert_eq!(rate_change_line(48_000.0, 48_000.0), None);
+        assert_eq!(rate_change_line(48_000.0, 48_000.4), None);
     }
 
     #[test]

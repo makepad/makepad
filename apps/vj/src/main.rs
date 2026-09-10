@@ -10859,6 +10859,11 @@ pub struct App {
     /// the render itself ever threatens its buffer.
     #[rust]
     audio_overruns_seen: u64,
+    /// The device rate the last pump saw, so a rate that moves under the
+    /// app is said once rather than every pump. Zero until the first
+    /// reading, which is not a change.
+    #[rust]
+    audio_device_rate_seen: f64,
     /// Poisoned callbacks already reported.
     #[rust]
     audio_panicked_seen: u64,
@@ -19073,6 +19078,18 @@ p2 {}
                 health.overruns - self.audio_overruns_seen
             );
             self.audio_overruns_seen = health.overruns;
+        }
+        // A device that changed the rate it plays at, which every chain
+        // then has to meet mid-buffer. Said out here rather than in the
+        // opened numbers pane, where the rate already stood and nobody
+        // with the pane shut could see it move.
+        if let Some(line) =
+            crate::console::rate_change_line(self.audio_device_rate_seen, health.device_rate)
+        {
+            log!("{line}");
+        }
+        if health.device_rate > 0.0 {
+            self.audio_device_rate_seen = health.device_rate;
         }
         // A panic inside an output callback, contained by the platform's
         // fence. At error level and not as a note: the output it names is
