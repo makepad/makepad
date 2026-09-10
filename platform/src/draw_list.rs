@@ -2106,6 +2106,37 @@ impl CxDrawItems {
             call.mark_uniforms_dirty(generation);
         }
     }
+    /// Patch only the given dyn-uniform ranges of a retained item's draw call
+    /// from `vars` (the shared, camera-dependent uniforms), leaving the item's
+    /// own per-owner values untouched. A camera-only frame therefore never
+    /// rebinds per-owner uniforms nor copies the whole block. The call is
+    /// marked dirty only when a value actually changed.
+    pub fn patch_retained_uniforms(
+        &mut self,
+        index: usize,
+        ranges: &[(usize, usize)],
+        vars: &DrawVars,
+        generation: u64,
+    ) {
+        let item = &mut self.buffer[index];
+        let call = item
+            .kind
+            .draw_call_mut()
+            .expect("retained presentation requires a draw call");
+        assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
+        let mut changed = false;
+        for &(offset, slots) in ranges {
+            for i in offset..(offset + slots).min(call.dyn_uniforms.len()) {
+                if call.dyn_uniforms[i] != vars.dyn_uniforms[i] {
+                    call.dyn_uniforms[i] = vars.dyn_uniforms[i];
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            call.mark_uniforms_dirty(generation);
+        }
+    }
     /// Reinterpret the same resident publication without inventing copy or
     /// consumption receipts. This changes no instance-count/upload predicate.
     pub fn stamp_retained_schema(&mut self, index: usize, schema: u64, prefetched: bool) {
