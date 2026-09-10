@@ -1,6 +1,7 @@
 #[path = "metal_pan_timing.rs"]
 mod pan_timing;
 use pan_timing::{PanCounters, PanEncoder, PanFrame};
+use crate::present_trace::{Cause as PresentCause, Stage as PresentStage};
 
 use {
     crate::{
@@ -144,6 +145,10 @@ impl Cx {
     }
 
     fn upload_instance_buffers(&mut self, root: DrawListId, metal_cx: &MetalCx) -> bool {
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::UploadBegin); }
+        let evicted_before = self.draw_lists.1.allocations.evicted_bytes();
+        let retired_before = metal_cx.retired_instance_bytes.get();
+        self.draw_lists.1.begin_frame(self.repaint_id);
         self.retry_metal_pipelines(metal_cx);
         let requests = self.pending_instance_uploads(root);
         self.prepare_retained_working_set(root);
@@ -168,6 +173,9 @@ impl Cx {
         let pressure = self.draw_lists.1.allocations.reclaim_needed();
         let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
         let mut evicted_bytes = 0usize;
+        let mut eviction = std::mem::take(&mut self.draw_lists.1.eviction);
+        let maintenance_limit = self.draw_lists.1.limit;
+        if let Some(trace) = &metal_cx.present_trace { trace.first(PresentStage::EvictionBegin); }
         self.draw_lists
             .reclaim_backend_storage_with_usage(&self.task_pool(), |_, _, used, os| {
                 if !metal_cx.has_retirement_room() {
@@ -175,6 +183,7 @@ impl Cx {
                 }
                 let buffer = &mut os.instance_buffer;
                 if !used && buffer.capacity_bytes() != 0 {
+                    if !eviction.admit(buffer.capacity_bytes(), buffer.buffer_count(), maintenance_limit) { return None; }
                     evicted_bytes += buffer.capacity_bytes();
                     metal_cx
                         .retired_instances
@@ -189,7 +198,10 @@ impl Cx {
                             .as_ref()
                             .is_some_and(|b| b.last_bound_seq <= completed)
                         {
-                            *out = spare.take();
+                            if eviction.admit(spare.as_ref().unwrap().capacity, 1, maintenance_limit) {
+                                evicted_bytes += spare.as_ref().unwrap().capacity;
+                                *out = spare.take();
+                            }
                         }
                     }
                     if retired.capacity_bytes() != 0 {
@@ -200,7 +212,6 @@ impl Cx {
                 None
             });
         self.draw_lists.1.allocations.evicted(evicted_bytes);
-        self.draw_lists.1.begin_frame(self.repaint_id);
         self.draw_lists
             .1
             .allocations
@@ -216,8 +227,9 @@ impl Cx {
             self.prepare_retained_demand(root, self.repaint_id);
             let required = self.draw_lists.1.allocations.reclaim_bytes();
             let mut evicted = 0usize;
-            for id in self.draw_lists.retained_eviction_candidates() {
-                for index in 0..self.draw_lists.backend_item_count(id) {
+            let (candidates, scan_complete) = self.draw_lists.retained_eviction_batch(128);
+            'victims: for (id, items) in candidates {
+                for index in items {
                     if !metal_cx.has_retirement_room() {
                         break;
                     }
@@ -226,6 +238,10 @@ impl Cx {
                     if bytes == 0 {
                         continue;
                     }
+                    self.draw_lists.1.eviction_cycle_has_victims = true;
+                    // Admission is charged before detaching physical backing.
+                    if !eviction.admit(bytes, self.draw_lists[id].draw_items[index].os.instance_buffer.buffer_count(), maintenance_limit) { break 'victims; }
+                    let buffer = &mut self.draw_lists[id].draw_items[index].os.instance_buffer;
                     metal_cx
                         .retired_instances
                         .borrow_mut()
@@ -242,11 +258,14 @@ impl Cx {
                 }
             }
             retirement_pending |= metal_cx.collect_retired_instances(&mut self.draw_lists.1);
-            self.draw_lists.1.allow_visible_overflow = evicted == 0
+            self.draw_lists.1.allow_visible_overflow = scan_complete
+                && !self.draw_lists.1.eviction_cycle_has_victims && evicted == 0
                 && !retirement_pending
                 && !self.draw_lists.1.allocations.has_pending_retirements()
                 && self.draw_lists.1.working_set_scan_passes == 0;
         }
+        self.draw_lists.1.eviction = eviction;
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::EvictionEnd); }
         let mut pending = self.instance_upload_collection_deferred(root);
         for request in &requests {
             let (list, budget) = self.draw_lists.list_and_upload_budget(request.list);
@@ -276,6 +295,7 @@ impl Cx {
                 target,
                 publication.is_none() && call.instance_dirty,
                 continue_prefix,
+                item.retained_progressive,
                 call.total_instance_slots,
                 request.category,
                 budget,
@@ -289,7 +309,8 @@ impl Cx {
                 self.os.instance_bytes_uploaded.saturating_add(bytes as u64);
             item.instance_upload_pending = remaining != 0;
             call.instance_dirty = false;
-            if remaining == 0 {
+            if remaining == 0 || (item.retained_progressive && item.os.instance_buffer.pending.as_ref().is_some_and(|p|
+                p.publication == target && item.os.instance_buffer.inner.as_ref().is_some_and(|i| i.len > 0 && i.buffer.as_id() == p.inner.buffer.as_id()))) {
                 item.retained_gpu_evicted = false;
                 item.retained_instance_id = target;
                 item.resident_schema = item.retained_schema;
@@ -302,6 +323,14 @@ impl Cx {
         budget
             .allocations
             .set_pending_backend_retirements(metal_cx.retired_instances.borrow().len());
+        if let Some(trace) = &metal_cx.present_trace {
+            trace.maintenance(budget);
+            trace.uploads(budget.stats.bytes, budget.pending_bytes,
+                metal_cx.retired_instance_bytes.get().saturating_sub(retired_before),
+                budget.allocations.evicted_bytes().saturating_sub(evicted_before),
+                metal_cx.retired_instances.borrow().len(), metal_cx.instance_pool.borrow().bytes());
+            trace.mark(PresentStage::UploadEnd);
+        }
         if crate::thread::ui_hang::hashing::enabled() && (budget.stats.bytes != 0 || pending != 0) {
             static NAMES: std::sync::Once = std::sync::Once::new();
             NAMES.call_once(|| crate::log!("retained-upload names=[Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other]"));
@@ -322,7 +351,8 @@ impl Cx {
     /// and has none resident: painting the list now would leave a hole
     /// where it belongs. A partial prefix is not a hole — that is the
     /// previous ink a replacement keeps until its copy completes.
-    fn draw_list_has_unresident_draw(&self, draw_list_id: DrawListId) -> bool {
+    fn draw_list_has_unresident_draw(&self, draw_list_id: DrawListId, trace: Option<&crate::present_trace::Trace>) -> bool {
+        let mut blocked = false;
         let len = self.draw_lists[draw_list_id].draw_item_order_len();
         for order_index in 0..len {
             let Some(item_id) =
@@ -333,9 +363,10 @@ impl Cx {
             let item = &self.draw_lists[draw_list_id].draw_items[item_id];
             if let Some(sub_list_id) = item.kind.sub_list() {
                 if !self.draw_lists.is_id_freed(sub_list_id)
-                    && self.draw_list_has_unresident_draw(sub_list_id)
+                    && self.draw_list_has_unresident_draw(sub_list_id, trace)
                 {
-                    return true;
+                    if trace.is_none() { return true; }
+                    blocked = true;
                 }
                 continue;
             }
@@ -350,31 +381,26 @@ impl Cx {
             if slots == 0 {
                 continue;
             }
-            let wanted = if item.retained_instances.is_some() {
-                item.retained_instance_count
-            } else {
-                item.instances.as_ref().map_or(0, |v| v.len()) / slots
-            };
-            if wanted == 0 {
-                continue;
-            }
             let resident = item
                 .os
                 .instance_buffer
                 .inner
                 .as_ref()
                 .map_or(0, |inner| inner.len / (slots * 4));
-            if resident == 0 {
-                return true;
+            if item.blocks_present(resident) {
+                if trace.is_none() { return true; }
+                blocked = true;
             }
-            // Frame ink whose copy did not finish: what is resident is the
-            // previous frame's, and painting it is painting the wrong
-            // frame. Only a retained publication may show its old ink.
-            if item.instance_upload_pending && item.retained_instances.is_none() {
-                return true;
+            if let Some(trace) = trace {
+                let wanted = item.retained_instances.as_ref().map_or_else(
+                    || item.instances.as_ref().map_or(0, |v| v.len() / slots),
+                    |_| item.retained_instance_count);
+                if wanted != 0 && (resident == 0 || (item.instance_upload_pending && item.retained_instances.is_none())) {
+                    trace.missing_item(draw_list_id.index(), call.draw_shader_id.index, wanted, item.retained_progressive);
+                }
             }
         }
-        false
+        blocked
     }
 
     fn render_view(
@@ -598,23 +624,26 @@ impl Cx {
                     let bytes = geometry.vertices.byte_len() as u64;
                     self.os.vertex_buffer_bytes_uploaded =
                         self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
-                    geometry
+                    geometry.dirty_vertices = !geometry
                         .os
                         .vertex_buffer
                         .update(metal_cx, geometry.vertices.as_bytes());
-                    geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.index_buffer.inner.is_none() {
                     let bytes = geometry.indices.as_bytes().len() as u64;
                     self.os.vertex_buffer_bytes_uploaded =
                         self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
-                    geometry
+                    geometry.dirty_indices = !geometry
                         .os
                         .index_buffer
                         .update(metal_cx, geometry.indices.as_bytes());
-                    geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
+                if geometry.dirty {
+                    metal_cx.uniforms_starved.set(true);
+                    self.passes[draw_pass_id].paint_dirty = true;
+                    continue 'draw_items;
+                }
 
                 if debug_dump {
                     Self::debug_dump_draw_call(
@@ -746,7 +775,11 @@ impl Cx {
                         if uniform.os.uploaded_generation != uniform.generation
                             || uniform.os.buffer.inner.is_none()
                         {
-                            uniform.os.buffer.update(metal_cx, &uniform.data);
+                            if !uniform.os.buffer.update(metal_cx, &uniform.data) {
+                                metal_cx.uniforms_starved.set(true);
+                                self.passes[draw_pass_id].paint_dirty = true;
+                                continue 'draw_items;
+                            }
                             uniform.os.uploaded_generation = uniform.generation;
                             uniform_bytes_uploaded =
                                 uniform_bytes_uploaded.saturating_add(uniform.data.len() as u64);
@@ -968,7 +1001,9 @@ impl Cx {
         mode: DrawPassMode,
     ) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Present);
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::Draw); }
         if metal_cx.aborted_repaint == Some(self.repaint_id) {
+            if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::PassAborted); }
             return false;
         }
         if !metal_flush_submissions() {
@@ -1254,7 +1289,7 @@ impl Cx {
         // last frame stays up, the next repaint paints it whole. Bounded per
         // streak of repaints, so an allocation that never lands degrades to
         // the hole rather than to a frozen screen.
-        if self.draw_list_has_unresident_draw(draw_list_id) {
+        if self.draw_list_has_unresident_draw(draw_list_id, metal_cx.present_trace.as_ref()) {
             let consecutive = metal_cx.hole_streak_repaint + 1 == self.repaint_id;
             let since = match metal_cx.hole_streak_since {
                 Some(since) if consecutive => since,
@@ -1312,6 +1347,22 @@ impl Cx {
         } else {
             metal_cx.new_command_buffer()
         };
+        if mode.is_drawable().is_some() {
+            if let Some(trace) = &metal_cx.present_trace {
+                trace.command(metal_cx.current_cb_seq);
+                METAL_ENCODING.with(|entries| {
+                    if let Some(entry) = entries.borrow_mut().get_mut(&(command_buffer as usize)) {
+                        entry.present_trace = Some(trace.clone());
+                    }
+                });
+                let scheduled = trace.clone();
+                let completed = trace.clone();
+                unsafe {
+                    let _: () = msg_send![command_buffer, addScheduledHandler: &objc_block!(move |_cb: ObjcId| { scheduled.mark(PresentStage::Scheduled); })];
+                    let _: () = msg_send![command_buffer, addCompletedHandler: &objc_block!(move |_cb: ObjcId| { completed.mark(PresentStage::Completed); })];
+                }
+            }
+        }
         // CPU->GPU uploads for the Vec textures this pass samples go on THIS
         // command buffer, ahead of its render encoder, so the GPU orders them
         // after every earlier reader and before this pass (`VecUploadEncoder`).
@@ -1390,6 +1441,7 @@ impl Cx {
         }
 
         encoders.end();
+        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::Encoded); }
         // RENDERER-OWNED TEXTURE CAPTURE: a capture requested for a texture
         // THIS pass renders is blitted on this very command buffer — the
         // producing queue — and delivered only from its completion handler,
@@ -1530,13 +1582,7 @@ impl Cx {
                 );
             }
             DrawPassMode::Drawable(drawable, target_presentation_time) => {
-                present_pulse();
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                #[cfg(target_os = "macos")]
-                crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
-                    let now = app.time_now();
-                    app.frame_trace.present(now);
-                });
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
@@ -1557,6 +1603,13 @@ impl Cx {
                 } else {
                     Some((drawable, target_presentation_time))
                 };
+                if present.is_some() {
+                    present_pulse();
+                    #[cfg(target_os = "macos")]
+                    crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                        app.frame_trace.present(app.time_now());
+                    });
+                }
                 self.commit_command_buffer(
                     screenshot,
                     None,
@@ -1588,7 +1641,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
-                    Some((drawable, None)),
+                    (metal_cx.aborted_repaint != Some(self.repaint_id)).then_some((drawable, None)),
                 );
             }
         }
@@ -1607,7 +1660,7 @@ impl Cx {
             self.os.texture_bytes_uploaded as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
-        true
+        metal_cx.aborted_repaint != Some(self.repaint_id)
     }
 
     fn build_screenshot_struct(
@@ -2066,6 +2119,8 @@ impl DrawPassMode {
 }
 
 pub struct MetalCx {
+    pub(crate) present_trace: Option<crate::present_trace::Trace>,
+    retired_instance_bytes: std::cell::Cell<usize>,
     pub device: ObjcId,
     command_queue: ObjcId,
     /// 1×1 BGRA fallback texture bound when a texture slot has no backing
@@ -2164,6 +2219,7 @@ struct InFlightCb {
     lifetime_serials: Arc<crate::texture::FrameSerials>,
     committed_at: Option<Instant>,
     passes: Vec<InFlightPass>,
+    present_trace: Option<crate::present_trace::Trace>,
 }
 
 struct InFlightPass {
@@ -2223,6 +2279,7 @@ fn metal_submitter() -> &'static std::sync::mpsc::SyncSender<MetalSubmission> {
             .spawn(move || {
                 while let Ok(mut submission) = rx.recv() {
                     let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+                    let trace = submission.entry.as_ref().and_then(|e| e.present_trace.clone());
                     if let Some(mut entry) = submission.entry.take() {
                         entry.committed_at = Some(Instant::now());
                         entry
@@ -2232,6 +2289,7 @@ fn metal_submitter() -> &'static std::sync::mpsc::SyncSender<MetalSubmission> {
                         metal_in_flight().push_back(entry);
                     }
                     let buffer = submission.buffer.as_id();
+                    if let Some(trace) = &trace { trace.mark(PresentStage::Commit); }
                     if let Some((drawable, time)) = &submission.drawable {
                         if let Some(time) = time {
                             let _: () = unsafe {
@@ -2243,6 +2301,7 @@ fn metal_submitter() -> &'static std::sync::mpsc::SyncSender<MetalSubmission> {
                         }
                     }
                     let _: () = unsafe { msg_send![buffer, commit] };
+                    if let Some(trace) = &trace { trace.mark(PresentStage::CommitReturned); }
                     drop(submission);
                     let _: () = unsafe { msg_send![pool, release] };
                     crate::thread::SignalToUI::set_ui_signal();
@@ -2271,6 +2330,7 @@ pub(crate) fn metal_flush_submissions() -> bool {
 }
 pub(crate) fn metal_submit_command_buffer(buffer: ObjcId, drawable: Option<(ObjcId, Option<f64>)>) {
     let entry = METAL_ENCODING.with(|entries| entries.borrow_mut().remove(&(buffer as usize)));
+    if let Some(trace) = entry.as_ref().and_then(|e| e.present_trace.as_ref()) { trace.mark(PresentStage::Queued); }
     let submission = MetalSubmission {
         buffer: RcObjcId::from_unowned(NonNull::new(buffer).unwrap()),
         drawable: drawable.map(|(drawable, time)| {
@@ -2652,6 +2712,7 @@ impl MetalCx {
                     lifetime_serials: self.lifetime_serials.clone(),
                     committed_at: None,
                     passes: Vec::new(),
+                    present_trace: None,
                 },
             )
         });
@@ -2710,6 +2771,16 @@ impl MetalCx {
     /// Stop this repaint: the pass being encoded could not be, so no later
     /// pass of it — nor the window — paints; all stay dirty for the next one.
     fn abort_repaint(&mut self, repaint_id: u64, reason: &str) {
+        if let Some(trace) = &self.present_trace {
+            trace.cause(match reason {
+                "submitter saturated" => PresentCause::SubmitterFull,
+                "render setup pending" => PresentCause::SetupPending,
+                "command buffer cap" => PresentCause::CommandBufferCap,
+                "instances not resident" => PresentCause::InstancesNotResident,
+                "uniforms not resident" => PresentCause::UniformsNotResident,
+                _ => PresentCause::PassAborted,
+            });
+        }
         if self.aborted_repaint != Some(repaint_id) {
             self.aborted_repaint = Some(repaint_id);
             self.backpressure_skips = self.backpressure_skips.saturating_add(1);
@@ -2720,7 +2791,7 @@ impl MetalCx {
     /// Repaints whose command buffers have not all completed.
     #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn frames_in_flight(&self) -> usize {
-        let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+        let completed = self.lifetime_serials.completed.load(Ordering::Acquire);
         self.repaint_tail_seqs
             .iter()
             .filter(|seq| **seq > completed)
@@ -2975,6 +3046,8 @@ impl MetalCx {
             }
         }
         MetalCx {
+            present_trace: None,
+            retired_instance_bytes: std::cell::Cell::new(0),
             uniform_chunks: RefCell::new(uniform_chunks),
             retired_instances: RefCell::new(VecDeque::with_capacity(16_384)),
             instance_pool: RefCell::new(crate::retained_instances::RetainedBufferPool::new(
@@ -3553,7 +3626,7 @@ const METAL_UNIFORM_MAX_CHUNKS: usize = 32;
 /// desktop): one 512th of it, 1..16 MiB, so a small machine keeps its UI
 /// thread light and a big one never paints a hole for a frame's own data.
 fn sync_allocation_bytes(allocations: &crate::retained_instances::RetainedAllocationBudget) -> usize {
-    (allocations.limit() / 512).clamp(1 << 20, 16 << 20)
+    allocations.sync_allocation_bytes()
 }
 /// How long a repaint may keep stopping for a draw item with nothing
 /// resident — the last frame stays up meanwhile — before the frame paints
@@ -3613,22 +3686,22 @@ impl MetalCx {
         let mut retired = self.retired_instances.borrow_mut();
         let pressure = budget.allocations.reclaim_needed();
         let mut pool = self.instance_pool.borrow_mut();
-        if pressure {
-            while retired.len() < retired.capacity() {
-                let Some(inner) = pool.drain_one() else {
-                    break;
-                };
-                retired.push_back(MetalBuffer {
-                    inner: Some(inner),
-                    ..Default::default()
-                });
-            }
-        }
-        for _ in 0..retired.len().min(64) {
-            let mut buffer = retired.pop_front().unwrap();
+        // One shared byte/handle allowance for this repaint, including pool
+        // pressure. Never drain the entire size-class cache into one batch.
+        for _ in 0..64 {
+            let from_pool = pressure && retired.len() < retired.capacity() && pool.largest_buffer_bytes().is_some_and(|bytes|
+                budget.retirement.can_admit(bytes, 1, budget.limit));
+            let mut buffer = if from_pool {
+                MetalBuffer { inner: pool.drain_one(), ..Default::default() }
+            } else if let Some(buffer) = retired.pop_front() { buffer } else { break; };
             if buffer.last_submission() > completed {
                 retired.push_back(buffer);
                 continue;
+            }
+            let before = budget.retirement;
+            if !budget.retirement.admit(buffer.capacity_bytes(), buffer.buffer_count(), budget.limit) {
+                retired.push_front(buffer);
+                break;
             }
             if !pressure {
                 // All last readers completed before a destination enters the
@@ -3660,28 +3733,31 @@ impl MetalCx {
                 continue;
             }
             let counter = budget.retirements.clone();
+            let retired_bytes = buffer.capacity_bytes();
             counter.fetch_add(1, Ordering::AcqRel);
             match metal_buffer_allocator()
-                .try_send(MetalAllocationRequest::RetireInstances(buffer, counter))
+                .try_send(MetalAllocationRequest::RetireInstances(buffer, counter, self.present_trace.clone()))
             {
-                Ok(()) => {}
+                Ok(()) => { self.retired_instance_bytes.set(self.retired_instance_bytes.get().saturating_add(retired_bytes)); }
                 Err(
                     std::sync::mpsc::TrySendError::Full(MetalAllocationRequest::RetireInstances(
                         buffer,
                         counter,
+                        _,
                     ))
                     | std::sync::mpsc::TrySendError::Disconnected(
-                        MetalAllocationRequest::RetireInstances(buffer, counter),
+                        MetalAllocationRequest::RetireInstances(buffer, counter, _),
                     ),
                 ) => {
                     counter.fetch_sub(1, Ordering::AcqRel);
+                    budget.retirement = before;
                     retired.push_front(buffer);
                     break;
                 }
                 Err(_) => unreachable!(),
             }
         }
-        !retired.is_empty() || budget.retirements.load(Ordering::Acquire) != 0
+        !retired.is_empty() || (pressure && pool.bytes() != 0) || budget.retirements.load(Ordering::Acquire) != 0
     }
 
     // setVertexBytes/setFragmentBytes make the driver copy every uniform
@@ -3844,7 +3920,7 @@ enum MetalAllocationRequest {
         Arc<MetalPipelines>,
     ),
     Instances(RcObjcId, Arc<MetalInstanceAllocation>),
-    RetireInstances(MetalBuffer, Arc<AtomicUsize>),
+    RetireInstances(MetalBuffer, Arc<AtomicUsize>, Option<crate::present_trace::Trace>),
     RenderSetup(RcObjcId, Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>),
 }
 
@@ -3862,8 +3938,10 @@ fn metal_buffer_allocator() -> &'static std::sync::mpsc::SyncSender<MetalAllocat
                     MetalAllocationRequest::Pipelines(device, source, color_format, ready) => {
                         MetalPipelines::compile(device.as_id(), source, color_format, ready);
                     }
-                    MetalAllocationRequest::RetireInstances(buffer, counter) => {
+                    MetalAllocationRequest::RetireInstances(buffer, counter, trace) => {
+                        if let Some(trace) = &trace { trace.first(PresentStage::RetirementBegin); trace.cause(PresentCause::Retirement); }
                         drop(buffer);
+                        if let Some(trace) = &trace { trace.mark(PresentStage::RetirementEnd); }
                         counter.fetch_sub(1, Ordering::AcqRel);
                     }
                     MetalAllocationRequest::Instances(device, allocation) => {
@@ -3907,6 +3985,12 @@ struct MetalPendingInstances {
 }
 
 impl MetalBuffer {
+    fn buffer_count(&self) -> usize {
+        // Shared append aliases are conservatively charged twice to the
+        // handle budget, while capacity_bytes deduplicates physical bytes.
+        usize::from(self.allocation.is_some()) + usize::from(self.inner.is_some())
+            + usize::from(self.pending.is_some()) + self.spares.iter().filter(|s| s.is_some()).count()
+    }
     fn last_submission(&self) -> u64 {
         self.inner
             .iter()
@@ -3951,6 +4035,7 @@ impl MetalBuffer {
         publication: u64,
         changed: bool,
         continue_prefix: bool,
+        progressive: bool,
         slots: usize,
         category: crate::retained_instances::UploadCategory,
         budget: &mut crate::retained_instances::RetainedUploadBudget,
@@ -4199,6 +4284,23 @@ impl MetalBuffer {
         budget.copied(copy.len(), slots * 4, category, start_time.elapsed());
         pending.copied = copy.end;
         let remaining = pending.end - pending.copied;
+        // Publish only complete immutable records. Later frames append beyond
+        // this prefix; replacements never overwrite a buffer with live readers.
+        // Consumption/delivery remains incomplete until the entire copy lands.
+        if progressive && remaining != 0 && pending.copied != 0
+            && (self.inner.as_ref().is_none_or(|old| old.buffer.as_id() == pending.inner.buffer.as_id()) || metal_cx.has_retirement_room())
+        {
+            let prefix = MetalBufferInner {
+                buffer: pending.inner.buffer.clone(), len: pending.copied,
+                capacity: pending.inner.capacity, last_bound_seq: pending.inner.last_bound_seq,
+                charge: pending.inner.charge.clone(),
+            };
+            if let Some(old) = self.inner.replace(prefix) {
+                if old.buffer.as_id() != pending.inner.buffer.as_id() {
+                    metal_cx.retired_instances.borrow_mut().push_back(MetalBuffer {inner:Some(old),..Default::default()});
+                }
+            }
+        }
         if remaining == 0 {
             if self
                 .inner
@@ -4248,17 +4350,26 @@ impl MetalBuffer {
     fn mark_bound(&mut self, metal_cx: &MetalCx) {
         if let Some(inner) = self.inner.as_mut() {
             inner.last_bound_seq = metal_cx.current_cb_seq;
+            if let Some(pending) = self.pending.as_mut().filter(|p| p.inner.buffer.as_id() == inner.buffer.as_id()) {
+                // A progressively published prefix aliases the pending copy.
+                // Preserve its reader fence when the next prefix/completion
+                // replaces the small CPU descriptor of this same allocation.
+                pending.inner.last_bound_seq = metal_cx.current_cb_seq;
+            }
             if let Some(charge) = &inner.charge {
                 charge.submitted(metal_cx.current_cb_seq);
             }
         }
     }
 
-    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
+    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) -> bool {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
-            self.inner = None;
-            return;
+            if self.inner.is_some() {
+                if !metal_cx.has_retirement_room() { return false; }
+                metal_cx.retired_instances.borrow_mut().push_back(MetalBuffer {inner:self.inner.take(),..Default::default()});
+            }
+            return true;
         }
         if let Some(inner) = self.inner.as_mut() {
             // Writing in place is only safe once every command buffer that
@@ -4290,30 +4401,33 @@ impl MetalBuffer {
                         let _: () = msg_send![inner.buffer.as_id(), didModifyRange: range];
                     }
                     inner.len = len;
-                    return;
+                    return true;
                 }
             }
         }
-        // A fresh buffer. The in-flight command buffers keep their own
-        // retain on the old one until they complete, so dropping ours here
-        // never pulls memory out from under the GPU.
-        self.inner = Some(MetalBufferInner {
-            buffer: RcObjcId::from_owned(
-                NonNull::new(unsafe {
+        // Geometry and custom uniforms follow the same completed-reader
+        // retirement path as instance backing. A driver release must not run
+        // inside paint, even when Metal also retains the old object.
+        if self.inner.is_some() && !metal_cx.has_retirement_room() { return false; }
+        let Some(buffer) = NonNull::new(unsafe {
                     msg_send![
                         metal_cx.device,
                         newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void
                         length: len as u64
                         options: nil
                     ]
-                })
-                .unwrap(),
-            ),
+                }) else { return false; };
+        let fresh = MetalBufferInner {
+            buffer: RcObjcId::from_owned(buffer),
             len,
             capacity: len,
             last_bound_seq: 0,
             charge: None,
-        });
+        };
+        if let Some(old) = self.inner.replace(fresh) {
+            metal_cx.retired_instances.borrow_mut().push_back(MetalBuffer {inner:Some(old),..Default::default()});
+        }
+        true
     }
 }
 
@@ -5968,7 +6082,7 @@ mod vec_upload_tests {
 
     fn upload(cx: &mut Cx, metal_cx: &mut MetalCx, texture: &Texture) -> u64 {
         let command_buffer = metal_cx.new_command_buffer();
-        let mut enc = VecUploadEncoder::new(command_buffer);
+        let mut enc = VecUploadEncoder::new(command_buffer, None);
         let bytes = cx.textures[texture.texture_id()].update_vec_texture(metal_cx, &mut enc);
         enc.finish(metal_cx);
         unsafe {
