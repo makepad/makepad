@@ -6535,6 +6535,39 @@ fn mix_not_carrying(mix: &SynthMixUiState, deck: DeckId) -> Option<String> {
     Some(format!("{MIX_NOT_CARRYING}{} · {why}", strip.name()))
 }
 
+/// The key the dialog writes and the launch reads. One spelling, because
+/// the two sites are eight thousand lines apart.
+const LAUNCH_CLEARS_DJ_MUTES: &str = "launch_clears.dj_channel_mutes";
+
+/// One reader, so the default cannot be spelled two ways. Off is what the
+/// tab has always done: every channel comes back where it was left.
+fn launch_clears_dj_mutes(store: &crate::settings::Settings) -> bool {
+    store.bool(LAUNCH_CLEARS_DJ_MUTES, false)
+}
+
+/// What a launch does with the channel mutes the file remembers.
+///
+/// The two DJ channels are the only ones a setting may open, and only on
+/// the way IN. Every other channel's mute is set and read on the one page
+/// that owns it. These two are different because the DJ tab's own
+/// transport starts them: a mute the file remembers on DJ A contradicts a
+/// deck the operator is about to press play on, and a deck's meter is
+/// taken before its channel, so it reads full while the channel passes
+/// nothing.
+///
+/// Returns whether anything moved, so a launch that found something can
+/// say so and one that found nothing stays quiet.
+fn clear_dj_channel_mutes(state: &mut SynthMixUiState, asked: bool) -> bool {
+    if !asked {
+        return false;
+    }
+    let mut cleared = false;
+    for strip in [StripId::DjA, StripId::DjB] {
+        cleared |= std::mem::replace(&mut state.strip_mutes[strip.index()], false);
+    }
+    cleared
+}
+
 /// The head's second line, given the line the deck's load state already
 /// wants there and what the program mix is doing with its channel.
 ///
@@ -7012,6 +7045,90 @@ mod synth_mix_file_tests {
         // A program is not a value: the file holds the knobs, and a program
         // that no longer matched them would be a lie.
         assert_eq!(after.ironfish_program, None);
+    }
+
+    fn all_shut() -> SynthMixUiState {
+        let mut state = SynthMixUiState::default();
+        state.strip_mutes = [true; STRIP_COUNT];
+        state
+    }
+
+    /// The two the DJ tab's own transport starts, and no others: every
+    /// other channel is set and read on the one page that owns it.
+    #[test]
+    fn a_launch_that_was_asked_opens_only_the_two_dj_channels() {
+        let mut state = all_shut();
+        assert!(clear_dj_channel_mutes(&mut state, true));
+        assert!(!state.strip_mutes[StripId::DjA.index()]);
+        assert!(!state.strip_mutes[StripId::DjB.index()]);
+        for strip in [
+            StripId::Video,
+            StripId::Sfx,
+            StripId::Piano,
+            StripId::Ironfish,
+            StripId::Drums,
+        ] {
+            assert!(state.strip_mutes[strip.index()], "{}", strip.name());
+        }
+    }
+
+    /// Off is what the tab has always done, and it is the default.
+    #[test]
+    fn a_launch_that_was_not_asked_brings_every_mute_back() {
+        let mut state = all_shut();
+        assert!(!clear_dj_channel_mutes(&mut state, false));
+        assert_eq!(state.strip_mutes, [true; STRIP_COUNT]);
+    }
+
+    /// A launch that found nothing says nothing.
+    #[test]
+    fn a_launch_with_no_dj_channel_muted_has_nothing_to_say() {
+        let mut state = SynthMixUiState::default();
+        state.strip_mutes[StripId::Video.index()] = true;
+        assert!(!clear_dj_channel_mutes(&mut state, true));
+        assert!(state.strip_mutes[StripId::Video.index()]);
+    }
+
+    /// The file goes on holding seven flags, so a build that never heard
+    /// of this setting still reads every one of them.
+    #[test]
+    fn the_file_still_writes_all_seven_flags_after_a_launch_opens_the_dj_pair() {
+        let mut state = all_shut();
+        clear_dj_channel_mutes(&mut state, true);
+        let text = synth_mix_text(&state);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[8], "1,0,0,1,1,1,1");
+        assert_eq!(lines[8].split(',').count(), STRIP_COUNT);
+        assert!(lines[0].starts_with("VJ_SYNTH_MIX 3"));
+        assert!(parse_synth_mix(&text).is_some());
+    }
+
+    /// A file that never heard of the key reads as the old behaviour, in
+    /// both dialects this store speaks.
+    #[test]
+    fn a_file_that_never_heard_of_the_setting_brings_the_dj_mutes_back() {
+        let keys = crate::settings::Settings::from_text("version 1\nload_clears.speed 1\n");
+        assert!(!launch_clears_dj_mutes(&keys));
+        let bare = crate::settings::legacy::autopilot("2\n0\n1\n1\n0\n0\n");
+        assert!(!launch_clears_dj_mutes(&bare));
+        let mut store = crate::settings::Settings::new();
+        store.set_bool(LAUNCH_CLEARS_DJ_MUTES, true);
+        let back = crate::settings::Settings::from_text(&store.to_text());
+        assert!(launch_clears_dj_mutes(&back));
+    }
+
+    /// The gate is on the load, not on the push: what the launch opened is
+    /// what every reader of this state sees, the deck head included. An
+    /// implementation that left the state alone and skipped the two
+    /// channels on the way to the engine passes every test above and
+    /// fails this one.
+    #[test]
+    fn a_launch_that_opened_the_dj_channels_leaves_the_deck_head_quiet() {
+        let mut state = SynthMixUiState::default();
+        state.strip_mutes[StripId::DjA.index()] = true;
+        assert!(mix_not_carrying(&state, DeckId::A).is_some());
+        clear_dj_channel_mutes(&mut state, true);
+        assert_eq!(mix_not_carrying(&state, DeckId::A), None);
     }
 
     #[test]
@@ -10661,6 +10778,13 @@ pub struct App {
     /// A saved level is waiting to go on the face at the first pump.
     #[rust]
     master_restore: bool,
+    /// Whether a launch opens the DJ channel mutes the file remembers.
+    /// Off is what the tab has always done: a channel muted on the mix
+    /// page comes back muted. Its ONLY initializer is `load_synth_mix`,
+    /// which runs in `handle_startup` before any of the handlers that
+    /// call `save_autopilot_settings`.
+    #[rust]
+    launch_clears_dj_mutes: bool,
     /// The newest thing the app said went wrong, for the one line. Reads
     /// the process log through a cursor of its own.
     #[rust]
@@ -23443,6 +23567,21 @@ p2 {}
         service::session_config_from_env().cache_parent.join("autopilot.txt")
     }
 
+    /// The autopilot store as this app reads it: version 0 is the six bare
+    /// numbers that came before the store existed, and the legacy reader
+    /// is what turns those into keys. Spelled here as well as in
+    /// `load_autopilot_settings` deliberately -- that one returns early on
+    /// an unreadable file and hands back deck commands, and this one has
+    /// to answer with the default instead. Two callers, one dialect.
+    fn autopilot_store() -> crate::settings::Settings {
+        let body = std::fs::read_to_string(Self::autopilot_settings_path()).unwrap_or_default();
+        let store = crate::settings::Settings::from_text(&body);
+        match store.version() {
+            0 => crate::settings::legacy::autopilot(&body),
+            _ => store,
+        }
+    }
+
     /// The night's play log. Operator-owned, so it sits with the settings
     /// and never in the analysis cache, where a version bump would erase it.
     fn set_history_path() -> std::path::PathBuf {
@@ -24227,6 +24366,9 @@ p2 {}
             field.set_value(cx, self.prep.concurrency as f64);
         }
         self.ui
+            .check_box(cx, ids!(launch_clears_dj_mutes))
+            .set_active(cx, self.launch_clears_dj_mutes, Animate::No);
+        self.ui
             .check_box(cx, ids!(console_faults))
             .set_active(cx, self.console.faults_on, Animate::No);
         self.paint_lit(cx, ids!(prep_fast), self.prep.fast);
@@ -24321,6 +24463,12 @@ p2 {}
         }
         if reset_changed {
             self.decks.set_load_reset(reset);
+            self.save_autopilot_settings();
+        }
+        // Whether a launch opens the two DJ channels. Written down the
+        // moment it is ticked; read once, at the next launch.
+        if let Some(on) = self.ui.check_box(cx, ids!(launch_clears_dj_mutes)).changed(actions) {
+            self.launch_clears_dj_mutes = on;
             self.save_autopilot_settings();
         }
         // Whether the one line names the newest fault. Switching it on
@@ -25401,6 +25549,9 @@ p2 {}
         store.set_bool("load_clears.filter", reset.filter);
         store.set_bool("load_clears.gain", reset.gain);
         store.set_bool("load_clears.stems", reset.stems);
+        // What a LAUNCH clears, beside what a load clears: the same kind of
+        // thought, one setting later.
+        store.set_bool(LAUNCH_CLEARS_DJ_MUTES, self.launch_clears_dj_mutes);
         store.set_usize(
             "deck.over_playing",
             match self.decks.over_playing {
@@ -25485,6 +25636,10 @@ p2 {}
         self.autopilot.pick_exit = store.bool("auto.pick_exit", false);
         self.autopilot.pick_route = store.bool("auto.pick_route", false);
         self.autopilot.suggest_only = store.bool("auto.suggest_only", false);
+        // Read again here, where every other key in this file is read, so
+        // the pair stays one reader and one writer. The launch has already
+        // asked the same question of the same file and got the same answer.
+        self.launch_clears_dj_mutes = launch_clears_dj_mutes(&store);
         self.set_length_mins = store.usize("auto.set_length_mins", 0) as u32;
         let curve = store.usize("auto.set_curve", 0);
         self.set_curve = Curve::ALL[curve.min(Curve::ALL.len() - 1)];
@@ -29824,10 +29979,26 @@ p2 {}
     }
 
     fn load_synth_mix(&mut self) {
+        // Read here and not in the autopilot panel's own reader: that one
+        // runs from the session pump's Up arm and does not run at all on a
+        // rig where the store never comes up, while this decision is made
+        // before the first buffer. Above the early returns, so the field is
+        // right even with no file to read.
+        self.launch_clears_dj_mutes = launch_clears_dj_mutes(&Self::autopilot_store());
         let Ok(body) = std::fs::read_to_string(Self::synth_mix_path()) else { return };
-        if let Some(state) = parse_synth_mix(&body) {
-            self.synth_mix = state;
+        let Some(mut state) = parse_synth_mix(&body) else { return };
+        // Before the one paint the mix page gets at boot, not after: the
+        // twenty-a-second path repaints the channel meters and not the
+        // mute lamp, and the lamp's painter remembers what it last drew.
+        if clear_dj_channel_mutes(&mut state, self.launch_clears_dj_mutes) {
+            // Said once, because the launch has just overridden something
+            // the operator wrote down. NOT written back: an override that
+            // erased what it overrode could not be undone by turning the
+            // setting off again, and the writer puts down all ten lines
+            // rather than this one.
+            log!("launch: opened the DJ channel mutes the file remembered");
         }
+        self.synth_mix = state;
     }
 
     /// cache cannot cross-talk with the orange latches.

@@ -4285,6 +4285,21 @@ script_mod! {
                         reset_stems := CheckBox{width: 86 text: "lanes"}
                         MusicLabel{width: Fill text: ""}
                     }
+                    // What a LAUNCH clears. Off is what the tab has always
+                    // done: a channel muted on the mix page comes back
+                    // muted, whatever the deck on it is about to do. Beside
+                    // the row above because it is the same thought a launch
+                    // later -- set once and left, not reached for mid-set.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "A LAUNCH CLEARS"}
+                        launch_clears_dj_mutes := CheckBox{width: 170 text: "the DJ channel mutes"}
+                        MusicLabel{width: Fill text: "a fader is not a mute"}
+                    }
                     // Where the equalizer's three bands meet. The equalizer's
                     // own setting, so it lives here with the equalizer rather
                     // than on the effects rack -- and one setting for every
