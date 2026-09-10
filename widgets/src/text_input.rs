@@ -1731,9 +1731,6 @@ impl TextInput {
 
     /// Whether the platform IME is still composing text in this field. That text
     /// is the IME's until it commits; see [`Self::replace_range`].
-    ///
-    /// iOS's keyboard bridge doesn't yet report its marked text to the widget, so
-    /// this is always false there.
     pub fn is_composing(&self) -> bool {
         self.has_composition()
     }
