@@ -284,8 +284,31 @@ script_mod! {
             border_width: instance(1.0)
             specular_strength: instance(0.10)
             noise_strength: instance(0.012)
-            fallback_color: instance(#8c8c8c)
+            /** The face a surface shows when there is nothing to refract:
+             * before the first capture, and under MAKEPAD_NO_GAUSS=1.
+             *
+             * Mixed toward the TEXT colour, not toward color_fg_app. The two
+             * app colours are one step apart on the same black-to-white ramp
+             * (0.30 vs 0.36 in the dark theme, 0.15 vs 0.175 in the light
+             * one, #D vs #E in the skeleton one), so mixing between them
+             * lands within a percent of the page and the surface disappears
+             * into it. The text colour is the one token guaranteed to
+             * contrast with the background in every theme, because that is
+             * what it is for, and it points the opposite way in a light
+             * theme from a dark one - which is the direction a fixed colour
+             * can never get right. Only .rgb is read, so the token's own
+             * alpha does not come into it. */
+            fallback_color: instance(mix(theme.color_bg_app, theme.color_text, 0.30))
             shadow_color: instance(#0007)
+            /** how much of the shadow to paint 0..1 step 0.05
+             *
+             * A surface with no capture behind it is a flat colour, and a
+             * full-strength halo round a flat colour reads as a mistake; a
+             * page that wants a softer sheet has no other way to ask for one,
+             * because shadow_color is a vec4 and the value wanted is a
+             * scalar. 1.0 is identity: nothing in the library overrides it,
+             * so every surface paints exactly as it did before this existed. */
+            shadow_alpha: instance(1.0)
             shadow_radius: uniform(14.0)
             shadow_offset: uniform(vec2(0.0, 5.0))
 
@@ -473,7 +496,7 @@ script_mod! {
                         self.shadow_radius * 0.5
                         self.corner_radius * 2.0
                     )
-                    sdf.clear(self.shadow_color * v)
+                    sdf.clear(self.shadow_color * (v * self.shadow_alpha))
                 }
 
                 let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
@@ -535,7 +558,7 @@ script_mod! {
                         self.shadow_radius * 0.5
                         self.corner_radius * 2.0
                     )
-                    sdf.clear(self.shadow_color * v)
+                    sdf.clear(self.shadow_color * (v * self.shadow_alpha))
                 }
 
                 let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
@@ -635,7 +658,7 @@ script_mod! {
                         self.shadow_radius * 0.5
                         self.corner_radius * 2.0
                     )
-                    sdf.clear(self.shadow_color * v)
+                    sdf.clear(self.shadow_color * (v * self.shadow_alpha))
                 }
 
                 let screen_pos = self.rect_pos2 + self.pos * self.rect_size3

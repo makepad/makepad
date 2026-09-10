@@ -62,7 +62,7 @@ script_mod! {
         }
 
         StoryHeading{text: "A surface that blurs what is behind it"}
-        StoryNote{text: "GaussRoundedView samples the scene behind itself through a chain of mip textures and blurs it. It only has a scene to sample where a host has rendered one, so on a page like this it draws its rounding and its tint and little else."}
+        StoryNote{text: "GaussRoundedView samples the scene behind itself through a chain of mip textures and blurs it. It opens its own overlay and asks the window for that capture on every draw, and announces itself when it is built, so an ordinary window captures for it — there is nothing a host has to set up."}
         StoryRow{
             View{
                 width: Fill height: 140.
@@ -140,7 +140,7 @@ It is worth being clear about what it is not. It does not animate its children, 
 
 A rounded surface that samples the scene behind it through a chain of mip textures and blurs it — the backing the glass family is built on.
 
-**It can only blur a scene that something rendered for it.** The textures come from a host that has drawn the page into them; on a page with no such pass it still draws, but there is nothing to sample and you get its rounding and its tint alone. That is what the second row here shows, and it is the honest version: reaching for this widget in a page that does not render a scene gets you a rounded rectangle.",
+**It arranges its own capture.** In normal flow it opens an overlay draw list, asks the window for the blurred scene on every draw, and announces itself from its apply hook so the window captures on the frame it first paints in rather than the one after. An ordinary window is all it needs. The exception is `MAKEPAD_NO_GAUSS=1`, which switches capture off everywhere and leaves every surface on its `fallback_color` face — a slab mixed from the theme's background and text colours, which is what the second row here shows when that flag is set.",
     subject: "rubber",
     feature: None,
     controls: &[],

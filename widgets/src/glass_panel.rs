@@ -249,6 +249,13 @@ script_mod! {
         }
 
         draw_glass +: {
+            /** The face it shows before there is a scene to refract. The
+             * surfaces it stands next to fall back to the same colour, and
+             * they used to disagree: pale white here, dark slate there, side
+             * by side on the same unready frame. Declared per shader because
+             * these three are hand-written quads rather than derivatives of
+             * the rounded surface, so there is no shared place to put it. */
+            fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
             scene_texture: texture_2d(float)
             mip0_texture: texture_2d(float)
             mip1_texture: texture_2d(float)
@@ -350,7 +357,7 @@ script_mod! {
                 let s_g = self.sample_blur(uv_g)
                 let s_b = self.sample_blur(uv_b)
                 let refracted = vec3(s_r.x, s_g.y, s_b.z)
-                let fallback = vec3(0.80, 0.88, 0.95)
+                let fallback = self.fallback_color.rgb
                 let base = fallback.mix(refracted, self.has_gauss)
 
                 // Fully OPAQUE glass - the "transparent" look comes only from the refraction lookup.
@@ -401,6 +408,13 @@ script_mod! {
         }
 
         draw_knob +: {
+            /** The face it shows before there is a scene to refract. The
+             * surfaces it stands next to fall back to the same colour, and
+             * they used to disagree: pale white here, dark slate there, side
+             * by side on the same unready frame. Declared per shader because
+             * these three are hand-written quads rather than derivatives of
+             * the rounded surface, so there is no shared place to put it. */
+            fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
             scene_texture: texture_2d(float)
             mip0_texture: texture_2d(float)
             mip1_texture: texture_2d(float)
@@ -450,7 +464,7 @@ script_mod! {
                 let s_g = self.sample_blur(uv_g)
                 let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
                 let refracted = vec3(s_r.r, s_g.g, s_b.b)
-                let fallback = vec3(0.85, 0.92, 0.90)
+                let fallback = self.fallback_color.rgb
                 let base = fallback.mix(refracted, self.has_gauss)
 
                 let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
@@ -495,6 +509,13 @@ script_mod! {
         }
 
         draw_sel +: {
+            /** The face it shows before there is a scene to refract. The
+             * surfaces it stands next to fall back to the same colour, and
+             * they used to disagree: pale white here, dark slate there, side
+             * by side on the same unready frame. Declared per shader because
+             * these three are hand-written quads rather than derivatives of
+             * the rounded surface, so there is no shared place to put it. */
+            fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
             scene_texture: texture_2d(float)
             mip0_texture: texture_2d(float)
             mip1_texture: texture_2d(float)
@@ -553,7 +574,7 @@ script_mod! {
                 let s_g = self.sample_blur(uv_g)
                 let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
                 let refracted = vec3(s_r.r, s_g.g, s_b.b)
-                let fallback = vec3(0.85, 0.92, 0.90)
+                let fallback = self.fallback_color.rgb
                 let base = fallback.mix(refracted, self.has_gauss)
 
                 let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
@@ -591,7 +612,6 @@ script_mod! {
             border_width: 1.0
             specular_strength: 0.22
             noise_strength: 0.004
-            fallback_color: #x334156
             shadow_color: #x0007
             shadow_radius: 13.0
             shadow_offset: vec2(0.0, 5.0)
@@ -609,7 +629,6 @@ script_mod! {
             surface_alpha: 1.0
             border_alpha: 0.84
             specular_strength: 0.28
-            fallback_color: #x263242
             shadow_color: #x0005
             diffraction_strength: 5.4
         }
@@ -678,7 +697,10 @@ script_mod! {
         min_size: vec2(140., 96.)
         /** nor bigger; a zero side means the window is the only ceiling */
         max_size: vec2(0., 0.)
-        /** how far either side of an edge a press still takes hold of it, in points 2..24 step 1 */
+        /** how far either side of an edge a press still takes hold of it,
+         * in points; also the width of the unmarked ring of page outside
+         * the glass that answers to this surface, which is why it stops
+         * at 16 2..16 step 1 */
         grab_margin: 8.
         /** the corner mark's side, in points; 0 draws none 0..48 step 1 */
         grip_size: 24.
@@ -686,6 +708,8 @@ script_mod! {
         movable: true
         /** the edges and the corners size it 0..1 step 1 */
         resizable: true
+        /** whether it is up; one that is not draws nothing at all 0..1 step 1 */
+        shown: false
 
         content := mod.widgets.glass.Panel{
             width: Fill
@@ -758,7 +782,6 @@ script_mod! {
             border_width: 1.0
             specular_strength: 0.28
             noise_strength: 0.004
-            fallback_color: #x314052
             shadow_color: #x0000
             shadow_radius: 0.0
             shadow_offset: vec2(0.0, 0.0)
@@ -773,7 +796,13 @@ script_mod! {
             tint_alpha: 0.024
             surface_alpha: 1.0
             border_alpha: 0.94
-            fallback_color: #x234e74
+            /** The prominent variant's face when there is nothing to
+             * refract. It has to differ from the plain surface's - a
+             * prominent button that loses the only thing marking it out is
+             * worse than a grey one - so the shared theme-derived base is
+             * carried toward this family's blue rather than replaced by a
+             * fixed colour that a light theme would put a hole in. */
+            fallback_color: mix(mix(theme.color_bg_app, theme.color_text, 0.30), #x2a6fd6, 0.45)
             diffraction_strength: 6.2
         }
     }
@@ -2687,6 +2716,70 @@ fn fit_axis(extent: f64, min: f64, max: f64, room: f64) -> f64 {
     extent.clamp(min, max)
 }
 
+/// What a press does to a surface, decided before its contents are asked.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Press {
+    /// Someone asked earlier already answered it.
+    Taken,
+    /// On the frame: size it, and the contents never see the press.
+    Size(Grip),
+    /// On the sheet: the contents get first refusal, and if none of them
+    /// wants it the surface claims it - moving if it may move, and standing
+    /// still but still claiming if it may not.
+    Sheet { moves: bool },
+    /// Not on this surface at all.
+    Elsewhere,
+}
+
+/// Whose press it is.
+///
+/// `handled` is the protocol every widget that goes through `event.hits`
+/// keeps: a press carries the area of whoever took it, `hits` hands it to
+/// nobody else, and it stamps the area on the way out. This surface cannot
+/// go through `hits`, because its two gestures are claimed at opposite ends
+/// of its own subtree's dispatch and `hits` claims at one point only - so
+/// the protocol has to be kept here by hand, and that is what the first
+/// arm is. It is not a nicety: this widget floats in window points over
+/// panes that are asked about a press before the pane it lives in, and
+/// without this one press both starts a drag here and does whatever that
+/// pane does with it - resizes the split, or opens a different page and
+/// takes the surface down with it.
+///
+/// The `Sheet` arm claims whether or not either switch is on, which is the
+/// other half. A sheet of painted glass that let a press through would be
+/// answering with whatever is behind it, which nobody can see.
+///
+/// The same decision answers a HOVER. A sheet that claimed the press but
+/// left the hover open would light up a field under the glass and paint its
+/// I-beam over painted glass, and then answer the click itself; the pointer
+/// and the press have to agree about who owns a place.
+fn press_on(
+    frame: Frame,
+    at: Vec2d,
+    grab: f64,
+    handled: bool,
+    movable: bool,
+    resizable: bool,
+) -> Press {
+    if handled {
+        return Press::Taken;
+    }
+    if resizable {
+        let grip = frame.grip_at(at, grab);
+        if !grip.is_empty() {
+            return Press::Size(grip);
+        }
+    }
+    let rect = Rect {
+        pos: frame.pos,
+        size: frame.size,
+    };
+    if rect.contains(at) {
+        return Press::Sheet { moves: movable };
+    }
+    Press::Elsewhere
+}
+
 /// What the pointer is doing to the surface.
 #[derive(Copy, Clone, Debug)]
 enum Drag {
@@ -2722,6 +2815,46 @@ enum Drag {
 /// put against the edge, and a resize that begins by dropping a caret into a
 /// field is a resize the person then has to undo.
 ///
+/// **A press another widget already answered is not this surface's.** It
+/// floats in window points and can therefore lie over panes that are asked
+/// about a press before the pane it lives in; the press belongs to whoever
+/// took it first, so a drag cannot be STARTED on the part of the sheet that
+/// overlaps one — and on a shell where that pane answers a press by opening
+/// a different page, the attempt does not merely fail, it takes the page the
+/// surface is standing on with it. Once a drag has begun it carries on over
+/// anything, because nothing else holds the pointer.
+///
+/// **The pointer, the press and the wheel are claimed together.** A hover
+/// over the sheet is marked handled exactly as a press is — before the
+/// contents for the frame band, after them for the body — so a control under
+/// the glass does not light up and offer a caret for a click it will never
+/// get. A wheel over the sheet is stopped after the contents have had it, so
+/// the surface's own body still scrolls and the page underneath does not
+/// slide out from under a sheet that stays put.
+///
+/// **And the keystrokes go with the press.** Every press the surface answers
+/// takes the key focus, the resize band included, so a search box elsewhere
+/// stops eating keys the moment the sheet is worked. Closing asks where the
+/// caret IS, not who put it there: one anywhere the surface draws goes back
+/// to whatever the surface took it from, or is dropped where the surface
+/// never took it (a `TextInput` a caller put on the glass took it directly,
+/// and there is nothing to go back to); one that has since moved OUT of the
+/// surface is left exactly where it is, because it belongs to whatever took
+/// it — on a page with a "hide it" button, that button.
+///
+/// **The grab band costs a ring of page.** It reaches `grab_margin` points
+/// outward as well as inward, so presses that far outside the painted glass
+/// belong to the surface, with nothing drawn there to say so. The outward
+/// half is not optional — a rounded rectangle's corners are unpainted — but
+/// it is a reason to keep `grab_margin` small.
+///
+/// **It is not reachable by touch.** The gesture is written against
+/// `Event::MouseDown`/`MouseMove`/`MouseUp` and not `Event::TouchUpdate`. A
+/// touch path is expressible — `TouchPoint` carries its own `handled`, so
+/// the before-and-after reading works the same way — but it needs a second
+/// state machine to track which touch owns the drag, and nothing in this
+/// tree exercises it. Until that is written, this widget is desktop only.
+///
 /// What it deliberately does NOT do: snap to anything, settle anywhere,
 /// remember where it was, or paint a scrim. It reports its frame and the
 /// caller keeps the value if it wants it back next run — a widget that
@@ -2755,6 +2888,14 @@ pub struct GlassFloatingSurface {
     #[live]
     pub max_size: Vec2d,
     /// How far either side of an edge a press still takes hold of it.
+    ///
+    /// The band reaches this far OUTSIDE the painted glass as well as
+    /// inside, so it is also the width of a ring of page around the surface
+    /// that answers to the surface, with nothing drawn there to say so. The
+    /// outward half is not optional — a rounded rectangle's corners are
+    /// unpainted, and a band that stopped at the boundary would ask for a
+    /// press on glass that is not there — but it is the reason to keep this
+    /// number small, and the reason the exposed range stops at 16.
     #[live(8.0)]
     pub grab_margin: f64,
     /// The corner mark's side. Zero draws none; the corner still grabs.
@@ -2765,14 +2906,31 @@ pub struct GlassFloatingSurface {
     #[live(true)]
     pub resizable: bool,
 
-    #[rust]
-    open: bool,
+    /// Whether it is up.
+    ///
+    /// Live rather than runtime state, so a page can put one on screen by
+    /// declaring it and a reload brings it back the way the page asked for
+    /// it. The consequence is that a live edit or a theme switch closes one
+    /// a person opened by hand and reopens one the page declared — the same
+    /// price every other live property pays. Named `shown` and not `open`
+    /// because `open` is already a method this widget answers from script.
+    #[live]
+    pub shown: bool,
     #[rust]
     drag: Option<Drag>,
     /// Whether the pointer showing now is one we set, and so ours to put
     /// back when it leaves the frame.
     #[rust]
     holds_cursor: bool,
+    /// Whether the keystrokes showing here are ones this surface took, and
+    /// so ours to hand back when it goes away.
+    #[rust]
+    holds_key_focus: bool,
+    /// What had the keystrokes at the moment this surface first took them,
+    /// so they can go back there. Empty means "nothing worth going back
+    /// to", which is also what a caret already inside the surface counts as.
+    #[rust]
+    focus_before: Area,
     /// The corner mark's hover mix.
     #[rust]
     hot: f32,
@@ -2798,7 +2956,20 @@ impl ScriptHook for GlassFloatingSurface {
         // `Fill` upward would make it a deferred fill and hand it a share of
         // its parent's spare height for a surface that may not even be up.
         self.view.walk = Walk::empty();
-        vm.with_cx_mut(|cx| self.redraw(cx));
+        vm.with_cx_mut(|cx| {
+            if self.shown {
+                // The same route `open` takes, and for the same reason. A
+                // whole-tree apply re-applies the glass inside, which
+                // announces itself; an EVAL apply does not — it touches this
+                // object's own properties and stops — so `{shown: true}`
+                // written by the design overlay or by a controls panel
+                // reaches here with nothing else having said a word.
+                self.appear(cx);
+            } else {
+                self.drop_key_focus(cx);
+                self.redraw(cx);
+            }
+        });
     }
 }
 
@@ -2837,24 +3008,125 @@ impl GlassFloatingSurface {
         self.redraw(cx);
     }
 
+    /// Take the keystrokes.
+    ///
+    /// Any press the surface answers takes them, not only the one that
+    /// starts a move. A person working a sheet of glass has stopped typing
+    /// into whatever had the caret, and a search box that goes on eating
+    /// keys while the surface is being dragged is what follows from taking
+    /// focus on the move alone.
+    ///
+    /// Where they came from is remembered here rather than left to
+    /// `cx.revert_key_focus`. That reverts to whatever held the focus one
+    /// step ago, and after (press the sheet, click a control on the glass,
+    /// press the sheet again) one step ago is a widget INSIDE the surface —
+    /// precisely the one that stops being drawn. What is worth going back
+    /// to is the last holder that was NOT the surface's own, so a focus
+    /// already inside it does not overwrite the answer.
+    fn take_key_focus(&mut self, cx: &mut Cx, area: Area) {
+        if !self.focus_is_inside(cx) {
+            self.focus_before = cx.key_focus();
+        }
+        self.holds_key_focus = true;
+        cx.set_key_focus(area);
+    }
+
+    /// Whether the caret is somewhere this surface draws.
+    ///
+    /// Not `cx.has_key_focus(content_area)`: a `TextInput` a caller put ON
+    /// the glass takes the focus for ITSELF, and that focus is just as much
+    /// this surface's to clean up — it sits on a widget that stops being
+    /// drawn the moment the surface goes away. Everything the surface paints
+    /// goes into its own overlay draw list or into a list nested under it
+    /// (a glass child opens its own overlay, whose codeflow parent is this
+    /// one), so walking that chain is the question "is this mine" asked
+    /// exactly.
+    fn focus_is_inside(&self, cx: &Cx) -> bool {
+        let Some(draw_list) = &self.draw_list else {
+            return false;
+        };
+        let mine = draw_list.id();
+        let mut next = cx.key_focus().draw_list_id();
+        while let Some(id) = next {
+            if id == mine {
+                return true;
+            }
+            next = cx
+                .draw_lists
+                .checked_index(id)
+                .and_then(|list| list.codeflow_parent_id);
+        }
+        false
+    }
+
+    /// Give the keystrokes back on the way out. One that goes away with the
+    /// caret still on it leaves the keystrokes going to an area nothing
+    /// draws any more.
+    ///
+    /// The question is where the caret IS, not who put it there. A caret
+    /// outside the surface is not the surface's to move — by the time this
+    /// runs from an action handler the page's own "hide it" button has
+    /// already taken the focus for itself, because key focus is promoted
+    /// before actions are handled, and snatching it back off the widget the
+    /// person just pressed would be worse than doing nothing.
+    ///
+    /// A caret inside goes back to whatever the surface took it from, and
+    /// where that is not known — a `TextInput` a caller put on the glass
+    /// took it directly, so the surface never took anything — it is
+    /// dropped. Nothing is a better answer than a widget that is not drawn.
+    fn drop_key_focus(&mut self, cx: &mut Cx) {
+        let took_it = self.holds_key_focus;
+        let back = self.focus_before;
+        self.holds_key_focus = false;
+        self.focus_before = Area::Empty;
+        if !self.focus_is_inside(cx) {
+            return;
+        }
+        cx.set_key_focus(if took_it { back } else { Area::Empty });
+    }
+
+    /// Come up, or arrive somewhere new, with the lens looking at where it
+    /// is now.
+    ///
+    /// The announcement is the part a redraw cannot do. A window decides
+    /// whether to capture the scene a glass surface refracts BEFORE any
+    /// widget draws, on the evidence of what asked last frame and what
+    /// announced itself since. A surface built closed announced itself once,
+    /// at build time, and that arm was spent on the next frame with nothing
+    /// drawn; so the frame it is finally shown on has no capture behind it,
+    /// it paints its flat face, and the window then redraws the whole UI to
+    /// correct itself.
+    ///
+    /// The subtree is redrawn rather than this widget's own list because
+    /// that is what a drag does, and a surface that arrives somewhere new is
+    /// in the same position as one dragged there. Two routes for one
+    /// situation is how they drift apart.
+    fn appear(&mut self, cx: &mut Cx) {
+        arm_gauss_capture(cx);
+        let area = self.view.widget(cx, ids!(content)).area();
+        self.redraw_over_the_scene(cx, area);
+    }
+
     pub fn open(&mut self, cx: &mut Cx) {
-        if !self.open {
-            self.open = true;
+        if !self.shown {
+            self.shown = true;
             self.drag = None;
-            self.redraw(cx);
+            self.appear(cx);
         }
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
-        if self.open {
-            self.open = false;
+        if self.shown {
+            self.shown = false;
             self.drag = None;
+            self.drop_key_focus(cx);
+            // Nothing to announce: it is going away.
             self.redraw(cx);
         }
     }
 
     pub fn toggle(&mut self, cx: &mut Cx) {
-        if self.open {
+        if self.shown {
             self.close(cx);
         } else {
             self.open(cx);
@@ -2862,7 +3134,7 @@ impl GlassFloatingSurface {
     }
 
     pub fn is_open(&self) -> bool {
-        self.open
+        self.shown
     }
 
     /// Where it is and how big, in window points.
@@ -2875,7 +3147,15 @@ impl GlassFloatingSurface {
     pub fn place(&mut self, cx: &mut Cx, pos: Vec2d, size: Vec2d) {
         self.pos = pos;
         self.size = size;
-        self.redraw(cx);
+        if self.shown {
+            self.appear(cx);
+        } else {
+            // Nothing to announce for a surface that is not up: the arm is
+            // taken on the next frame whether or not any glass drew, so an
+            // announcement made here is spent on a frame with nothing to
+            // capture for, and the frame it is finally shown on has none.
+            self.redraw(cx);
+        }
     }
 
     /// The corner mark's square, inside the bottom-right corner.
@@ -2898,7 +3178,7 @@ impl GlassFloatingSurface {
 
 impl Widget for GlassFloatingSurface {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.open {
+        if !self.shown {
             return;
         }
         let content = self.view.widget(cx, ids!(content));
@@ -2915,49 +3195,73 @@ impl Widget for GlassFloatingSurface {
             Event::MouseMove(me) => Some(me.handled.get()),
             _ => None,
         };
-        // A press on the body, waiting to see whether the contents want it.
-        let mut offered_move = None;
+        // A press on the sheet, waiting to see whether the contents want it:
+        // where it landed, where the surface was, and whether it may move.
+        let mut offered_sheet: Option<(Vec2d, Vec2d, bool)> = None;
+        // A HOVER over the sheet, waiting on the same question. The surface
+        // claims it if nothing inside wanted it, so that the widgets behind
+        // the glass stop lighting up for a press they will never get.
+        let mut offered_hover = false;
+        // What the frame made of a pointer move that started no drag. It
+        // decides the pointer AND whether the pointer showing is still ours
+        // to put back — the two have to come from one answer, or a move from
+        // the edge band onto the body leaves a resize arrow over the sheet.
+        let mut hover_verdict = None;
         // The pointer the FRAME wants, decided before the contents are given
         // the event and applied after them: a control under the grab band
         // would otherwise set its own pointer last and win the argument.
         let mut frame_cursor = None;
 
         match event {
-            Event::MouseDown(me) if self.drag.is_none() && me.button.is_primary() => {
+            Event::MouseDown(me) if self.drag.is_none() => {
                 let frame = self.frame();
-                let grip = if self.resizable {
-                    frame.grip_at(me.abs, self.grab_margin)
-                } else {
-                    Grip::default()
-                };
-                // The frame claims a press BEFORE the contents see it. The
-                // band is a few points wide and lies over whatever the
-                // caller put against the edge, and a resize that begins by
-                // dropping a caret into a field is a resize the person then
-                // has to undo.
-                if !grip.is_empty() {
-                    self.drag = Some(Drag::Size {
-                        grip,
-                        held_at: me.abs,
-                        from: frame,
-                    });
-                    // Nobody after us answers this press either. The page
-                    // under the surface keeps working — it just does not get
-                    // to act on a press aimed at the surface's own edge.
-                    me.handled.set(area);
-                    cx.set_cursor(grip.cursor());
-                    self.hot = 1.0;
-                    self.redraw(cx);
-                    return;
-                }
-                // Not the frame, so it may be a move — but the contents have
-                // first refusal, and that is settled below.
-                let rect = Rect {
-                    pos: frame.pos,
-                    size: frame.size,
-                };
-                if self.movable && rect.contains(me.abs) {
-                    offered_move = Some((me.abs, self.pos));
+                match press_on(
+                    frame,
+                    me.abs,
+                    self.grab_margin,
+                    !me.handled.get().is_empty(),
+                    self.movable,
+                    self.resizable,
+                ) {
+                    // Not ours. Fall through so the contents still see it —
+                    // they will refuse it for the same reason — rather than
+                    // returning and cutting the dispatch short.
+                    Press::Taken | Press::Elsewhere => {}
+                    Press::Size(grip) if me.button.is_primary() => {
+                        // The frame claims a press BEFORE the contents see
+                        // it. The band is a few points wide and lies over
+                        // whatever the caller put against the edge, and a
+                        // resize that begins by dropping a caret into a
+                        // field is a resize the person then has to undo.
+                        self.drag = Some(Drag::Size {
+                            grip,
+                            held_at: me.abs,
+                            from: frame,
+                        });
+                        // Nobody after us answers this press either. The page
+                        // under the surface keeps working — it just does not
+                        // get to act on a press aimed at the surface's edge.
+                        me.handled.set(area);
+                        self.take_key_focus(cx, area);
+                        cx.set_cursor(grip.cursor());
+                        self.hot = 1.0;
+                        self.redraw(cx);
+                        return;
+                    }
+                    // A secondary press sizes nothing, so the band is only
+                    // more sheet to it: the contents get first refusal and
+                    // the surface claims whatever is left, exactly as on the
+                    // body. Claiming it matters even though nothing in this
+                    // tree acts on a right-press — a press that fell through
+                    // painted glass would be answered by a widget nobody can
+                    // see, whichever button made it.
+                    Press::Size(_) => {
+                        offered_sheet = Some((me.abs, self.pos, false));
+                    }
+                    Press::Sheet { moves } => {
+                        // The contents have first refusal; settled below.
+                        offered_sheet = Some((me.abs, self.pos, moves && me.button.is_primary()));
+                    }
                 }
             }
             Event::MouseMove(me) => match self.drag {
@@ -2992,15 +3296,40 @@ impl Widget for GlassFloatingSurface {
                     return;
                 }
                 None => {
-                    // Say what the frame would do before it is taken.
-                    let grip = if self.resizable {
-                        self.frame().grip_at(me.abs, self.grab_margin)
-                    } else {
-                        Grip::default()
-                    };
-                    let hot = if grip.is_empty() { 0.0 } else { 1.0 };
-                    if !grip.is_empty() {
-                        frame_cursor = Some(grip.cursor());
+                    // The same decision a press takes, taken again for the
+                    // pointer. A hover marks a move handled exactly as a
+                    // press marks a press, so this is where the surface says
+                    // "this place is mine" to the widgets it floats over —
+                    // and a move that arrives here ALREADY claimed is a move
+                    // over a widget that will answer the press as well, so
+                    // the frame promises nothing there.
+                    //
+                    // The two drag branches above are deliberately NOT gated
+                    // this way: a drag that has begun owns the pointer and
+                    // has to keep hearing about it wherever it goes.
+                    let verdict = press_on(
+                        self.frame(),
+                        me.abs,
+                        self.grab_margin,
+                        !me.handled.get().is_empty(),
+                        self.movable,
+                        self.resizable,
+                    );
+                    hover_verdict = Some(verdict);
+                    let mut hot = 0.0;
+                    match verdict {
+                        Press::Size(grip) => {
+                            // Before the contents, as the press is: a control
+                            // under the band cannot answer the press, so it
+                            // must not answer the hover either.
+                            me.handled.set(area);
+                            frame_cursor = Some(grip.cursor());
+                            hot = 1.0;
+                        }
+                        // After the contents, as the press is — settled once
+                        // they have had their turn.
+                        Press::Sheet { .. } => offered_hover = true,
+                        Press::Taken | Press::Elsewhere => {}
                     }
                     if hot != self.hot {
                         self.hot = hot;
@@ -3022,26 +3351,56 @@ impl Widget for GlassFloatingSurface {
 
         content.handle_event(cx, event, scope);
 
-        // The move is claimed AFTER the contents, which is the whole reason
-        // this surface can hold controls: a press a button on the glass took
-        // has changed `handled` by now, and the surface stays put.
-        if let (Some((held_at, from)), Event::MouseDown(me)) = (offered_move, event) {
+        // The sheet is claimed AFTER the contents, which is the whole reason
+        // it can hold controls: a press a button on the glass took has
+        // changed `handled` by now, and the surface leaves it alone.
+        if let (Some((held_at, from, moves)), Event::MouseDown(me)) = (offered_sheet, event) {
             if me.handled.get() == claimed_before.unwrap_or_default() {
-                self.drag = Some(Drag::Move { held_at, from });
                 me.handled.set(area);
-                cx.set_key_focus(area);
+                self.take_key_focus(cx, area);
+                if moves {
+                    self.drag = Some(Drag::Move { held_at, from });
+                }
             }
         }
 
-        if let Event::MouseMove(me) = event {
+        // And the hover with it, on the same test.
+        if let (true, Event::MouseMove(me)) = (offered_hover, event) {
+            if me.handled.get() == claimed_before.unwrap_or_default() {
+                me.handled.set(area);
+                // A sheet of glass has no pointer of its own — but the one
+                // showing may be an I-beam a field under it set before the
+                // surface arrived over it, and that field will not clear it.
+                frame_cursor = Some(MouseCursor::Arrow);
+            }
+        }
+
+        // The wheel, claimed after the contents for the same reason and with
+        // the same effect. The surface's own body scrolls first; a wheel it
+        // had no use for stops here rather than scrolling the page out from
+        // under a sheet that stays put.
+        if let Event::Scroll(se) = event {
+            let rect = Rect {
+                pos: self.pos,
+                size: self.size,
+            };
+            if rect.contains(se.abs) {
+                se.handled_x.set(true);
+                se.handled_y.set(true);
+            }
+        }
+
+        if let Event::MouseMove(_) = event {
             if let Some(cursor) = frame_cursor {
                 cx.set_cursor(cursor);
                 self.holds_cursor = true;
-            } else if self.holds_cursor && me.handled.get() == claimed_before.unwrap_or_default() {
-                // Nothing inside the surface wanted this move either, so the
-                // pointer showing is still the one we set for the frame and
-                // ours to put back. A control that DID want it has set its
-                // own, and stamping an arrow over that would undo it.
+            } else if self.holds_cursor && hover_verdict == Some(Press::Elsewhere) {
+                // The pointer has left the surface altogether, so the one
+                // showing is still the one we set and ours to put back. The
+                // other three verdicts must NOT restore: `Taken` means a pane
+                // dispatched before us owns this move and set its own
+                // pointer, and a `Sheet` that reached here without a cursor
+                // is one a control on the glass took.
                 cx.set_cursor(MouseCursor::Arrow);
                 self.holds_cursor = false;
             }
@@ -3055,7 +3414,7 @@ impl Widget for GlassFloatingSurface {
         self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
         cx.begin_root_turtle_for_pass(self.view.layout);
 
-        if self.open {
+        if self.shown {
             // Never bigger than the window and never off it: a surface whose
             // frame has gone past an edge cannot be dragged back, which
             // would make losing it permanent.
@@ -3203,6 +3562,117 @@ mod tests {
             top,
             bottom,
         }
+    }
+
+    /// The `script_mod!` block is invisible to the Rust compiler: a mistake
+    /// in it shows up only in a running app's log, and a shader that fails
+    /// to compile is not an error anywhere — the draw is simply skipped and
+    /// the widget paints nothing. This family now takes its no-capture face
+    /// from two theme tokens rather than from a literal, in four different
+    /// shaders, and multiplies a new input into the shadow of three more.
+    /// Evaluating the crate's whole script module here, building one of
+    /// each preset from it and reading the shader-error slot back is what
+    /// turns a mistake in either into a failed build.
+    #[test]
+    fn the_glass_presets_build_and_their_shaders_compile() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (surface, button, slider, segmented) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            // Registering type defaults compiles nothing; making an
+            // instance out of one does. Clearing here keeps any other
+            // module's complaint out of this test's answer.
+            let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+            (
+                GlassFloatingSurface::script_new_with_default(vm),
+                GlassButton::script_new_with_default(vm),
+                GlassSlider::script_new_with_default(vm),
+                GlassSegmented::script_new_with_default(vm),
+            )
+        });
+        assert_eq!(
+            crate::makepad_draw::makepad_platform::shader_error::take(),
+            None,
+            "a draw shader failed to compile"
+        );
+        // Numbers only the DSL sets: the Rust defaults for these are false
+        // and zero.
+        assert!(!surface.shown, "the preset ships closed, so a page has to say so");
+        assert!(surface.movable && surface.resizable);
+        assert_eq!(surface.grab_margin, 8.0);
+        assert_eq!(surface.grip_size, 24.0);
+        assert_eq!(surface.size, dvec2(320.0, 220.0));
+        // And the three hand-written quads reached their own presets.
+        assert_eq!(button.walk.height.to_fixed(), Some(44.0));
+        assert_eq!(slider.walk.height.to_fixed(), Some(32.0));
+        assert_eq!(segmented.walk.height.to_fixed(), Some(38.0));
+    }
+
+    /// A press someone answered before this widget was reached is not this
+    /// surface's, whatever part of it the press landed on. The surface
+    /// floats in window points over panes that are asked first; without
+    /// this, one press both starts a drag here and does whatever that pane
+    /// does with it.
+    #[test]
+    fn a_press_someone_answered_already_is_not_the_surfaces() {
+        let f = surface();
+        assert_eq!(press_on(f, dvec2(100.0, 175.0), 8.0, true, true, true), Press::Taken);
+        assert_eq!(press_on(f, dvec2(200.0, 175.0), 8.0, true, true, true), Press::Taken);
+        // The same two presses, with nobody having taken them first.
+        assert_eq!(
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, true, true),
+            Press::Size(grip(true, false, false, false)),
+            "the left edge is the surface's when it is free"
+        );
+        assert_eq!(
+            press_on(f, dvec2(200.0, 175.0), 8.0, false, true, true),
+            Press::Sheet { moves: true },
+            "and so is the body"
+        );
+    }
+
+    /// A sheet that can neither be moved nor sized still answers a press on
+    /// itself. It is painted glass over the page: a press that fell through
+    /// would be answered by something nobody can see.
+    #[test]
+    fn a_sheet_that_cannot_move_or_size_still_claims_its_own_press() {
+        let f = surface();
+        assert_eq!(
+            press_on(f, dvec2(200.0, 175.0), 8.0, false, false, false),
+            Press::Sheet { moves: false }
+        );
+        assert_eq!(
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, false, false),
+            Press::Sheet { moves: false },
+            "with sizing switched off the edge is just more sheet"
+        );
+        assert_eq!(
+            press_on(f, dvec2(500.0, 500.0), 8.0, false, false, false),
+            Press::Elsewhere,
+            "and the page beyond it is still the page's"
+        );
+    }
+
+    /// The frame is decided before the sheet, and the outward half of the
+    /// band belongs to the surface while the page a few points further out
+    /// does not.
+    #[test]
+    fn the_frame_is_taken_before_the_sheet_and_the_page_after_it() {
+        let f = surface();
+        assert_eq!(
+            press_on(f, dvec2(94.0, 175.0), 8.0, false, true, true),
+            Press::Size(grip(true, false, false, false)),
+            "outside the painted glass but inside the band"
+        );
+        assert_eq!(
+            press_on(f, dvec2(91.0, 175.0), 8.0, false, true, true),
+            Press::Elsewhere,
+            "three points further out and it is the page's"
+        );
+        assert_eq!(
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, true, false),
+            Press::Sheet { moves: true },
+            "with sizing off, a press on the edge moves it instead"
+        );
     }
 
     /// Each edge moves its own side and leaves the other three alone. The

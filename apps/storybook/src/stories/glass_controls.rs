@@ -8,77 +8,43 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    // The ground the lens bends. A plain View cannot hand a caller a slot,
-    // so the scene is written out where it is used rather than wrapped in a
-    // template with a hole in it.
-    let Ground = View{
-        width: Fill
-        height: Fill
-        show_bg: true
-        draw_bg +: {
-            pixel: fn() {
-                let p = self.pos
-                let a = vec3(0.05, 0.12, 0.38)
-                let b = vec3(0.62, 0.16, 0.42)
-                let c = vec3(0.05, 0.42, 0.45)
-                let m = mix(a, b, p.x)
-                let n = mix(c, b, p.y)
-                return vec4(mix(m, n, 0.45 + 0.35 * sin(p.x * 6.0 + p.y * 3.0)), 1.0)
-            }
-        }
-    }
-
     mod.stories.GlassControlsOverview = StoryPage{
         StoryNote{text: "Four controls that bend what is behind them. They are the panel's family: the same lensing, applied to a toggle, a button, a slider and a segmented row."}
 
         StoryHeading{text: "Over something worth bending"}
         StoryNote{text: "The colours under these are drawn by the page, not by the controls. Put one on a flat ground and the lensing has nothing to work with, which is the commonest way this family disappoints."}
-        StoryRow{
-            View{
-                width: Fill
-                // Fixed, not Fit: the ground is height: Fill, and a Fill
-                // child of a Fit overlay is given nothing at all - which
-                // drew no gradient and quietly made this page's whole
-                // comparison a lie.
-                height: 230.
-                flow: Overlay
-                Ground{}
+        // 260 and not the old 230: the shared stage spends 60 points of
+        // height on the clearance the rim needs, where the old inset spent
+        // 18, and the four rows plus their spacing come to 184.
+        GlassStage{
+            height: 260.
+            body +: {
                 View{
+                    width: Fill height: Fit flow: Right spacing: theme.space_2
+                    align: Align{y: 0.5}
+                    radio_one := mod.widgets.glass.GlassRadio{}
+                    mod.widgets.glass.OptionLabel{text: "Air"}
+                    radio_two := mod.widgets.glass.GlassRadio{}
+                    mod.widgets.glass.OptionLabel{text: "Water"}
+                }
+                View{
+                    width: Fill height: Fit flow: Right spacing: theme.space_2
+                    mod.widgets.glass.GlassButtonProminent{text: "Continue"}
+                    subject := mod.widgets.glass.GlassButton{text: "Cancel"}
+                }
+                mod.widgets.glass.GlassSlider{width: Fill}
+                mod.widgets.glass.GlassSegmented{
                     width: Fill
-                    height: Fit
-                    flow: Down
-                    spacing: theme.space_2
-                    padding: theme.mspace_3
-                    View{
-                        width: Fill height: Fit flow: Right spacing: theme.space_2
-                        align: Align{y: 0.5}
-                        radio_one := mod.widgets.glass.GlassRadio{}
-                        mod.widgets.glass.OptionLabel{text: "Air"}
-                        radio_two := mod.widgets.glass.GlassRadio{}
-                        mod.widgets.glass.OptionLabel{text: "Water"}
-                    }
-                    View{
-                        width: Fill height: Fit flow: Right spacing: theme.space_2
-                        mod.widgets.glass.GlassButtonProminent{text: "Continue"}
-                        subject := mod.widgets.glass.GlassButton{text: "Cancel"}
-                    }
-                    mod.widgets.glass.GlassSlider{width: Fill}
-                    mod.widgets.glass.GlassSegmented{
-                        width: Fill
-                        labels: ["Day" "Week" "Month"]
-                    }
+                    labels: ["Day" "Week" "Month"]
                 }
             }
         }
 
         StoryHeading{text: "The same four on a flat ground"}
         StoryNote{text: "Identical declarations, over one colour. This is what the family looks like when there is nothing behind it to refract, and it is worth seeing next to the row above before choosing it for a page that has a plain background."}
-        StoryRow{
-            View{
-                width: Fill height: Fit flow: Down spacing: theme.space_2
-                padding: theme.mspace_3
-                show_bg: true
-                draw_bg +: {color: #x101018}
+        FlatStage{
+            height: 260.
+            body +: {
                 View{
                     width: Fill height: Fit flow: Right spacing: theme.space_2
                     align: Align{y: 0.5}
@@ -123,3 +89,43 @@ They must also be drawn in the same pass as what they refract. The glass example
     controls: &[],
     on_actions: None,
 }];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page is built from the DSL, which the Rust compiler never reads,
+    /// and a shader that fails to compile is not an error anywhere — the
+    /// draw is skipped and the widget paints nothing. Both bands moved onto
+    /// a shared stage that did not exist before, so building the page and
+    /// asking for the widget the controls panel addresses is what turns a
+    /// mistake in either into a failed build.
+    #[test]
+    fn the_page_builds_and_its_subject_can_be_reached() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            self::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+        });
+        let story = &STORIES[0];
+        let page = cx.with_vm(|vm| {
+            let stories = vm.module(id!(stories));
+            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+            assert!(value.as_object().is_some(), "no template {}", story.dsl);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!page.is_empty(), "{} built no widget", story.key);
+        assert_eq!(
+            makepad_platform::shader_error::take(),
+            None,
+            "a draw shader failed to compile"
+        );
+        assert!(
+            !page.widget(&cx, &[LiveId::from_str(story.subject)]).is_empty(),
+            "no widget at {}",
+            story.subject
+        );
+    }
+}
