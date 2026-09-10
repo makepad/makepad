@@ -1353,7 +1353,7 @@ impl Video {
                     VideoDataSource::Dependency { res } => {
                         if let Some(handle_ref) = res {
                             let handle = handle_ref.as_handle();
-                            match cx.get_resource(handle) {
+                            match cx.get_resource(handle_ref.heap_key(), handle) {
                                 Some(data) => VideoSource::InMemory(data),
                                 None => {
                                     error!("Attempted to prepare playback: resource not found");
@@ -2150,7 +2150,7 @@ impl Video {
     fn load_thumbnail_image(&mut self, cx: &mut Cx) -> bool {
         if let Some(ref handle_ref) = self.thumbnail_source {
             let handle = handle_ref.as_handle();
-            if let Some(data) = cx.get_resource(handle) {
+            if let Some(data) = cx.get_resource(handle_ref.heap_key(), handle) {
                 // Try to load as PNG first, then JPG
                 if self.load_png_from_data(cx, &data, 0).is_ok() {
                     return true;

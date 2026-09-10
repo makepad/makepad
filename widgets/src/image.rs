@@ -247,15 +247,16 @@ impl Image {
             return;
         };
         let handle = handle_ref.as_handle();
-        let data = if let Some(data) = cx.get_resource(handle) {
+        let heap_key = handle_ref.heap_key();
+        let data = if let Some(data) = cx.get_resource(heap_key, handle) {
             data
         } else {
-            cx.load_script_resource(handle);
-            match cx.get_resource(handle) {
+            cx.load_script_resource(heap_key, handle);
+            match cx.get_resource(heap_key, handle) {
                 Some(data) => data,
                 None => {
                     let resources = cx.script_data.resources.resources.borrow();
-                    if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
+                    if let Some(res) = resources.iter().find(|r| r.has_handle(heap_key, handle)) {
                         if res.is_error() {
                             drop(resources);
                             self.src_loaded = true;
@@ -274,7 +275,7 @@ impl Image {
             let resources = cx.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .find(|r| r.has_handle(handle))
+                .find(|r| r.has_handle(heap_key, handle))
                 .map(|r| PathBuf::from(&r.abs_path))
                 .unwrap_or_else(|| PathBuf::from("http_resource"))
         };

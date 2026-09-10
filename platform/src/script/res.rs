@@ -27,13 +27,13 @@ pub struct CxScriptResource {
     pub dependency_path: Option<String>,
     pub web_url: Option<String>,
     pub data: CxScriptResourceData,
-    /// One handle per script heap that references this resource. Handle
-    /// VALUES are heap-local (a handle indexes its owning heap's handle
-    /// table, and each heap's GC marks/sweeps it) — sharing one handle value
-    /// across VMs corrupts the other heap's GC walk. The resource DATA is
-    /// Cx-global; each interested heap gets its own local handle attached
-    /// to this entry.
-    pub handles: Vec<ScriptHandle>,
+    /// One handle per script heap that references this resource, WITH the
+    /// heap it belongs to. Handle values are heap-local (a handle indexes
+    /// its owning heap's handle table, and each heap's GC marks/sweeps it),
+    /// so two isolates hand out equal values for different files: the pair
+    /// is the identity, never the number alone (a clock module's alarm
+    /// glyph once resolved to the host's speaker icon that way).
+    pub handles: Vec<(usize, ScriptHandle)>,
 }
 
 impl CxScriptResource {
@@ -49,8 +49,8 @@ impl CxScriptResource {
         matches!(self.data, CxScriptResourceData::Error(_))
     }
 
-    pub fn has_handle(&self, handle: ScriptHandle) -> bool {
-        self.handles.contains(&handle)
+    pub fn has_handle(&self, heap_key: usize, handle: ScriptHandle) -> bool {
+        self.handles.contains(&(heap_key, handle))
     }
 }
 
@@ -110,7 +110,7 @@ impl CxScriptResources {
     pub fn insert_resource(&self, heap_key: usize, resource: CxScriptResource) {
         self.handles_by_abs_path.borrow_mut().insert(
             (heap_key, resource.abs_path.clone()),
-            resource.handles[0],
+            resource.handles[0].1,
         );
         self.resources.borrow_mut().push(resource);
     }
@@ -125,7 +125,7 @@ impl CxScriptResources {
     ) -> bool {
         let mut resources = self.resources.borrow_mut();
         if let Some(res) = resources.iter_mut().find(|v| v.abs_path == abs_path) {
-            res.handles.push(handle);
+            res.handles.push((heap_key, handle));
             self.handles_by_abs_path
                 .borrow_mut()
                 .insert((heap_key, abs_path.to_string()), handle);
@@ -135,10 +135,10 @@ impl CxScriptResources {
         }
     }
 
-    /// Get the data for a resource by handle
-    pub fn get_data(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
+    /// Get the data for a resource by its owning heap and handle.
+    pub fn get_data(&self, heap_key: usize, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
         let resources = self.resources.borrow();
-        if let Some(res) = resources.iter().find(|v| v.has_handle(handle)) {
+        if let Some(res) = resources.iter().find(|v| v.has_handle(heap_key, handle)) {
             if let CxScriptResourceData::Loaded(data) = &res.data {
                 return Some(data.clone());
             }
@@ -336,7 +336,7 @@ fn register_crate_resource_parts(
             dependency_path,
             web_url,
             data: CxScriptResourceData::NotLoaded,
-            handles: vec![handle],
+            handles: vec![(heap_key, handle)],
         },
     );
     handle.into()
@@ -465,8 +465,8 @@ impl Cx {
         }
     }
 
-    pub fn load_script_resource(&mut self, handle: ScriptHandle) {
-        let Some(path) = self.get_resource_abs_path(handle) else { return };
+    pub fn load_script_resource(&mut self, heap_key: usize, handle: ScriptHandle) {
+        let Some(path) = self.get_resource_abs_path(heap_key, handle) else { return };
         self.load_script_resource_by_path(&path);
     }
 
@@ -580,7 +580,7 @@ mod tests {
         for (heap, path, bytes) in [(1, "test://icon.svg", b"<svg>".to_vec()), (2, "test://font.ttf", b"font".to_vec())] {
             cx.script_data.resources.insert_resource(heap, CxScriptResource {
                 abs_path: path.into(), dependency_path: None, web_url: None,
-                data: CxScriptResourceData::Loaded(Rc::new(bytes)), handles: vec![handle],
+                data: CxScriptResourceData::Loaded(Rc::new(bytes)), handles: vec![(heap, handle)],
             });
         }
         let path = cx.script_data.resources.path_for_handle(2, handle).unwrap();
@@ -593,6 +593,28 @@ mod tests {
     }
 
     #[test]
+    fn equal_handle_values_in_two_heaps_name_their_own_resources() {
+        use super::*;
+        // Two isolates mint handle value ZERO for different files: the host's
+        // speaker icon and a module's alarm glyph. Each heap gets its own bytes.
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let handle = ScriptHandle::ZERO;
+        for (heap, path, bytes) in [(1, "apps/wm/resources/icons/volume-0.svg", b"<svg speaker>".to_vec()), (2, "apps/clock/resources/icons/alarm.svg", b"<svg bell>".to_vec())] {
+            cx.script_data.resources.insert_resource(heap, CxScriptResource {
+                abs_path: path.into(), dependency_path: None, web_url: None,
+                data: CxScriptResourceData::Loaded(Rc::new(bytes)), handles: vec![(heap, handle)],
+            });
+        }
+        assert_eq!(cx.get_resource(1, handle).unwrap().as_slice(), b"<svg speaker>");
+        assert_eq!(cx.get_resource(2, handle).unwrap().as_slice(), b"<svg bell>");
+        assert_eq!(cx.get_resource_abs_path(2, handle).as_deref(), Some("apps/clock/resources/icons/alarm.svg"));
+        assert!(cx.get_resource(3, handle).is_none(), "a heap that never registered it sees nothing");
+        // The same file from a third heap shares the entry, still by pair.
+        assert!(cx.script_data.resources.attach_handle_for_path(3, "apps/clock/resources/icons/alarm.svg", handle));
+        assert_eq!(cx.get_resource(3, handle).unwrap().as_slice(), b"<svg bell>");
+    }
+
+    #[test]
     fn collecting_a_heap_keeps_other_heaps_equal_resource_handles() {
         use super::*;
         let resources = CxScriptResources::default();
@@ -600,7 +622,7 @@ mod tests {
         for (heap, path) in [(1, "icon.svg"), (2, "font.ttf")] {
             resources.insert_resource(heap, CxScriptResource {
                 abs_path: path.into(), dependency_path: None, web_url: None,
-                data: CxScriptResourceData::NotLoaded, handles: vec![handle],
+                data: CxScriptResourceData::NotLoaded, handles: vec![(heap, handle)],
             });
         }
         resources.attach_handle_for_path(3, "font.ttf", handle);
@@ -668,9 +690,9 @@ fn prune_resource_handles(
     resources: &mut Vec<CxScriptResource>,
     handles: &HashMap<(usize, String), ScriptHandle>,
 ) {
-    let mut live: HashMap<&str, Vec<ScriptHandle>> = HashMap::new();
-    for ((_, path), handle) in handles {
-        live.entry(path.as_str()).or_default().push(*handle);
+    let mut live: HashMap<&str, Vec<(usize, ScriptHandle)>> = HashMap::new();
+    for ((heap, path), handle) in handles {
+        live.entry(path.as_str()).or_default().push((*heap, *handle));
     }
     resources.retain_mut(|resource| {
         let Some(owners) = live.get(resource.abs_path.as_str()) else { return false };
@@ -922,9 +944,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // Get the path of the resource
     vm.set_handle_getter(res_type, |vm, pself, prop| {
         if let Some(handle) = pself.as_handle() {
+            let heap_key = vm.bx.heap.heap_key();
             let cx = vm.host.cx_mut();
             let resources = cx.script_data.resources.resources.borrow();
-            if let Some(res) = resources.iter().find(|v| v.has_handle(handle)) {
+            if let Some(res) = resources.iter().find(|v| v.has_handle(heap_key, handle)) {
                 match prop {
                     _ if prop == id!(path) => {
                         let path = res.abs_path.clone();
@@ -1029,7 +1052,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         dependency_path: None,
                         web_url: None,
                         data: CxScriptResourceData::NotLoaded,
-                        handles: vec![handle],
+                        handles: vec![(heap_key, handle)],
                     },
                 );
 
@@ -1110,7 +1133,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         dependency_path: None,
                         web_url: None,
                         data: CxScriptResourceData::Loading,
-                        handles: vec![handle],
+                        handles: vec![(heap_key, handle)],
                     },
                 );
 
@@ -1161,7 +1184,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     dependency_path: None,
                     web_url: None,
                     data: CxScriptResourceData::Loaded(Rc::new(bytes)),
-                    handles: vec![handle],
+                    handles: vec![(heap_key, handle)],
                 },
             );
 
