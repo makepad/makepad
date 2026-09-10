@@ -115,7 +115,11 @@ impl Cx {
 
     fn headless_bounded_loop(&mut self, draw_cycles: usize) {
         let mut windows = Vec::new();
-        self.call_event_handler(&Event::Startup);
+        // Subsequent bounded calls continue this Cx. Replaying Startup both
+        // reinitializes apps and injects startup logging into idle evidence.
+        if !std::mem::replace(&mut self.os.bounded_started, true) {
+            self.call_event_handler(&Event::Startup);
+        }
         let mut running = self.headless_handle_platform_ops(&mut windows, false);
         if windows.is_empty() {
             windows.push(HeadlessWindowState {
