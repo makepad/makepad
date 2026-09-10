@@ -237,12 +237,6 @@ pub struct Html {
     #[rust]
     seen_details: HashSet<LiveId>,
 
-    /// When `Some`, the draw walk is skipping nodes because the enclosing
-    /// `<details>` is collapsed. The inner counter tracks the nested open-tag
-    /// depth while skipping, so the matching `</details>` can be recognized.
-    #[rust]
-    skip_details_depth: Option<i32>,
-
     /// Transparent DrawQuad emitted over each `<summary>` so the whole summary
     /// line is clickable, not just the fold triangle. The quad's default
     /// shader produces `#0000`, so it's invisible but its instance area
@@ -296,6 +290,25 @@ impl ScriptHook for Html {
 }
 
 impl Html {
+    /// Advance from `</summary>` to the enclosing `</details>`, leaving the
+    /// close tag for the normal handler. Only nested details affect depth:
+    /// void elements such as `<br>` have no matching close tag.
+    fn skip_details_body(node: &mut HtmlWalker<'_>) {
+        let mut depth = 0;
+        node.walk();
+        while !node.done() {
+            if node.open_tag_lc() == Some(live_id!(details)) {
+                depth += 1;
+            } else if node.close_tag_lc() == Some(live_id!(details)) {
+                if depth == 0 {
+                    return;
+                }
+                depth -= 1;
+            }
+            node.walk();
+        }
+    }
+
     /// Vertical spacing inserted before a `<details>` opens and after it
     /// closes, in pixels, scaled by the current font size. Keeps the block
     /// from butting up against surrounding content. A single helper so the
@@ -712,34 +725,8 @@ impl Widget for Html {
         self.text_flow.begin(cx, walk);
         let mut node = self.doc.new_walker();
         self.details_stack.clear();
-        self.skip_details_depth = None;
         self.summary_click_areas.clear();
         while !node.done() {
-            // If the enclosing <details> is collapsed, fast-skip nodes until
-            // the matching </details> close tag at depth 0.
-            if let Some(depth) = self.skip_details_depth.as_mut() {
-                if node.open_tag_lc().is_some() {
-                    *depth += 1;
-                    node.walk();
-                    continue;
-                } else if let Some(close_tag) = node.close_tag_lc() {
-                    if *depth == 0 && close_tag == live_id!(details) {
-                        // Reached the matching </details>; leave skip mode and
-                        // fall through so the close handler runs normally.
-                        self.skip_details_depth = None;
-                    } else {
-                        if *depth > 0 {
-                            *depth -= 1;
-                        }
-                        node.walk();
-                        continue;
-                    }
-                } else {
-                    node.walk();
-                    continue;
-                }
-            }
-
             // Intercept <details> / <summary> open tags before the generic
             // handler, so <details> never falls through to handle_custom_widget
             // (which would jump_to_close and hide all content).
@@ -905,12 +892,13 @@ impl Widget for Html {
                             self.summary_click_areas.push((dl.id, new_area));
                         }
                     }
-                    // Only enter skip mode when there is an enclosing
+                    // Only skip the body when there is an enclosing
                     // `<details>` that is collapsed. A stray `<summary>` with
                     // no parent `<details>` must not skip to the end of the
                     // document, which is what `map_or(true, ...)` would do.
                     if matches!(self.details_stack.last(), Some(dl) if !dl.is_open) {
-                        self.skip_details_depth = Some(0);
+                        Self::skip_details_body(&mut node);
+                        continue;
                     }
                     node.walk();
                     continue;
@@ -1461,5 +1449,85 @@ fn align_keyword_to_x(keyword: &str) -> Option<f64> {
         "center" => Some(0.5),
         "right" | "end" => Some(1.0),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_close(doc: &HtmlDoc) -> HtmlWalker<'_> {
+        let mut node = doc.new_walker();
+        while !node.done() && node.close_tag_lc() != Some(live_id!(summary)) {
+            node.walk();
+        }
+        assert!(!node.done(), "fixture must contain a closing summary tag");
+        node
+    }
+
+    #[test]
+    fn collapsed_details_with_breaks_preserves_table_closures() {
+        let doc = parse_html(
+            "<table><tr><td><details><summary>View Bio</summary>\
+             <br>Hidden biography<br><br><a href='profile'>Profile</a></details>\
+             </td><td>Next cell</td></tr><tr><td>Next row</td></tr></table>\
+             <p>After table</p>",
+            &mut None,
+            InternLiveId::No,
+        );
+        let mut node = summary_close(&doc);
+        Html::skip_details_body(&mut node);
+        assert_eq!(node.close_tag_lc(), Some(live_id!(details)));
+
+        let remaining_closures: Vec<_> = node.nodes[node.index..].iter().filter_map(|node| {
+            match node {
+                HtmlNode::CloseTag { lc, .. } => Some(*lc),
+                _ => None,
+            }
+        }).collect();
+        assert_eq!(remaining_closures, vec![
+            live_id!(details), live_id!(td), live_id!(td), live_id!(tr),
+            live_id!(td), live_id!(tr), live_id!(table), live_id!(p),
+        ]);
+        let mut remaining_text = String::new();
+        while !node.done() {
+            if let Some(text) = node.text() {
+                remaining_text.push_str(text);
+            }
+            node.walk();
+        }
+        assert_eq!(remaining_text, "Next cellNext rowAfter table");
+    }
+
+    #[test]
+    fn collapsed_details_skips_nested_details_and_void_elements() {
+        let doc = parse_html(
+            "<details><summary>Outer</summary><br>\
+             <details open><summary>Inner</summary><BR class='space'>\
+             <b>Hidden</b></details>\
+             <DETAILS><summary>Second</summary><img src='picture'><br /></DETAILS>\
+             <hr>Outer hidden</details><p>After details</p>",
+            &mut None,
+            InternLiveId::No,
+        );
+        let outer_close = doc.nodes.iter().rposition(|node| {
+            matches!(node, HtmlNode::CloseTag { lc, .. } if *lc == live_id!(details))
+        }).unwrap();
+        let mut node = summary_close(&doc);
+        Html::skip_details_body(&mut node);
+        assert_eq!(node.index, outer_close);
+        assert_eq!(node.find_tag_text(live_id!(p)), Some("After details"));
+    }
+
+    #[test]
+    fn collapsed_details_without_close_stops_at_document_end() {
+        let doc = parse_html(
+            "<details><summary>Outer</summary><br>Hidden<details>Inner</details>",
+            &mut None,
+            InternLiveId::No,
+        );
+        let mut node = summary_close(&doc);
+        Html::skip_details_body(&mut node);
+        assert!(node.done());
     }
 }
