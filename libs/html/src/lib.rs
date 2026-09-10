@@ -86,18 +86,28 @@ impl<'a> HtmlWalker<'a> {
         let Some(open_lc) = self.open_tag_lc() else {
             return;
         };
-        let mut depth = 0u32;
+        // Elements opened inside this one and not yet closed. Empty for the
+        // common case of an element whose content is plain text, so this
+        // usually does not allocate.
+        let mut inner: Vec<LiveId> = Vec::new();
         for i in self.index + 1..self.nodes.len() {
             match &self.nodes[i] {
-                HtmlNode::OpenTag { lc, .. } if *lc == open_lc => {
-                    depth += 1;
-                }
-                HtmlNode::CloseTag { lc, .. } if *lc == open_lc => {
-                    if depth == 0 {
+                HtmlNode::OpenTag { lc, .. } => inner.push(*lc),
+                HtmlNode::CloseTag { lc, .. } => {
+                    if let Some(pos) = inner.iter().rposition(|t| t == lc) {
+                        // Closes a descendant. Anything still above it was
+                        // void or left unclosed, so it ends here too.
+                        inner.truncate(pos);
+                    } else if *lc == open_lc {
                         self.index = i;
                         return;
+                    } else {
+                        // An enclosing element closes first, so this one never
+                        // had a close tag of its own. Stop here rather than
+                        // reading to the end of the document for every void
+                        // element, which would make a draw quadratic.
+                        return;
                     }
-                    depth -= 1;
                 }
                 _ => (),
             }
@@ -367,6 +377,7 @@ pub fn parse_html(
         saved_last_non_whitespace: usize,
     }
 
+    #[inline]
     fn process_entity(
         c: char,
         in_entity: &mut Option<InEntity>,
@@ -448,7 +459,11 @@ pub fn parse_html(
         last_non_whitespace: 0,
         collapse_ws: true,
     };
-    let mut decoded = String::new();
+    // Decoded output never exceeds the source length, and reserving it up
+    // front measurably beats growing it. `nodes` deliberately gets no such
+    // hint: its length tracks tag count, not byte count, so sizing it from
+    // `body.len()` made a tag-sparse document pay a large pointless alloc.
+    let mut decoded = String::with_capacity(body.len());
     let mut in_entity = None;
 
     for (i, c) in body.char_indices() {
@@ -1040,6 +1055,11 @@ pub fn parse_html(
 }
 
 pub fn match_entity(what: &str) -> Result<u32, String> {
+    // A numeric reference shares no prefix with any name, so check for it
+    // before the table rather than after ~1500 failed comparisons.
+    if what.starts_with('#') {
+        return match_numeric_entity(what);
+    }
     Ok(match what {
         "dollar" => 36,
         "DOLLAR" => 36,
@@ -2550,31 +2570,35 @@ pub fn match_entity(what: &str) -> Result<u32, String> {
         "UFISHT" => 10622,
         "dfisht" => 10623,
         "DFISHT" => 10623,
-        x => {
-            // Not a named entity: it may be a numeric character reference.
-            // Everything here is validated rather than cast, because the
-            // caller turns the result into a `char`: an out-of-range value,
-            // a surrogate, or a negative number would otherwise panic.
-            let Some(digits) = x.strip_prefix('#') else {
-                return Err("unknown html entity".into());
-            };
-            // `&#x..;` / `&#X..;` are hex, anything else is decimal. Parsing
-            // as `u32` (not `i64`) rejects a leading `-` or `+` outright.
-            let num = match digits.strip_prefix(['x', 'X']) {
-                Some(hex) => u32::from_str_radix(hex, 16)
-                    .map_err(|_| String::from("Cannot parse hex html entity"))?,
-                None => digits
-                    .parse::<u32>()
-                    .map_err(|_| String::from("Cannot parse digit html entity"))?,
-            };
-            // Reject anything that is not a Unicode scalar value: beyond
-            // U+10FFFF, or a UTF-16 surrogate half.
-            if char::from_u32(num).is_none() {
-                return Err("Html entity is not a valid unicode scalar".into());
-            }
-            num
-        }
+        _ => return Err("unknown html entity".into()),
     })
+}
+
+/// Decodes `&#38;` / `&#x26;` style references, given the text between the
+/// `&` and the `;`.
+///
+/// Everything is validated rather than cast, because the caller turns the
+/// result into a `char`: an out-of-range value, a surrogate, or a negative
+/// number would otherwise panic.
+fn match_numeric_entity(what: &str) -> Result<u32, String> {
+    let Some(digits) = what.strip_prefix('#') else {
+        return Err("unknown html entity".into());
+    };
+    // `&#x..;` / `&#X..;` are hex, anything else is decimal. Parsing as `u32`
+    // (not `i64`) rejects a leading `-` or `+` outright.
+    let num = match digits.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16)
+            .map_err(|_| String::from("Cannot parse hex html entity"))?,
+        None => digits
+            .parse::<u32>()
+            .map_err(|_| String::from("Cannot parse digit html entity"))?,
+    };
+    // Reject anything that is not a Unicode scalar value: beyond U+10FFFF, or
+    // a UTF-16 surrogate half.
+    if char::from_u32(num).is_none() {
+        return Err("Html entity is not a valid unicode scalar".into());
+    }
+    Ok(num)
 }
 
 #[cfg(test)]

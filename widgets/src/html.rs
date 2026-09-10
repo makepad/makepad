@@ -235,6 +235,12 @@ pub struct Html {
     #[rust]
     open_elements: Vec<LiveId>,
 
+    /// How many of each tag `open_elements` holds, so an unmatched close tag
+    /// is rejected without scanning the stack. A message can carry both deep
+    /// nesting and many stray close tags.
+    #[rust]
+    open_element_counts: HashMap<LiveId, u32>,
+
     /// How many `<summary>` elements are open. `</summary>` pops a tracker
     /// that `<summary>` pushed, so a message containing only the close tag
     /// used to pop an empty stack.
@@ -573,6 +579,16 @@ impl Html {
         (None, trim_whitespace_in_text)
     }
 
+    /// Drops one occurrence of `lc` from the open-element tally.
+    fn release_open_element(counts: &mut HashMap<LiveId, u32>, lc: LiveId) {
+        if let Some(n) = counts.get_mut(&lc) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                counts.remove(&lc);
+            }
+        }
+    }
+
     /// Tags whose close handler changes `TextFlow` state, so their open tag
     /// has to be remembered and their close tag ignored when unmatched.
     fn element_is_tracked(lc: LiveId) -> bool {
@@ -797,6 +813,7 @@ impl Widget for Html {
         // inside an unclosed element must not bleed into this one.
         self.list_stack.clear();
         self.open_elements.clear();
+        self.open_element_counts.clear();
         self.open_summaries = 0;
         self.used_widget_ids.clear();
         self.table_columns_cache.clear();
@@ -1013,6 +1030,7 @@ impl Widget for Html {
                         break;
                     }
                     self.open_elements.pop();
+                    Self::release_open_element(&mut self.open_element_counts, top);
                     let _ = Self::handle_close_tag(
                         cx,
                         &mut self.text_flow,
@@ -1050,6 +1068,7 @@ impl Widget for Html {
                     if let Some(lc) = open_lc {
                         if Self::element_is_tracked(lc) {
                             self.open_elements.push(lc);
+                            *self.open_element_counts.entry(lc).or_insert(0) += 1;
                         }
                     }
                 }
@@ -1058,9 +1077,15 @@ impl Widget for Html {
             // Run a close handler only for an element this draw actually
             // opened, unwinding anything left open inside it.
             if let Some(close_lc) = node.close_tag_lc() {
-                if let Some(depth) = self.open_elements.iter().rposition(|t| *t == close_lc) {
+                if self.open_element_counts.get(&close_lc).is_some_and(|n| *n > 0) {
+                    let depth = self
+                        .open_elements
+                        .iter()
+                        .rposition(|t| *t == close_lc)
+                        .unwrap_or(0);
                     while self.open_elements.len() > depth {
                         let lc = self.open_elements.pop().unwrap_or(close_lc);
+                        Self::release_open_element(&mut self.open_element_counts, lc);
                         let _ = Self::handle_close_tag(
                             cx,
                             &mut self.text_flow,
@@ -1076,6 +1101,7 @@ impl Widget for Html {
         // Close anything the document left open, so `<ul><li>item` hands a
         // balanced turtle stack back to `TextFlow::end`.
         while let Some(lc) = self.open_elements.pop() {
+            Self::release_open_element(&mut self.open_element_counts, lc);
             let _ = Self::handle_close_tag(cx, &mut self.text_flow, lc, &mut self.list_stack);
         }
         self.text_flow.end(cx);
@@ -1620,11 +1646,18 @@ fn cell_align_x(node: &HtmlWalker) -> f64 {
 }
 
 fn align_keyword_to_x(keyword: &str) -> Option<f64> {
-    match keyword.trim().to_ascii_lowercase().as_str() {
-        "left" | "start" | "justify" => Some(0.0),
-        "center" => Some(0.5),
-        "right" | "end" => Some(1.0),
-        _ => None,
+    // Compared in place rather than lowercased into a fresh String, which ran
+    // once per aligned cell on every draw.
+    let keyword = keyword.trim();
+    let eq = |s: &str| keyword.eq_ignore_ascii_case(s);
+    if eq("left") || eq("start") || eq("justify") {
+        Some(0.0)
+    } else if eq("center") {
+        Some(0.5)
+    } else if eq("right") || eq("end") {
+        Some(1.0)
+    } else {
+        None
     }
 }
 
