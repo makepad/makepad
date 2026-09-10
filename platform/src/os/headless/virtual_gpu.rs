@@ -202,6 +202,68 @@ pub struct TriSetup {
 /// Below this the top-left tie-break applies; see [`edge_pass`].
 const EDGE_EPS: f32 = 1.0e-6;
 
+/// Clip one triangle against the near plane `z_clip >= 0` (Metal's clip volume
+/// is `0 <= z <= w`). A GPU does this before the perspective divide; without it
+/// a vertex behind the eye is divided through a negative `w`, mirrored across
+/// the screen, and the triangle it belongs to covers nothing or the wrong
+/// pixels. Intersection vertices are appended to `positions`/`varyings` with
+/// linearly interpolated varyings (clip space is linear before the divide; a
+/// flat varying is constant across the primitive, so its lerp is itself).
+/// Returns the visible polygon's vertex indices: the three corners unchanged,
+/// three or four vertices after clipping, or none when the whole triangle is
+/// behind the plane.
+pub fn clip_triangle_near(
+    positions: &mut Vec<[f32; 4]>,
+    varyings: &mut Vec<f32>,
+    slots: usize,
+    corners: [u32; 3],
+) -> ([u32; 4], usize) {
+    let mut out = [0u32; 4];
+    let mut len = 0usize;
+    let inside = |p: &[f32; 4]| p[2] >= 0.0;
+    let all_inside = corners
+        .iter()
+        .all(|&i| positions.get(i as usize).is_some_and(inside));
+    if all_inside {
+        return ([corners[0], corners[1], corners[2], 0], 3);
+    }
+    let mut previous = corners[2];
+    for &current in &corners {
+        let (Some(a), Some(b)) = (
+            positions.get(previous as usize).copied(),
+            positions.get(current as usize).copied(),
+        ) else {
+            return (out, 0);
+        };
+        let (a_in, b_in) = (inside(&a), inside(&b));
+        if a_in != b_in {
+            let t = a[2] / (a[2] - b[2]);
+            let mut p = [0.0f32; 4];
+            for k in 0..4 {
+                p[k] = a[k] + (b[k] - a[k]) * t;
+            }
+            p[2] = 0.0;
+            let index = positions.len() as u32;
+            positions.push(p);
+            let (ao, bo) = (previous as usize * slots, current as usize * slots);
+            for k in 0..slots {
+                let (va, vb) = (varyings[ao + k], varyings[bo + k]);
+                varyings.push(va + (vb - va) * t);
+            }
+            if len < 4 {
+                out[len] = index;
+                len += 1;
+            }
+        }
+        if b_in && len < 4 {
+            out[len] = current;
+            len += 1;
+        }
+        previous = current;
+    }
+    (out, len)
+}
+
 /// Project one triangle into screen space and bound it, or `None` when it is
 /// degenerate or entirely outside the viewport.
 ///
@@ -841,6 +903,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A vertex behind the eye (`z_clip < 0`, `w < 0`) is clipped at the
+    /// near plane, not divided through its negative `w`: the visible polygon
+    /// has four vertices, all with positive `w`, the two new ones exactly on
+    /// the plane with varyings interpolated at the same parameter.
+    #[test]
+    fn clip_near_keeps_the_visible_part_of_a_triangle_crossing_the_eye() {
+        // A perspective near plane in front of the eye: corner 2 is behind it
+        // (z -0.5) while still in front of the eye (w 0.5).
+        let mut pos = vec![
+            [-0.5, -0.5, 0.5, 1.0],
+            [0.5, -0.5, 0.5, 1.0],
+            [0.0, 0.5, -0.5, 0.5],
+        ];
+        let mut vary = vec![0.0, 10.0, 20.0];
+        let (poly, len) = clip_triangle_near(&mut pos, &mut vary, 1, [0, 1, 2]);
+        assert_eq!(len, 4);
+        assert_eq!(pos.len(), 5);
+        assert_eq!(vary.len(), 5);
+        for &i in &poly[..len] {
+            assert!(pos[i as usize][3] > 0.0, "vertex {i} has w {}", pos[i as usize][3]);
+        }
+        for i in 3..5 {
+            assert_eq!(pos[i][2], 0.0);
+            assert!((pos[i][3] - 0.75).abs() < 1e-6);
+        }
+        // Corner 2 is the outside vertex: edges 2->0 and 1->2 each meet the
+        // plane halfway (z 0.5 -> -0.5), so the varyings land halfway too.
+        assert!((vary[3] - 10.0).abs() < 1e-6, "{:?}", vary);
+        assert!((vary[4] - 15.0).abs() < 1e-6, "{:?}", vary);
+        // A projection whose near plane is the eye plane itself (z = k*w)
+        // still yields the visible polygon; its plane vertices sit at w 0 and
+        // project to the far edge of the screen, which setup_triangle bounds.
+        let mut eye = vec![[-0.5, -0.5, 0.65, 1.0], [0.5, -0.5, 0.65, 1.0], [0.0, 0.5, -0.65, -1.0]];
+        let mut v = vec![0.0; 3];
+        assert_eq!(clip_triangle_near(&mut eye, &mut v, 1, [0, 1, 2]).1, 4);
+        // Entirely behind: nothing.
+        let mut behind = vec![[0.0, 0.0, -1.0, -1.0], [1.0, 0.0, -1.0, -1.0], [0.0, 1.0, -2.0, -1.0]];
+        let mut v = vec![0.0; 3];
+        assert_eq!(clip_triangle_near(&mut behind, &mut v, 1, [0, 1, 2]).1, 0);
+        assert_eq!(behind.len(), 3);
+        // Entirely in front: the corners come back untouched, nothing appended.
+        let mut front = vec![[0.0, 0.0, 0.5, 1.0], [1.0, 0.0, 0.5, 1.0], [0.0, 1.0, 0.5, 1.0]];
+        let mut v = vec![1.0, 2.0, 3.0];
+        let (poly, len) = clip_triangle_near(&mut front, &mut v, 1, [0, 1, 2]);
+        assert_eq!((poly, len), ([0, 1, 2, 0], 3));
+        assert_eq!(front.len(), 3);
     }
 
     #[test]

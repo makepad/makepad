@@ -1,6 +1,6 @@
 use super::virtual_gpu::{
-    quantize_color_unorm8, rasterize_setup_rows, setup_triangle, Framebuffer, RasterScratch,
-    RasterState, TriSetup, TriangleDerivatives,
+    clip_triangle_near, quantize_color_unorm8, rasterize_setup_rows, setup_triangle, Framebuffer,
+    RasterScratch, RasterState, TriSetup, TriangleDerivatives,
 };
 use crate::{
     cx::Cx,
@@ -1768,26 +1768,37 @@ impl Cx {
                     {
                         continue;
                     }
-                    let Some(setup) = setup_triangle(
-                        fb.width,
-                        fb.height,
-                        viewport,
-                        &shaded_positions,
-                        inst_base + i0,
-                        inst_base + i1,
-                        inst_base + i2,
-                    ) else {
-                        continue;
-                    };
-                    band_lo = band_lo.min(setup.min_y.max(0) as usize);
-                    band_hi = band_hi.max(setup.max_y.max(0) as usize);
-                    // Half the bounding box is a fair estimate of a triangle's
-                    // covered pixels, and this only has to be good enough to
-                    // decide whether spreading the draw over threads pays.
-                    covered_px += ((setup.max_x - setup.min_x + 1) as usize
-                        * (setup.max_y - setup.min_y + 1) as usize)
-                        / 2;
-                    setups.push(setup);
+                    // Near-plane clipping precedes the perspective divide, as
+                    // on the GPU: a corner behind the eye yields a three- or
+                    // four-vertex polygon, fanned from its first vertex.
+                    let (poly, poly_len) = clip_triangle_near(
+                        &mut shaded_positions,
+                        &mut shaded_varyings,
+                        varying_slots,
+                        [inst_base + i0, inst_base + i1, inst_base + i2],
+                    );
+                    for k in 1..poly_len.saturating_sub(1) {
+                        let Some(setup) = setup_triangle(
+                            fb.width,
+                            fb.height,
+                            viewport,
+                            &shaded_positions,
+                            poly[0],
+                            poly[k],
+                            poly[k + 1],
+                        ) else {
+                            continue;
+                        };
+                        band_lo = band_lo.min(setup.min_y.max(0) as usize);
+                        band_hi = band_hi.max(setup.max_y.max(0) as usize);
+                        // Half the bounding box is a fair estimate of a triangle's
+                        // covered pixels, and this only has to be good enough to
+                        // decide whether spreading the draw over threads pays.
+                        covered_px += ((setup.max_x - setup.min_x + 1) as usize
+                            * (setup.max_y - setup.min_y + 1) as usize)
+                            / 2;
+                        setups.push(setup);
+                    }
                 }
             }
 
