@@ -19,7 +19,7 @@ script_mod! {
         StoryNote{text: "Panels of tabs, split any way round, that a person can take apart and put back together. Eight places in this repository build one; the editor you may know is the biggest of them."}
 
         StoryHeading{text: "Drag a tab"}
-        StoryNote{text: "Drag a tab onto the other bar to move it. Drag it against an edge of a body — the outer tenth — to split that panel and drop it into the new half. Drag the bar between the panels to resize them. Close a tab with its cross. Everything here is reported below as it happens."}
+        StoryNote{text: "Drag a tab onto the other bar to move it. Drag it against an edge of a body — the outer tenth — to split THAT panel and take half of it. Drag it right out to the edge of the dock instead and it lies across everything: with two panels sharing the square, a drop down the far left gives the newcomer the whole left half and leaves the other two stacked in the right half. Drop it along the outside of the way they are already stacked and all three end up the same size. Drag the bar between panels to resize them; nothing a drop decides is final. Close a tab with its cross. Everything here is reported below as it happens."}
         StoryRow{
             View{
                 width: Fill height: 340.
@@ -149,6 +149,18 @@ Of the eight docks in this repository, exactly one wires them. Every other one, 
 **The close button does not close.** `TabCloseWasPressed` is a request too; the cross animates and the tab stays until the host calls `close_tab`.
 
 **`closable` is not what makes the cross.** On a `DockTabs` panel, `closable` means *when the last tab leaves, collapse this panel and heal the splitter*. The cross comes from the tab's `template` — `@CloseableTab` has one, `@PermanentTab` does not. Note the spelling: `closable` on the panel, `closeable` on the tab. The third tab above is permanent, and has no cross.
+
+## Where a drop lands
+
+A drop is read in three passes, and the order between them is the behaviour.
+
+**A tab, or a tab bar.** Joining a panel that is already there wins over everything else, so the topmost panel's bar is still a place to drop even though it runs along the outside of the dock.
+
+**The outside of the dock**, within 24 points of it. This splits the *root*, so the panel arriving lies across whatever is already in there rather than beside one member of it. Two panels sharing a square top and bottom, and a drop down the far left: the newcomer takes the whole left half and the pair stay stacked in the right one. The preview says which it will be — half the whole dock, not half a panel.
+
+**The edges and middle of the panel under the pointer.** The outer tenth of a body splits that panel alone and nests a splitter inside it; the middle joins its tabs.
+
+The bar of a new split starts where everything sharing that direction ends up the same size: beside one panel that is the middle, and under a pair already stacked it is a third. Every bar can be dragged afterwards, so those fractions are only where it opens.
 
 ## Smaller sharp edges
 

@@ -132,7 +132,7 @@ script_mod! {
     }
 }
 
-#[derive(Copy, Clone, Debug, Script, ScriptHook, Default, SerRon, DeRon)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Script, ScriptHook, Default, SerRon, DeRon)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAxis {
     #[pick]
