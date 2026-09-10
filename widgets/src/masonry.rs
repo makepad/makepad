@@ -155,7 +155,7 @@ impl Columns {
 
 /// A length the layout can work with: negatives and non-numbers are a
 /// property somebody is in the middle of editing, not a request.
-fn finite(value: f64) -> f64 {
+pub(crate) fn finite(value: f64) -> f64 {
     if value.is_finite() && value >= 0.0 {
         value
     } else {
@@ -168,7 +168,7 @@ fn finite(value: f64) -> f64 {
 ///
 /// `width` is optional because a masonry inside a `Fit` parent has no width
 /// to answer with. There is nothing to divide then, so it is one column.
-fn column_count(width: Option<f64>, fixed: usize, min_width: f64, gap: f64) -> usize {
+pub(crate) fn column_count(width: Option<f64>, fixed: usize, min_width: f64, gap: f64) -> usize {
     if fixed > 0 {
         return fixed.min(MAX_COLUMNS);
     }
@@ -190,7 +190,7 @@ fn column_count(width: Option<f64>, fixed: usize, min_width: f64, gap: f64) -> u
 }
 
 /// What one column gets once the gaps are paid for.
-fn column_width(width: Option<f64>, count: usize, gap: f64, min_width: f64) -> f64 {
+pub(crate) fn column_width(width: Option<f64>, count: usize, gap: f64, min_width: f64) -> f64 {
     let count = count.max(1);
     match width {
         Some(width) => ((width - gap * (count - 1) as f64) / count as f64).max(0.0),
@@ -203,7 +203,7 @@ fn column_width(width: Option<f64>, count: usize, gap: f64, min_width: f64) -> f
 /// An item is widened to its column: a masonry whose columns are different
 /// widths is not one. Its height is left exactly as authored, which is the
 /// entire point of the layout.
-fn item_walk(mut walk: Walk, column_width: f64) -> Walk {
+pub(crate) fn item_walk(mut walk: Walk, column_width: f64) -> Walk {
     walk.abs_pos = None;
     walk.width = Size::Fixed((column_width - walk.margin.width()).max(0.0));
     walk

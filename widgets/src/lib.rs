@@ -105,6 +105,8 @@ pub mod fold_header;
 pub mod glass_panel;
 pub mod loading_spinner;
 pub mod progress;
+pub mod playback_bar;
+pub mod level_meter;
 pub mod marquee;
 pub mod spinner;
 
@@ -122,12 +124,14 @@ pub mod kbd;
 pub mod typography;
 pub mod tree;
 pub mod list_item;
+pub mod item_selection;
 pub mod avatar;
 pub mod card;
 pub mod media;
 pub mod table;
 pub mod empty_state;
 pub mod timeline;
+pub mod waveform;
 pub mod chat;
 pub mod code_block;
 pub mod carousel;
@@ -141,6 +145,7 @@ pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
 pub mod masonry;
+pub mod tile_list;
 pub mod kanban;
 pub mod splitter_more;
 pub mod svg_select;
@@ -151,6 +156,7 @@ pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
 pub mod text_flow;
+pub mod log_list;
 
 pub mod cached_widget;
 pub mod root;
@@ -201,6 +207,7 @@ pub mod flat_list;
 
 pub mod chart;
 pub mod perf_graph;
+pub mod corner_cap_view;
 pub mod screen_cap;
 
 // Commented out modules (not yet converted)
@@ -293,6 +300,7 @@ pub use crate::{
     table::*,
     empty_state::*,
     timeline::*,
+    waveform::*,
     chat::*,
     code_block::*,
     carousel::*,
@@ -306,6 +314,7 @@ pub use crate::{
     chart_more::*,
     toolbar::*,
     masonry::*,
+    tile_list::*,
     kanban::*,
     splitter_more::*,
     svg_select::*,
@@ -315,6 +324,8 @@ pub use crate::{
     wheel_picker::*,
     portal_list::*,
     progress::*,
+    playback_bar::*,
+    level_meter::*,
     reorder_list::*,
     radio_button::*,
     reflect::*,
@@ -341,6 +352,7 @@ pub use crate::{
     tabs::*,
     tab_close_button::*,
     text_flow::*,
+    log_list::*,
 
     text_input::*,
     tooltip::*,
@@ -395,6 +407,8 @@ pub use crate::vector::*;
 
 pub use crate::chart::*;
 pub use crate::perf_graph::*;
+pub use crate::item_selection::*;
+pub use crate::corner_cap_view::*;
 pub use crate::screen_cap::*;
 
 pub use crate::video::*;
@@ -536,6 +550,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    crate::playback_bar::script_mod(vm);
+    crate::level_meter::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
@@ -574,6 +590,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::table::script_mod(vm);
     crate::empty_state::script_mod(vm);
     crate::timeline::script_mod(vm);
+    crate::waveform::script_mod(vm);
     crate::chat::script_mod(vm);
     crate::code_block::script_mod(vm);
     crate::carousel::script_mod(vm);
@@ -588,6 +605,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::chart_more::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::masonry::script_mod(vm);
+    crate::tile_list::script_mod(vm);
     crate::kanban::script_mod(vm);
     crate::splitter_more::script_mod(vm);
     crate::scroll_more::script_mod(vm);
@@ -595,6 +613,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::rich_text::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
+    crate::log_list::script_mod(vm);
 
     crate::cached_widget::script_mod(vm);
     crate::root::script_mod(vm);
@@ -632,6 +651,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
     crate::perf_graph::script_mod(vm);
+    crate::corner_cap_view::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
     #[cfg(feature = "maps")]

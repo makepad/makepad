@@ -673,6 +673,34 @@
    ]
   },
   {
+   "component": "CornerCapView",
+   "aka": [
+    "fake rounded corners",
+    "corner caps",
+    "corner patches",
+    "cheap rounded corners",
+    "round a video",
+    "round a chart",
+    "corner overlay",
+    "negative rounded corners",
+    "rounded corners without a texture"
+   ],
+   "does": [
+    "round the corners of content the library cannot round",
+    "rounded corners with no render target",
+    "paint the surrounding colour over the corners",
+    "round a surface that redraws every frame",
+    "top corners only",
+    "per corner radius",
+    "square one corner",
+    "corner radius clamped to the box",
+    "cheaper than a cached rounded view",
+    "does not clip its children",
+    "claims no hits",
+    "cap colour must match what is behind"
+   ]
+  },
+  {
    "component": "Coverage",
    "aka": [
     "widget list",
@@ -1416,6 +1444,51 @@
    ]
   },
   {
+   "component": "LevelMeter",
+   "aka": [
+    "vu meter",
+    "peak meter",
+    "signal meter",
+    "load bar",
+    "utilisation bar",
+    "headroom meter",
+    "bar that falls",
+    "falling bar",
+    "live value bar",
+    "throughput bar",
+    "latency bar",
+    "temperature bar",
+    "capacity bar",
+    "peak hold bar",
+    "clip light",
+    "overload lamp",
+    "channel meter",
+    "level column",
+    "bar graph readout",
+    "gauge that drops"
+   ],
+   "does": [
+    "show a live value that goes down",
+    "rise instantly and fall slowly",
+    "hold the highest recent reading",
+    "high-water mark that decays",
+    "peak hold that follows the bar down",
+    "latch a lamp when a ceiling is passed",
+    "clear a latched lamp by pressing it",
+    "run the scale bottom to top",
+    "a column instead of a bar",
+    "lift the quiet end of the scale",
+    "draw a reading on a non-linear scale",
+    "stand at a fixed reading with nothing feeding it",
+    "stop repainting once it has settled",
+    "colour the loud end of the bar",
+    "rungs along the bar",
+    "dim a channel that is not live",
+    "print the measured value",
+    "ballistics without a widget"
+   ]
+  },
+  {
    "component": "LinkLabel",
    "aka": [
     "hyperlink",
@@ -1474,6 +1547,37 @@
     "reorder event with from and to",
     "escape cancels a drag",
     "drag and drop"
+   ]
+  },
+  {
+   "component": "LogList",
+   "aka": [
+    "console",
+    "output pane",
+    "terminal pane",
+    "message log",
+    "event log",
+    "diagnostics panel",
+    "problems panel",
+    "trace view",
+    "live tail",
+    "stdout view"
+   ],
+   "does": [
+    "follow the newest line",
+    "stick to the bottom",
+    "tailing stops when you scroll up",
+    "how many arrived while you were away",
+    "severity per line",
+    "errors only",
+    "warnings and worse",
+    "filter the lines by text",
+    "a file and line number becomes a link",
+    "jump to where a message came from",
+    "how many lines are kept",
+    "the oldest lines are forgotten",
+    "show an application's own log",
+    "levels marked by colour and by word"
    ]
   },
   {
@@ -1871,6 +1975,32 @@
     "while loading",
     "before data arrives",
     "stands in for content"
+   ]
+  },
+  {
+   "component": "PlaybackBar",
+   "aka": [
+    "seek bar",
+    "scrubber",
+    "scrub bar",
+    "transport",
+    "transport bar",
+    "position slider",
+    "time slider",
+    "progress slider",
+    "player controls"
+   ],
+   "does": [
+    "seek",
+    "scrub",
+    "jump to a point",
+    "click to seek",
+    "drag the playhead",
+    "show elapsed time",
+    "show time remaining",
+    "count down",
+    "format a clock",
+    "mm:ss"
    ]
   },
   {
@@ -2702,6 +2832,33 @@
    ]
   },
   {
+   "component": "TileList",
+   "aka": [
+    "tile grid",
+    "grid of thumbnails",
+    "gallery view",
+    "icon view",
+    "picker grid",
+    "virtualised grid",
+    "virtualized grid",
+    "item wall"
+   ],
+   "does": [
+    "lays items out n across",
+    "only draws the rows on screen",
+    "recycles rows and the tiles in them",
+    "one across is an ordinary row list",
+    "as many across as a floor width allows",
+    "the tiles share the row equally",
+    "reports each item with its row and column",
+    "turns a tile's action back into an item number",
+    "keeps the top item at the top when the count changes",
+    "scroll to an item",
+    "tiles need a definite or fit height",
+    "one tile template for the whole set"
+   ]
+  },
+  {
    "component": "Timeline",
    "aka": [
     "history of events",
@@ -3036,6 +3193,38 @@
     "cache into a texture",
     "property rows",
     "level meter"
+   ]
+  },
+  {
+   "component": "Waveform",
+   "aka": [
+    "audio peaks lane",
+    "sound envelope display",
+    "audio scrubber",
+    "track overview bar",
+    "loop region editor",
+    "peak meter history"
+   ],
+   "does": [
+    "the peaks of a recording across a lane",
+    "lowest and highest sample per column",
+    "spans with a name and a meaning",
+    "points in time with a name and a meaning",
+    "a playhead over the picture",
+    "press the lane to move the playhead",
+    "drag a region edge to resize it",
+    "drag a marker to move it",
+    "click a marker without moving it",
+    "reports where a drag settled",
+    "quantize every drag to a step",
+    "one texture and one quad",
+    "peaks reduced to one texel a pixel",
+    "extremes kept so transients survive",
+    "peaks that cover part of the axis",
+    "names left out when they do not fit",
+    "the host owns the peak data",
+    "it does not decode audio",
+    "no zoom and no scrolling"
    ]
   },
   {

@@ -14,6 +14,8 @@ pub mod checkbox_more;
 pub mod alert;
 pub mod divider;
 pub mod progress;
+pub mod playback_bar;
+pub mod level_meter;
 pub mod spinner;
 pub mod button_group;
 pub mod chip;
@@ -47,6 +49,7 @@ pub mod list_item;
 pub mod avatar;
 pub mod card;
 pub mod media;
+pub mod waveform;
 pub mod table;
 pub mod empty_state;
 pub mod timeline;
@@ -110,6 +113,7 @@ pub mod iconset;
 pub mod image;
 pub mod imageblend;
 pub mod rotatedimage;
+pub mod corner_cap_view;
 pub mod glasspanel;
 pub mod linklabel;
 pub mod markdown;
@@ -122,6 +126,8 @@ pub mod adaptiveview;
 pub mod slidesview;
 pub mod scrollbar;
 pub mod portallist;
+pub mod tile_list;
+pub mod log_list;
 pub mod filetree;
 pub mod rotary;
 pub mod video;
@@ -160,6 +166,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     empty_state::script_mod(vm);
     table::script_mod(vm);
     media::script_mod(vm);
+    waveform::script_mod(vm);
     card::script_mod(vm);
     avatar::script_mod(vm);
     list_item::script_mod(vm);
@@ -213,6 +220,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     image::script_mod(vm);
     imageblend::script_mod(vm);
     rotatedimage::script_mod(vm);
+    corner_cap_view::script_mod(vm);
     glasspanel::script_mod(vm);
     linklabel::script_mod(vm);
     markdown::script_mod(vm);
@@ -225,6 +233,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     slidesview::script_mod(vm);
     scrollbar::script_mod(vm);
     portallist::script_mod(vm);
+    tile_list::script_mod(vm);
+    log_list::script_mod(vm);
     filetree::script_mod(vm);
     spinner::script_mod(vm);
     rotary::script_mod(vm);
@@ -247,6 +257,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     alert::script_mod(vm);
     divider::script_mod(vm);
     progress::script_mod(vm);
+    playback_bar::script_mod(vm);
+    level_meter::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -284,6 +296,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         empty_state::STORIES,
         table::STORIES,
         media::STORIES,
+        waveform::STORIES,
         card::STORIES,
         avatar::STORIES,
         list_item::STORIES,
@@ -337,6 +350,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         image::STORIES,
         imageblend::STORIES,
         rotatedimage::STORIES,
+        corner_cap_view::STORIES,
         glasspanel::STORIES,
         linklabel::STORIES,
         markdown::STORIES,
@@ -349,6 +363,8 @@ pub fn tables() -> &'static [&'static [Story]] {
         slidesview::STORIES,
         scrollbar::STORIES,
         portallist::STORIES,
+        tile_list::STORIES,
+        log_list::STORIES,
         filetree::STORIES,
         spinner::STORIES,
         rotary::STORIES,
@@ -371,6 +387,8 @@ pub fn tables() -> &'static [&'static [Story]] {
         alert::STORIES,
         divider::STORIES,
         progress::STORIES,
+        playback_bar::STORIES,
+        level_meter::STORIES,
     ]
 }
 
