@@ -472,7 +472,7 @@ script_mod! {
                 window.title: "Director"
                 window.inner_size: vec2(1180, 760)
                 window.caption_bar_height_override: 42.0
-                screen_cap +: {max_fps: 15 output_dir: "local/director-recordings"}
+                screen_cap +: {max_fps: 15}
                 pass +: { clear_color: theme.color_bg_app }
                 caption_bar +: {
                     caption_label +: {
