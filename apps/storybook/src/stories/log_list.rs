@@ -14,7 +14,7 @@ script_mod! {
         StoryNote{text: "Somewhere in every application there is a pane of arriving messages. The platform has kept them all along — every log and error line, with its level, in a ring any part of the app can read — and the ring's own notes say it was moved out of the automation surface so an app could show its own log. Nothing was built to show it, so two applications here grew their own: one drawing the tail into a single multi-line label, one a hand-written virtual list with its own icons. Neither is a widget. This is the third one, written once."}
 
         StoryHeading{text: "Following the newest"}
-        StoryNote{text: "The pane holds the bottom while lines arrive and lets go the instant you scroll away from it — scroll up, press \"fifty at once\", and the lines land below you instead of dragging you down. Scroll back to the bottom and it takes hold again. It says which of the two it is doing and counts what you missed, so a host can offer the way back; \"back to the newest\" is that offer."}
+        StoryNote{text: "The pane holds the bottom while lines arrive and lets go the instant you scroll away from it — scroll up, press \"fifty at once\", and the lines land below you instead of dragging you down. Scroll back to the bottom and it takes hold again. It says which of the two it is doing and counts what you missed, so a host can offer the way back; \"back to the newest\" is that offer. Letting go holds LINES, not row numbers: once the pane is full every arriving line drops one off the front and renumbers every row behind it, so the view is given those rows back before the frame draws and the words under your eye stay where they were."}
         live_pane := LogList{
             width: Fill
             height: 210.
@@ -41,7 +41,7 @@ script_mod! {
         }
 
         StoryHeading{text: "The mark"}
-        StoryNote{text: "Five levels, and each one gets a stripe down the leading edge and a word in the gutter — the word so that the level survives a screenshot, a colour-blind reader and a monochrome printer, which a coloured dot on its own does not. The stripe is painted by the row's own background rather than being a child of it: the row is sized to fit its text, and a full-height child inside a fitted parent resolves to nothing and never paints."}
+        StoryNote{text: "Five levels, and each one gets a stripe down the leading edge and a word in the gutter — the word so that the level survives a screenshot, a colour-blind reader and a monochrome printer, which a coloured dot on its own does not. The two are coloured separately, because they are asking for different things: the word is ten points of text and has to be READ, so it takes a theme role that flips with the theme, while the stripe is three points of colour beside a word that already spells the level out, so it keeps the saturated status hue and stays a thing to find rather than a thing to read. Switch this page to the light theme and watch the amber stripe stay amber while the word goes dark. The stripe is painted by the row's own background rather than being a child of it: the row is sized to fit its text, and a full-height child inside a fitted parent resolves to nothing and never paints."}
         marks := LogList{
             width: Fill
             height: 150.
@@ -164,7 +164,7 @@ pub const STORIES: &[Story] = &[Story {
     key: "data display/loglist/overview",
     category: "Data display",
     component: "LogList",
-    also: &["LogListRow", "LogListLink", "LogListFloor"],
+    also: &["LogListRow", "LogListLink", "LogListEmpty", "LogListFloor"],
     name: "Overview",
     dsl: "LogListOverview",
     added: "2026-09-10",
@@ -176,6 +176,10 @@ A pane of arriving messages: a severity mark per line, the newest line held in v
 **It does not read the platform's log ring.** The ring is there, and feeding this from it is three lines in a host's own tick — but a library widget that reached into a global would draw lines nobody handed it, could not be tested without a process that had logged something, and would be no use to a host whose lines come from a build, a device or a file. The host pushes; the level type is the platform's own, so that pump needs no conversion.
 
 **Sticking is the point, and it is not this widget's code.** The virtualising list underneath already holds the bottom while content arrives and lets go when a reader scrolls away (`auto_tail`). What this adds is the report: it says when it lets go, counts what arrived while nobody was looking, and offers the way back, so a host can put a \"3 new\" pill on screen instead of guessing.
+
+**And it holds lines, not row numbers.** The list numbers its rows from the oldest line showing, so once `cap` is reached — which for anything that logs at all is the steady state rather than an edge case — every arriving line drops one off the front and quietly makes every row number mean a newer line. The draw hands a reader who has scrolled away those rows back before it paints, so they stay on the lines they were reading. Without it a held view slides by one row per push while the pane goes on claiming to hold it.
+
+**Two colours per level, not one.** The word in the gutter is ten points of text that has to be read in every theme, so it takes an adaptive role and measures between 9:1 and 13:1 against its row in all three; the stripe is three points of colour next to a word that already spells the level out, so it keeps the saturated status hue and stays something to find at a glance rather than something to read. Those hues are the same bytes in the light theme as in the dark one: the warning amber measures 1.25:1 against the light theme's row, which is a fine stripe and an unreadable word. The one exception is `log`, which stays on the theme's quiet meta role — the ordinary line is the absence of news, and its job in the gutter is to recede.
 
 **What counts as a reference** is `path:line` or `path:line:column` — what this platform's log sink writes and what every compiler writes. The numbers are read from the RIGHT, which is what keeps `C:\\src\\a.rs:12:3` one reference rather than a column of 3 in a file called `C`. Clock times, `word:number` pairs and addresses with a port are left alone, and trailing punctuation stays outside the link. The pane marks what LOOKS like a reference and reports the press; whether the path can be opened is the host's question.
 
