@@ -23,6 +23,11 @@ script_mod! {
     mod.stories.BadgeOverview = StoryPage{
         StoryHeading{text: "Dot, count and the overflow cap"}
         StoryNote{text: "A badge with nothing to say is a dot. A count shows its number up to max, then max+; a word shows the word."}
+        StoryHeading{text: "One badge, under the controls"}
+        StoryNote{text: "One badge; its count, cap, intent and appearance come from the controls."}
+        StoryRow{
+            subject := Badge{count: 5}
+        }
         StoryRow{
             Badge{}
             Badge{count: 1}
@@ -181,13 +186,6 @@ script_mod! {
                 marker_4 := Marker{width: Fill height: Fill x: 0.4 y: 0.85 badge +: {intent: Success}}
             }
             picked := Caption{text: "no marker clicked yet"}
-        }
-    
-
-        StoryHeading{text: "One badge, under the controls"}
-        StoryNote{text: "One badge; its count, cap, intent and appearance come from the controls."}
-        StoryRow{
-            subject := Badge{count: 5}
         }
     }
 }

@@ -10,6 +10,11 @@ script_mod! {
 
     mod.stories.SpinnerOverview = StoryPage{
         StoryNote{text: "The mark that says working. Three faces, the size ladder, a delayed one that never flashes for a quick load, the status spinner that ends in a tick or a cross, the saving indicator built from it, and the overlay that blocks a region while it loads."}
+        StoryHeading{text: "One spinner, under the controls"}
+        StoryNote{text: "One spinner; its face, size, delay, label and container come from the controls. Change the delay and press Reset to see it wait."}
+        StoryRow{
+            subject := SpinnerFlat{text: "Loading"}
+        }
 
         StoryHeading{text: "Faces"}
         StoryRow{
@@ -109,13 +114,6 @@ script_mod! {
                     Button{text: "Another blocked button"}
                 }
             }
-        }
-    
-
-        StoryHeading{text: "One spinner, under the controls"}
-        StoryNote{text: "One spinner; its face, size, delay, label and container come from the controls. Change the delay and press Reset to see it wait."}
-        StoryRow{
-            subject := SpinnerFlat{text: "Loading"}
         }
     }
 

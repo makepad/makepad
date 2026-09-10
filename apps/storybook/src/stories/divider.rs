@@ -10,6 +10,9 @@ script_mod! {
     mod.stories.DividerOverview = StoryPage{
         StoryHeading{text: "Orientations"}
         StoryNote{text: "A horizontal rule fills its parent's width; the vertical one stands as tall as the row it is in."}
+        StoryHeading{text: "One divider, under the controls"}
+        StoryNote{text: "One divider. The controls write its label, where the label sits, its style, weight and inset."}
+        subject := Divider{text: "or"}
         Divider{}
         StoryRow{
             height: 40.
@@ -41,11 +44,6 @@ script_mod! {
         Divider{inset: DividerInset.None, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Start, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Middle, appearance: DividerAppearance.Strong}
-    
-
-        StoryHeading{text: "One divider, under the controls"}
-        StoryNote{text: "One divider. The controls write its label, where the label sits, its style, weight and inset."}
-        subject := Divider{text: "or"}
     }
 }
 

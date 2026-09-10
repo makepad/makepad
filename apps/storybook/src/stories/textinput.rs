@@ -8,7 +8,12 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.TextInputOverview = StoryPage{
+    mod.stories.TextInputOverview = StoryPage{        StoryHeading{text: "One field, under the controls"}
+        StoryNote{text: "One text input with a placeholder."}
+        StoryRow{
+            subject := TextInput{width: 240. empty_text: "Type here"}
+        }
+
         H4{text: "TextInput"}
         StoryRow{
             simpletextinput := TextInput{}
@@ -140,13 +145,6 @@ script_mod! {
             text: "Toggle me between single-line and multiline..."
             height: Fit
             width: Fill
-        }
-    
-
-        StoryHeading{text: "One field, under the controls"}
-        StoryNote{text: "One text input with a placeholder."}
-        StoryRow{
-            subject := TextInput{width: 240. empty_text: "Type here"}
         }
     }
 }

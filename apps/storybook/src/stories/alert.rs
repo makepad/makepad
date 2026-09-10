@@ -19,6 +19,13 @@ script_mod! {
     mod.stories.AlertOverview = StoryPage{
         StoryHeading{text: "Four intents, three appearances"}
         StoryNote{text: "The intent picks the palette; the appearance decides how the face wears it. Light tints, Filled paints, Outline strokes."}
+        StoryHeading{text: "One alert, under the controls"}
+        StoryNote{text: "One alert. The controls write its title, description, intent, appearance and close cross; the button brings it back after the cross folds it away."}
+        subject := Alert{
+            title: "Title"
+            description: "A description of what happened and what to do about it."
+            closable: true
+        }
         Alert{title: "Information", description: "A neutral note about the state of things.", intent: AlertIntent.Info}
         Alert{title: "Saved", description: "Your changes are on the server.", intent: AlertIntent.Success}
         Alert{title: "Check the date", description: "The end date is before the start date.", intent: AlertIntent.Warning}
@@ -86,15 +93,6 @@ script_mod! {
         View{width: 640. height: Fit  Reflowing{}}
         View{width: 440. height: Fit  Reflowing{}}
         View{width: 300. height: Fit  Reflowing{}}
-    
-
-        StoryHeading{text: "One alert, under the controls"}
-        StoryNote{text: "One alert. The controls write its title, description, intent, appearance and close cross; the button brings it back after the cross folds it away."}
-        subject := Alert{
-            title: "Title"
-            description: "A description of what happened and what to do about it."
-            closable: true
-        }
     }
 }
 

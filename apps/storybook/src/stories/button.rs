@@ -9,7 +9,15 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.ButtonOverview = StoryPage{
+    mod.stories.ButtonOverview = StoryPage{        StoryHeading{text: "One button, under the controls"}
+        StoryNote{text: "One button. Every control on the right writes into it."}
+        StoryRow{
+            subject := Button{text: "Button"}
+        }
+        StoryRow{
+            clicks := Label{text: "not clicked yet"}
+        }
+
         H4{text: "Standard"}
         StoryRow{
             Button{}
@@ -199,16 +207,6 @@ script_mod! {
                     svg: crate_resource("self:resources/Icon_Favorite.svg")
                 }
             }
-        }
-    
-
-        StoryHeading{text: "One button, under the controls"}
-        StoryNote{text: "One button. Every control on the right writes into it."}
-        StoryRow{
-            subject := Button{text: "Button"}
-        }
-        StoryRow{
-            clicks := Label{text: "not clicked yet"}
         }
     }
 }

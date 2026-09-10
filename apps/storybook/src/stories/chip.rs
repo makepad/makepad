@@ -10,6 +10,14 @@ script_mod! {
 
     mod.stories.ChipOverview = StoryPage{
         StoryNote{text: "A pill standing for one thing the user chose: a filter that is on, a recipient in a field, a label on a record. Selectable chips toggle and carry a tick; removable chips carry a cross with its own hit area; a Tag answers nothing at all."}
+        StoryHeading{text: "One chip, under the controls"}
+        StoryNote{text: "One chip. Every control on the right writes into it."}
+        StoryRow{
+            subject := Chip{text: "Chip" selectable: true}
+        }
+        StoryRow{
+            state := Label{text: "not pressed yet"}
+        }
 
         StoryHeading{text: "Style ladder"}
         StoryRow{
@@ -113,16 +121,6 @@ script_mod! {
             Chip{text: "Tonal" appearance: Tonal intent: Primary disabled: true}
             Chip{text: "Outline" appearance: Outline disabled: true}
             Chip{text: "Chosen" selectable: true selected: true disabled: true}
-        }
-    
-
-        StoryHeading{text: "One chip, under the controls"}
-        StoryNote{text: "One chip. Every control on the right writes into it."}
-        StoryRow{
-            subject := Chip{text: "Chip" selectable: true}
-        }
-        StoryRow{
-            state := Label{text: "not pressed yet"}
         }
     }
 }

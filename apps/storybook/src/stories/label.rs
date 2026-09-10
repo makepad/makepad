@@ -7,7 +7,12 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.LabelOverview = StoryPage{
+    mod.stories.LabelOverview = StoryPage{        StoryHeading{text: "One label, under the controls"}
+        StoryNote{text: "One label; the controls change its text and size."}
+        StoryRow{
+            subject := Label{text: "Hello"}
+        }
+
         H4{text: "Standard"}
         Label{text: "Default single line text"}
 
@@ -189,13 +194,6 @@ script_mod! {
                 }
             }
             text: "OR EVEN SOME PIXELSHADERS"
-        }
-    
-
-        StoryHeading{text: "One label, under the controls"}
-        StoryNote{text: "One label; the controls change its text and size."}
-        StoryRow{
-            subject := Label{text: "Hello"}
         }
     }
 }

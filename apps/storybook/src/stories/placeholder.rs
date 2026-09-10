@@ -22,6 +22,11 @@ script_mod! {
     mod.stories.PlaceholderOverview = StoryPage{
         StoryHeading{text: "Shapes"}
         StoryNote{text: "A rect, a circle, and a stack of text lines whose last line is shorter."}
+        StoryHeading{text: "One stack of lines, under the controls"}
+        StoryNote{text: "One stack of lines; the line count, the animation and the translucency come from the controls."}
+        StoryRow{
+            subject := ContentPlaceholder{shape: PlaceholderShape.Lines lines: 3 width: 320. height: Fit}
+        }
         StoryRow{
             spacing: theme.space_3
             ContentPlaceholder{width: 160. height: 12.}
@@ -79,13 +84,6 @@ script_mod! {
         StoryNote{text: "Card."}
         StoryRow{
             PlaceholderCard{}
-        }
-    
-
-        StoryHeading{text: "One stack of lines, under the controls"}
-        StoryNote{text: "One stack of lines; the line count, the animation and the translucency come from the controls."}
-        StoryRow{
-            subject := ContentPlaceholder{shape: PlaceholderShape.Lines lines: 3 width: 320. height: Fit}
         }
     }
 }

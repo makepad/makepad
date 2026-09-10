@@ -10,6 +10,16 @@ script_mod! {
 
     mod.stories.ButtonGroupOverview = StoryPage{
         StoryNote{text: "A button group lays separate verbs out together and shapes their corners. A segmented control is a different thing: one question with a fixed set of answers, and a pill on the current one."}
+        StoryHeading{text: "One segmented control, under the controls"}
+        StoryNote{text: "One segmented control. Every control on the right writes into it."}
+        StoryRow{
+            subject := SegmentedControl{
+                options: ["Day" "Week" "Month"]
+            }
+        }
+        StoryRow{
+            state := Label{text: "answer: Day"}
+        }
 
         StoryHeading{text: "Connected"}
         StoryNote{text: "The inner corners collapse, so the row reads as one object."}
@@ -101,18 +111,6 @@ script_mod! {
         }
 
         menus := MenuLayer{}
-    
-
-        StoryHeading{text: "One segmented control, under the controls"}
-        StoryNote{text: "One segmented control. Every control on the right writes into it."}
-        StoryRow{
-            subject := SegmentedControl{
-                options: ["Day" "Week" "Month"]
-            }
-        }
-        StoryRow{
-            state := Label{text: "answer: Day"}
-        }
     }
 }
 

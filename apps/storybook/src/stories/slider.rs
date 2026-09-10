@@ -7,7 +7,12 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.SliderOverview = StoryPage{
+    mod.stories.SliderOverview = StoryPage{        StoryHeading{text: "One slider, under the controls"}
+        StoryNote{text: "One slider; its range and step come from the controls."}
+        StoryRow{
+            subject := Slider{width: 240. text: "Amount"}
+        }
+
         H4{text: "Slider"}
         Slider{text: "Default"}
         Slider{
@@ -187,13 +192,6 @@ script_mod! {
         }
         SliderRoundFlat{text: "precision" precision: 20}
         SliderRoundFlat{text: "stepped" step: 0.1}
-    
-
-        StoryHeading{text: "One slider, under the controls"}
-        StoryNote{text: "One slider; its range and step come from the controls."}
-        StoryRow{
-            subject := Slider{width: 240. text: "Amount"}
-        }
     }
     mod.stories.SliderTapers = StoryPage{
         StoryNote{text: "A taper is the law that turns travel into a value. Every slider below carries the SAME value; what differs is where that value sits along the track, which is the whole of what a taper is."}

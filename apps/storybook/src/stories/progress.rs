@@ -10,6 +10,11 @@ script_mod! {
 
     mod.stories.ProgressOverview = StoryPage{
         StoryNote{text: "Every shape of progress. The first bar advances a tenth per click; the rest are set values, an unknown one, the intents, labels, stacked segments, then rings, an arc, activity rings, gauges and the navigation line."}
+        StoryHeading{text: "One bar, under the controls"}
+        StoryNote{text: "One bar; its value, intent, thickness and label come from the controls."}
+        StoryRow{
+            subject := ProgressBar{width: 260. value: 0.35 show_percent: true}
+        }
 
         StoryHeading{text: "Determinate"}
         StoryRow{
@@ -112,13 +117,6 @@ script_mod! {
             nav_step := Button{text: "Step"}
             nav_done := Button{text: "Complete"}
             nav_reset := Button{text: "Reset"}
-        }
-    
-
-        StoryHeading{text: "One bar, under the controls"}
-        StoryNote{text: "One bar; its value, intent, thickness and label come from the controls."}
-        StoryRow{
-            subject := ProgressBar{width: 260. value: 0.35 show_percent: true}
         }
     }
 }

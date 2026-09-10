@@ -9,7 +9,13 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.CheckBoxOverview = StoryPage{
+    mod.stories.CheckBoxOverview = StoryPage{        StoryHeading{text: "One checkbox, under the controls"}
+        StoryNote{text: "One checkbox and one toggle, driven from the controls."}
+        StoryRow{
+            subject := CheckBox{text: "Option"}
+            toggle := Toggle{text: "Switch"}
+        }
+
         H4{text: "Checkbox"}
         CheckBox{text: "CheckBox"}
 
@@ -73,14 +79,6 @@ script_mod! {
                     height: Fit
                 }
             }
-        }
-    
-
-        StoryHeading{text: "One checkbox, under the controls"}
-        StoryNote{text: "One checkbox and one toggle, driven from the controls."}
-        StoryRow{
-            subject := CheckBox{text: "Option"}
-            toggle := Toggle{text: "Switch"}
         }
     }
 }
