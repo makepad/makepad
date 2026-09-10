@@ -65,6 +65,8 @@ pub mod toolbar;
 pub mod masonry;
 pub mod kanban;
 pub mod splitter_more;
+pub mod svg_select;
+pub mod rich_text;
 pub mod scroll_more;
 pub mod tour;
 pub mod range_slider;
@@ -137,6 +139,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     range_slider::script_mod(vm);
     tour::script_mod(vm);
     scroll_more::script_mod(vm);
+    rich_text::script_mod(vm);
+    svg_select::script_mod(vm);
     splitter_more::script_mod(vm);
     kanban::script_mod(vm);
     masonry::script_mod(vm);
@@ -259,6 +263,8 @@ pub fn tables() -> &'static [&'static [Story]] {
         range_slider::STORIES,
         tour::STORIES,
         scroll_more::STORIES,
+        rich_text::STORIES,
+        svg_select::STORIES,
         splitter_more::STORIES,
         kanban::STORIES,
         masonry::STORIES,

@@ -1184,23 +1184,27 @@ impl DataGrid {
                 };
                 self.draw_cell.draw_abs(cx, rect);
                 let data_col = self.display_to_data(display_col);
-                let mut label = self.col_label(data_col);
-                // A column that CAN be sorted says so before it is, with a
-                // pale pair of marks. Without it there is nothing on screen
-                // to tell a sortable heading from a plain one, and the only
-                // way to find out is to press every heading in the row.
+                let label = self.col_label(data_col);
+                // A column that CAN be sorted says so before it is. Without
+                // it there is nothing on screen to tell a sortable heading
+                // from a plain one, and the only way to find out is to press
+                // every heading in the row.
+                //
+                // Drawn at the right edge in its own pass rather than stuck
+                // on the end of the label: appended, it drags the heading
+                // off centre and the marks land in a different place in
+                // every column.
                 let can_sort = self.sortable && !self.unsortable_cols.contains(&data_col);
-                match self.sort_indicator {
-                    Some((sort_col, asc)) if sort_col == data_col => {
-                        label.push_str(if asc { "  ▲" } else { "  ▼" });
-                    }
+                let mark = match self.sort_indicator {
+                    Some((c, asc)) if c == data_col => Some((if asc { "▲" } else { "▼" }, false)),
                     // The filled pair, not the hollow one: the hollow
                     // triangles are only in faces this chain does not carry
-                    // and rendered as tofu. Two marks means "either way from
-                    // here", one means "this way".
-                    _ if can_sort => label.push_str("  ▲▼"),
-                    _ => {}
-                }
+                    // and rendered as tofu, so an unsorted column is the
+                    // same marks worn lighter. Two means either way from
+                    // here; one means this way.
+                    _ if can_sort => Some(("▲▼", true)),
+                    _ => None,
+                };
                 if w >= 15.0 {
                     let cell = GridCell {
                         row: 0,
@@ -1209,6 +1213,9 @@ impl DataGrid {
                         rect,
                     };
                     self.header_text(cx, &cell, &label);
+                    if let Some((mark, faded)) = mark {
+                        self.header_mark(cx, &cell, mark, faded);
+                    }
                 }
             }
             cx.pop_clip_rect();
@@ -1275,6 +1282,27 @@ impl DataGrid {
         if overflow {
             cx.pop_clip_rect();
         }
+    }
+
+    /// The sort marks, against the right edge of a heading. Faded while
+    /// the column is only sortable, full once it is sorted, so the row
+    /// reads as one lit column among several offers.
+    fn header_mark(&mut self, cx: &mut Cx2d, cell: &GridCell, mark: &str, faded: bool) {
+        let rest = self.draw_text.color;
+        self.draw_text.color = if faded {
+            Vec4f { w: rest.w * 0.45, ..rest }
+        } else {
+            rest
+        };
+        let laidout = self
+            .draw_text
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), mark);
+        let mw = laidout.size_in_lpxs.width as f64;
+        let mh = laidout.size_in_lpxs.height as f64;
+        let x = cell.rect.pos.x + cell.rect.size.x - self.cell_pad_x - mw;
+        let y = cell.rect.pos.y + (cell.rect.size.y - mh) * 0.5;
+        self.draw_text.draw_abs(cx, dvec2(x, y), mark);
+        self.draw_text.color = rest;
     }
 
     fn draw_interact_overlay(&mut self, cx: &mut Cx2d) {

@@ -143,6 +143,8 @@ pub mod toolbar;
 pub mod masonry;
 pub mod kanban;
 pub mod splitter_more;
+pub mod svg_select;
+pub mod rich_text;
 pub mod scroll_more;
 pub mod tour;
 pub mod wheel_picker;
@@ -306,6 +308,8 @@ pub use crate::{
     masonry::*,
     kanban::*,
     splitter_more::*,
+    svg_select::*,
+    rich_text::*,
     scroll_more::*,
     tour::*,
     wheel_picker::*,
@@ -587,6 +591,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::kanban::script_mod(vm);
     crate::splitter_more::script_mod(vm);
     crate::scroll_more::script_mod(vm);
+    crate::svg_select::script_mod(vm);
+    crate::rich_text::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 

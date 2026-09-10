@@ -669,6 +669,7 @@ script_mod! {
     /** A sheet of glass that floats over the page: moved by its body, sized
      * by its edges and its corners. */
     mod.widgets.glass.FloatingSurface = set_type_default() do mod.widgets.glass.FloatingSurfaceBase{
+        flow: Overlay
         /** where it opens, in window points */
         pos: vec2(120., 120.)
         /** how big it opens */
@@ -2492,5 +2493,912 @@ impl GlassSegmentedRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_selected(cx, index);
         }
+    }
+}
+
+/// What a floating surface reports.
+///
+/// A resize from a top or a left edge moves the surface as well as sizing
+/// it, so every one of these carries the whole frame. `Sizing` and `Moving`
+/// arrive on every frame of a drag; `Placed` once, when the hand comes off.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum GlassFloatingSurfaceAction {
+    /// A resize is under way, and the frame it is passing through.
+    Sizing { pos: Vec2d, size: Vec2d },
+    /// A move is under way.
+    Moving { pos: Vec2d, size: Vec2d },
+    /// Where the drag left it.
+    Placed { pos: Vec2d, size: Vec2d },
+    #[default]
+    None,
+}
+
+/// Which sides of a surface a press took hold of. Two sides is a corner,
+/// one is an edge, and none of them is the body.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct Grip {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl Grip {
+    fn is_empty(self) -> bool {
+        !(self.left || self.right || self.top || self.bottom)
+    }
+
+    /// The pointer that says what this grip will do before it is dragged.
+    fn cursor(self) -> MouseCursor {
+        match (self.left || self.right, self.top || self.bottom) {
+            // The two diagonals are different pointers, and a corner that
+            // shows the wrong one is a corner the hand distrusts. Top-left
+            // and bottom-right lean one way (both flags agree), top-right
+            // and bottom-left the other.
+            (true, true) if self.left == self.top => MouseCursor::NwseResize,
+            (true, true) => MouseCursor::NeswResize,
+            (true, false) => MouseCursor::EwResize,
+            (false, true) => MouseCursor::NsResize,
+            (false, false) => MouseCursor::Arrow,
+        }
+    }
+}
+
+/// A floating surface's frame, and the limits a drag on it must respect.
+///
+/// It is a plain struct apart from the widget for two reasons: the hit test
+/// and the resize are then the same arithmetic — what is grabbable is what
+/// moves — and it can be checked without a window.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Frame {
+    pos: Vec2d,
+    size: Vec2d,
+    min: Vec2d,
+    max: Vec2d,
+}
+
+impl Frame {
+    /// What a press at `at` takes hold of.
+    ///
+    /// The band reaches `grab` points BOTH ways from each edge. Inward
+    /// alone would not do: the surface is a rounded rectangle, so its last
+    /// few points at every corner are unpainted, and a band that stopped at
+    /// the edge would ask for a press on glass that is not there. Outward
+    /// alone would take presses meant for the page behind it.
+    fn grip_at(self, at: Vec2d, grab: f64) -> Grip {
+        let grab = grab.max(0.0);
+        let lo = self.pos;
+        let hi = self.pos + self.size;
+        if at.x < lo.x - grab || at.x > hi.x + grab || at.y < lo.y - grab || at.y > hi.y + grab {
+            return Grip::default();
+        }
+        let mut grip = Grip {
+            left: (at.x - lo.x).abs() <= grab,
+            right: (at.x - hi.x).abs() <= grab,
+            top: (at.y - lo.y).abs() <= grab,
+            bottom: (at.y - hi.y).abs() <= grab,
+        };
+        // A surface narrower than two bands has them overlapping down the
+        // middle. Holding both would size it from both ends at once under
+        // one finger, which is not a gesture anybody makes on purpose, so
+        // the nearer edge wins.
+        if grip.left && grip.right {
+            if at.x - lo.x <= hi.x - at.x {
+                grip.right = false;
+            } else {
+                grip.left = false;
+            }
+        }
+        if grip.top && grip.bottom {
+            if at.y - lo.y <= hi.y - at.y {
+                grip.bottom = false;
+            } else {
+                grip.top = false;
+            }
+        }
+        grip
+    }
+
+    /// Where a drag of `delta` on `grip` leaves this frame.
+    fn resized(self, grip: Grip, delta: Vec2d) -> (Vec2d, Vec2d) {
+        let (x, w) = resize_axis(
+            self.pos.x,
+            self.size.x,
+            delta.x,
+            grip.left,
+            grip.right,
+            self.min.x,
+            self.max.x,
+        );
+        let (y, h) = resize_axis(
+            self.pos.y,
+            self.size.y,
+            delta.y,
+            grip.top,
+            grip.bottom,
+            self.min.y,
+            self.max.y,
+        );
+        (dvec2(x, y), dvec2(w, h))
+    }
+
+    /// The frame pulled inside a window of `room`, so a surface dragged at
+    /// the edge cannot be left somewhere it can never be dragged back from.
+    fn settled(self, room: Vec2d) -> (Vec2d, Vec2d) {
+        let w = fit_axis(self.size.x, self.min.x, self.max.x, room.x);
+        let h = fit_axis(self.size.y, self.min.y, self.max.y, room.y);
+        let pos = dvec2(
+            span_inboard(self.pos.x, w, 0.0, room.x),
+            span_inboard(self.pos.y, h, 0.0, room.y),
+        );
+        (pos, dvec2(w, h))
+    }
+}
+
+/// The ceiling for one axis. A `max` of zero — or any max below the floor —
+/// means unbounded, which is also what keeps `clamp` out of the one state it
+/// panics in: a floor above its own ceiling.
+fn ceiling(min: f64, max: f64) -> f64 {
+    if max > 0.0 {
+        max.max(min)
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Resize one axis: `lo` moves the near edge, `hi` the far one, and with
+/// neither of them set the axis is left exactly as it was.
+///
+/// The clamp is applied to the SIZE and the position is derived from it,
+/// never the other way about. Dragging the near edge inward past the floor
+/// has to pin that edge and leave the far one exactly where it was; a
+/// position moved first and clamped afterwards drags the far edge along
+/// with it, which is the resize bug everyone writes once.
+fn resize_axis(
+    start: f64,
+    extent: f64,
+    delta: f64,
+    lo: bool,
+    hi: bool,
+    min: f64,
+    max: f64,
+) -> (f64, f64) {
+    // Never zero, whatever the caller declared: a surface with no size left
+    // is invisible AND has no edge to grab, so it could not be brought back.
+    let min = min.max(1.0);
+    let max = ceiling(min, max);
+    if lo {
+        let e = (extent - delta).clamp(min, max);
+        (start + extent - e, e)
+    } else if hi {
+        (start, (extent + delta).clamp(min, max))
+    } else {
+        (start, extent)
+    }
+}
+
+/// One axis of a size held between its floor, its ceiling and the room there
+/// is. The room beats the ceiling and the floor beats the room: a surface
+/// squeezed under its own floor by a small window is still usable, and one
+/// squeezed to nothing is not.
+fn fit_axis(extent: f64, min: f64, max: f64, room: f64) -> f64 {
+    let min = min.max(1.0);
+    let max = ceiling(min, max).min(room.max(min));
+    extent.clamp(min, max)
+}
+
+/// What the pointer is doing to the surface.
+#[derive(Copy, Clone, Debug)]
+enum Drag {
+    /// Moving it: where the press was, and where the surface was.
+    Move { held_at: Vec2d, from: Vec2d },
+    /// Sizing it: which sides, where the press was, and the frame it
+    /// started from. The frame is captured at the press so every step of
+    /// the drag is measured from the same place — accumulating deltas
+    /// instead lets a clamped edge lose track of the finger.
+    Size { grip: Grip, held_at: Vec2d, from: Frame },
+}
+
+/// A sheet of glass that floats over the page, moved by its body and sized
+/// by its edges and its corners.
+///
+/// The material is what makes this different from `FloatingPanel`, and the
+/// difference is not decoration. The lens reads the scene BEHIND the
+/// surface, so a drag has to leave the glass looking at where it is now:
+/// every frame of a move or a resize redraws the surface's whole subtree,
+/// which is what makes it ask the window for a fresh capture. A repaint that
+/// reuses the drawn content asks for nothing, and the lens then carries a
+/// photograph of the part of the screen the drag started on.
+///
+/// **It has no title bar.** A bar would be the obvious handle and it is the
+/// wrong one here: the surface is one sheet, and a strip of chrome across
+/// the top of it is exactly what this family exists not to draw. The body
+/// moves it instead, and the move is claimed AFTER the contents have had the
+/// press — so a button on the surface still answers a click, and only what
+/// nothing inside wanted moves the surface.
+///
+/// **The frame is claimed the other way round**, before the contents see the
+/// press: the band is a few points wide and lies over whatever the caller
+/// put against the edge, and a resize that begins by dropping a caret into a
+/// field is a resize the person then has to undo.
+///
+/// What it deliberately does NOT do: snap to anything, settle anywhere,
+/// remember where it was, or paint a scrim. It reports its frame and the
+/// caller keeps the value if it wants it back next run — a widget that
+/// writes files has learned something it has no business knowing.
+#[derive(Script, Widget)]
+pub struct GlassFloatingSurface {
+    #[source]
+    source: ScriptObjectRef,
+
+    #[deref]
+    view: View,
+
+    #[rust]
+    draw_list: Option<DrawList2d>,
+
+    /// The corner mark, drawn last and INSIDE the same overlay list as the
+    /// glass. A quad the parent draws after a glass child is painted over
+    /// by the lens (the draw-order rule in `gauss_view`); one drawn into the
+    /// overlay after it is not.
+    #[live]
+    draw_grip: DrawQuad,
+
+    /// Where it sits and how big, in window points.
+    #[live(Vec2d { x: 120., y: 120. })]
+    pub pos: Vec2d,
+    #[live(Vec2d { x: 320., y: 220. })]
+    pub size: Vec2d,
+    #[live(Vec2d { x: 140., y: 96. })]
+    pub min_size: Vec2d,
+    /// A zero side means the window is the only ceiling.
+    #[live]
+    pub max_size: Vec2d,
+    /// How far either side of an edge a press still takes hold of it.
+    #[live(8.0)]
+    pub grab_margin: f64,
+    /// The corner mark's side. Zero draws none; the corner still grabs.
+    #[live(24.0)]
+    pub grip_size: f64,
+    #[live(true)]
+    pub movable: bool,
+    #[live(true)]
+    pub resizable: bool,
+
+    #[rust]
+    open: bool,
+    #[rust]
+    drag: Option<Drag>,
+    /// Whether the pointer showing now is one we set, and so ours to put
+    /// back when it leaves the frame.
+    #[rust]
+    holds_cursor: bool,
+    /// The corner mark's hover mix.
+    #[rust]
+    hot: f32,
+}
+
+impl ScriptHook for GlassFloatingSurface {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::script_new(vm));
+        }
+        // The surface takes NO room in the layout that holds it: it paints
+        // on its own overlay against a root turtle for the pass. Reporting
+        // `Fill` upward would make it a deferred fill and hand it a share of
+        // its parent's spare height for a surface that may not even be up.
+        self.view.walk = Walk::empty();
+        vm.with_cx_mut(|cx| self.redraw(cx));
+    }
+}
+
+impl GlassFloatingSurface {
+    /// The frame as it stands, built fresh each time: every number in it is
+    /// a live property and the tweaker may have moved any of them since the
+    /// last draw.
+    fn frame(&self) -> Frame {
+        Frame {
+            pos: self.pos,
+            size: self.size,
+            min: self.min_size,
+            max: self.max_size,
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
+    }
+
+    /// Redraw after a drag moved or sized the surface.
+    ///
+    /// The whole subtree, not just this widget's own list. The glass paints
+    /// what is behind it from a capture the window takes only when a draw
+    /// asks for one, and the ask happens inside the surface's own draw. A
+    /// repaint that reuses the content's draw list never asks, the window
+    /// stops capturing, and the lens goes on showing the scene as it was
+    /// when the drag began — the surface then carries a picture of the wrong
+    /// part of the screen around with it, which is worse than no glass at
+    /// all because it looks deliberate.
+    fn redraw_over_the_scene(&mut self, cx: &mut Cx, area: Area) {
+        cx.redraw_area_and_children(area);
+        self.redraw(cx);
+    }
+
+    pub fn open(&mut self, cx: &mut Cx) {
+        if !self.open {
+            self.open = true;
+            self.drag = None;
+            self.redraw(cx);
+        }
+    }
+
+    pub fn close(&mut self, cx: &mut Cx) {
+        if self.open {
+            self.open = false;
+            self.drag = None;
+            self.redraw(cx);
+        }
+    }
+
+    pub fn toggle(&mut self, cx: &mut Cx) {
+        if self.open {
+            self.close(cx);
+        } else {
+            self.open(cx);
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Where it is and how big, in window points.
+    pub fn placement(&self) -> (Vec2d, Vec2d) {
+        (self.pos, self.size)
+    }
+
+    /// Put it somewhere. The next draw settles the frame against the window
+    /// and the floor, so a caller may hand this whatever it saved.
+    pub fn place(&mut self, cx: &mut Cx, pos: Vec2d, size: Vec2d) {
+        self.pos = pos;
+        self.size = size;
+        self.redraw(cx);
+    }
+
+    /// The corner mark's square, inside the bottom-right corner.
+    fn grip_rect(&self) -> Rect {
+        let side = self.grip_size.min(self.size.x).min(self.size.y).max(0.0);
+        Rect {
+            pos: dvec2(
+                self.pos.x + self.size.x - side,
+                self.pos.y + self.size.y - side,
+            ),
+            size: dvec2(side, side),
+        }
+    }
+
+    fn say(&mut self, cx: &mut Cx, action: GlassFloatingSurfaceAction) {
+        let uid = self.widget_uid();
+        cx.widget_action(uid, action);
+    }
+}
+
+impl Widget for GlassFloatingSurface {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.open {
+            return;
+        }
+        let content = self.view.widget(cx, ids!(content));
+        let area = content.area();
+        // What the page BENEATH the surface had already claimed before this
+        // widget was reached. It is read again once the contents have run,
+        // and the only handler between the two reads is the surface's own
+        // subtree — so a change means something INSIDE wanted the event.
+        // Nothing else can tell us that: a press on a control behind the
+        // surface has marked the event handled long before this widget is
+        // reached at all, and reading `handled` on its own confuses the two.
+        let claimed_before = match event {
+            Event::MouseDown(me) => Some(me.handled.get()),
+            Event::MouseMove(me) => Some(me.handled.get()),
+            _ => None,
+        };
+        // A press on the body, waiting to see whether the contents want it.
+        let mut offered_move = None;
+        // The pointer the FRAME wants, decided before the contents are given
+        // the event and applied after them: a control under the grab band
+        // would otherwise set its own pointer last and win the argument.
+        let mut frame_cursor = None;
+
+        match event {
+            Event::MouseDown(me) if self.drag.is_none() && me.button.is_primary() => {
+                let frame = self.frame();
+                let grip = if self.resizable {
+                    frame.grip_at(me.abs, self.grab_margin)
+                } else {
+                    Grip::default()
+                };
+                // The frame claims a press BEFORE the contents see it. The
+                // band is a few points wide and lies over whatever the
+                // caller put against the edge, and a resize that begins by
+                // dropping a caret into a field is a resize the person then
+                // has to undo.
+                if !grip.is_empty() {
+                    self.drag = Some(Drag::Size {
+                        grip,
+                        held_at: me.abs,
+                        from: frame,
+                    });
+                    // Nobody after us answers this press either. The page
+                    // under the surface keeps working — it just does not get
+                    // to act on a press aimed at the surface's own edge.
+                    me.handled.set(area);
+                    cx.set_cursor(grip.cursor());
+                    self.hot = 1.0;
+                    self.redraw(cx);
+                    return;
+                }
+                // Not the frame, so it may be a move — but the contents have
+                // first refusal, and that is settled below.
+                let rect = Rect {
+                    pos: frame.pos,
+                    size: frame.size,
+                };
+                if self.movable && rect.contains(me.abs) {
+                    offered_move = Some((me.abs, self.pos));
+                }
+            }
+            Event::MouseMove(me) => match self.drag {
+                Some(Drag::Size {
+                    grip,
+                    held_at,
+                    from,
+                }) => {
+                    let (pos, size) = from.resized(grip, me.abs - held_at);
+                    let moved = (pos, size) != (self.pos, self.size);
+                    self.pos = pos;
+                    self.size = size;
+                    cx.set_cursor(grip.cursor());
+                    if moved {
+                        self.say(cx, GlassFloatingSurfaceAction::Sizing { pos, size });
+                        self.redraw_over_the_scene(cx, area);
+                    }
+                    return;
+                }
+                Some(Drag::Move { held_at, from }) => {
+                    let pos = from + (me.abs - held_at);
+                    if pos != self.pos {
+                        self.pos = pos;
+                        let size = self.size;
+                        self.say(cx, GlassFloatingSurfaceAction::Moving { pos, size });
+                        // Moving changes what is behind the glass every bit
+                        // as much as sizing does, so it needs the same
+                        // refresh.
+                        self.redraw_over_the_scene(cx, area);
+                    }
+                    cx.set_cursor(MouseCursor::Move);
+                    return;
+                }
+                None => {
+                    // Say what the frame would do before it is taken.
+                    let grip = if self.resizable {
+                        self.frame().grip_at(me.abs, self.grab_margin)
+                    } else {
+                        Grip::default()
+                    };
+                    let hot = if grip.is_empty() { 0.0 } else { 1.0 };
+                    if !grip.is_empty() {
+                        frame_cursor = Some(grip.cursor());
+                    }
+                    if hot != self.hot {
+                        self.hot = hot;
+                        self.redraw(cx);
+                    }
+                }
+            },
+            Event::MouseUp(_) => {
+                if self.drag.take().is_some() {
+                    self.hot = 0.0;
+                    let (pos, size) = (self.pos, self.size);
+                    self.say(cx, GlassFloatingSurfaceAction::Placed { pos, size });
+                    self.redraw(cx);
+                    return;
+                }
+            }
+            _ => {}
+        }
+
+        content.handle_event(cx, event, scope);
+
+        // The move is claimed AFTER the contents, which is the whole reason
+        // this surface can hold controls: a press a button on the glass took
+        // has changed `handled` by now, and the surface stays put.
+        if let (Some((held_at, from)), Event::MouseDown(me)) = (offered_move, event) {
+            if me.handled.get() == claimed_before.unwrap_or_default() {
+                self.drag = Some(Drag::Move { held_at, from });
+                me.handled.set(area);
+                cx.set_key_focus(area);
+            }
+        }
+
+        if let Event::MouseMove(me) = event {
+            if let Some(cursor) = frame_cursor {
+                cx.set_cursor(cursor);
+                self.holds_cursor = true;
+            } else if self.holds_cursor && me.handled.get() == claimed_before.unwrap_or_default() {
+                // Nothing inside the surface wanted this move either, so the
+                // pointer showing is still the one we set for the frame and
+                // ours to put back. A control that DID want it has set its
+                // own, and stamping an arrow over that would undo it.
+                cx.set_cursor(MouseCursor::Arrow);
+                self.holds_cursor = false;
+            }
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
+        }
+        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        cx.begin_root_turtle_for_pass(self.view.layout);
+
+        if self.open {
+            // Never bigger than the window and never off it: a surface whose
+            // frame has gone past an edge cannot be dragged back, which
+            // would make losing it permanent.
+            let (pos, size) = self.frame().settled(cx.current_pass_size());
+            self.pos = pos;
+            self.size = size;
+
+            let content = self.view.widget(cx.cx.cx, ids!(content));
+            let mut walk = Walk::new(Size::Fixed(size.x), Size::Fixed(size.y));
+            walk.abs_pos = Some(pos);
+            content.draw_walk_all(cx, scope, walk);
+
+            // The corner mark goes last, in the same overlay list, so it
+            // sits ON the glass rather than under it.
+            if self.resizable && self.grip_size > 0.0 {
+                let grip_rect = self.grip_rect();
+                self.draw_grip
+                    .draw_vars
+                    .set_uniform(cx, live_id!(hover), &[self.hot]);
+                self.draw_grip.draw_abs(cx, grip_rect);
+            }
+        }
+
+        cx.end_pass_sized_turtle();
+        self.draw_list.as_mut().unwrap().end(cx);
+        DrawStep::done()
+    }
+
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(open) {
+            vm.with_cx_mut(|cx| self.open(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(close) {
+            vm.with_cx_mut(|cx| self.close(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(toggle) {
+            vm.with_cx_mut(|cx| self.toggle(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+}
+
+impl GlassFloatingSurfaceRef {
+    pub fn open(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.open(cx);
+        }
+    }
+
+    pub fn close(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.close(cx);
+        }
+    }
+
+    pub fn toggle(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle(cx);
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.borrow().map(|inner| inner.is_open()).unwrap_or(false)
+    }
+
+    /// Where it is and how big, for a caller that wants to put it back.
+    pub fn placement(&self) -> Option<(Vec2d, Vec2d)> {
+        self.borrow().map(|inner| inner.placement())
+    }
+
+    pub fn place(&self, cx: &mut Cx, pos: Vec2d, size: Vec2d) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.place(cx, pos, size);
+        }
+    }
+
+    /// The new size, while a drag on an edge or a corner is making it.
+    pub fn sizing(&self, actions: &Actions) -> Option<(Vec2d, Vec2d)> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<GlassFloatingSurfaceAction>() {
+            GlassFloatingSurfaceAction::Sizing { pos, size } => Some((pos, size)),
+            _ => None,
+        }
+    }
+
+    /// Where it is, while a drag on the body is moving it.
+    pub fn moving(&self, actions: &Actions) -> Option<(Vec2d, Vec2d)> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<GlassFloatingSurfaceAction>() {
+            GlassFloatingSurfaceAction::Moving { pos, size } => Some((pos, size)),
+            _ => None,
+        }
+    }
+
+    /// Where a drag just left it, if one did.
+    pub fn placed(&self, actions: &Actions) -> Option<(Vec2d, Vec2d)> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<GlassFloatingSurfaceAction>() {
+            GlassFloatingSurfaceAction::Placed { pos, size } => Some((pos, size)),
+            _ => None,
+        }
+    }
+
+    /// The frame this surface reports this pass, whichever kind of drag
+    /// reported it — for a host that only wants to follow the frame and does
+    /// not care which handle is doing it.
+    pub fn framed(&self, actions: &Actions) -> Option<(Vec2d, Vec2d)> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<GlassFloatingSurfaceAction>() {
+            GlassFloatingSurfaceAction::Sizing { pos, size }
+            | GlassFloatingSurfaceAction::Moving { pos, size }
+            | GlassFloatingSurfaceAction::Placed { pos, size } => Some((pos, size)),
+            GlassFloatingSurfaceAction::None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A surface at 100,100 sized 200x150, with the preset's floor and no
+    /// ceiling of its own.
+    fn surface() -> Frame {
+        Frame {
+            pos: dvec2(100.0, 100.0),
+            size: dvec2(200.0, 150.0),
+            min: dvec2(140.0, 96.0),
+            max: dvec2(0.0, 0.0),
+        }
+    }
+
+    fn grip(left: bool, right: bool, top: bool, bottom: bool) -> Grip {
+        Grip {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    /// Each edge moves its own side and leaves the other three alone. The
+    /// far edge staying put is the whole of what "dragging an edge" means,
+    /// and it is the half a naive resize gets wrong.
+    #[test]
+    fn each_edge_moves_only_its_own_side() {
+        let f = surface();
+        assert_eq!(
+            f.resized(grip(false, true, false, false), dvec2(40.0, 0.0)),
+            (dvec2(100.0, 100.0), dvec2(240.0, 150.0)),
+            "the right edge grows the width and does not move the surface"
+        );
+        assert_eq!(
+            f.resized(grip(true, false, false, false), dvec2(40.0, 0.0)),
+            (dvec2(140.0, 100.0), dvec2(160.0, 150.0)),
+            "the left edge moves in and the right edge stays at 300"
+        );
+        assert_eq!(
+            f.resized(grip(false, false, false, true), dvec2(0.0, 30.0)),
+            (dvec2(100.0, 100.0), dvec2(200.0, 180.0)),
+            "the bottom edge grows the height"
+        );
+        assert_eq!(
+            f.resized(grip(false, false, true, false), dvec2(0.0, -20.0)),
+            (dvec2(100.0, 80.0), dvec2(200.0, 170.0)),
+            "the top edge moves up and the bottom stays at 250"
+        );
+    }
+
+    /// A corner is both of its edges at once, and neither of the other two.
+    #[test]
+    fn each_corner_moves_both_of_its_sides() {
+        let f = surface();
+        assert_eq!(
+            f.resized(grip(false, true, false, true), dvec2(50.0, 40.0)),
+            (dvec2(100.0, 100.0), dvec2(250.0, 190.0)),
+            "bottom-right grows both and moves nothing"
+        );
+        assert_eq!(
+            f.resized(grip(true, false, true, false), dvec2(-20.0, -10.0)),
+            (dvec2(80.0, 90.0), dvec2(220.0, 160.0)),
+            "top-left moves the surface and grows it by the same amount"
+        );
+        assert_eq!(
+            f.resized(grip(true, false, false, true), dvec2(20.0, 25.0)),
+            (dvec2(120.0, 100.0), dvec2(180.0, 175.0)),
+            "bottom-left moves in on x only"
+        );
+        assert_eq!(
+            f.resized(grip(false, true, true, false), dvec2(30.0, 15.0)),
+            (dvec2(100.0, 115.0), dvec2(230.0, 135.0)),
+            "top-right moves down on y only"
+        );
+    }
+
+    /// Dragged past the floor, the edge under the finger stops and the far
+    /// edge does not budge. Clamping the position instead of the size would
+    /// shove the far edge along, quietly moving a surface the person was
+    /// only trying to make smaller.
+    #[test]
+    fn the_floor_pins_the_dragged_edge_and_spares_the_far_one() {
+        let f = surface();
+        let (pos, size) = f.resized(grip(true, false, false, false), dvec2(400.0, 0.0));
+        assert_eq!(size.x, 140.0, "stopped at the floor");
+        assert_eq!(pos.x + size.x, 300.0, "and the right edge never moved");
+
+        let (pos, size) = f.resized(grip(false, false, true, false), dvec2(400.0, 400.0));
+        assert_eq!(size.y, 96.0);
+        assert_eq!(pos.y + size.y, 250.0, "the bottom edge never moved");
+
+        // The far edges do the same thing, without moving the surface.
+        let (pos, size) = f.resized(grip(false, true, false, true), dvec2(-500.0, -500.0));
+        assert_eq!((pos, size), (dvec2(100.0, 100.0), dvec2(140.0, 96.0)));
+    }
+
+    /// A ceiling stops a drag the same way a floor does, and a zero ceiling
+    /// is no ceiling — which is what the preset ships, so it must not be
+    /// mistaken for "may not be wider than nothing".
+    #[test]
+    fn a_ceiling_stops_the_drag_and_a_zero_one_does_not_exist() {
+        let mut f = surface();
+        f.max = dvec2(260.0, 0.0);
+        let (pos, size) = f.resized(grip(false, true, false, true), dvec2(900.0, 900.0));
+        assert_eq!(size.x, 260.0, "the ceiling held");
+        assert_eq!(size.y, 1050.0, "and a zero ceiling did not");
+        assert_eq!(pos, dvec2(100.0, 100.0));
+
+        // A ceiling under the floor loses to the floor rather than
+        // inverting the clamp, which would panic.
+        f.max = dvec2(10.0, 10.0);
+        let (_, size) = f.resized(grip(false, true, false, true), dvec2(900.0, 900.0));
+        assert_eq!(size, dvec2(140.0, 96.0));
+    }
+
+    /// The hit test finds each edge and each corner where they are drawn,
+    /// and finds nothing in the body — which is what leaves the body free to
+    /// move the surface.
+    #[test]
+    fn the_hit_test_finds_each_edge_and_each_corner() {
+        let f = surface();
+        let grab = 8.0;
+        assert_eq!(f.grip_at(dvec2(100.0, 175.0), grab), grip(true, false, false, false));
+        assert_eq!(f.grip_at(dvec2(300.0, 175.0), grab), grip(false, true, false, false));
+        assert_eq!(f.grip_at(dvec2(200.0, 100.0), grab), grip(false, false, true, false));
+        assert_eq!(f.grip_at(dvec2(200.0, 250.0), grab), grip(false, false, false, true));
+        assert_eq!(f.grip_at(dvec2(100.0, 100.0), grab), grip(true, false, true, false));
+        assert_eq!(f.grip_at(dvec2(300.0, 100.0), grab), grip(false, true, true, false));
+        assert_eq!(f.grip_at(dvec2(100.0, 250.0), grab), grip(true, false, false, true));
+        assert_eq!(f.grip_at(dvec2(300.0, 250.0), grab), grip(false, true, false, true));
+        assert!(f.grip_at(dvec2(200.0, 175.0), grab).is_empty(), "the body");
+        assert!(f.grip_at(dvec2(500.0, 500.0), grab).is_empty(), "the page");
+    }
+
+    /// The band reaches both ways from the edge, so the unpainted bite a
+    /// rounded corner takes out of the square is still grabbable, and a
+    /// press further out than that belongs to the page.
+    #[test]
+    fn the_band_reaches_both_sides_of_an_edge_and_no_further() {
+        let f = surface();
+        assert_eq!(f.grip_at(dvec2(94.0, 175.0), 8.0), grip(true, false, false, false));
+        assert_eq!(f.grip_at(dvec2(106.0, 175.0), 8.0), grip(true, false, false, false));
+        assert!(f.grip_at(dvec2(91.0, 175.0), 8.0).is_empty());
+        assert!(f.grip_at(dvec2(110.0, 175.0), 8.0).is_empty());
+    }
+
+    /// On a surface narrower than two bands the two overlap; one finger then
+    /// gets one edge — the nearer — rather than both ends at once.
+    #[test]
+    fn overlapping_bands_give_the_nearer_edge_only() {
+        let f = Frame {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(20.0, 20.0),
+            min: dvec2(10.0, 10.0),
+            max: dvec2(0.0, 0.0),
+        };
+        assert_eq!(f.grip_at(dvec2(9.0, 9.0), 12.0), grip(true, false, true, false));
+        assert_eq!(f.grip_at(dvec2(11.0, 11.0), 12.0), grip(false, true, false, true));
+    }
+
+    /// A surface is pulled back inside the window, and cut down to it if it
+    /// is bigger — but never below its own floor, because a surface with no
+    /// size left cannot be dragged anywhere at all.
+    #[test]
+    fn a_surface_is_settled_inside_the_window() {
+        let f = surface();
+        assert_eq!(
+            f.settled(dvec2(1000.0, 800.0)),
+            (dvec2(100.0, 100.0), dvec2(200.0, 150.0)),
+            "already inside: untouched"
+        );
+
+        let mut off = surface();
+        off.pos = dvec2(950.0, 780.0);
+        assert_eq!(
+            off.settled(dvec2(1000.0, 800.0)),
+            (dvec2(800.0, 650.0), dvec2(200.0, 150.0)),
+            "pulled back so its far edges sit on the window's"
+        );
+
+        let mut huge = surface();
+        huge.size = dvec2(2000.0, 2000.0);
+        assert_eq!(
+            huge.settled(dvec2(1000.0, 800.0)),
+            (dvec2(0.0, 0.0), dvec2(1000.0, 800.0)),
+            "cut down to the window"
+        );
+
+        let mut tiny_window = surface();
+        tiny_window.size = dvec2(2000.0, 2000.0);
+        assert_eq!(
+            tiny_window.settled(dvec2(40.0, 40.0)).1,
+            dvec2(140.0, 96.0),
+            "a window smaller than the floor loses to the floor"
+        );
+    }
+
+    /// The two diagonals are different pointers. A corner that shows the
+    /// wrong one tells the hand it will do something it will not.
+    #[test]
+    fn each_corner_shows_its_own_diagonal_pointer() {
+        assert_eq!(grip(true, false, true, false).cursor(), MouseCursor::NwseResize);
+        assert_eq!(grip(false, true, false, true).cursor(), MouseCursor::NwseResize);
+        assert_eq!(grip(false, true, true, false).cursor(), MouseCursor::NeswResize);
+        assert_eq!(grip(true, false, false, true).cursor(), MouseCursor::NeswResize);
+        assert_eq!(grip(true, false, false, false).cursor(), MouseCursor::EwResize);
+        assert_eq!(grip(false, false, false, true).cursor(), MouseCursor::NsResize);
+        assert_eq!(Grip::default().cursor(), MouseCursor::Arrow);
+    }
+
+    /// A grab margin of zero leaves the edges exactly on the boundary rather
+    /// than making the whole surface a grip or none of it one.
+    #[test]
+    fn a_zero_grab_margin_is_the_edge_itself() {
+        let f = surface();
+        assert_eq!(f.grip_at(dvec2(100.0, 175.0), 0.0), grip(true, false, false, false));
+        assert!(f.grip_at(dvec2(101.0, 175.0), 0.0).is_empty());
     }
 }
