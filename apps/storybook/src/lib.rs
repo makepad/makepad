@@ -16,6 +16,7 @@ pub mod coverage;
 pub mod docs;
 pub mod navigator;
 pub mod registry;
+pub mod synonyms;
 pub mod remote;
 pub mod settings;
 pub mod shell;

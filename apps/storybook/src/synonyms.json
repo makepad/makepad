@@ -1,0 +1,2076 @@
+{
+ "components": [
+  {
+   "component": "Accordion",
+   "aka": [
+    "collapsible sections",
+    "expander",
+    "disclosure panel",
+    "fold panel",
+    "expand and collapse",
+    "collapsible headings"
+   ],
+   "does": [
+    "collapse a section",
+    "expand a section",
+    "how many may be open at once",
+    "one open at a time",
+    "folding leaves the room empty",
+    "crowded out sections come back",
+    "last open one cannot be folded",
+    "open when the pointer rests",
+    "hover dwell delay",
+    "start a section closed",
+    "reports which section changed",
+    "which sections are showing",
+    "animated open and close",
+    "fold arrow mark",
+    "header over a body"
+   ]
+  },
+  {
+   "component": "AdaptiveView",
+   "aka": [
+    "responsive container",
+    "breakpoint switcher",
+    "layout variant",
+    "screen size switch",
+    "mobile or desktop layout",
+    "device layout",
+    "responsive wrapper",
+    "container query",
+    "variant swapper"
+   ],
+   "does": [
+    "switch layout on width",
+    "responsive",
+    "respond to window resize",
+    "screen width check",
+    "parent size check",
+    "mobile layout",
+    "desktop layout",
+    "custom selector",
+    "named variants",
+    "keep hidden variant state",
+    "one variant shown at a time"
+   ]
+  },
+  {
+   "component": "Alert",
+   "aka": [
+    "banner",
+    "callout",
+    "notice",
+    "inline message",
+    "message bar",
+    "info box",
+    "warning box"
+   ],
+   "does": [
+    "dismissible",
+    "close cross",
+    "fold away",
+    "reopen",
+    "severity colour",
+    "severity color",
+    "warning state",
+    "success state",
+    "error state",
+    "full width strip",
+    "text reflow",
+    "remember dismissal",
+    "accent bar",
+    "intent icon"
+   ]
+  },
+  {
+   "component": "AlignScroll",
+   "aka": [
+    "content too big"
+   ],
+   "does": [
+    "overflowing content",
+    "oversized child",
+    "content larger than parent",
+    "centres when it fits"
+   ]
+  },
+  {
+   "component": "AnimatedImageGif",
+   "aka": [
+    "moving picture",
+    "looping picture",
+    "flipbook",
+    "frame animation"
+   ],
+   "does": [
+    "play",
+    "pause",
+    "autoplay",
+    "loop playback",
+    "loop count",
+    "frame delays",
+    "decode bytes",
+    "load from data",
+    "gpu texture upload",
+    "finished event",
+    "current frame",
+    "hold first frame"
+   ]
+  },
+  {
+   "component": "Badge",
+   "aka": [
+    "notification dot",
+    "unread count",
+    "notification bubble",
+    "status dot",
+    "marker pin",
+    "count on a button"
+   ],
+   "does": [
+    "count overflow cap",
+    "99 plus",
+    "dot only mark",
+    "corner anchor",
+    "hides at zero",
+    "intent colours",
+    "intent colors",
+    "filled ghost outline tint",
+    "size ladder",
+    "status shapes",
+    "pulsing ring",
+    "label and value pill",
+    "clickable pin",
+    "dimmed when disabled"
+   ]
+  },
+  {
+   "component": "Breadcrumb",
+   "aka": [
+    "trail",
+    "path bar",
+    "folder path",
+    "you are here",
+    "hierarchy path",
+    "ancestor trail",
+    "breadcrumbs"
+   ],
+   "does": [
+    "shows where you are",
+    "steps back to the top",
+    "clickable ancestors",
+    "jump to a parent folder",
+    "ellipsis when it does not fit",
+    "folds the middle",
+    "keeps the last item",
+    "keeps the root while it fits",
+    "separator character",
+    "gap between items",
+    "reports which was picked",
+    "current item clickable"
+   ]
+  },
+  {
+   "component": "Button",
+   "aka": [
+    "cta",
+    "call to action",
+    "icon button",
+    "hamburger menu",
+    "close cross",
+    "primary action"
+   ],
+   "does": [
+    "click to run something",
+    "long press on mobile",
+    "reports press and release",
+    "carries the modifier keys",
+    "loading spinner blocks presses",
+    "leading and trailing icons",
+    "description line under the label",
+    "copies text to the clipboard",
+    "shows copied for a moment",
+    "morphs bars into a cross",
+    "sizes from extra small to extra large",
+    "danger and outline faces",
+    "dashed outline"
+   ]
+  },
+  {
+   "component": "ButtonGroup",
+   "aka": [
+    "segmented control",
+    "joined buttons",
+    "connected buttons",
+    "toggle group",
+    "split button",
+    "menu button"
+   ],
+   "does": [
+    "collapses the inner corners",
+    "spaced or connected",
+    "runs across or down a column",
+    "one question with a fixed set of answers",
+    "remembers the current answer",
+    "a pill glides to the selection",
+    "equal width segments",
+    "several answers on at once",
+    "arrow keys walk the row",
+    "one tab stop for the whole row",
+    "reports the chosen index",
+    "intent colours",
+    "intent colors",
+    "offers more choices in a menu",
+    "holds any button in the library"
+   ]
+  },
+  {
+   "component": "Charts",
+   "aka": [
+    "graph",
+    "plot",
+    "line graph",
+    "bar graph",
+    "scatter plot",
+    "candlestick",
+    "sparkline",
+    "trend tile",
+    "price graph",
+    "ohlc"
+   ],
+   "does": [
+    "plot a series",
+    "draw candles",
+    "bars and dots",
+    "filled area under a line",
+    "grid lines",
+    "axis labels",
+    "drag to pan",
+    "wheel to zoom",
+    "fit the viewport to the values",
+    "open high low close",
+    "up and down colours",
+    "up and down colors",
+    "dashboard tile",
+    "graph in a table cell",
+    "fabricates sample values when unfed",
+    "fixed seed sample series"
+   ]
+  },
+  {
+   "component": "CheckBox",
+   "aka": [
+    "toggle",
+    "toggles",
+    "switch",
+    "switches",
+    "tick box",
+    "tickbox",
+    "on off switch"
+   ],
+   "does": [
+    "tick",
+    "tick mark",
+    "on off",
+    "indeterminate",
+    "tri state",
+    "mixed state",
+    "select all",
+    "draggable knob",
+    "knob drag",
+    "error state",
+    "label before",
+    "per state label"
+   ]
+  },
+  {
+   "component": "Chip",
+   "aka": [
+    "tag",
+    "tags",
+    "pill",
+    "pills",
+    "filter pill",
+    "recipient pill"
+   ],
+   "does": [
+    "removable",
+    "remove cross",
+    "clear all",
+    "selectable",
+    "keyboard arrows",
+    "wrapping row",
+    "colour role",
+    "color role"
+   ]
+  },
+  {
+   "component": "CodeView",
+   "aka": [
+    "syntax highlighting",
+    "source snippet",
+    "monospace block",
+    "read only editor"
+   ],
+   "does": [
+    "read only by default",
+    "no gutter",
+    "takes exactly the room its lines need",
+    "word wrap off for code",
+    "long lines scroll sideways",
+    "word wrap can be turned on",
+    "editing can be handed back",
+    "raises changed on a keystroke",
+    "set the contents from a string",
+    "sits inline in a page"
+   ]
+  },
+  {
+   "component": "Colour",
+   "aka": [
+    "color",
+    "colors",
+    "palette",
+    "swatches",
+    "theme colors",
+    "theme colours",
+    "accent colors"
+   ],
+   "does": [
+    "primary secondary tertiary",
+    "success warning error",
+    "surface ladder",
+    "outline tokens",
+    "scrim",
+    "inverse pair",
+    "presence dots",
+    "hex values",
+    "reads the live theme"
+   ]
+  },
+  {
+   "component": "ComboBox",
+   "aka": [
+    "autocomplete",
+    "auto complete",
+    "type ahead",
+    "typeahead",
+    "searchable select",
+    "editable dropdown"
+   ],
+   "does": [
+    "type to filter",
+    "filter items",
+    "highlight match",
+    "commit on enter",
+    "arrow keys",
+    "escape reverts",
+    "revert on blur",
+    "no matches",
+    "scrolling list",
+    "popup list",
+    "closed set",
+    "click outside closes",
+    "flips above"
+   ]
+  },
+  {
+   "component": "Coverage",
+   "aka": [
+    "widget list",
+    "catalogue index",
+    "catalog index",
+    "inventory",
+    "audit",
+    "what is missing",
+    "index of widgets"
+   ],
+   "does": [
+    "lists every declaration",
+    "widget type",
+    "derives from",
+    "style ladder rung",
+    "has a story",
+    "family grouping",
+    "summary count",
+    "logged count",
+    "flat and gradient rungs"
+   ]
+  },
+  {
+   "component": "DataGrid",
+   "aka": [
+    "spreadsheet",
+    "table",
+    "cells"
+   ],
+   "does": [
+    "virtualised rows",
+    "virtualized rows",
+    "a million rows",
+    "resize a column",
+    "resize a row",
+    "reorder columns",
+    "drag a column header",
+    "select a cell",
+    "rectangular selection",
+    "select a whole row",
+    "select a whole column",
+    "keyboard navigation",
+    "shift to extend a selection",
+    "column headers",
+    "row numbers",
+    "sort indicator arrow"
+   ]
+  },
+  {
+   "component": "Dialog",
+   "aka": [
+    "dialogue",
+    "confirmation prompt",
+    "confirm box",
+    "alert window",
+    "message box",
+    "are you sure"
+   ],
+   "does": [
+    "blocks the page",
+    "dim the background",
+    "scrim",
+    "escape to close",
+    "return confirms",
+    "default answer",
+    "restore focus",
+    "destructive styling",
+    "pinned buttons",
+    "scrolling body",
+    "width sizes",
+    "full screen",
+    "confirmed or cancelled",
+    "confirmed or canceled"
+   ]
+  },
+  {
+   "component": "Divider",
+   "aka": [
+    "separator",
+    "rule",
+    "horizontal line",
+    "vertical line",
+    "hairline",
+    "section break",
+    "line between items"
+   ],
+   "does": [
+    "horizontal or vertical",
+    "label in the line",
+    "centre the label",
+    "center the label",
+    "label at the start or end",
+    "dashed",
+    "dotted",
+    "solid",
+    "line thickness",
+    "inset from the leading edge",
+    "inset both edges",
+    "subtle or strong",
+    "accent colour",
+    "accent color",
+    "stretches to its parent",
+    "separate list rows"
+   ]
+  },
+  {
+   "component": "Dock",
+   "aka": [
+    "tabbed panels",
+    "editor panels"
+   ],
+   "does": [
+    "drag a tab",
+    "move a tab between panels",
+    "reorder tabs",
+    "split a panel",
+    "drop preview",
+    "drag ghost",
+    "nested splits",
+    "collapse an empty panel",
+    "close a tab",
+    "drag and drop"
+   ]
+  },
+  {
+   "component": "Drawer",
+   "aka": [
+    "side panel",
+    "slide out panel",
+    "side sheet",
+    "bottom sheet",
+    "off canvas panel"
+   ],
+   "does": [
+    "slides in from an edge",
+    "edge selection",
+    "dim the background",
+    "scrim",
+    "escape to close",
+    "blocks the page",
+    "grab handle",
+    "snap points",
+    "drag to dismiss",
+    "peek height",
+    "half height",
+    "panel width",
+    "panel height",
+    "slide animation"
+   ]
+  },
+  {
+   "component": "DropControls",
+   "aka": [
+    "popover slider",
+    "popup slider",
+    "toolbar chip",
+    "popover toggles"
+   ],
+   "does": [
+    "opens below",
+    "flips above",
+    "escape closes",
+    "click outside closes",
+    "drag the value",
+    "percentage readout",
+    "value suffix",
+    "switch list",
+    "active count"
+   ]
+  },
+  {
+   "component": "DropDown",
+   "aka": [],
+   "does": [
+    "labels list",
+    "selected item",
+    "arrow keys",
+    "per item icons",
+    "icon only face",
+    "dimmed rows",
+    "opens over the selection",
+    "opens below",
+    "enum binding",
+    "corner arrow"
+   ]
+  },
+  {
+   "component": "Elevation",
+   "aka": [
+    "shadow",
+    "drop shadow",
+    "depth",
+    "lift",
+    "raised surface",
+    "shadow levels",
+    "card shadow"
+   ],
+   "does": [
+    "five levels",
+    "blur radius",
+    "vertical drop",
+    "shadow colour",
+    "shadow color",
+    "raised panels",
+    "how high it sits"
+   ]
+  },
+  {
+   "component": "FabControls",
+   "aka": [
+    "property panel",
+    "number scrubber",
+    "drag number",
+    "colour swatch",
+    "color swatch",
+    "colour picker",
+    "color picker",
+    "property row"
+   ],
+   "does": [
+    "drag sideways",
+    "scrub a number",
+    "type a number",
+    "step per pixel",
+    "unit suffix",
+    "wrap around",
+    "fill bar",
+    "colour wheel",
+    "color wheel",
+    "hex entry",
+    "recent swatches",
+    "commit on release",
+    "fine drag",
+    "section header"
+   ]
+  },
+  {
+   "component": "FieldWell",
+   "aka": [
+    "input group",
+    "input wrapper",
+    "search box",
+    "search field",
+    "search well"
+   ],
+   "does": [
+    "leading icon",
+    "trailing label",
+    "leading slot",
+    "trailing slot",
+    "focus state",
+    "click anywhere focuses",
+    "magnifier",
+    "one disabled flag",
+    "text input wrapper"
+   ]
+  },
+  {
+   "component": "FileTree",
+   "aka": [
+    "file browser",
+    "directory browser",
+    "directory listing",
+    "folder hierarchy",
+    "nested folders",
+    "tree view"
+   ],
+   "does": [
+    "expand and collapse folders",
+    "indented rows",
+    "select a node",
+    "drag a node out",
+    "scroll to a node",
+    "reveal a node",
+    "version control status dots",
+    "new and modified marks",
+    "deleted mark",
+    "mixed folder mark",
+    "folder icons",
+    "alternating row shading"
+   ]
+  },
+  {
+   "component": "FloatingPanel",
+   "aka": [
+    "inspector",
+    "tool window",
+    "movable window",
+    "utility window"
+   ],
+   "does": [
+    "drag to move",
+    "resize by the corner",
+    "corner grip",
+    "close mark",
+    "minimum size",
+    "stays on screen",
+    "page stays interactive",
+    "no scrim",
+    "reports position",
+    "reports size",
+    "title bar"
+   ]
+  },
+  {
+   "component": "GlassControls",
+   "aka": [
+    "translucent button",
+    "transparent slider"
+   ],
+   "does": [
+    "refraction",
+    "refracts the background",
+    "lensing",
+    "sliding knob",
+    "filled variant",
+    "needs a background",
+    "overlay draw"
+   ]
+  },
+  {
+   "component": "GlassPanel",
+   "aka": [
+    "frosted card",
+    "backdrop blur"
+   ],
+   "does": [
+    "background blur",
+    "scene blur",
+    "refraction",
+    "tint colour",
+    "tint color",
+    "border colour",
+    "border color",
+    "specular highlight",
+    "noise grain",
+    "corner radius",
+    "translucency",
+    "fallback colour",
+    "fallback color"
+   ]
+  },
+  {
+   "component": "GlassSurfaces",
+   "aka": [
+    "frosted backings",
+    "lens presets",
+    "blur presets",
+    "refracting backdrop"
+   ],
+   "does": [
+    "bends the background",
+    "lensing",
+    "gradient blur",
+    "rounded backing",
+    "button backing",
+    "chip backing",
+    "input backing",
+    "icon backing",
+    "toggle backing"
+   ]
+  },
+  {
+   "component": "Grid",
+   "aka": [
+    "columns and rows",
+    "card layout",
+    "cells",
+    "tracks",
+    "responsive columns"
+   ],
+   "does": [
+    "column tracks",
+    "row tracks",
+    "fractional share",
+    "percentage width",
+    "minimum and maximum",
+    "repeat columns",
+    "auto fit",
+    "auto fill",
+    "named areas",
+    "span cells",
+    "column gap",
+    "row gap",
+    "place by column and row",
+    "implicit rows",
+    "flow down columns"
+   ]
+  },
+  {
+   "component": "Html",
+   "aka": [
+    "markup",
+    "hypertext",
+    "rich text"
+   ],
+   "does": [
+    "bold and italic",
+    "underline and strikethrough",
+    "headings h1 to h6",
+    "bullet lists",
+    "numbered lists",
+    "tables with alignment",
+    "inline code spans",
+    "blockquote",
+    "subscript and superscript",
+    "collapsible details sections",
+    "expand and collapse a summary",
+    "line clamp with ellipsis",
+    "inline widgets in a run",
+    "emoji and entities",
+    "wrapping rows of mixed content"
+   ]
+  },
+  {
+   "component": "Icon",
+   "aka": [
+    "pictogram",
+    "symbol"
+   ],
+   "does": [
+    "tint colour",
+    "tint color",
+    "gradient fill",
+    "gradient direction",
+    "rotation angle",
+    "filled disc background",
+    "outlined ring",
+    "circle background",
+    "pixel size",
+    "two stop gradient"
+   ]
+  },
+  {
+   "component": "IconSet",
+   "aka": [
+    "glyph",
+    "font glyph",
+    "unicode symbol",
+    "font symbols"
+   ],
+   "does": [
+    "glyph rendering",
+    "unicode codepoint",
+    "tint glyphs"
+   ]
+  },
+  {
+   "component": "Image",
+   "aka": [
+    "picture",
+    "pictures",
+    "photo",
+    "photos",
+    "bitmap",
+    "png",
+    "jpeg",
+    "raster"
+   ],
+   "does": [
+    "stretch to fit",
+    "crop to fill",
+    "fit inside",
+    "cover the space",
+    "keep aspect ratio",
+    "load from file",
+    "load from url",
+    "async decode",
+    "load from bytes",
+    "decode png jpeg",
+    "webp and gif decoding"
+   ]
+  },
+  {
+   "component": "ImageBlend",
+   "aka": [
+    "crossfade",
+    "cross fade",
+    "dissolve",
+    "picture transition",
+    "photo transition",
+    "picture switcher",
+    "fade between photos",
+    "two picture fade"
+   ],
+   "does": [
+    "crossfade animation",
+    "switch between two",
+    "fade opacity",
+    "swap textures",
+    "load from file",
+    "load png",
+    "load jpeg",
+    "stacked pictures",
+    "toggle back and forth",
+    "keep aspect ratio",
+    "centre alignment",
+    "center alignment"
+   ]
+  },
+  {
+   "component": "Label",
+   "aka": [
+    "caption",
+    "headline",
+    "static string",
+    "typography"
+   ],
+   "does": [
+    "truncate with an ellipsis",
+    "max lines",
+    "wrap to the width given",
+    "bold and italic variants",
+    "font size",
+    "line spacing",
+    "gradient fill",
+    "horizontal gradient",
+    "vertical gradient",
+    "custom pixel shader",
+    "colour the glyphs",
+    "color the glyphs",
+    "emoji and cjk",
+    "hover in and hover out",
+    "fit or fill width"
+   ]
+  },
+  {
+   "component": "Layout",
+   "aka": [
+    "sizing",
+    "alignment",
+    "spacing",
+    "flow direction"
+   ],
+   "does": [
+    "fill remaining space",
+    "fit content",
+    "minimum size",
+    "maximum size",
+    "weighted share",
+    "wrapping rows",
+    "centre children",
+    "center children",
+    "padding",
+    "margin",
+    "spacing between children",
+    "flow right",
+    "flow down",
+    "responsive width"
+   ]
+  },
+  {
+   "component": "LinkLabel",
+   "aka": [
+    "hyperlink",
+    "clickable text",
+    "url",
+    "href",
+    "tappable text"
+   ],
+   "does": [
+    "opens a url when clicked",
+    "opens in place or in a new window",
+    "reports clicks presses and releases",
+    "carries the modifier keys of the click",
+    "an icon beside the words"
+   ]
+  },
+  {
+   "component": "Lists",
+   "aka": [
+    "reorderable rows",
+    "drag handle rows"
+   ],
+   "does": [
+    "draw every row given",
+    "row templates",
+    "fetch an item by id",
+    "drag to reorder",
+    "drag handle",
+    "gripper",
+    "insertion indicator line",
+    "reorder event with from and to",
+    "escape cancels a drag",
+    "drag and drop"
+   ]
+  },
+  {
+   "component": "Markdown",
+   "aka": [
+    "md",
+    "readme"
+   ],
+   "does": [
+    "headings",
+    "bullet lists",
+    "numbered lists",
+    "bold and italic",
+    "strikethrough",
+    "inline code",
+    "code blocks",
+    "blockquote",
+    "tables with column alignment",
+    "subscript and superscript",
+    "latex math",
+    "inline maths",
+    "display maths",
+    "emoji",
+    "syntax highlighted code blocks"
+   ]
+  },
+  {
+   "component": "Marquee",
+   "aka": [
+    "scrolling text",
+    "ticker",
+    "moving text"
+   ],
+   "does": [
+    "seamless loop",
+    "travels left",
+    "travels right",
+    "pause on hover",
+    "speed control",
+    "gap between copies",
+    "hold still",
+    "overflowing text",
+    "constant speed"
+   ]
+  },
+  {
+   "component": "Menu",
+   "aka": [
+    "context menu",
+    "right click menu",
+    "flyout"
+   ],
+   "does": [
+    "right click to open",
+    "opens under a button",
+    "opens at the pointer",
+    "keyboard arrows walk the rows",
+    "escape closes",
+    "type a letter to jump",
+    "submenus",
+    "checkmarks",
+    "radio marks",
+    "section headings",
+    "disabled rows",
+    "destructive row",
+    "shortcut labels",
+    "click away dismiss",
+    "reports what was picked"
+   ]
+  },
+  {
+   "component": "Modal",
+   "aka": [
+    "lightbox",
+    "dim layer",
+    "backdrop",
+    "scrim layer",
+    "blocking popup"
+   ],
+   "does": [
+    "dim the window",
+    "escape to close",
+    "press outside to close",
+    "back gesture",
+    "blocks what is behind",
+    "takes no layout room",
+    "reports dismissal",
+    "cannot be dismissed",
+    "centre content",
+    "center content",
+    "draws over everything"
+   ]
+  },
+  {
+   "component": "Motion",
+   "aka": [
+    "animation",
+    "easing",
+    "transition",
+    "duration",
+    "timing",
+    "curves",
+    "tween",
+    "animations",
+    "ease curves"
+   ],
+   "does": [
+    "durations in seconds",
+    "short to extra long",
+    "seven easings",
+    "linear",
+    "spring",
+    "accelerate",
+    "decelerate",
+    "hover fade demo",
+    "sixteen durations",
+    "timing tokens",
+    "animator ease"
+   ]
+  },
+  {
+   "component": "MovingPanels",
+   "aka": [
+    "slide out"
+   ],
+   "does": [
+    "slides from an edge",
+    "drag up and down",
+    "reports the offset",
+    "initial offset",
+    "reset position",
+    "any side",
+    "sits over content"
+   ]
+  },
+  {
+   "component": "NavList",
+   "aka": [
+    "sidebar",
+    "side rail",
+    "destination picker",
+    "rail of destinations"
+   ],
+   "does": [
+    "exactly one highlighted",
+    "shows where you are",
+    "switch the panel beside it",
+    "arrow keys move the choice",
+    "home and end keys",
+    "one keyboard stop for the whole set",
+    "reports what was chosen",
+    "vertical or horizontal flow",
+    "radio style rows",
+    "custom row template",
+    "labels from a list"
+   ]
+  },
+  {
+   "component": "Nesting",
+   "aka": [
+    "stacked popups",
+    "popup inside a popup",
+    "menu inside a popover",
+    "lock stack",
+    "depth of popups"
+   ],
+   "does": [
+    "escape closes one level",
+    "pointer grab",
+    "blocks clicks underneath",
+    "sweep lock",
+    "scroll block",
+    "stack of owners",
+    "release returns control",
+    "one press one level",
+    "multiple levels deep"
+   ]
+  },
+  {
+   "component": "OverlayMessages",
+   "aka": [
+    "notification popup"
+   ],
+   "does": [
+    "point at a control",
+    "arrow triangle",
+    "place at a position",
+    "corner popup",
+    "full width banner",
+    "intent colours",
+    "intent colors",
+    "title and detail",
+    "stays until closed",
+    "flips to stay on screen"
+   ]
+  },
+  {
+   "component": "PageFlip",
+   "aka": [
+    "panel swapper",
+    "one at a time container"
+   ],
+   "does": [
+    "show one child at a time",
+    "switch by id",
+    "set the active one",
+    "named templates",
+    "only the active one draws",
+    "create children on demand",
+    "lazy creation",
+    "swap panels",
+    "update a hidden template"
+   ]
+  },
+  {
+   "component": "Pagination",
+   "aka": [
+    "pager",
+    "page numbers",
+    "prev next strip",
+    "page picker",
+    "numbered strip",
+    "results pages",
+    "go to page"
+   ],
+   "does": [
+    "numbered pages",
+    "previous and next arrows",
+    "jump to a page number",
+    "current page highlighted",
+    "fold extra pages into an ellipsis",
+    "neighbour pages around the current one",
+    "pinned pages at each end",
+    "hide the middle",
+    "clamps out of range numbers",
+    "reports the page asked for",
+    "turn the step arrows off",
+    "1 indexed pages"
+   ]
+  },
+  {
+   "component": "Placeholder",
+   "aka": [
+    "skeleton",
+    "skeleton screen",
+    "skeleton loader",
+    "shimmer",
+    "loading shapes",
+    "grey blocks",
+    "gray blocks"
+   ],
+   "does": [
+    "shimmer sweep",
+    "pulse",
+    "wave",
+    "no animation",
+    "reduced motion",
+    "translucent",
+    "circle shape",
+    "text lines",
+    "paragraph lines",
+    "avatar stand-in",
+    "image stand-in",
+    "table rows",
+    "while loading",
+    "before data arrives",
+    "stands in for content"
+   ]
+  },
+  {
+   "component": "Popover",
+   "aka": [
+    "flyout",
+    "hover card",
+    "toggletip",
+    "anchored panel"
+   ],
+   "does": [
+    "anchor to a control",
+    "placement sides",
+    "flip when no room",
+    "shift to stay on screen",
+    "arrow pointer",
+    "open on click",
+    "open on hover",
+    "dwell delay",
+    "opens at the pointer",
+    "secondary click",
+    "light dismiss",
+    "escape closes",
+    "tab cycles inside",
+    "match anchor width",
+    "confirm and cancel",
+    "danger styling"
+   ]
+  },
+  {
+   "component": "PortalList",
+   "aka": [
+    "virtual scroller",
+    "infinite scroll",
+    "news feed",
+    "thousands of rows",
+    "virtual list",
+    "virtualised list",
+    "virtualized list"
+   ],
+   "does": [
+    "only draws what is on screen",
+    "recycles row widgets",
+    "momentum scrolling",
+    "flick scrolling",
+    "rubber band bounce",
+    "smooth scroll to an item",
+    "jump to the end",
+    "auto tail to new content",
+    "drag to scroll",
+    "row templates",
+    "select and copy across rows",
+    "reached start and reached end events",
+    "scroll position",
+    "set the item range"
+   ]
+  },
+  {
+   "component": "Progress",
+   "aka": [
+    "progress bar",
+    "loading bar",
+    "percent bar",
+    "meter",
+    "gauge",
+    "activity rings",
+    "page load line",
+    "how far along"
+   ],
+   "does": [
+    "percentage readout",
+    "determinate",
+    "indeterminate",
+    "animates to value",
+    "stacked segments",
+    "ring sections",
+    "half ring arc",
+    "needle and zones",
+    "warning zone",
+    "critical zone",
+    "track thickness",
+    "stop indicator",
+    "nested rings",
+    "top of page hairline",
+    "raises completed"
+   ]
+  },
+  {
+   "component": "RadioButton",
+   "aka": [
+    "option button",
+    "single choice",
+    "pick one",
+    "exclusive choice"
+   ],
+   "does": [
+    "exclusive selection",
+    "mutually exclusive options",
+    "select one option",
+    "deselect the others",
+    "toggle off when independent",
+    "space or return to activate",
+    "label and icon together"
+   ]
+  },
+  {
+   "component": "RangeSlider",
+   "aka": [
+    "dual slider",
+    "two handle slider",
+    "min max picker",
+    "price filter",
+    "span selector",
+    "double slider"
+   ],
+   "does": [
+    "two handles on one track",
+    "drag either end",
+    "drag the whole span at once",
+    "handles never cross",
+    "minimum and maximum",
+    "least gap between the ends",
+    "press bare track to jump",
+    "double tap to reset",
+    "arrow keys move a handle",
+    "home and end keys",
+    "stepped values",
+    "quantised values",
+    "quantized values",
+    "readout with a unit",
+    "decimal precision"
+   ]
+  },
+  {
+   "component": "Rotary",
+   "aka": [
+    "knob",
+    "knobs",
+    "dial",
+    "dials",
+    "circular slider",
+    "volume knob",
+    "pan knob"
+   ],
+   "does": [
+    "drag up and down to change",
+    "type a value in",
+    "double tap to reset",
+    "label tap resets to default",
+    "bipolar centre",
+    "bipolar center",
+    "fills from the middle",
+    "arc gap at the bottom",
+    "arc thickness",
+    "minimum and maximum",
+    "stepped values",
+    "logarithmic scale",
+    "mouse wheel",
+    "unit suffix",
+    "decimal precision"
+   ]
+  },
+  {
+   "component": "RotatedImage",
+   "aka": [
+    "turned picture",
+    "tilted picture",
+    "angled photo",
+    "picture at an angle"
+   ],
+   "does": [
+    "not available",
+    "unavailable",
+    "unimplemented"
+   ]
+  },
+  {
+   "component": "ScrollBar",
+   "aka": [
+    "kinetic scroller"
+   ],
+   "does": [
+    "drag the handle",
+    "mouse wheel",
+    "trackpad",
+    "flick",
+    "momentum",
+    "fling",
+    "rubber band",
+    "bounce at edges",
+    "minimum handle size",
+    "handle thickness",
+    "bring into view",
+    "smooth motion"
+   ]
+  },
+  {
+   "component": "Select",
+   "aka": [
+    "chooser",
+    "option list",
+    "multiple choice"
+   ],
+   "does": [
+    "shows one value and offers the rest",
+    "choose from a list of options",
+    "toggle several at once",
+    "check mark on chosen rows",
+    "stays open while toggling",
+    "counts how many are chosen",
+    "names them instead of counting",
+    "placeholder when nothing chosen",
+    "options as a list of words",
+    "reports the chosen index",
+    "list hangs below or at the pointer",
+    "restore a saved set",
+    "choose by name or by index"
+   ]
+  },
+  {
+   "component": "Shape",
+   "aka": [
+    "corner radius",
+    "rounded corners",
+    "border radius",
+    "pill",
+    "roundness",
+    "corners",
+    "radius scale"
+   ],
+   "does": [
+    "radius ladder",
+    "none to full pill",
+    "seven corner sizes",
+    "corner tokens",
+    "rounded panels"
+   ]
+  },
+  {
+   "component": "Size",
+   "aka": [
+    "icon size",
+    "control height",
+    "touch target",
+    "hairline"
+   ],
+   "does": [
+    "control heights",
+    "icon sizes",
+    "hairline widths",
+    "three heights",
+    "token lengths",
+    "bar per token",
+    "minimum tap area"
+   ]
+  },
+  {
+   "component": "Slider",
+   "aka": [
+    "fader",
+    "faders",
+    "trackbar",
+    "gain control"
+   ],
+   "does": [
+    "drag to change the value",
+    "type a value in",
+    "double tap to reset",
+    "label tap resets to default",
+    "minimum and maximum",
+    "stepped values",
+    "decimal precision",
+    "unit suffix",
+    "percent display scale",
+    "logarithmic taper",
+    "gain law taper",
+    "mouse wheel",
+    "vertical drag",
+    "fill from the centre",
+    "fill from the center"
+   ]
+  },
+  {
+   "component": "SlidesView",
+   "aka": [
+    "slideshow",
+    "presentation",
+    "slide deck",
+    "chapter slides",
+    "carousel"
+   ],
+   "does": [
+    "arrow keys move between slides",
+    "next and previous",
+    "animated sliding transition",
+    "one slide fills the space",
+    "reports which slide is showing",
+    "title and body slides",
+    "takes keyboard focus on press",
+    "step through a talk"
+   ]
+  },
+  {
+   "component": "Slug",
+   "aka": [
+    "large glyphs",
+    "big type",
+    "glyph rendering",
+    "font rendering"
+   ],
+   "does": [
+    "very large font sizes",
+    "render path comparison",
+    "msdf raster path",
+    "gradient labels at size",
+    "custom get_color shader",
+    "glyph shape probes",
+    "descenders and counters",
+    "theme colour source",
+    "theme color source",
+    "diagnostic probes",
+    "disappearing glyphs"
+   ]
+  },
+  {
+   "component": "Spacing",
+   "aka": [
+    "gap",
+    "gaps",
+    "whitespace"
+   ],
+   "does": [
+    "six steps",
+    "scale factor",
+    "bar per token",
+    "token lengths",
+    "gap sizes",
+    "ladder of gaps"
+   ]
+  },
+  {
+   "component": "Spinner",
+   "aka": [
+    "loading indicator",
+    "busy indicator",
+    "throbber",
+    "activity indicator",
+    "loader",
+    "loading wheel",
+    "loading overlay",
+    "saving indicator"
+   ],
+   "does": [
+    "indeterminate",
+    "turning arc",
+    "pulsing dots",
+    "rising bars",
+    "delayed appearance",
+    "never flashes",
+    "tick on success",
+    "cross on failure",
+    "auto reset",
+    "start finish fail",
+    "blocks the pointer",
+    "dims content",
+    "blurred glass",
+    "label beside it",
+    "retry button"
+   ]
+  },
+  {
+   "component": "Splash",
+   "aka": [
+    "sandbox",
+    "isolate",
+    "embedded script",
+    "plugin host",
+    "script runner",
+    "hot swappable page",
+    "downloaded panel"
+   ],
+   "does": [
+    "runs a script",
+    "separate virtual machine",
+    "compiled at runtime",
+    "network permission",
+    "storage quota",
+    "sandbox directory",
+    "host capabilities",
+    "call into the script",
+    "validate a body",
+    "isolated events",
+    "untrusted code",
+    "least privilege",
+    "embeds a plugin"
+   ]
+  },
+  {
+   "component": "Splitter",
+   "aka": [
+    "drag bar",
+    "gutter",
+    "resize handle",
+    "two panes",
+    "split view",
+    "split pane",
+    "resizable panes"
+   ],
+   "does": [
+    "drag to resize",
+    "side by side",
+    "stacked panes",
+    "keep a fraction",
+    "fixed from one edge",
+    "minimum pane size",
+    "fold a pane",
+    "collapse a pane",
+    "reopen a pane",
+    "reports its position",
+    "horizontal or vertical"
+   ]
+  },
+  {
+   "component": "StackNavigation",
+   "aka": [
+    "screen stack",
+    "push and pop screens",
+    "drill down",
+    "header with a back arrow"
+   ],
+   "does": [
+    "push a screen",
+    "pop back",
+    "pop to the root",
+    "slide in transition",
+    "animated push and pop",
+    "back button in the header",
+    "mouse back button pops",
+    "title in the header",
+    "set the title at runtime",
+    "one screen at a time",
+    "how deep it is",
+    "tells the incoming screen it is showing"
+   ]
+  },
+  {
+   "component": "State",
+   "aka": [
+    "interaction states",
+    "state layers",
+    "overlay tint"
+   ],
+   "does": [
+    "hover opacity",
+    "focus opacity",
+    "press opacity",
+    "drag opacity",
+    "two disabled strengths",
+    "scrim opacity",
+    "content over surface",
+    "opacity tokens",
+    "tint preview"
+   ]
+  },
+  {
+   "component": "Surfaces",
+   "aka": [
+    "auto height",
+    "animated height",
+    "smooth resize",
+    "self sizing wrapper"
+   ],
+   "does": [
+    "eases its height",
+    "exponential smoothing",
+    "first draw snaps",
+    "content driven height"
+   ]
+  },
+  {
+   "component": "Svg",
+   "aka": [
+    "vector drawing",
+    "artwork",
+    "drawing file"
+   ],
+   "does": [
+    "load a drawing from a resource",
+    "scale into a given size",
+    "fit to the drawing's own size",
+    "tint a drawing",
+    "recolour",
+    "recolor",
+    "keep the authored colours",
+    "keep the authored colors",
+    "animated drawing",
+    "asks for a frame every frame",
+    "turn the animation off",
+    "per vertex alpha kept"
+   ]
+  },
+  {
+   "component": "Tabs",
+   "aka": [
+    "tab strip",
+    "tab bar",
+    "tabbed panel"
+   ],
+   "does": [
+    "share the width",
+    "shrink as more are opened",
+    "maximum and minimum width",
+    "close mark on a tab",
+    "middle click to close",
+    "add a new one",
+    "reports what was chosen",
+    "reports what was closed",
+    "close mark shows on hover",
+    "close mark shows on the active one",
+    "active one matches the panel colour",
+    "active one matches the panel color",
+    "chooses the panel underneath",
+    "set the list at runtime"
+   ]
+  },
+  {
+   "component": "TextFlow",
+   "aka": [
+    "paragraph",
+    "prose layout",
+    "styled run",
+    "typesetting",
+    "wrapping prose",
+    "rich text"
+   ],
+   "does": [
+    "wrap a long run",
+    "push and pop styles",
+    "bold and italic",
+    "underline and strikethrough",
+    "inline code",
+    "quote block",
+    "code block",
+    "inline links mid sentence",
+    "selection across style boundaries",
+    "drag to select",
+    "explicit line breaks",
+    "latex math",
+    "fractions and roots",
+    "superscripts",
+    "greek letters",
+    "maths font"
+   ]
+  },
+  {
+   "component": "TextInput",
+   "aka": [
+    "text field",
+    "text box",
+    "textbox",
+    "textarea",
+    "text area",
+    "entry field",
+    "edit field",
+    "password field",
+    "multiline field"
+   ],
+   "does": [
+    "type and edit words",
+    "placeholder when empty",
+    "read only mode",
+    "password masking",
+    "numbers only",
+    "multiline editing",
+    "horizontal scrolling when it overflows",
+    "select all",
+    "double click selects a word",
+    "copy cut and paste",
+    "undo and redo",
+    "blinking caret",
+    "move by word",
+    "grows to fit then scrolls",
+    "enter submits"
+   ]
+  },
+  {
+   "component": "Tip",
+   "aka": [
+    "tooltip",
+    "hover text",
+    "hover label",
+    "hover hint",
+    "help bubble",
+    "balloon",
+    "hover popup"
+   ],
+   "does": [
+    "hover delay",
+    "dwell time",
+    "twelve placements",
+    "flips to fit",
+    "stays in window",
+    "arrow pointer",
+    "wrap width",
+    "shows on focus",
+    "escape dismisses",
+    "keyboard reachable",
+    "wraps a control",
+    "error colour",
+    "error color",
+    "instant follow",
+    "one overlay layer"
+   ]
+  },
+  {
+   "component": "Toast",
+   "aka": [
+    "snackbar",
+    "notification",
+    "transient message",
+    "flash message",
+    "toaster",
+    "temporary message",
+    "corner message",
+    "notification stack"
+   ],
+   "does": [
+    "auto dismiss",
+    "timed dismissal",
+    "pauses on hover",
+    "countdown hairline",
+    "stack limit",
+    "queue overflow",
+    "six corners",
+    "undo action",
+    "closable",
+    "never blocks input",
+    "replace by id",
+    "dismiss all",
+    "errors stay",
+    "slides in",
+    "second line body",
+    "raise from anywhere"
+   ]
+  },
+  {
+   "component": "Type",
+   "aka": [
+    "typography",
+    "font",
+    "fonts",
+    "text styles",
+    "type scale",
+    "headings",
+    "font sizes",
+    "text sizes"
+   ],
+   "does": [
+    "nine presets",
+    "title body label",
+    "three sizes each",
+    "base font size",
+    "scale follows the knob",
+    "sample sentence",
+    "text style tokens",
+    "heading sizes",
+    "body text size"
+   ]
+  },
+  {
+   "component": "ValueInput",
+   "aka": [
+    "number field",
+    "numeric field",
+    "spinbox",
+    "stepper",
+    "number box",
+    "drag a number",
+    "scrubbable number"
+   ],
+   "does": [
+    "scrub sideways to change it",
+    "click to type a number",
+    "arrows at each end step it",
+    "minimum and maximum bounds",
+    "step granularity",
+    "decimal places",
+    "suffix after the number",
+    "clamps out of bounds numbers",
+    "enter commits escape reverts",
+    "hover reveals the step arrows",
+    "reports every change",
+    "a host can push a number in"
+   ]
+  },
+  {
+   "component": "Vector",
+   "aka": [
+    "shapes",
+    "drawing",
+    "path drawing"
+   ],
+   "does": [
+    "rectangle",
+    "circle",
+    "ellipse",
+    "polygon",
+    "polyline",
+    "path d string",
+    "fill and stroke",
+    "stroke width",
+    "line cap and join",
+    "linear gradient",
+    "radial gradient",
+    "gradient stops",
+    "drop shadow",
+    "group transforms",
+    "rotate and scale",
+    "skew and translate"
+   ]
+  },
+  {
+   "component": "Video",
+   "aka": [
+    "movie",
+    "movies",
+    "clip player",
+    "film playback",
+    "camera preview",
+    "webcam view",
+    "stream player",
+    "mp4 player"
+   ],
+   "does": [
+    "play and pause",
+    "seek",
+    "scrub bar",
+    "volume",
+    "mute",
+    "loop playback",
+    "autoplay",
+    "playback speed",
+    "track selection",
+    "poster thumbnail",
+    "hardware decoding",
+    "yuv colour conversion",
+    "yuv color conversion",
+    "stream from url",
+    "camera capture"
+   ]
+  },
+  {
+   "component": "View",
+   "aka": [
+    "div"
+   ],
+   "does": [
+    "background colour",
+    "background color",
+    "clip children",
+    "cached drawing",
+    "border",
+    "show background"
+   ]
+  },
+  {
+   "component": "ViewShapes",
+   "aka": [
+    "rounded rectangle",
+    "circle",
+    "hexagon",
+    "gradient fill"
+   ],
+   "does": [
+    "rounded corners",
+    "round one pair of corners",
+    "gradient along an axis",
+    "drop shadow",
+    "horizontal rule",
+    "vertical rule",
+    "scroll one axis",
+    "scroll both axes",
+    "cache into a texture",
+    "property rows",
+    "level meter"
+   ]
+  },
+  {
+   "component": "Welcome",
+   "aka": [
+    "intro",
+    "introduction",
+    "start here",
+    "home page",
+    "getting started",
+    "landing",
+    "about"
+   ],
+   "does": [
+    "what this catalogue is",
+    "how to read it",
+    "gpu drawn widgets",
+    "live styling",
+    "no recompile",
+    "cross platform",
+    "runs on the web",
+    "green dot marks new",
+    "pick a story"
+   ]
+  },
+  {
+   "component": "WindowChrome",
+   "aka": [
+    "title bar",
+    "caption bar",
+    "menu bar",
+    "window buttons",
+    "caption buttons",
+    "app menu",
+    "minimise button",
+    "minimize button",
+    "maximise button",
+    "maximize button",
+    "window furniture"
+   ],
+   "does": [
+    "menus declared as data",
+    "keyboard shortcuts",
+    "shortcut glyphs beside the label",
+    "greyed out entries",
+    "grayed out entries",
+    "separator rules in a menu",
+    "reports the chosen id",
+    "drops open under its title",
+    "arrow keys walk the entries",
+    "enable and disable an entry",
+    "cmd maps to ctrl off mac",
+    "minimise maximise close glyphs",
+    "fullscreen glyph",
+    "xr mode glyph",
+    "recording lamp",
+    "glyphs drawn by a shader"
+   ]
+  }
+ ]
+}

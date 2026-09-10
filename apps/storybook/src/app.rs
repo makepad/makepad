@@ -239,6 +239,11 @@ impl MatchEvent for App {
         self.open_story(cx, &key);
         remote::install(cx);
         log!("storybook: {} stories registered", registry::all().count());
+        log!(
+            "storybook: {} search terms over {} components",
+            crate::synonyms::term_count(),
+            crate::synonyms::component_count()
+        );
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
