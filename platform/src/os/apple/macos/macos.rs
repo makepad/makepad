@@ -1,4 +1,5 @@
 use crate::frame_trace::TickSource;
+use crate::present_trace::{Cause as PresentCause, Stage as PresentStage};
 use {
     crate::{
         cx::{Cx, OsType},
@@ -105,6 +106,8 @@ struct DrawableWorker {
     request: std::sync::mpsc::SyncSender<()>,
     ready: std::sync::mpsc::Receiver<Option<RcObjcId>>,
     pending: bool,
+    wait_ns: Arc<std::sync::atomic::AtomicU64>,
+    started: Option<Instant>,
 }
 
 impl DrawableWorker {
@@ -112,27 +115,31 @@ impl DrawableWorker {
         let layer = RcObjcId::from_unowned(NonNull::new(layer).unwrap());
         let (request, requests) = std::sync::mpsc::sync_channel(1);
         let (ready, replies) = std::sync::mpsc::sync_channel(1);
+        let wait_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let measured = wait_ns.clone();
         std::thread::Builder::new().name("makepad-drawable".into()).spawn(move || {
             while requests.recv().is_ok() {
                 let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+                let start = Instant::now();
                 let drawable: ObjcId = unsafe { msg_send![layer.as_id(), nextDrawable] };
+                measured.store(start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Release);
                 let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
                 unsafe { let _: () = msg_send![pool, release]; }
                 if ready.try_send(drawable).is_err() { break; }
                 SignalToUI::set_ui_signal();
             }
         }).expect("drawable acquisition worker");
-        Self { request, ready: replies, pending: false }
+        Self { request, ready: replies, pending: false, wait_ns, started: None }
     }
 
     fn take(&mut self) -> Option<RcObjcId> {
         let result = if self.pending {
             match self.ready.try_recv() {
-                Ok(drawable) => { self.pending = false; drawable }
+                Ok(drawable) => { self.pending = false; self.started = None; drawable }
                 Err(_) => None,
             }
         } else { None };
-        if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; }
+        if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; self.started = Some(Instant::now()); }
         result
     }
 }
@@ -664,6 +671,8 @@ impl Cx {
         }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        metal_cx.present_trace = (!passes_todo.is_empty()).then(|| crate::present_trace::begin(self.repaint_id + 1)).flatten();
+        let _trace_end = crate::present_trace::RequestEnd(metal_cx.present_trace.clone());
         // Safety flush: if a previous repaint batched offscreen passes but
         // no window pass followed (texture-only frame), commit that work
         // now so it is never stranded.
@@ -682,6 +691,7 @@ impl Cx {
         // until the GPU eventually catches up. Bound whole repaints by GPU
         // completion before the first pass allocates or encodes anything.
         metal_cx.begin_repaint();
+        if let Some(trace) = &metal_cx.present_trace { trace.inflight(metal_cx.frames_in_flight()); }
         metal_cx.trace_memory_once_per_second();
         // A CAMetalDisplayLink-owned drawable must not be dropped here: the
         // link waits for its consumption before delivering at full rate. Its
@@ -689,6 +699,7 @@ impl Cx {
         if link_drawable.is_none() && metal_cx.frames_in_flight() >= PRESENT_GATE_IN_FLIGHT as usize
         {
             metal_cx.backpressure_skips = metal_cx.backpressure_skips.saturating_add(1);
+            if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::RepaintsInFlight); }
             return;
         }
         self.repaint_id += 1;
@@ -757,6 +768,7 @@ impl Cx {
                             if !remote_present
                                 && now.duration_since(since) < OCCLUSION_PROBE_INTERVAL
                             {
+                                if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::Occluded); }
                                 self.repaint_pass(*draw_pass_id);
                                 continue;
                             }
@@ -776,6 +788,19 @@ impl Cx {
                                 in_flight
                             );
                         }
+                        let acquired = if link_drawable.is_none() && !metal_window.link_is_metal {
+                            let mut worker = metal_window.drawable_worker.borrow_mut();
+                            let worker = worker.get_or_insert_with(|| DrawableWorker::new(metal_window.ca_layer));
+                            let drawable = worker.take();
+                            if let Some(trace) = &metal_cx.present_trace {
+                                trace.drawable_wait(worker.started.map_or(0, |t| t.elapsed().as_nanos() as u64).max(worker.wait_ns.load(Ordering::Acquire)));
+                                if drawable.is_none() && worker.pending { trace.cause(PresentCause::DrawableWait); }
+                            }
+                            drawable
+                        } else { None };
+                        // A ready drawable proves compositor capacity even if
+                        // presented callbacks are late/lost. Acquisition is on
+                        // the worker, so callback debt cannot starve this beat.
                         // Present-gated pacing: with display sync on, a full
                         // drawable pool makes nextDrawable BLOCK the main
                         // thread until the compositor consumes a frame
@@ -783,7 +808,7 @@ impl Cx {
                         // this beat and keep the pass dirty; the next timer
                         // beat retries with the pool drained and event
                         // handling never stalls behind vsync.
-                        if link_drawable.is_none() && in_flight >= PRESENT_GATE_IN_FLIGHT {
+                        if link_drawable.is_none() && acquired.is_none() && in_flight >= PRESENT_GATE_IN_FLIGHT {
                             if inherited_occlusion_gate
                                 || (remote_present
                                     && occlusion & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0)
@@ -798,6 +823,7 @@ impl Cx {
                                 let now = Instant::now();
                                 let since = *metal_window.gate_closed_since.get_or_insert(now);
                                 if now.duration_since(since) < PRESENT_GATE_STUCK_TIMEOUT {
+                                    if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::PresentsInFlight); }
                                     self.repaint_pass(*draw_pass_id);
                                     continue;
                                 }
@@ -821,18 +847,16 @@ impl Cx {
                         self.perf_monitor
                             .frame_boundary(with_macos_app(|app| app.time_now()));
                         if link_drawable.is_none() && metal_window.link_is_metal {
+                            if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::MetalLinkBeat); }
                             // The layer's display link owns the drawables and this beat did
                             // not come from it: leave the pass dirty, the next update paints it.
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
-                        let acquired = if link_drawable.is_none() {
-                            let mut worker = metal_window.drawable_worker.borrow_mut();
-                            worker.get_or_insert_with(|| DrawableWorker::new(metal_window.ca_layer)).take()
-                        } else { None };
                         let drawable = link_drawable.unwrap_or_else(||
                             acquired.as_ref().map_or(nil, RcObjcId::as_id));
                         if drawable == nil {
+                            if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::NoDrawable); }
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
@@ -844,6 +868,7 @@ impl Cx {
                         });
                         let in_flight = metal_window.in_flight_presents.clone();
                         let is_metal_link_drawable = link_drawable.is_some();
+                        let trace = metal_cx.present_trace.clone();
                         let () = unsafe {
                             msg_send![
                                 drawable,
@@ -856,19 +881,9 @@ impl Cx {
                                             crate::startup_trace_flush("cumulative at first present");
                                         }
                                     }
-                                    // Actual GLASS times — the CPU trace's blind
-                                    // spot where dropped/slipped frames live.
-                                    if crate::makepad_error_log::trace_enabled("present") {
+                                    if let Some(trace) = &trace {
                                         let t: f64 = unsafe { msg_send![drawable_, presentedTime] };
-                                        static LAST: std::sync::atomic::AtomicU64 =
-                                            std::sync::atomic::AtomicU64::new(0);
-                                        let prev = f64::from_bits(LAST.swap(
-                                            t.to_bits(),
-                                            std::sync::atomic::Ordering::AcqRel,
-                                        ));
-                                        if prev > 0.0 && t > prev {
-                                            crate::trace!("present", "glass gap {:.2}ms", (t - prev) * 1000.0);
-                                        }
+                                        trace.presented(unsafe { CACurrentMediaTime() }, t);
                                     }
                                     if is_metal_link_drawable {
                                         metal_link_trace_presented();
@@ -886,6 +901,7 @@ impl Cx {
                             ]
                         };
                         let uniforms_gen = self.next_uniform_gen();
+                        if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::Draw); }
                         self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                         let presented = if link_drawable.is_some() {
                             // This drawable came from a CAMetalDisplayLink update,

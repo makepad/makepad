@@ -1054,6 +1054,7 @@ impl CxDrawListPool {
         frame: u64,
         mut take_backend: impl FnMut(DrawListId, usize, &mut CxOsDrawCall) -> P,
     ) -> bool {
+        self.1.retirement_queued.store(self.has_pending_instance_retirements(), Ordering::Release);
         if self.1.retirement_frame == Some(frame) {
             return self.has_pending_instance_retirements();
         }
@@ -1158,12 +1159,10 @@ impl CxDrawListPool {
             })
             .detach();
         }
-        self.1.retirement_queued.store(
-            self.2.is_some()
-                || self.0.has_pending_retirements()
-                || !self.3.values.borrow().is_empty(),
-            Ordering::Release,
-        );
+        // Settlement includes rotating scans and completion/metadata debt,
+        // not just the queue of freed CPU publications. Otherwise a view can
+        // announce rest while the backend still evicts on later paint beats.
+        self.1.retirement_queued.store(self.has_pending_instance_retirements(), Ordering::Release);
         self.has_pending_instance_retirements()
     }
     /// Snapshot only non-demanded owners. Callers supply world/camera distance
@@ -1193,6 +1192,46 @@ impl CxDrawListPool {
                 })
         });
         candidates
+    }
+    /// Bounded rotating inventory, ordered farthest first within each batch.
+    /// Large cold inventories cannot turn pressure into an all-owner sort on
+    /// the paint path. Repeated frames eventually visit every physical slot.
+    pub fn retained_eviction_batch(&mut self, max_lists: usize) -> (Vec<(DrawListId, std::ops::Range<usize>)>, bool) {
+        if self.1.eviction_cursor >= self.0.pool.len() {
+            self.1.eviction_cursor = 0;
+            self.1.eviction_item_cursor = 0;
+        }
+        if self.1.eviction_cursor == 0 && self.1.eviction_item_cursor == 0 {
+            self.1.eviction_cycle_has_victims = false;
+        }
+        let max_lists = max_lists.min(128usize.saturating_sub(self.1.eviction_scanned));
+        let mut candidates = Vec::with_capacity(max_lists);
+        for _ in 0..max_lists {
+            if self.1.eviction_cursor == self.0.pool.len() || self.1.eviction_items_scanned == 128 { break; }
+            let index = self.1.eviction_cursor;
+            let slot = &self.0.pool[index];
+            self.1.eviction_scanned += 1;
+            if slot.gpu_demand_epoch.get() != self.1.demand_epoch {
+                // Resume within a large physical list as well as between owners.
+                // Otherwise its first 128 empty slots can strand every later
+                // buffer forever and falsely certify a victim-free sweep.
+                let len = slot.draw_items.buffer.len();
+                let start = self.1.eviction_item_cursor.min(len);
+                let end = len.min(start + 128 - self.1.eviction_items_scanned);
+                self.1.eviction_items_scanned += end - start;
+                candidates.push((DrawListId(index, slot.generation), start..end));
+                if end < len {
+                    self.1.eviction_item_cursor = end;
+                    break;
+                }
+            }
+            self.1.eviction_cursor += 1;
+            self.1.eviction_item_cursor = 0;
+        }
+        candidates.sort_unstable_by(|(a,_),(b,_)| self[*b].gpu_eviction_distance.total_cmp(&self[*a].gpu_eviction_distance)
+            .then_with(|| self[*a].gpu_demand_epoch.get().cmp(&self[*b].gpu_demand_epoch.get())));
+        let complete = self.1.eviction_cursor == self.0.pool.len();
+        (candidates, complete)
     }
     pub fn retained_list_demanded(&self, id: DrawListId) -> bool {
         !self.is_id_freed(id) && self[id].gpu_demand_epoch.get() == self.1.demand_epoch
@@ -1360,7 +1399,9 @@ impl CxDrawListPool {
     }
 
     pub fn has_pending_instance_retirements(&self) -> bool {
-        self.1.working_set_scan_passes != 0
+        // Only a backend that built a physical working-set inventory has a
+        // rotating scan to drain. Software rasterization has no such backing.
+        (self.1.working_set_valid && self.1.working_set_scan_passes != 0)
             || self.1.allocations.has_pending_retirements()
             || self.2.is_some()
             || self.0.has_pending_retirements()
@@ -1539,6 +1580,9 @@ pub struct CxDrawItem {
     /// Explicitly prefetched LOD backing stays resident while this list is demanded.
     /// Off-demand and unused recording slots remain eligible for reclamation.
     pub retained_prefetched: bool,
+    /// Optional detail over an already painted surface. Missing backing may
+    /// defer this item, but must never hold the containing window's present.
+    pub retained_progressive: bool,
     pub redraw_id: u64,
     pub kind: CxDrawKind,
     // these values stick around to reduce buffer churn
@@ -1564,6 +1608,19 @@ pub struct CxDrawItem {
 }
 
 impl CxDrawItem {
+    /// Shared presentation policy, also used by the software recorder. Only
+    /// hosts that supply a stable underlying surface opt into progressive ink.
+    /// Ordinary surfaces/texture producers keep their complete-frame contract.
+    pub fn blocks_present(&self, resident_instances: usize) -> bool {
+        let Some(call) = self.kind.draw_call() else { return false; };
+        let slots = call.total_instance_slots;
+        if slots == 0 { return false; }
+        let wanted = self.retained_instances.as_ref().map_or_else(
+            || self.instances.as_ref().map_or(0, |v| v.len() / slots),
+            |_| self.retained_instance_count);
+        wanted != 0 && !(self.retained_progressive && self.retained_instances.is_some())
+            && (resident_instances == 0 || (self.instance_upload_pending && self.retained_instances.is_none()))
+    }
     pub fn retained_zero_ink(&self) -> bool {
         self.retained_instance_count == 0 && self.retained_instances.is_some()
     }
@@ -1979,6 +2036,7 @@ impl CxDrawItems {
                 retained_instance_id: 0,
                 retained_gpu_evicted: false,
                 retained_prefetched: false,
+                retained_progressive: false,
                 retained_schema: 0,
                 resident_schema: 0,
                 consumed_instance_id: 0,
@@ -2118,6 +2176,7 @@ impl CxDrawItems {
                 retained_instance_id: 0,
                 retained_gpu_evicted: false,
                 retained_prefetched: false,
+                retained_progressive: false,
                 retained_schema: 0,
                 resident_schema: 0,
                 consumed_instance_id: 0,
@@ -2135,6 +2194,7 @@ impl CxDrawItems {
             let draw_item = &mut self.buffer[draw_item_id];
             draw_item.retained_gpu_evicted = false;
             draw_item.retained_prefetched = false;
+            draw_item.retained_progressive = false;
             draw_item.instances.as_mut().unwrap().clear();
             draw_item
                 .instances
@@ -3111,6 +3171,10 @@ mod uniform_generation_tests {
             .push_item(1, CxDrawKind::DrawCall(call));
         item.retained_instances = Some(resource.clone());
         item.retained_schema = 7;
+        item.retained_instance_count = 1;
+        assert!(item.blocks_present(0), "ordinary surface must wait for its first backing");
+        item.retained_progressive = true;
+        assert!(!item.blocks_present(0), "optional detail must not hold the window");
         assert!(!item.retained_binding_ready());
         item.retained_instance_id = resource.id();
         item.resident_schema = 7;
@@ -3165,6 +3229,7 @@ mod uniform_generation_tests {
             "a reused slot is a different recording"
         );
         let item = &mut cx.draw_lists[list.id()].draw_items[0];
+        assert!(!item.retained_progressive, "slot reuse must reset the optional-detail policy");
         assert!(
             !item.draw_consumption_complete(100),
             "ordinary replacement cannot inherit the previous receipt"
@@ -3226,6 +3291,23 @@ mod uniform_generation_tests {
             children.len(),
             "continuous higher-priority work must not strand later requests"
         );
+        // A wide physical list needs the same bounded forward progress when
+        // evicting. Empty early slots must not hide later backing forever.
+        cx.draw_lists.1.demand_epoch = 1;
+        let mut retired_slots = std::collections::HashSet::new();
+        let mut complete = false;
+        for frame in 1..=40 {
+            cx.draw_lists.1.begin_frame(frame);
+            let (batch, done) = cx.draw_lists.retained_eviction_batch(128);
+            assert!(batch.len() <= 128);
+            assert!(batch.iter().map(|(_,range)|range.len()).sum::<usize>() <= 128);
+            for (id, range) in batch {
+                if id == root.id() { retired_slots.extend(range); }
+            }
+            if done { complete = true; break; }
+        }
+        assert!(complete, "bounded eviction must finish its physical inventory");
+        assert_eq!(retired_slots.len(), 900, "eviction must resume beyond the first 128 slots");
         // A publication larger than the frame cap remains admitted after a
         // partial copy. Exercise the collector, physical copies and receipt,
         // rather than only calling the allowance arithmetic.

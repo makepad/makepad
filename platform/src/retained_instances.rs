@@ -52,6 +52,30 @@ pub struct RetainedUploadStats {
     pub category_instances: [usize; 8],
 }
 
+/// One frame's physical maintenance allowance. A Metal buffer cannot be
+/// freed in pieces: an oversized unit runs alone, and is explicitly reported.
+/// All passes share the same counters; calling service twice grants no credit.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RetainedMaintenance {
+    pub bytes: usize,
+    pub buffers: usize,
+    pub largest_unit: usize,
+}
+impl RetainedMaintenance {
+    pub const MAX_BUFFERS: usize = 64;
+    pub fn can_admit(&self, bytes: usize, buffers: usize, limit: usize) -> bool {
+        buffers <= Self::MAX_BUFFERS.saturating_sub(self.buffers)
+            && (bytes <= limit.saturating_sub(self.bytes) || self.buffers == 0)
+    }
+    pub fn admit(&mut self, bytes: usize, buffers: usize, limit: usize) -> bool {
+        if !self.can_admit(bytes, buffers, limit) { return false; }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.buffers += buffers;
+        self.largest_unit = self.largest_unit.max(bytes);
+        true
+    }
+}
+
 #[derive(Debug)]
 pub struct RetainedUploadBudget {
     frame: Option<u64>,
@@ -76,6 +100,13 @@ pub struct RetainedUploadBudget {
     pub retirements: Arc<std::sync::atomic::AtomicUsize>,
     pub retirement_queued: Arc<std::sync::atomic::AtomicBool>,
     pub retirement_frame: Option<u64>,
+    pub eviction: RetainedMaintenance,
+    pub retirement: RetainedMaintenance,
+    pub eviction_cursor: usize,
+    pub eviction_item_cursor: usize,
+    pub eviction_scanned: usize,
+    pub eviction_items_scanned: usize,
+    pub eviction_cycle_has_victims: bool,
 }
 
 /// Physical backing allocations, including allocator rounding, spare buffers
@@ -215,6 +246,9 @@ impl<P> RetainedBufferPool<P> {
         }
         None
     }
+    pub fn largest_buffer_bytes(&self) -> Option<usize> {
+        self.classes.iter().enumerate().rev().find(|(_, items)| !items.is_empty()).map(|(class, _)| 1usize << class)
+    }
 }
 impl RetainedAllocationBudget {
     pub fn new(limit: usize) -> Self {
@@ -247,6 +281,10 @@ impl RetainedAllocationBudget {
     }
     pub fn limit(&self) -> usize {
         self.device_limit.unwrap_or(self.limit)
+    }
+    /// Existing Metal small-allocation threshold, shared with the recorder.
+    pub fn sync_allocation_bytes(&self) -> usize {
+        (self.limit() / 512).clamp(1 << 20, 16 << 20)
     }
     pub fn evicted_bytes(&self) -> usize {
         self.evicted_bytes
@@ -384,6 +422,13 @@ impl RetainedUploadBudget {
             retirements: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             retirement_queued: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             retirement_frame: None,
+            eviction: RetainedMaintenance::default(),
+            retirement: RetainedMaintenance::default(),
+            eviction_cursor: 0,
+            eviction_item_cursor: 0,
+            eviction_scanned: 0,
+            eviction_items_scanned: 0,
+            eviction_cycle_has_victims: false,
         }
     }
 
@@ -398,6 +443,10 @@ impl RetainedUploadBudget {
         self.frame = Some(frame);
         self.install_ns = 0;
         self.stats = Default::default();
+        self.eviction = RetainedMaintenance::default();
+        self.retirement = RetainedMaintenance::default();
+        self.eviction_scanned = 0;
+        self.eviction_items_scanned = 0;
         self.pending_bytes = 0;
     }
 
@@ -713,6 +762,16 @@ mod upload_tests {
             "never round an oversized record up"
         );
         let mut short = RetainedUploadBudget::new(1024);
+        short.begin_frame(99);
+        assert!(short.eviction.admit(1024, 1, short.limit));
+        short.begin_frame(99);
+        assert!(!short.eviction.admit(1, 1, short.limit), "another pass cannot renew maintenance credit");
+        short.begin_frame(100);
+        assert!(short.eviction.admit(4096, 1, short.limit), "indivisible oversized allocation must eventually retire");
+        assert!(!short.eviction.admit(1, 1, short.limit), "oversized allocation must run alone");
+        assert_eq!(short.eviction.largest_unit, 4096);
+        for _ in 0..RetainedMaintenance::MAX_BUFFERS {assert!(short.retirement.admit(1, 1, short.limit));}
+        assert!(!short.retirement.admit(1, 1, short.limit), "small buffers still obey the handle bound");
         for frame in 0..2 {
             short.begin_frame(frame);
             for _ in 0..4 {
