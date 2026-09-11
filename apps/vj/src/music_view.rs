@@ -3609,6 +3609,20 @@ script_mod! {
                                     height: 22
                                     labels: ["Tap locks" "Hold locks"]
                                 }
+                                // How much of a record the zoomed lanes show,
+                                // in seconds across their width. A wheel over
+                                // a lane still does it; this is the same value
+                                // where a hand can see it, a controller can
+                                // reach it, and shift puts it back.
+                                wave_zoom_learn := Learn{
+                                    wave_zoom_knob := DropSlider{
+                                        min: 1.5
+                                        max: 10.0
+                                        default: 8.0
+                                        suffix: "s"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/waveform.svg") }
+                                    }
+                                }
                                 // Latched, the deck a picked track lands on starts as
                                 // soon as its decode finishes — "select and it plays".
                                 // An EJECT turned a quarter turn: the bar leads,

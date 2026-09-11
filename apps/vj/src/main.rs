@@ -6696,7 +6696,7 @@ const LANE_CHIPS: [(&[LiveId], GridLane, &str); 6] = [
 /// it is: a knob reads its number as its binding says, a wheel is a
 /// knob whose turns are jogs, and a button carries the press that is
 /// its own until a binding says otherwise.
-const LEARNABLES: [(&[LiveId], &str, Learnable); 23] = [
+const LEARNABLES: [(&[LiveId], &str, Learnable); 24] = [
     (ids!(video_fade_learn), "video_fade", Learnable::Knob),
     (ids!(xfader_learn), "xfader", Learnable::Knob),
     (ids!(master_learn), "master", Learnable::Knob),
@@ -6720,6 +6720,7 @@ const LEARNABLES: [(&[LiveId], &str, Learnable); 23] = [
     (ids!(fx_slot_b_d1_learn), "fx_b_d1", Learnable::Knob),
     (ids!(fx_slot_b_d2_learn), "fx_b_d2", Learnable::Knob),
     (ids!(fadeout_learn), "fadeout", Learnable::Knob),
+    (ids!(wave_zoom_learn), "wave_zoom", Learnable::Knob),
 ];
 
 /// Which of a learned control's values a turn moves from. One row per
@@ -6728,6 +6729,7 @@ const LEARNABLES: [(&[LiveId], &str, Learnable); 23] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadSide {
     VideoFade,
+    WaveZoom,
     ProgramMix,
     Fadeout,
     Master,
@@ -6762,6 +6764,7 @@ fn read_side(control: &str) -> Option<ReadSide> {
         "video_fade" => ReadSide::VideoFade,
         "xfader" => ReadSide::ProgramMix,
         "fadeout" => ReadSide::Fadeout,
+        "wave_zoom" => ReadSide::WaveZoom,
         "master" => ReadSide::Master,
         "autofade" | "deck_a_play" | "deck_b_play" | "deck_a_rev" | "deck_b_rev" => ReadSide::Button,
         "deck_a_wheel" | "deck_b_wheel" => ReadSide::Wheel,
@@ -8977,6 +8980,20 @@ fn net_beat_info(net: NetClock, now: Instant) -> Option<BeatInfo> {
         beat_index: (next.max(0.0) as u64) % BAR_BEATS,
         beats_observed: position.max(0.0) as u64,
     })
+}
+
+/// The lane's zoom as a knob reads it: 0 is the closest look at a record
+/// and 1 the widest. Its own unit is seconds across the lane, which is
+/// what the chip shows and what is written down.
+fn zoom_to_unit(secs: f64) -> f64 {
+    let span = crate::music_view::ZOOM_MAX_SECS - crate::music_view::ZOOM_MIN_SECS;
+    ((secs - crate::music_view::ZOOM_MIN_SECS) / span).clamp(0.0, 1.0)
+}
+
+fn unit_to_zoom(unit: f64) -> f64 {
+    let span = crate::music_view::ZOOM_MAX_SECS - crate::music_view::ZOOM_MIN_SECS;
+    (crate::music_view::ZOOM_MIN_SECS + unit.clamp(0.0, 1.0) * span)
+        .clamp(crate::music_view::ZOOM_MIN_SECS, crate::music_view::ZOOM_MAX_SECS)
 }
 
 /// How far one press walks the grid, and how far it walks with shift
@@ -12743,6 +12760,9 @@ impl App {
             Some(ReadSide::VideoFade) => ((self.fade_secs - 0.05) / (5.0 - 0.05)).clamp(0.0, 1.0),
             Some(ReadSide::ProgramMix) => self.program_mix,
             Some(ReadSide::Fadeout) => self.fadeout,
+            // The lane's zoom is seconds across its width, read back over
+            // the range the operator can actually ask for.
+            Some(ReadSide::WaveZoom) => zoom_to_unit(self.wave_zoom_secs) as f32,
             // The mixer's master is a command with no cell to read back;
             // the on-screen slider is written by every route that sets it.
             Some(ReadSide::Master) => {
@@ -12796,6 +12816,9 @@ impl App {
             }
             "fadeout" => {
                 self.set_fadeout(cx, v);
+            }
+            "wave_zoom" => {
+                self.set_wave_zoom(cx, unit_to_zoom(v as f64));
             }
             "autofade" => {
                 // A press does what the binding says to the AUTOFADE latch;
@@ -18823,6 +18846,10 @@ p2 {}
     /// Mirror engine deck state into the toggle/slider widgets (after swap,
     /// and at install) so the controls always show the deck they control.
     fn sync_deck_controls(&mut self, cx: &mut Cx) {
+        // The zoom chip carries a live readout of a value three hands can
+        // move; the setter refuses a value it is already showing, and a
+        // chip being dragged refuses one altogether.
+        self.set_drop_slider(cx, ids!(wave_zoom_knob), self.wave_zoom_secs);
         for (deck, gain_id, pitch_id) in [
             (DeckId::A, ids!(deck_a_gain), ids!(deck_a_pitch)),
             (DeckId::B, ids!(deck_b_gain), ids!(deck_b_pitch)),
@@ -19179,6 +19206,22 @@ p2 {}
     /// is thrown away whenever a detector changes; a hand's correction
     /// goes beside the marks, where operator work lives and where it
     /// outranks whatever the analysis says next time.
+    /// How much of a record the zoomed lanes show. One way in for every
+    /// hand that can ask: the wheel over a lane, the chip beside the load
+    /// policy, and whatever a controller has been taught to drive.
+    fn set_wave_zoom(&mut self, cx: &mut Cx, secs: f64) {
+        let secs = secs.clamp(crate::music_view::ZOOM_MIN_SECS, crate::music_view::ZOOM_MAX_SECS);
+        if (secs - self.wave_zoom_secs).abs() < 1e-9 {
+            return;
+        }
+        self.wave_zoom_secs = secs;
+        if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
+            scroll.set_zoom(cx, secs);
+        }
+        self.set_drop_slider(cx, ids!(wave_zoom_knob), secs);
+        self.save_preprocess_settings();
+    }
+
     fn apply_grid_edit(&mut self, cx: &mut Cx, deck: DeckId, edit: crate::decks::GridEdit) {
         let Some((grid, cmds)) = self.decks.edit_grid(deck, edit) else { return };
         self.run_deck_cmds(cx, cmds);
@@ -34116,6 +34159,9 @@ p2 {}
                     // hang it on and the file is small.
                     if (secs - self.wave_zoom_secs).abs() > 1e-9 {
                         self.wave_zoom_secs = secs;
+                        // The chip shows the same number, whichever hand
+                        // moved it.
+                        self.set_drop_slider(cx, ids!(wave_zoom_knob), secs);
                         self.save_preprocess_settings();
                     }
                 }
@@ -35704,6 +35750,9 @@ impl MatchEvent for App {
         if let Some(v) = self.drop_slider_changed(cx, ids!(fadeout_knob), actions) {
             self.set_fadeout(cx, v as f32);
         }
+        if let Some(v) = self.drop_slider_changed(cx, ids!(wave_zoom_knob), actions) {
+            self.set_wave_zoom(cx, v);
+        }
         if let Some(v) = self.ui.slider(cx, ids!(video_fade)).slided(actions) {
             self.fade_secs = v as f32;
             self.ui
@@ -36827,11 +36876,13 @@ impl AppMain for App {
         crate::flow_tween::script_mod(vm);
         makepad_score_view::script_mod(vm);
         makepad_ai_hub_ui::script_mod(vm);
+        // Before every module whose markup wraps a control in it: the
+        // learn wrapper has to exist by the time a page asks for one.
+        crate::midi_learn::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);
         crate::fx_slot::script_mod(vm);
-        crate::midi_learn::script_mod(vm);
         crate::synth_ui::script_mod(vm);
         self::script_mod(vm)
     }
@@ -38257,6 +38308,34 @@ mod sync_tests {
     /// has reached, and the next beat where the sender's next tick is due.
     /// It expires rather than coasting -- a sender that stops without
     /// saying so must not keep the grid moving.
+    /// The zoom a knob reads and the zoom the lane is drawn at are the
+    /// same number in two units, and the conversion has to survive the
+    /// round trip or a mapped knob would walk the value every time it was
+    /// read back and written again.
+    #[test]
+    fn the_lanes_zoom_reads_back_as_the_knob_position_that_set_it() {
+        use crate::music_view::{ZOOM_DEFAULT_SECS, ZOOM_MAX_SECS, ZOOM_MIN_SECS};
+        assert!((unit_to_zoom(0.0) - ZOOM_MIN_SECS).abs() < 1e-12, "the closest look");
+        assert!((unit_to_zoom(1.0) - ZOOM_MAX_SECS).abs() < 1e-12, "and the widest");
+        assert!((zoom_to_unit(ZOOM_MIN_SECS) - 0.0).abs() < 1e-12);
+        assert!((zoom_to_unit(ZOOM_MAX_SECS) - 1.0).abs() < 1e-12);
+        for unit in [0.0, 0.13, 0.5, 0.764, 1.0] {
+            let back = zoom_to_unit(unit_to_zoom(unit));
+            assert!((back - unit).abs() < 1e-12, "{unit} came back as {back}");
+        }
+        // The default is a position on the knob like any other.
+        let unit = zoom_to_unit(ZOOM_DEFAULT_SECS);
+        assert!((0.0..=1.0).contains(&unit));
+        assert!((unit_to_zoom(unit) - ZOOM_DEFAULT_SECS).abs() < 1e-12);
+        // Anything outside the range is pulled to its end rather than
+        // wrapping or being refused: a knob cannot ask for more than the
+        // ends, but a settings file written by hand can.
+        assert!((unit_to_zoom(-3.0) - ZOOM_MIN_SECS).abs() < 1e-12);
+        assert!((unit_to_zoom(9.0) - ZOOM_MAX_SECS).abs() < 1e-12);
+        assert_eq!(zoom_to_unit(0.0), 0.0);
+        assert_eq!(zoom_to_unit(1000.0), 1.0);
+    }
+
     /// The count lamp flashes on every count and stays on longer for the
     /// first of the lap, which is the only way a lamp with one brightness
     /// can tell them apart. A record that is not moving does not count.

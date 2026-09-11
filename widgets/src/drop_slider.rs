@@ -332,6 +332,18 @@ impl Widget for DropSlider {
                 self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
                 self.draw_bg.redraw(cx);
             }
+            Hit::FingerDown(fe) if fe.modifiers.shift => {
+                // A chip with a marked default should have a way back to it
+                // that is not aim: shift on the chip is it, and the popover
+                // stays as it was so a hand can carry on from the default.
+                let value = self.default.clamp(self.min, self.max);
+                self.value_init = true;
+                if (value - self.value).abs() > f64::EPSILON {
+                    self.value = value;
+                    cx.widget_action(uid, DropSliderAction::Changed(value));
+                    self.redraw_all(cx);
+                }
+            }
             Hit::FingerDown(_) => {
                 self.set_open(cx, !self.open);
             }
