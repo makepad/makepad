@@ -120,13 +120,14 @@ use current source for API signatures and working examples.
   visual verification is needed. Avoid unrelated or routine captures.
 - Command-line builds, tests, linting, and file operations run directly in
   the shell.
-- Rendering is verified on the real GPU backend, never on the headless
-  raster (user, 2026-09-11: "chasing bugs in headless is useless"). Any
+- Rendering is verified on the real GPU backend, never on the gpusim
+  raster (the CPU simulated-GPU backend, `MAKEPAD=gpusim`, formerly called
+  "headless"; user, 2026-09-11: "chasing bugs in headless is useless"). Any
   picture, pixel, outline, colour, LOD, tile or frame-timing question is
   answered with an owned `--remote` instance of the release build on the
   native backend (Metal here) and `/g` / `/gseq` grabs, compared in RGB.
-  `MAKEPAD=headless` suites are for logic and data-structure tests only
-  (layout, budgets, orderings, parsers); a headless raster gate never
+  `MAKEPAD=gpusim` suites are for logic and data-structure tests only
+  (layout, budgets, orderings, parsers); a gpusim raster gate never
   stands in for a GPU proof and is never used to diagnose a rendering bug.
   The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
   on the native backend is the normal pixel-proof rig; `/g` forces a present

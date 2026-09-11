@@ -67,7 +67,7 @@ pub struct TestConfig {
     pub test_name: String,
     pub artifacts_dir: PathBuf,
     /// Extra environment for the app process. `CARGO_TARGET_DIR`, when set,
-    /// also applies to the build. `MAKEPAD_HEADLESS_DPI=N` scales screenshots
+    /// also applies to the build. `MAKEPAD_GPUSIM_DPI=N` scales screenshots
     /// to N pixels per layout point.
     pub env: HashMap<String, String>,
     /// Extra arguments appended after `--remote`.
@@ -138,12 +138,12 @@ impl TestConfig {
         }
     }
 
-    /// Screenshot scale that honours `MAKEPAD_HEADLESS_DPI` from `env`: the
+    /// Screenshot scale that honours `MAKEPAD_GPUSIM_DPI` from `env`: the
     /// old software backend rendered at that dpi, so a suite that asked for
     /// `1` expects layout points to equal PNG pixels.
     fn requested_screenshot_dpi(&self) -> Option<f64> {
         self.env
-            .get("MAKEPAD_HEADLESS_DPI")
+            .get("MAKEPAD_GPUSIM_DPI")
             .and_then(|value| value.trim().parse::<f64>().ok())
             .filter(|dpi| *dpi > 0.0)
     }
@@ -1385,12 +1385,12 @@ mod tests {
     }
 
     #[test]
-    fn headless_dpi_env_scales_screenshots() {
+    fn gpusim_dpi_env_scales_screenshots() {
         let mut config =
             TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
         config
             .env
-            .insert("MAKEPAD_HEADLESS_DPI".to_string(), "1".to_string());
+            .insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
         assert_eq!(config.requested_screenshot_dpi(), Some(1.0));
     }
 

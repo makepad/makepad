@@ -116,12 +116,12 @@ backend cannot grab; do not replace a failed grab with an OS screenshot.
   not redrawing, `/gseq` can time out ("grab timeout"). Rest/settle timing
   proofs need a window that presents on its own (the user's, or a visible
   unfocused one).
-- `MAKEPAD=headless` builds the simulated-GPU backend (`cfg(headless)`,
-  `platform/src/os/headless/`): a CPU raster that writes frames to files
+- `MAKEPAD=gpusim` builds the simulated-GPU backend (`cfg(gpusim)`,
+  `platform/src/os/gpusim/`): a CPU raster that writes frames to files
   with no window, no Metal shader compile and no presentation. It is for
   logic and data-structure tests only. Never use it to prove a picture or to
   chase a rendering bug, and never build it into the shared `target/`
-  (`CARGO_TARGET_DIR=target-headless`).
+  (`CARGO_TARGET_DIR=target-gpusim`).
 - Known remote hazards: a hidden-window click is occasionally lost
   (`Event::MouseDown` never arrives) — relaunch before debugging the widget;
   tick-sampled keys need `/k?k=down` … ≥150 ms … `/k?k=up`, a `press` lands

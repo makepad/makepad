@@ -21,7 +21,7 @@ impl UniformBuffer {
     pub fn release_if_unused(&self, cx: &mut Cx) -> Option<Vec<u8>> {
         if self.readers() != 1
             || cfg!(all(
-                not(headless),
+                not(gpusim),
                 any(use_vulkan, linux_direct, target_env = "ohos")
             ))
         {
@@ -29,7 +29,7 @@ impl UniformBuffer {
         }
         let submitted = cx.frame_submission_serial();
         #[cfg(all(
-            not(headless),
+            not(gpusim),
             any(target_os = "macos", target_os = "ios", target_os = "tvos")
         ))]
         let submitted = submitted.max(
@@ -44,7 +44,7 @@ impl UniformBuffer {
         }
         let id = self.uniform_buffer_id();
         #[cfg(all(
-            not(headless),
+            not(gpusim),
             not(use_vulkan),
             not(linux_direct),
             not(target_env = "ohos"),

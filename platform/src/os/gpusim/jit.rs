@@ -2,20 +2,20 @@ use std::ffi::{c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub struct HeadlessShaderJit {
+pub struct GpusimShaderJit {
     root_dir: PathBuf,
 }
 
-pub struct HeadlessJitOutput {
+pub struct GpusimJitOutput {
     pub dylib_path: PathBuf,
-    pub module: Option<HeadlessLoadedModule>,
+    pub module: Option<GpusimLoadedModule>,
     pub shader_version: Option<u32>,
     pub load_error: Option<String>,
 }
 
-impl Default for HeadlessShaderJit {
+impl Default for GpusimShaderJit {
     fn default() -> Self {
-        let root_dir = std::env::var("MAKEPAD_HEADLESS_JIT_DIR")
+        let root_dir = std::env::var("MAKEPAD_GPUSIM_JIT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_jit_root_dir());
         Self { root_dir }
@@ -24,20 +24,20 @@ impl Default for HeadlessShaderJit {
 
 fn default_jit_root_dir() -> PathBuf {
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        return PathBuf::from(target_dir).join("makepad-headless-jit");
+        return PathBuf::from(target_dir).join("makepad-gpusim-jit");
     }
     if let Ok(cwd) = std::env::current_dir() {
-        return cwd.join("target").join("makepad-headless-jit");
+        return cwd.join("target").join("makepad-gpusim-jit");
     }
-    PathBuf::from("target/makepad-headless-jit")
+    PathBuf::from("target/makepad-gpusim-jit")
 }
 
-impl HeadlessShaderJit {
+impl GpusimShaderJit {
     pub fn compile_and_load(
         &self,
         source_hash: u64,
         source: &str,
-    ) -> Result<HeadlessJitOutput, String> {
+    ) -> Result<GpusimJitOutput, String> {
         let shader_dir = self.root_dir.join(format!("shader_{source_hash:016x}"));
         let cached_path =
             shader_dir.join(format!("shader_{source_hash:016x}.{}", dylib_extension()));
@@ -45,13 +45,13 @@ impl HeadlessShaderJit {
         // The dylib is content-addressed by the hash of the source that made it,
         // so one left by an earlier run is exactly what rustc would produce now.
         // Reuse it: this compiles EVERY shader with `rustc -O` at startup, which
-        // costs tens of seconds per process — and a headless test suite starts a
+        // costs tens of seconds per process — and a gpusim test suite starts a
         // fresh process for every test. Anything unloadable (truncated by a killed
         // run, built by a different toolchain) just falls through and recompiles.
         if cached_path.is_file() {
-            if let Ok(loaded) = HeadlessLoadedModule::load(&cached_path) {
+            if let Ok(loaded) = GpusimLoadedModule::load(&cached_path) {
                 if let Ok(version) = loaded.shader_version() {
-                    return Ok(HeadlessJitOutput {
+                    return Ok(GpusimJitOutput {
                         dylib_path: cached_path,
                         module: Some(loaded),
                         shader_version: Some(version),
@@ -63,7 +63,7 @@ impl HeadlessShaderJit {
 
         std::fs::create_dir_all(&shader_dir).map_err(|err| {
             format!(
-                "failed to create headless shader output dir `{}`: {err}",
+                "failed to create gpusim shader output dir `{}`: {err}",
                 shader_dir.display()
             )
         })?;
@@ -71,7 +71,7 @@ impl HeadlessShaderJit {
         let source_path = shader_dir.join("lib.rs");
         std::fs::write(&source_path, source).map_err(|err| {
             format!(
-                "failed to write generated headless shader source `{}`: {err}",
+                "failed to write generated gpusim shader source `{}`: {err}",
                 source_path.display()
             )
         })?;
@@ -86,7 +86,7 @@ impl HeadlessShaderJit {
             dylib_extension()
         ));
 
-        let crate_name = format!("makepad_headless_shader_{source_hash:016x}");
+        let crate_name = format!("makepad_gpusim_shader_{source_hash:016x}");
         let output = Command::new("rustc")
             .arg("--edition=2021")
             .arg("--crate-type")
@@ -99,14 +99,14 @@ impl HeadlessShaderJit {
             .arg(&staging_path)
             .output()
             .map_err(|err| {
-                format!("failed to run rustc for headless shader JIT `{crate_name}`: {err}")
+                format!("failed to run rustc for gpusim shader JIT `{crate_name}`: {err}")
             })?;
 
         if !output.status.success() {
             let _ = std::fs::remove_file(&staging_path);
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
-                "headless shader JIT compile failed for `{}`:\n{}",
+                "gpusim shader JIT compile failed for `{}`:\n{}",
                 dylib_path.display(),
                 stderr.trim()
             ));
@@ -114,7 +114,7 @@ impl HeadlessShaderJit {
 
         std::fs::rename(&staging_path, &dylib_path).map_err(|err| {
             format!(
-                "failed to publish headless shader dylib `{}`: {err}",
+                "failed to publish gpusim shader dylib `{}`: {err}",
                 dylib_path.display()
             )
         })?;
@@ -123,7 +123,7 @@ impl HeadlessShaderJit {
         let mut shader_version = None;
         let mut module = None;
 
-        match HeadlessLoadedModule::load(&dylib_path) {
+        match GpusimLoadedModule::load(&dylib_path) {
             Ok(loaded) => {
                 shader_version = loaded.shader_version().ok();
                 module = Some(loaded);
@@ -133,7 +133,7 @@ impl HeadlessShaderJit {
             }
         }
 
-        Ok(HeadlessJitOutput {
+        Ok(GpusimJitOutput {
             dylib_path,
             module,
             shader_version,
@@ -160,12 +160,12 @@ fn dylib_extension() -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-pub struct HeadlessLoadedModule {
+pub struct GpusimLoadedModule {
     handle: std::ptr::NonNull<c_void>,
 }
 
 #[cfg(target_os = "macos")]
-impl HeadlessLoadedModule {
+impl GpusimLoadedModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         const RTLD_NOW: i32 = 2;
         let c_path = CString::new(path.to_string_lossy().as_bytes())
@@ -177,7 +177,7 @@ impl HeadlessLoadedModule {
 
     pub fn shader_version(&self) -> Result<u32, String> {
         type VersionFn = unsafe extern "C" fn() -> u32;
-        let version_fn: VersionFn = self.symbol("makepad_headless_shader_version")?;
+        let version_fn: VersionFn = self.symbol("makepad_gpusim_shader_version")?;
         Ok(unsafe { version_fn() })
     }
 
@@ -186,7 +186,7 @@ impl HeadlessLoadedModule {
         let ptr = unsafe { dlsym(self.handle.as_ptr(), name.as_ptr()) };
         if ptr.is_null() {
             return Err(format!(
-                "symbol `{symbol}` missing in headless shader module: {}",
+                "symbol `{symbol}` missing in gpusim shader module: {}",
                 last_dlerror()
             ));
         }
@@ -195,7 +195,7 @@ impl HeadlessLoadedModule {
 }
 
 #[cfg(target_os = "macos")]
-impl Drop for HeadlessLoadedModule {
+impl Drop for GpusimLoadedModule {
     fn drop(&mut self) {
         unsafe {
             dlclose(self.handle.as_ptr());
@@ -223,18 +223,18 @@ unsafe extern "C" {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub struct HeadlessLoadedModule;
+pub struct GpusimLoadedModule;
 
 #[cfg(not(target_os = "macos"))]
-impl HeadlessLoadedModule {
+impl GpusimLoadedModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         Err(format!(
-            "headless shader dlopen is only implemented on macOS for now (`{}`)",
+            "gpusim shader dlopen is only implemented on macOS for now (`{}`)",
             path.display()
         ))
     }
 
     pub fn shader_version(&self) -> Result<u32, String> {
-        Err("headless shader version lookup is only implemented on macOS for now".to_string())
+        Err("gpusim shader version lookup is only implemented on macOS for now".to_string())
     }
 }

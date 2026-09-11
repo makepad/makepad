@@ -6,7 +6,7 @@ edition = "2021"
 description = "Fab digital-fabrication and architecture application"
 license = "MIT OR Apache-2.0"
 # src/bin/frames_to_mp4.rs makes this a two-binary package; without this,
-# `cargo run -p makepad-fab` (the headless test harness) refuses to
+# `cargo run -p makepad-fab` (the gpusim test harness) refuses to
 # guess and demands --bin.
 default-run = "makepad-fab"
 
@@ -26,7 +26,7 @@ makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-raytrace = { path = "../../libs/raytrace", version = "0.1.0" }
 
-# The headless harness (`MAKEPAD=headless`) execs one `target/release/<bin>`
+# The gpusim harness (`MAKEPAD=gpusim`) execs one `target/release/<bin>`
 # chosen from this manifest: a lone `[[bin]]` is treated as the whole package,
 # so the UI binary has to be named here or `frames_to_mp4` is launched instead.
 [[bin]]

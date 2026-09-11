@@ -237,7 +237,7 @@ resulting frame. Rectangles are window-local layout points; do not apply DPI
 conversion to clicks.
 
 Screenshots are captured from the app's own drawable. Setting
-`TestConfig::env["MAKEPAD_HEADLESS_DPI"]` to a positive number scales screenshots
+`TestConfig::env["MAKEPAD_GPUSIM_DPI"]` to a positive number scales screenshots
 to that pixel density for existing suites; it does not select a software
 renderer or change the native window's DPI.
 

@@ -53,7 +53,7 @@ mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
-#[cfg(all(not(headless), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(all(not(gpusim), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;
 pub mod component;

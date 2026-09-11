@@ -1890,7 +1890,7 @@ impl ShaderFnCompiler {
                             }
                         }
                         ShaderBackend::Rust => {
-                            // Rust headless backend keeps texture data in logical RGBA,
+                            // Rust gpusim backend keeps texture data in logical RGBA,
                             // so sample_as_bgra is a no-op alias of sample. The
                             // sampler STATE is not: `sample_nearest` means an exact
                             // texel fetch (every data pass depends on it) and only

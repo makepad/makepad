@@ -1,7 +1,7 @@
 use crate::event::game_input::GameInputState;
 
 #[cfg(any(
-    headless,
+    gpusim,
     not(any(
         target_os = "windows",
         target_os = "macos",
@@ -48,7 +48,7 @@ pub trait CxGameInputApi {
 }
 
 #[cfg(any(
-    headless,
+    gpusim,
     not(any(
         target_os = "windows",
         target_os = "macos",
@@ -59,7 +59,7 @@ pub trait CxGameInputApi {
 /// These platforms have no native game-input backend, but an app hosted by
 /// Studio still gets controllers: Studio reads them and forwards the state, so
 /// a Linux app run from Studio on a machine whose Studio can see a pad works
-/// even though the same app run standalone would see nothing. The headless
+/// even though the same app run standalone would see nothing. The gpusim
 /// backend also has no native game input and uses the same remote fallback.
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {

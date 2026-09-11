@@ -33,7 +33,7 @@ pub struct CxDrawShaderOptions {
     /// blending disabled (BGRA8 window targets only; data formats keep their
     /// never-blending pipeline), D3D11 binds a blend state with BlendEnable
     /// off, Vulkan keys its pipeline on the flag, GL and WebGL toggle
-    /// GL_BLEND around the call, and the headless rasteriser blends only
+    /// GL_BLEND around the call, and the gpusim rasteriser blends only
     /// when the target is BGRA8 AND the flag is set. With `true`, GL, WebGL,
     /// D3D11 and Vulkan blend into any target format the pass gives them;
     /// only Metal's data formats stay unblended. Shaders declared with
@@ -558,7 +558,7 @@ impl DrawShaderInputs {
         hash
     }
 
-    /// Decode one packed vertex into f32 logical slots (headless fetch).
+    /// Decode one packed vertex into f32 logical slots (gpusim fetch).
     pub fn decode_vertex_f32(&self, vertex_bytes: &[u8], dst: &mut [f32]) {
         for input in &self.inputs {
             let end = (input.byte_offset + input.byte_size).min(vertex_bytes.len());
@@ -859,7 +859,7 @@ pub struct CxDrawShaderMapping {
     pub scope_uniforms_gen: u64,
     pub geometry_id: Option<GeometryId>,
     /// Total f32 slots in the varying buffer (instances + explicit varyings).
-    /// Set by the headless backend during shader compilation.
+    /// Set by the gpusim backend during shader compilation.
     pub varying_total_slots: usize,
     /// The color-attachment format this shader's pipeline targets.
     pub color_format: DrawShaderColorFormat,

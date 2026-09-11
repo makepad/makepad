@@ -1,10 +1,10 @@
 //! Headless, release-only scheduling gate. `--baseline` records without gating.
-#[cfg(not(headless))]
+#[cfg(not(gpusim))]
 fn main() {
-    eprintln!("pool_latency: use MAKEPAD=headless cargo test --release -p makepad-platform --test pool_latency");
+    eprintln!("pool_latency: use MAKEPAD=gpusim cargo test --release -p makepad-platform --test pool_latency");
 }
 
-#[cfg(headless)]
+#[cfg(gpusim)]
 fn main() {
     use makepad_platform::{
         thread::{machine_topology, Lane, PriorityStatus, ShutdownMode},

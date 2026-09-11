@@ -828,7 +828,7 @@ pub fn define_shader_builtins(
     );
     // Packed-attribute unpackers: two f16s / four unorm8s bitcast into one
     // f32 slot. CPU impls mirror the GPU helpers bit-exactly for the
-    // headless runtime.
+    // gpusim runtime.
     native.add_method(
         heap,
         math,

@@ -874,11 +874,11 @@ fn decode_timing_start() -> Option<f64> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn headless_mode_enabled() -> bool {
+fn gpusim_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("MAKEPAD")
-            .map(|value| value.eq_ignore_ascii_case("headless"))
+            .map(|value| value.eq_ignore_ascii_case("gpusim"))
             .unwrap_or(false)
     })
 }
@@ -1984,12 +1984,12 @@ where
     }
 
     // On wasm, decode synchronously on the UI thread since thread pools
-    // are not reliably available. Also decode synchronously for headless
+    // are not reliably available. Also decode synchronously for gpusim
     // single-frame runs so textured output is available in the first emitted PNG.
     #[cfg(target_arch = "wasm32")]
     let force_sync = true;
     #[cfg(not(target_arch = "wasm32"))]
-    let force_sync = headless_mode_enabled();
+    let force_sync = gpusim_mode_enabled();
 
     if force_sync {
         let image = decode_image_buffer(image_path, bytes)?;

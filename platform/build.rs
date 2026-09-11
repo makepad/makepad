@@ -125,7 +125,7 @@ fn main() {
     }
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icon_gen).unwrap();
 
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,gpusim,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
     println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_NAME");
@@ -145,7 +145,7 @@ fn main() {
                 }
                 "apple_bundle" => println!("cargo:rustc-cfg=apple_bundle"),
                 "ohos_sim" => println!("cargo:rustc-cfg=ohos_sim"),
-                "headless" => println!("cargo:rustc-cfg=headless"),
+                "gpusim" => println!("cargo:rustc-cfg=gpusim"),
                 "use_gles_3" => println!("cargo:rustc-cfg=use_gles_3"),
                 "vulkan" | "use_vulkan" => println!("cargo:rustc-cfg=use_vulkan"),
                 _ => {}

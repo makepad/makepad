@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)]
-#![cfg(headless)]
+#![cfg(gpusim)]
 
 use makepad_xr::makepad_widgets::*;
 use makepad_xr::{net::*, scene::*};
@@ -1044,7 +1044,7 @@ fn run_shared_cube_test_app(config: SharedCubeUiAppConfig) -> SharedCubeUiAppRep
         cx_ref.init_cx_os();
     }
 
-    Cx::headless_no_draw_event_loop_for_draw_cycles(cx.clone(), TEST_DRAW_CYCLES);
+    Cx::gpusim_no_draw_event_loop_for_draw_cycles(cx.clone(), TEST_DRAW_CYCLES);
 
     match report_rx.recv_timeout(TEST_IO_TIMEOUT) {
         Ok(report) => report,
@@ -1055,18 +1055,18 @@ fn run_shared_cube_test_app(config: SharedCubeUiAppConfig) -> SharedCubeUiAppRep
                 if let Some(app) = app_ref_borrow.as_mut() {
                     app.debug_state(&mut cx_ref)
                 } else {
-                    "app missing after bounded headless loop".to_string()
+                    "app missing after bounded gpusim loop".to_string()
                 }
             };
             panic!(
-                "shared-cube test app should report before the bounded headless loop exits: {debug_state}"
+                "shared-cube test app should report before the bounded gpusim loop exits: {debug_state}"
             );
         }
     }
 }
 
 #[test]
-fn single_headless_shared_cube_app_grabs_moves_and_releases_cube() {
+fn single_gpusim_shared_cube_app_grabs_moves_and_releases_cube() {
     let _guard = UI_SHARED_OBJECT_TEST_LOCK.lock().unwrap();
     let report = run_shared_cube_test_app(SharedCubeUiAppConfig {
         role: SharedCubeUiRole::Initiator,
@@ -1103,7 +1103,7 @@ fn single_headless_shared_cube_app_grabs_moves_and_releases_cube() {
 }
 
 #[test]
-fn two_headless_shared_cube_apps_take_over_and_release_cube_over_loopback() {
+fn two_gpusim_shared_cube_apps_take_over_and_release_cube_over_loopback() {
     let _guard = UI_SHARED_OBJECT_TEST_LOCK.lock().unwrap();
     let initiator_thread = thread::spawn(|| {
         run_shared_cube_test_app(SharedCubeUiAppConfig {

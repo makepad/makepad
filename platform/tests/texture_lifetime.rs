@@ -1,7 +1,7 @@
-//! Run with CARGO_TARGET_DIR=target-headless MAKEPAD=headless RUSTFLAGS='--cfg headless' cargo test --release
+//! Run with CARGO_TARGET_DIR=target-gpusim MAKEPAD=gpusim RUSTFLAGS='--cfg gpusim' cargo test --release
 //! -p makepad-platform --test texture_lifetime. No window, capture or JIT is
 //! needed: an empty draw list exercises the real render-pass clear/allocation.
-#![cfg(headless)]
+#![cfg(gpusim)]
 use makepad_platform::*;
 use makepad_platform::os::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, TEXTURE_READBACK_MAX_BYTES};
 
@@ -49,11 +49,11 @@ fn released_render_texture_reallocates_fifty_sizes_without_retaining_storage() {
         pass.set_size(&mut cx, dvec2(size as f64, size as f64));
         cx.passes[pass.draw_pass_id()].dpi_factor = Some(1.0);
         cx.passes[pass.draw_pass_id()].paint_dirty = true;
-        cx.headless_render_all_passes(iteration as f64);
+        cx.gpusim_render_all_passes(iteration as f64);
         let submitted = cx.frame_submission_serial();
         assert!(submitted > last_serial);
         assert_eq!(cx.frame_completion_serial(), submitted);
-        // Headless stores RGBA float pixels even for a BGRA8 target.
+        // Gpusim stores RGBA float pixels even for a BGRA8 target.
         let bytes = (size * size * 16) as u64;
         assert_eq!(texture.allocated_bytes(&cx), Some(bytes));
         assert_eq!(cx.texture_pool_bytes(), baseline + bytes);
@@ -94,7 +94,7 @@ fn readback_round_trip_512_and_fifty_bounded_tickets() {
     cx.passes[pass.draw_pass_id()].paint_dirty = true;
     let first = texture.read_back(&mut cx, ReadbackRequest::default()).unwrap();
     assert!(cx.try_take_texture_readbacks().is_empty());
-    cx.headless_render_all_passes(0.0);
+    cx.gpusim_render_all_passes(0.0);
     let results = cx.try_take_texture_readbacks();
     assert_eq!(results.len(), 1);
     let result = &results[0];
@@ -164,7 +164,7 @@ fn readback_round_trip_512_and_fifty_bounded_tickets() {
             }
         };
         assert!(expected.insert(ticket, pixel).is_none());
-        cx.headless_render_all_passes(iteration as f64 + 1.0);
+        cx.gpusim_render_all_passes(iteration as f64 + 1.0);
         assert!(cx.texture_readback_usage().reserved_bytes <= TEXTURE_READBACK_MAX_BYTES);
     }
     texture.release(&mut cx);
@@ -195,7 +195,7 @@ fn readback_cancellation_and_reallocation_are_terminal() {
     let invalidated = texture.read_back(&mut cx, ReadbackRequest::default()).unwrap();
     assert!(cx.cancel_texture_readback(cancelled));
     texture.release(&mut cx);
-    cx.headless_render_all_passes(0.0);
+    cx.gpusim_render_all_passes(0.0);
     let results = cx.try_take_texture_readbacks();
     assert_eq!(results.len(), 2);
     assert_eq!(results.iter().find(|r| r.ticket == cancelled).unwrap().data, Err(ReadbackError::Cancelled));

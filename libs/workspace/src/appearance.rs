@@ -103,7 +103,7 @@ pub fn host_family(cx: &Cx) -> DesktopStyle {
 /// Matching Aqua/DarkAqua also handles the accessibility contrast variants.
 /// Other platforms retain their existing manual appearance fallback.
 pub fn host_dark() -> Option<bool> {
-    #[cfg(all(target_os = "macos", not(headless)))]
+    #[cfg(all(target_os = "macos", not(gpusim)))]
     unsafe {
         use makepad_widgets::makepad_platform::os::apple::apple_sys::*;
         extern "C" {
@@ -130,7 +130,7 @@ pub fn host_dark() -> Option<bool> {
         let () = msg_send![pool, drain];
         return result;
     }
-    #[cfg(not(all(target_os = "macos", not(headless))))]
+    #[cfg(not(all(target_os = "macos", not(gpusim))))]
     None
 }
 

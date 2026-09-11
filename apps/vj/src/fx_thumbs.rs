@@ -666,7 +666,7 @@ pub struct VjFxThumbs {
     #[rust]
     new_failures: Vec<AssetRevisionId>,
     /// Set once the platform proves it cannot read a render target back
-    /// (web/headless); rendering is pointless then, cache decode still works.
+    /// (web/gpusim); rendering is pointless then, cache decode still works.
     #[rust]
     disabled: Option<String>,
     /// Consecutive whole-job readback failures; one flaky texture must not
@@ -1690,7 +1690,7 @@ impl VjFxThumbs {
             self.readback_failures += 1;
             if self.readback_failures >= 3 {
                 // Three different jobs in a row could not read back: this
-                // platform has no readback (web/headless). Stop trying;
+                // platform has no readback (web/gpusim). Stop trying;
                 // cached sheets still decode.
                 self.disabled = Some("render-target readback unavailable".to_string());
             }
