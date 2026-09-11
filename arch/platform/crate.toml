@@ -229,13 +229,13 @@ files = [
     { path = "platform/src/os/apple/video_file_encoder.rs", hash = "a79cd41fa755ad4f98068b36463d4ab370d1cef2" },
     { path = "platform/src/os/cx_native.rs", hash = "9c300db233dcc4f5314293ddd14d4b6bf1532a80" },
     { path = "platform/src/os/cx_shared.rs", hash = "d3b9f6322ef082a1059b9714acaf1b380bdc8e4c" },
-    { path = "platform/src/os/headless/event_loop.rs", hash = "7d6f5155acc0376612528b37de3558a1e58abdc0" },
-    { path = "platform/src/os/headless/jit.rs", hash = "9b87b1a83b3e918a69971b1e98392b7a68b3f49a" },
-    { path = "platform/src/os/headless/mod.rs", hash = "13c91dfd118d391fa9a2fb1f89f056aed0fd5bfe" },
-    { path = "platform/src/os/headless/raster.rs", hash = "aad3a97d55ff5d7243a555fca62c0495f0197b02" },
-    { path = "platform/src/os/headless/shader.rs", hash = "5df56bd5872f9b1fbbd0a3f10072378b72d8cc23" },
-    { path = "platform/src/os/headless/shader_runtime_preamble.rs", hash = "f8d354dce1fe98d0dc990303fbae49ea9ced6d96" },
-    { path = "platform/src/os/headless/virtual_gpu.rs", hash = "44ec0ad8f6b23e7e471428cdf1174c613cea1832" },
+    { path = "platform/src/os/gpusim/event_loop.rs", hash = "55999c81b2c4df376f6bc6a6d6c933f95137dba7" },
+    { path = "platform/src/os/gpusim/jit.rs", hash = "a744f1b35f586182e6c1e46fb966829a581d30d8" },
+    { path = "platform/src/os/gpusim/mod.rs", hash = "7fda0eb2e344ff0de64210f986fe991e495885c7" },
+    { path = "platform/src/os/gpusim/raster.rs", hash = "a39231a832531463f9dea245889589c2f9ddf57e" },
+    { path = "platform/src/os/gpusim/shader.rs", hash = "1ab4d2556a02862646d507c07fc55f10b67d0ee2" },
+    { path = "platform/src/os/gpusim/shader_runtime_preamble.rs", hash = "369a54944edc2072b20597221346540b865da0dd" },
+    { path = "platform/src/os/gpusim/virtual_gpu.rs", hash = "f8d121660cdd94cff1a9e4f0de05a04bdb3c2f56" },
     { path = "platform/src/os/linux/alsa_audio.rs", hash = "58919896d31df0e3d587705ef9af5e12e672275d" },
     { path = "platform/src/os/linux/alsa_midi.rs", hash = "e174e108f90d7fd7e943e57d7bd069c8470e5d33" },
     { path = "platform/src/os/linux/alsa_sys.rs", hash = "98d1dcb75e3d650a1e36c1e341059e69e5b70509" },
@@ -516,7 +516,7 @@ story = """
 The selected backend uploads drawing data and textures, compiles shaders and renders passes.
 The inspected desktop and web loops submit from the UI path; GPU execution and completion form a separate boundary.
 Metal skips drawing after shader compilation errors, and readbacks can report device loss.
-Vulkan is configuration gated; headless has a separate software renderer.
+Vulkan is configuration gated; gpusim (the CPU simulated-GPU backend, formerly "headless") has a separate software renderer.
 A universal render thread and GPU memory ceiling are unknown."""
 lane = "render"
 refs = ["platform/src/os/apple/metal.rs", "platform/src/os/windows/d3d11.rs", "platform/src/os/linux/opengl.rs", "platform/src/os/linux/mod.rs", "platform/src/os/web/web_gl.rs", "platform/src/os/headless/mod.rs", "platform/src/os/apple/macos/macos.rs", "platform/src/os/windows/windows.rs", "platform/src/os/linux/x11/linux_x11.rs", "platform/src/os/web/web.rs"]
@@ -564,7 +564,7 @@ title = "Windows and OS adapters"
 summary = "Adapts window operations, input and lifecycle events to the selected platform."
 story = """
 CxOsApi and CxOsOp separate application requests from target-specific window and device APIs.
-Compile-time gates select Apple, Windows, Linux-family, web or headless code.
+Compile-time gates select Apple, Windows, Linux-family, web or gpusim (simulated-GPU) code.
 Desktop Linux chooses Wayland or X11 from an override or environment; browser messages cross the wasm bridge.
 Capabilities differ: Wayland backdrop blur is a logged no-op, and some native initialization paths can panic.
 Uniform feature support is not guaranteed."""
