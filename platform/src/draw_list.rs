@@ -1154,6 +1154,10 @@ pub struct CxDrawListPool(
     std::rc::Rc<RetiredDrawInstances>,
     std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
     (usize, usize),
+    /// The last stale (index, generation) `Index` reported under the
+    /// `drawlist` trace topic, so a holder spinning on one dead id is named
+    /// once with its backtrace, not per access.
+    std::cell::Cell<Option<(usize, u64)>>,
 );
 impl Default for CxDrawListPool {
     fn default() -> Self {
@@ -1170,6 +1174,7 @@ impl Default for CxDrawListPool {
             retired,
             Default::default(),
             (0, 0),
+            std::cell::Cell::new(None),
         )
     }
 }
@@ -1824,7 +1829,24 @@ impl std::ops::Index<DrawListId> for CxDrawListPool {
             error!(
                 "Drawlist id generation wrong index: {} current gen:{} in pointer:{}",
                 index.0, d.generation, index.1
-            )
+            );
+            // The holder of a dead id is what matters, and the error line
+            // above cannot name it (a stale id indexed per frame logged
+            // 35 000 lines a second in a user's window without once saying
+            // who held it). Under the `drawlist` trace topic the first
+            // access of each stale (index, generation) carries a backtrace.
+            if crate::makepad_error_log::trace_enabled("drawlist")
+                && self.6.get() != Some((index.0, index.1))
+            {
+                self.6.set(Some((index.0, index.1)));
+                error!(
+                    "Drawlist stale id index: {} gen:{} (current gen:{}) first access from:\n{}",
+                    index.0,
+                    index.1,
+                    d.generation,
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
         }
         &d.item
     }
