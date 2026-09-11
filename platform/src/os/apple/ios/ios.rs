@@ -603,12 +603,12 @@ impl Cx {
         let time = with_ios_app(|app| app.time_now());
         for queued_event in queued_events {
             match queued_event {
-                ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
+                ios_app::IosTextInputEvent::SelectionChanged(text, start, end, composition) => {
                     self.call_event_handler(&Event::TextInput(TextInputEvent {
                         full_state_sync: Some(FullTextState {
                             text,
                             selection: CharOffset(start)..CharOffset(end),
-                            composition: None,
+                            composition: composition.map(|(start, end)| CharOffset(start)..CharOffset(end)),
                         }),
                         ..Default::default()
                     }));
@@ -1135,9 +1135,14 @@ impl Cx {
                 CxOsOp::SyncImeState {
                     text,
                     selection,
-                    composition: _,
+                    composition,
                 } => {
-                    IosApp::set_ime_text(text, selection.start.0, selection.end.0);
+                    IosApp::set_ime_text(
+                        text,
+                        selection.start.0,
+                        selection.end.0,
+                        composition.map(|composition| (composition.start.0, composition.end.0)),
+                    );
                 }
                 CxOsOp::StartTimer {
                     timer_id,
