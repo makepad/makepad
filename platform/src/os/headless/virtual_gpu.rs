@@ -516,7 +516,11 @@ pub fn rasterize_setup_rows<F>(
             let w1 = ce1 * inv_area;
             let w2 = ce2 * inv_area;
 
-            let depth = sz[0] * w0 + sz[1] * w1 + sz[2] * w2;
+            // Plane form: a triangle at one depth (every 2D quad) gets that
+            // depth exactly at every pixel. The barycentric sum rounds per
+            // pixel and made coplanar draws z-fight into noise a GPU never
+            // shows (its plane evaluation is exact for a constant).
+            let depth = sz[0] + (sz[1] - sz[0]) * w1 + (sz[2] - sz[0]) * w2;
             let index = row_base + x as usize;
 
             // Depth test (less-or-equal for overlapping widgets with same zbias)

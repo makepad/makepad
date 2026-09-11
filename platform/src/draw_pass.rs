@@ -503,6 +503,12 @@ pub struct DrawPassUniforms {
     pub dpi_factor: f32,
     #[live]
     pub dpi_dilate: f32,
+    /// The density the pass is shown at: `dpi_factor` for a pass painted
+    /// where it is displayed; for a pass rasterised at another density (a
+    /// cache sheet displayed scaled) the density of its display, so that a
+    /// shader's screen-space decisions do not follow the raster.
+    #[live]
+    pub display_dpi_factor: f32,
     #[live]
     pub time: f32,
     /// App-controlled clock shared by every map draw in this pass. This is
@@ -510,6 +516,13 @@ pub struct DrawPassUniforms {
     /// shader's static `uses_time` scan repaint the pass at display rate.
     #[live]
     pub shiny_time: f32,
+    // std140: the block ends on a vec4 boundary
+    #[live]
+    pub pad0: f32,
+    #[live]
+    pub pad1: f32,
+    #[live]
+    pub pad2: f32,
 }
 
 impl DrawPassUniforms {
@@ -537,6 +550,9 @@ pub struct CxDrawPass {
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
+    /// The display density of a pass rasterised at another density (see
+    /// `DrawPassUniforms::display_dpi_factor`); `None` = shown as painted.
+    pub display_dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxDrawPassParent,
     pub paint_dirty: bool,
@@ -560,6 +576,13 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
+    /// The repaint that last painted this pass whole (0 before the first).
+    /// A repaint the backend stopped — instances or uniforms not resident,
+    /// the submitter saturated — leaves it as it was, so a producer that
+    /// must know its output exists before using it (the map's tile bake
+    /// lands its cells only once its sheet was painted) compares this with
+    /// the value it saw when it attached the pass.
+    pub painted_serial: u64,
     pub pass_rect: Option<CxDrawPassRect>,
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
@@ -622,6 +645,7 @@ impl Default for CxDrawPass {
             color_textures: Vec::new(),
             depth_texture: None,
             dpi_factor: None,
+            display_dpi_factor: None,
             clear_depth: DrawPassClearDepth::ClearWith(1.0),
             clear_color: Vec4f::default(),
             depth_init: 1.0,
@@ -633,6 +657,7 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             attached_by: None,
             repaint_requested: false,
+            painted_serial: 0,
             pass_rect: None,
             os: CxOsPass::default(),
             gpu_time_query: None,
@@ -664,6 +689,16 @@ impl CxDrawPass {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor as f32;
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
+        self.pass_uniforms.display_dpi_factor = self.display_dpi_factor.unwrap_or(dpi_factor) as f32;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    /// The display density of a pass rasterised at another density; `None`
+    /// returns the pass to "shown as painted".
+    pub fn set_display_dpi_factor(&mut self, display: Option<f64>, uniforms_gen: u64) {
+        self.display_dpi_factor = display;
+        self.pass_uniforms.display_dpi_factor =
+            display.unwrap_or(self.pass_uniforms.dpi_factor as f64) as f32;
         self.mark_pass_uniforms_dirty(uniforms_gen);
     }
 

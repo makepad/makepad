@@ -68,6 +68,16 @@ pub fn image_cache_use_mipmaps() -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Texture(Rc<PoolId>);
 
+#[cfg(all(target_os = "linux", use_vulkan))]
+pub(crate) struct WeakTexture(std::rc::Weak<PoolId>);
+
+#[cfg(all(target_os = "linux", use_vulkan))]
+impl WeakTexture {
+    pub(crate) fn upgrade(&self) -> Option<Texture> {
+        self.0.upgrade().map(Texture)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
 
@@ -355,6 +365,10 @@ impl Default for TextureId {
 }
 
 impl Texture {
+    #[cfg(all(target_os = "linux", use_vulkan))]
+    pub(crate) fn downgrade(&self) -> WeakTexture {
+        WeakTexture(Rc::downgrade(&self.0))
+    }
     pub fn readers(&self) -> usize {
         Rc::strong_count(&self.0)
     }
@@ -1442,6 +1456,12 @@ impl Texture {
         cx.textures[self.texture_id()].animation = animation;
     }
 
+    /// Mark a render target as an application-held cache (see
+    /// `CxTexture::retained_render_target`).
+    pub fn set_retained_render_target(&self, cx: &mut Cx, retained: bool) {
+        cx.textures[self.texture_id()].retained_render_target = retained;
+    }
+
     pub fn animation<'a>(&self, cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
         &cx.textures[self.texture_id()].animation
     }
@@ -1567,6 +1587,10 @@ pub struct CxTexture {
     pub(crate) allocation_generation: u64,
     pub(crate) producer_serial: u64,
     pub(crate) animation: Option<TextureAnimation>,
+    /// A render target the application keeps as a cache: a software backend
+    /// never releases its framebuffer for idleness or budget while the
+    /// handle lives (GPU backends keep every target anyway).
+    pub(crate) retained_render_target: bool,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
 }

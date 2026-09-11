@@ -639,9 +639,14 @@ impl Cx {
                 continue;
             }
             clean_leaf = false;
+            // The frame allowance is charged what this request copies: a
+            // publication continuing from its resident prefix owes its tail,
+            // not its whole length (charging the whole length let one large
+            // file's tail take the frame's allowance and served the rest of
+            // the inventory one item per frame — thousands of frames).
             let bytes = item.retained_instances.as_ref().map_or_else(
                 || item.instances.as_ref().map_or(0, |v| v.len() * 4),
-                |p| p.byte_len(),
+                |p| (item.retained_upload_range.len() * 4).min(p.byte_len()),
             );
             let stride = call.total_instance_slots * 4;
             // A payload the next paint cannot present without: a fresh immediate
@@ -1508,11 +1513,26 @@ impl CxDrawListPool {
         pending
     }
 
+    /// The terms of `has_pending_instance_retirements`, named (diagnostics:
+    /// which maintenance a rest is still waiting for).
+    pub fn instance_retirement_terms(&self) -> String {
+        let terms = [
+            ("allocations", self.1.allocations.has_pending_retirements()),
+            ("batch", self.2.is_some()),
+            ("pool", self.0.has_pending_retirements()),
+            ("values", !self.3.values.borrow().is_empty()),
+            ("releases", !self.3.recording_releases.borrow().is_empty()),
+            ("retirements", self.1.retirements.load(Ordering::Acquire) != 0),
+        ];
+        terms.iter().filter(|(_, on)| *on).map(|(name, _)| *name).collect::<Vec<_>>().join(",")
+    }
+
     pub fn has_pending_instance_retirements(&self) -> bool {
-        // Only a backend that built a physical working-set inventory has a
-        // rotating scan to drain. Software rasterization has no such backing.
-        (self.1.working_set_valid && self.1.working_set_scan_passes != 0)
-            || self.1.allocations.has_pending_retirements()
+        // The rotating working-set scan is a paint-time census of unused
+        // tail items: it advances with paints and finds nothing an idle app
+        // needs, so it never holds the app's maintenance wake (it held it
+        // forever at rest: 25 frames/s asking for a paint nothing wanted).
+        self.1.allocations.has_pending_retirements()
             || self.2.is_some()
             || self.0.has_pending_retirements()
             || !self.3.values.borrow().is_empty()
@@ -1760,6 +1780,17 @@ pub struct CxDrawItem {
     /// Recording may vary draw count without changing the immutable publication.
     pub retained_instance_count: usize,
     pub retained_upload_range: std::ops::Range<usize>,
+    /// The instances submitted when non-empty: absolute instance indices,
+    /// each range clamped to what is resident. An owner whose one recording
+    /// holds a spatially sorted inventory (the map's scene lists) or a
+    /// row-ordered publication (a code view) presents the part a camera or
+    /// a tile sheet needs without re-recording or re-uploading anything;
+    /// the backends draw one call per range. Empty: every instance.
+    /// Per backend: Metal draws one `drawIndexedPrimitives … baseInstance`
+    /// per range; the headless raster submits the ranged instances; OpenGL,
+    /// D3D11, WebGL and Vulkan draw the whole item (ranges ignored: more
+    /// work, the same pixels).
+    pub instance_ranges: Vec<std::ops::Range<u32>>,
     pub os: CxOsDrawCall,
 }
 
@@ -2274,6 +2305,7 @@ impl CxDrawItems {
                 consumed_uniforms_gen: 0,
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
+                instance_ranges: Vec::new(),
                 os: CxOsDrawCall::default(),
             }));
         }
@@ -2343,6 +2375,30 @@ impl CxDrawItems {
         if let Some(call) = self.buffer[index].kind.draw_call_mut() {
             call.options.depth_write = enabled;
         }
+    }
+    /// The submitted instance ranges of an item (see
+    /// `CxDrawItem::instance_ranges`); presentation only, never a
+    /// recording or upload change. Returns whether they changed.
+    pub fn set_instance_ranges(&mut self, index: usize, ranges: &[std::ops::Range<u32>]) -> bool {
+        let item = &mut self.buffer[index];
+        if item.instance_ranges.as_slice() == ranges {
+            return false;
+        }
+        item.instance_ranges.clear();
+        item.instance_ranges.extend_from_slice(ranges);
+        true
+    }
+    /// The instances an item submits: its ranges clamped to `resident`, or
+    /// `0..resident` when it has none.
+    pub fn submitted_instances(&self, index: usize, resident: usize) -> usize {
+        let item = &self.buffer[index];
+        if item.instance_ranges.is_empty() {
+            return resident;
+        }
+        item.instance_ranges
+            .iter()
+            .map(|r| (r.end.min(resident as u32)).saturating_sub(r.start.min(resident as u32)) as usize)
+            .sum()
     }
     /// Record backend consumption without changing the recording's topology
     /// or instance upload state.
@@ -2417,6 +2473,7 @@ impl CxDrawItems {
                 consumed_uniforms_gen: 0,
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
+                instance_ranges: Vec::new(),
                 instance_upload_pending: false,
                 immediate_hash: 0,
                 os: CxOsDrawCall::default(),
@@ -2446,6 +2503,7 @@ impl CxDrawItems {
             draw_item.retained_schema = 0;
             draw_item.consumed_serial = 0;
             draw_item.consumed_uniforms_gen = 0;
+            draw_item.instance_ranges.clear();
             draw_item.redraw_id = redraw_id;
         }
         self.used += 1;

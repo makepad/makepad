@@ -103,6 +103,9 @@ pub struct Settings {
     pub dark: bool,
     /// Display cells per four source indentation cells in Architecture.
     pub architecture_indent_cells: Option<u32>,
+    /// The 2D texture-tile cache of the code map (`None` = on). Off draws
+    /// the map through the direct renderer, as the 2.5D/3D projections do.
+    pub map_tiles: Option<bool>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
@@ -111,6 +114,9 @@ const DOCK_FILE: &str = "dock.ron";
 impl Settings {
     pub fn code_indent_cells(&self) -> u32 {
         self.architecture_indent_cells.unwrap_or(2).clamp(1, 8)
+    }
+    pub fn map_tiles(&self) -> bool {
+        self.map_tiles.unwrap_or(true)
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -298,9 +304,12 @@ mod tests {
             style: Some("windows-2000".into()),
             dark: true,
             architecture_indent_cells: Some(2),
+            map_tiles: Some(false),
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);
+        assert!(!s.map_tiles());
+        assert!(Settings::default().map_tiles());
         std::fs::write(dir.join(SETTINGS_FILE), "not ron").unwrap();
         assert_eq!(Settings::load(&dir), Settings::default());
         let _ = std::fs::remove_dir_all(&dir);

@@ -1670,6 +1670,27 @@ impl Cx {
         }
     }
 
+    /// What one texel of a BGRA8 render target costs on this backend: the
+    /// GPU backends allocate 4 bytes, the headless raster keeps float colour
+    /// (16 bytes). Caches that budget render targets charge this.
+    pub fn render_target_bytes_per_texel(&self) -> usize {
+        if cfg!(headless) { 16 } else { 4 }
+    }
+
+    /// What one texel of a `DepthD32` attachment costs (4 bytes everywhere).
+    pub fn depth_target_bytes_per_texel(&self) -> usize {
+        4
+    }
+
+    /// Whether a pass's depth attachment lives in its colour target's
+    /// storage: the headless raster keeps a depth plane per framebuffer, so
+    /// a retained render target painted with depth holds it for good; the
+    /// GPU backends keep one `TextureSize::Auto` depth texture per handle,
+    /// sized to the largest pass it served.
+    pub fn depth_target_rides_with_render_target(&self) -> bool {
+        cfg!(headless)
+    }
+
     pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
         &self.passes[draw_pass_id].debug_name
     }

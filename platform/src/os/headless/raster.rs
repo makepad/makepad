@@ -233,6 +233,9 @@ pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>
 #[derive(Default)]
 pub(crate) struct HeadlessRenderTargets {
     framebuffers: HashMap<usize, Framebuffer>,
+    /// A test-owned budget in place of the derived one (see
+    /// `render_target_budget_bytes`).
+    pub(crate) budget_override: Option<usize>,
     /// Frame each target was last written or sampled, for eviction. A `Cell`
     /// because sampling happens behind `&self`, deep inside the draw loop.
     last_used: HashMap<usize, std::cell::Cell<u64>>,
@@ -249,19 +252,18 @@ pub(crate) struct HeadlessRenderTargets {
 /// target used once every few seconds survives.
 const RENDER_TARGET_IDLE_FRAMES: u64 = 120;
 
-/// Retained render-target budget in MB, over which the least recently used
+/// Retained render-target budget, over which the least recently used
 /// targets are released even if they are not idle yet. Anything dropped is
 /// rebuilt (cleared) the next time a pass renders into it, so this only ever
 /// costs work, never correctness — a bake chain's scratch targets are all
-/// written before they are read within the same frame. Tunable through
-/// `MAKEPAD_HEADLESS_RT_BUDGET_MB`; 0 disables the cap.
-fn render_target_budget_bytes() -> usize {
-    const DEFAULT_MB: usize = 512;
-    std::env::var("MAKEPAD_HEADLESS_RT_BUDGET_MB")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MB)
-        .saturating_mul(1024 * 1024)
+/// written before they are read within the same frame. Derived from the
+/// process allowance (a quarter of it: the raster keeps float colour, four
+/// times a GPU's bytes per texel) unless a test set its own through
+/// `Cx::set_headless_render_target_budget`; 0 disables the cap. Targets the
+/// application marked retained (`Texture::set_retained_render_target`) are
+/// never released by idleness or budget while their handle lives.
+fn render_target_budget_bytes(process_budget: usize, owned: Option<usize>) -> usize {
+    owned.unwrap_or(process_budget / 4)
 }
 
 /// Attachment-level raster state: what the render pass descriptor fixes for
@@ -863,6 +865,17 @@ impl Cx {
     /// reads — a 2400x1520 window is 73 MB of colour plus depth, and building
     /// that mapping fresh every frame cost more in page faults than clearing it
     /// does.
+    /// Test-owned render-target budget (bytes; 0 disables the cap) in place
+    /// of the value derived from the process allowance.
+    pub fn set_headless_render_target_budget(&mut self, bytes: Option<usize>) {
+        self.os.render_targets.budget_override = bytes;
+    }
+
+    /// Bytes the raster currently holds for offscreen colour targets.
+    pub fn headless_render_target_bytes(&self) -> usize {
+        self.os.render_targets.bytes()
+    }
+
     pub fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
         if self
             .draw_lists
@@ -954,6 +967,10 @@ impl Cx {
                 // too (the GPU backends treat both the same way): it just has no
                 // parent that composites it back.
                 CxDrawPassParent::DrawPass(_) | CxDrawPassParent::None => {
+                    // a pass with no list or no colour attachment paints
+                    // nothing: no receipt for it
+                    let paintable = self.passes[*draw_pass_id].main_draw_list_id.is_some()
+                        && !self.passes[*draw_pass_id].color_textures.is_empty();
                     self.headless_draw_pass_to_texture(
                         *draw_pass_id,
                         time,
@@ -966,6 +983,9 @@ impl Cx {
                             None
                         },
                     );
+                    if paintable {
+                        self.passes[*draw_pass_id].painted_serial = serial.unwrap_or(0);
+                    }
                 }
                 CxDrawPassParent::Xr => {}
             }
@@ -1022,6 +1042,13 @@ impl Cx {
         let pool = &self.textures.0.pool;
         let frame = render_targets.frame;
         let last_used = &render_targets.last_used;
+        // A retained target is retained while its handle lives: a dropped
+        // handle's slot keeps the flag until reuse, and its backing must go.
+        let live = &self.textures.0;
+        let retained = |texture_index: usize| {
+            pool.get(texture_index).is_some_and(|slot| slot.item.retained_render_target)
+                && !live.is_free(texture_index)
+        };
         render_targets.framebuffers.retain(|texture_index, _| {
             let still_a_render_target = pool
                 .get(*texture_index)
@@ -1031,7 +1058,7 @@ impl Cx {
                 .get(texture_index)
                 .map(|used| frame.saturating_sub(used.get()))
                 .unwrap_or(u64::MAX);
-            still_a_render_target && idle < RENDER_TARGET_IDLE_FRAMES
+            still_a_render_target && (idle < RENDER_TARGET_IDLE_FRAMES || retained(*texture_index))
         });
         // Over budget: release least-recently-used targets — but never one
         // touched within the last few frames. "Same frame" alone is not
@@ -1042,11 +1069,12 @@ impl Cx {
         // may keep the store over budget for a beat; that costs memory
         // briefly, never pixels.
         const RENDER_TARGET_EVICT_GUARD_FRAMES: u64 = 3;
-        let budget = render_target_budget_bytes();
+        let budget = render_target_budget_bytes(self.memory_budget(), render_targets.budget_override);
         if budget > 0 && render_targets.bytes() > budget {
             let mut by_age: Vec<(u64, usize)> = render_targets
                 .framebuffers
                 .keys()
+                .filter(|texture_index| !retained(**texture_index))
                 .map(|texture_index| {
                     let used = render_targets
                         .last_used
@@ -1148,8 +1176,8 @@ impl Cx {
         // Same arithmetic the GPU backends use: the viewport is dpi * pass rect
         // anchored at the attachment's top-left corner, while the attachment
         // itself may be larger when `TextureSize::Fixed` pins it.
-        let viewport_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
-        let viewport_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
+        let viewport_width = (dpi_factor * pass_rect.size.x).round().max(1.0) as usize;
+        let viewport_height = (dpi_factor * pass_rect.size.y).round().max(1.0) as usize;
         let (width, height) = {
             let cxtexture = &mut self.textures[texture_id];
             if cxtexture.alloc.is_some() && !render_targets.framebuffers.contains_key(&texture_id.0)
@@ -1653,21 +1681,35 @@ impl Cx {
             if tri_count == 0 {
                 continue;
             }
+            // The submitted instances: the item's ranges clamped to what is
+            // resident (the GPU backends draw one call per range), else all.
+            let submitted: Vec<usize> = if draw_item.instance_ranges.is_empty() {
+                (0..instance_count).collect()
+            } else {
+                draw_item
+                    .instance_ranges
+                    .iter()
+                    .flat_map(|r| (r.start as usize).min(instance_count)..(r.end as usize).min(instance_count))
+                    .collect()
+            };
+            if submitted.is_empty() {
+                continue;
+            }
             if let Some(p) = profile.as_deref_mut() {
                 p.draw_calls += 1;
-                p.total_instances += instance_count;
-                p.total_triangles += tri_count * instance_count;
+                p.total_instances += submitted.len();
+                p.total_triangles += tri_count * submitted.len();
             }
 
             let vertex_start = std::time::Instant::now();
-            let shaded_vert_count = instance_count * vertex_count;
+            let shaded_vert_count = submitted.len() * vertex_count;
             let mut shaded_positions = vec![[0.0f32; 4]; shaded_vert_count];
             let mut shaded_varyings = vec![0.0f32; shaded_vert_count * varying_slots];
 
-            for inst_idx in 0..instance_count {
+            for (slot, &inst_idx) in submitted.iter().enumerate() {
                 let inst_offset = inst_idx * total_instance_slots;
                 let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
-                let inst_base = inst_idx * vertex_count;
+                let inst_base = slot * vertex_count;
 
                 let mut decoded_geom = vec![0.0f32; geom_slots.max(1)];
                 for vert_idx in 0..vertex_count {
@@ -1737,11 +1779,11 @@ impl Cx {
             // one an empty range.
             let raster_start = std::time::Instant::now();
             let mut setups: Vec<TriSetup> =
-                Vec::with_capacity(tri_count.saturating_mul(instance_count));
+                Vec::with_capacity(tri_count.saturating_mul(submitted.len()));
             let mut covered_px = 0usize;
             let (mut band_lo, mut band_hi) = (usize::MAX, 0usize);
-            for inst_idx in 0..instance_count {
-                let inst_base = (inst_idx * vertex_count) as u32;
+            for slot in 0..submitted.len() {
+                let inst_base = (slot * vertex_count) as u32;
                 for tri_idx in 0..tri_count {
                     let (i0, i1, i2) = match geom.index_width {
                         4 => {
@@ -1859,7 +1901,7 @@ impl Cx {
                 options.parallel_min_pixels,
             );
             let use_parallel = bands.len() > 1
-                && tri_count.saturating_mul(instance_count) >= options.parallel_min_tris;
+                && tri_count.saturating_mul(submitted.len()) >= options.parallel_min_tris;
             if let Some(p) = profile.as_deref_mut() {
                 if use_parallel {
                     p.parallel_draw_calls += 1;

@@ -125,15 +125,18 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
 
-    pub fn set_current_pass_dpi_factor(&mut self, dpi_factor: f64) {
-        if let Some(pass_id) = self.pass_stack.last().map(|stack_item| stack_item.pass_id) {
-            if let Some(stack_item) = self.pass_stack.last_mut() {
-                stack_item.dpi_factor = dpi_factor;
-            }
+    /// The current pass is rasterised at its own density but displayed at
+    /// `display`: `current_dpi_factor()` and the pass uniform
+    /// `display_dpi_factor` read the display density from here to the end
+    /// of the pass, the raster keeps the pass density. Every screen-space
+    /// decision (LOD, fades, minimum widths) taken while recording into
+    /// such a pass then matches the pass it is composited into.
+    pub fn set_current_pass_display_dpi_factor(&mut self, display: f64) {
+        if let Some(stack_item) = self.pass_stack.last_mut() {
+            stack_item.dpi_factor = display;
+            let pass_id = stack_item.pass_id;
             let uniforms_gen = self.cx.next_uniform_gen();
-            let cxpass = &mut self.passes[pass_id];
-            cxpass.dpi_factor = Some(dpi_factor);
-            cxpass.set_dpi_factor(dpi_factor, uniforms_gen);
+            self.passes[pass_id].set_display_dpi_factor(Some(display), uniforms_gen);
         }
     }
 
@@ -174,6 +177,10 @@ impl<'a> CxDraw<'a> {
             }
         };
         self.passes[pass.draw_pass_id()].dpi_factor = Some(dpi_factor);
+        if self.passes[pass.draw_pass_id()].display_dpi_factor.is_some() {
+            let uniforms_gen = self.cx.next_uniform_gen();
+            self.passes[pass.draw_pass_id()].set_display_dpi_factor(None, uniforms_gen);
+        }
 
         self.pass_stack.push(PassStackItem {
             dpi_factor,
