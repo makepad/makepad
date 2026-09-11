@@ -4,20 +4,18 @@ use crate::makepad_live_id::live_id::*;
 use crate::native::*;
 use crate::value::*;
 use crate::*;
-use makepad_html::{parse_html, HtmlNode};
+use makepad_html::{parse_html, HtmlDoc, HtmlNode};
 use makepad_live_id::live_id::InternLiveId;
+use std::fmt::Write as _;
 use std::rc::Rc;
 
-// Shared backing store — the parsed HTML data is Rc'd so query results
-// just reference ranges into it without copying strings or nodes.
-struct HtmlBacking {
-    decoded: String,
-    nodes: Vec<HtmlNode>,
-}
-
 pub struct ScriptHtmlDoc {
-    backing: Rc<HtmlBacking>,
-    // Element ranges as (open_tag_index, close_tag_index) into backing.nodes.
+    // The parsed document is `Rc`'d so query results just reference ranges
+    // into it without copying strings or nodes.
+    backing: Rc<HtmlDoc>,
+    // Element ranges as (open_tag_index, end_index) into backing.nodes: the
+    // end is exclusive, one past the element's own close tag, or the index
+    // of the enclosing close tag that ended it.
     ranges: Vec<(u32, u32)>,
     // true = root document (empty ranges means whole doc), false = query result (empty = no matches)
     is_root: bool,
@@ -67,6 +65,12 @@ struct ParsedQuery {
     terminal: Terminal,
 }
 
+/// Parses a selector. Each whitespace-separated token (or `>`-separated for
+/// the child combinator) is `[tag|*][.class|.text][#id]` followed by at most
+/// one terminal, `[N]` or `@attr`, in that order: `@attr` takes the rest of
+/// the token, `[N]` overrides `@attr` when both appear, and a suffix written
+/// out of order is folded into the name before it (`a.foo.text` is class
+/// `foo.text`). Only the last token's terminal applies.
 fn parse_query(sel: &str) -> ParsedQuery {
     let sel = sel.trim();
     let mut steps = Vec::new();
@@ -113,7 +117,9 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
         // [N] index terminal
         if let Some(b) = tag_part.find('[') {
-            if let Some(e) = tag_part.find(']') {
+            // Only a `]` after the `[` closes it; `a]b[` used to slice
+            // backwards and panic.
+            if let Some(e) = tag_part[b..].find(']').map(|e| b + e) {
                 if let Ok(idx) = tag_part[b + 1..e].parse::<usize>() {
                     terminal = Terminal::Index(idx);
                 }
@@ -163,21 +169,17 @@ fn parse_query(sel: &str) -> ParsedQuery {
 
 // ---- Query execution (zero-copy, operates on backing) ----
 
-fn find_close_tag(nodes: &[HtmlNode], open_idx: usize) -> usize {
-    let mut depth = 0u32;
-    for i in (open_idx + 1)..nodes.len() {
-        match &nodes[i] {
-            HtmlNode::OpenTag { .. } => depth += 1,
-            HtmlNode::CloseTag { .. } => {
-                if depth == 0 {
-                    return i;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    nodes.len().saturating_sub(1)
+/// One past the last node of the element opened at `open_idx`: past its own
+/// close tag, or at the close tag of the enclosing element that ended it, or
+/// the end of the document; for a void element, just past its attributes.
+/// The parser resolves these, so this is a lookup. Mapping an element
+/// without a close tag to itself, as this used to, gave every `<li>a<li>b`
+/// item an empty range: no `.text`, no `.html`, and children promoted to
+/// siblings.
+fn element_end(doc: &HtmlDoc, open_idx: usize) -> usize {
+    doc.new_walker_with_index(open_idx)
+        .end_index()
+        .unwrap_or(open_idx + 1)
 }
 
 fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QueryStep) -> bool {
@@ -221,43 +223,36 @@ fn element_matches(decoded: &str, nodes: &[HtmlNode], idx: usize, step: &QuerySt
 }
 
 fn find_elements(
-    decoded: &str,
-    nodes: &[HtmlNode],
+    doc: &HtmlDoc,
     step: &QueryStep,
     range_start: usize,
     range_end: usize,
     recurse: bool,
     out: &mut Vec<(u32, u32)>,
 ) {
+    let nodes = &doc.nodes;
     let mut i = range_start;
-    let mut depth = 0u32;
-    while i < range_end {
-        match &nodes[i] {
-            HtmlNode::OpenTag { .. } => {
-                if (recurse || depth == 0) && element_matches(decoded, nodes, i, step) {
-                    let close = find_close_tag(nodes, i);
-                    out.push((i as u32, close as u32));
-                    if !recurse {
-                        i = close + 1;
-                        continue;
-                    }
-                }
-                depth += 1;
+    while i < range_end.min(nodes.len()) {
+        if let HtmlNode::OpenTag { .. } = &nodes[i] {
+            let end = element_end(doc, i);
+            if element_matches(&doc.decoded, nodes, i, step) {
+                out.push((i as u32, end as u32));
             }
-            HtmlNode::CloseTag { .. } => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            // A child combinator sees only direct children, so step over
+            // each element's whole subtree; a descendant combinator looks
+            // inside. Using the resolved end rather than counting tags keeps
+            // void elements from unbalancing the depth.
+            if !recurse {
+                i = end;
+                continue;
             }
-            _ => {}
         }
         i += 1;
     }
 }
 
 fn execute_query(
-    decoded: &str,
-    nodes: &[HtmlNode],
+    doc: &HtmlDoc,
     ranges: &[(u32, u32)],
     steps: &[QueryStep],
 ) -> Vec<(u32, u32)> {
@@ -270,21 +265,21 @@ fn execute_query(
     if ranges.is_empty() {
         // Whole document
         find_elements(
-            decoded,
-            nodes,
+            doc,
             &steps[0],
             0,
-            nodes.len(),
+            doc.nodes.len(),
             true,
             &mut matches,
         );
     } else {
+        // Inside the selection: `querySelectorAll` on an element never
+        // returns the element itself.
         for &(s, e) in ranges {
             find_elements(
-                decoded,
-                nodes,
+                doc,
                 &steps[0],
-                s as usize,
+                s as usize + 1,
                 e as usize,
                 true,
                 &mut matches,
@@ -296,12 +291,19 @@ fn execute_query(
     for step in &steps[1..] {
         let prev = std::mem::take(&mut matches);
         let is_child = matches!(step.combinator, Combinator::Child);
+        // For a descendant step, a match nested inside a match already
+        // scanned has already had its subtree searched; rescanning it made
+        // `b b` on deeply nested `<b>` quadratic. `prev` is sorted.
+        let mut scanned_end = 0usize;
         for &(s, e) in &prev {
+            if !is_child && (s as usize) < scanned_end {
+                continue;
+            }
+            scanned_end = scanned_end.max(e as usize);
             let child_start = s as usize + 1;
             if child_start < e as usize {
                 find_elements(
-                    decoded,
-                    nodes,
+                    doc,
                     step,
                     child_start,
                     e as usize,
@@ -323,14 +325,9 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
     // Fast path: if there's exactly one text node, return a slice (no alloc)
     let mut first_text: Option<(usize, usize)> = None;
     let mut count = 0;
-    for i in start..=end.min(nodes.len().saturating_sub(1)) {
-        if let HtmlNode::Text {
-            start: s,
-            end: e,
-            all_ws,
-        } = &nodes[i]
-        {
-            if !all_ws {
+    for i in start..end.min(nodes.len()) {
+        if let HtmlNode::Text { start: s, end: e, .. } = &nodes[i] {
+            if s != e {
                 count += 1;
                 if count == 1 {
                     first_text = Some((*s, *e));
@@ -347,21 +344,15 @@ fn collect_text<'a>(decoded: &'a str, nodes: &[HtmlNode], start: usize, end: usi
     ""
 }
 
+/// The element's text content: its text nodes concatenated as decoded.
+/// Inserting a space between nodes, as this used to, put one inside a word
+/// split by a comment or an inline tag (`a<!-- -->b`, `a<b>b</b>`) and made
+/// `.text` disagree with `.html`.
 fn collect_text_owned(decoded: &str, nodes: &[HtmlNode], start: usize, end: usize) -> String {
     let mut text = String::new();
-    for i in start..=end.min(nodes.len().saturating_sub(1)) {
-        if let HtmlNode::Text {
-            start: s,
-            end: e,
-            all_ws,
-        } = &nodes[i]
-        {
-            if !all_ws || (text.is_empty() && *all_ws) {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(&decoded[*s..*e]);
-            }
+    for i in start..end.min(nodes.len()) {
+        if let HtmlNode::Text { start: s, end: e, .. } = &nodes[i] {
+            text.push_str(&decoded[*s..*e]);
         }
     }
     text
@@ -385,34 +376,21 @@ fn get_attr<'a>(
     None
 }
 
-fn count_top_level_elements(nodes: &[HtmlNode]) -> usize {
-    let mut count = 0;
-    let mut depth = 0u32;
-    for node in nodes {
-        match node {
-            HtmlNode::OpenTag { .. } => {
-                if depth == 0 {
-                    count += 1;
-                }
-                depth += 1;
-            }
-            HtmlNode::CloseTag { .. } => {
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
-    count
+/// Counted from the same ranges the callers walk, so a void element can't
+/// make the two disagree.
+fn count_top_level_elements(doc: &HtmlDoc) -> usize {
+    top_level_ranges(doc).len()
 }
 
-fn top_level_ranges(nodes: &[HtmlNode]) -> Vec<(u32, u32)> {
+fn top_level_ranges(doc: &HtmlDoc) -> Vec<(u32, u32)> {
+    let nodes = &doc.nodes;
     let mut out = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
         if let HtmlNode::OpenTag { .. } = &nodes[i] {
-            let close = find_close_tag(nodes, i);
-            out.push((i as u32, close as u32));
-            i = close + 1;
+            let end = element_end(doc, i);
+            out.push((i as u32, end as u32));
+            i = end;
         } else {
             i += 1;
         }
@@ -433,7 +411,9 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let sself = script_value!(vm, args.self);
             let doc =
                 if let Some(d) = vm.bx.heap.string_mut_self_with(sself, |_heap, s| {
-                    parse_html(s, &mut None, InternLiveId::No)
+                    // Interned, so `.html` can print tag and attribute names
+                    // back out; an un-interned `LiveId` only prints as hex.
+                    parse_html(s, &mut None, InternLiveId::Yes)
                 }) {
                     d
                 } else {
@@ -442,10 +422,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                         "parse_html called on non-string value"
                     );
                 };
-            let backing = Rc::new(HtmlBacking {
-                decoded: doc.decoded,
-                nodes: doc.nodes,
-            });
+            let backing = Rc::new(doc);
             let html_doc = ScriptHtmlDoc {
                 backing,
                 ranges: Vec::new(),
@@ -502,7 +479,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 return vm.bx.heap.new_handle(html_type, Box::new(sub)).into();
             }
 
-            let matches = execute_query(&backing.decoded, &backing.nodes, &ranges, &parsed.steps);
+            let matches = execute_query(&backing, &ranges, &parsed.steps);
 
             match parsed.terminal {
                 Terminal::Attr(attr_id) => {
@@ -660,7 +637,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let (backing, ranges) =
                 if let Some(doc) = vm.bx.heap.handle_ref::<ScriptHtmlDoc>(handle) {
                     let r = if doc.is_root && doc.ranges.is_empty() {
-                        top_level_ranges(doc.nodes())
+                        top_level_ranges(&doc.backing)
                     } else if !doc.ranges.is_empty() {
                         doc.ranges.clone()
                     } else {
@@ -700,7 +677,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 if !doc.is_root || !doc.ranges.is_empty() {
                     return ScriptValue::from_f64(doc.ranges.len() as f64);
                 }
-                return ScriptValue::from_f64(count_top_level_elements(doc.nodes()) as f64);
+                return ScriptValue::from_f64(count_top_level_elements(&doc.backing) as f64);
             }
             return NIL;
         }
@@ -710,12 +687,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             if field == id!(text) {
                 let mut text = String::new();
                 if doc.is_root && doc.ranges.is_empty() {
-                    text = collect_text_owned(
-                        doc.decoded(),
-                        doc.nodes(),
-                        0,
-                        doc.nodes().len().saturating_sub(1),
-                    );
+                    text = collect_text_owned(doc.decoded(), doc.nodes(), 0, doc.nodes().len());
                 } else {
                     for &(s, e) in &doc.ranges {
                         let t =
@@ -740,7 +712,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                             doc.decoded(),
                             doc.nodes(),
                             s as usize,
-                            e as usize + 1,
+                            e as usize,
                         );
                     }
                     out
@@ -760,6 +732,22 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     });
 }
 
+/// Appends `s` with the characters that would read back as markup escaped,
+/// so the `.html` of a document parses to the same document again. The
+/// decoded text has had its entities resolved, so emitting it verbatim used
+/// to turn a literal `<` in a text node into a tag.
+fn push_escaped(out: &mut String, s: &str, in_attribute: bool) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if in_attribute => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
 fn reconstruct_html(decoded: &str, nodes: &[HtmlNode], start: usize, end: usize) -> String {
     let mut out = String::new();
     reconstruct_html_into(&mut out, decoded, nodes, start, end);
@@ -776,34 +764,49 @@ fn reconstruct_html_into(
     let mut i = start;
     while i < end && i < nodes.len() {
         match &nodes[i] {
-            HtmlNode::OpenTag { nc, .. } => {
+            HtmlNode::OpenTag { lc, nc } => {
                 out.push('<');
-                out.push_str(&format!("{}", nc));
+                let _ = write!(out, "{}", nc);
                 let mut j = i + 1;
+                // The serializer's rule for `<pre>`: a newline that starts
+                // its content is written twice, because the parser drops
+                // the first one. Otherwise `.html` loses a line each time
+                // it is parsed.
+                let doubles_leading_newline =
+                    *lc == live_id!(pre) || *lc == live_id!(textarea) || *lc == live_id!(listing);
                 while j < end && j < nodes.len() {
                     if let HtmlNode::Attribute { nc, start, end, .. } = &nodes[j] {
                         out.push(' ');
-                        out.push_str(&format!("{}", nc));
-                        let val = &decoded[*start..*end];
-                        if !val.is_empty() {
-                            out.push_str("=\"");
-                            out.push_str(val);
-                            out.push('"');
-                        }
+                        let _ = write!(out, "{}", nc);
+                        // Always `=""`, as the serializer specifies: a bare
+                        // name followed by an attribute whose name starts
+                        // with `=` would re-parse to a different document.
+                        out.push_str("=\"");
+                        push_escaped(out, &decoded[*start..*end], true);
+                        out.push('"');
                         j += 1;
                     } else {
                         break;
                     }
                 }
                 out.push('>');
+                if doubles_leading_newline {
+                    let first_text = nodes[j..end.min(nodes.len())].iter().find_map(|n| match n {
+                        HtmlNode::Text { start, end, .. } if start != end => Some(&decoded[*start..*end]),
+                        _ => None,
+                    });
+                    if first_text.is_some_and(|t| t.starts_with('\n')) {
+                        out.push('\n');
+                    }
+                }
             }
             HtmlNode::CloseTag { nc, .. } => {
                 out.push_str("</");
-                out.push_str(&format!("{}", nc));
+                let _ = write!(out, "{}", nc);
                 out.push('>');
             }
             HtmlNode::Text { start, end, .. } => {
-                out.push_str(&decoded[*start..*end]);
+                push_escaped(out, &decoded[*start..*end], false);
             }
             HtmlNode::Attribute { .. } => {}
         }
