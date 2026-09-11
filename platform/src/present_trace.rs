@@ -117,6 +117,8 @@ pub struct Frame {
     pool_bytes: AtomicU64,
     inflight: AtomicU64,
     drawable_wait: AtomicU64,
+    /// The presented handler ran without a glass time (see `presented`).
+    unconfirmed: AtomicU64,
     maintenance: [AtomicU64; 6],
     admission: [AtomicU64; 5],
     category_bytes: [AtomicU64; 8],
@@ -203,6 +205,12 @@ impl Frame {
             let lag = ((host_now - glass) * 1e9) as u64;
             self.times[Stage::Presented as usize]
                 .store(callback.saturating_sub(lag).max(1), Ordering::Release);
+        } else {
+            // the handler ran but the drawable reports no glass time (a
+            // window the compositor did not put on glass, or a layer that
+            // does not report presentedTime): the present happened, `n` is
+            // the confirmed ones — this counts the rest
+            self.unconfirmed.store(1, Ordering::Release);
         }
     }
 }
@@ -237,6 +245,7 @@ pub fn begin(repaint: u64) -> Option<Trace> {
         pool_bytes: AtomicU64::new(0),
         inflight: AtomicU64::new(0),
         drawable_wait: AtomicU64::new(0),
+        unconfirmed: AtomicU64::new(0),
         maintenance: std::array::from_fn(|_| AtomicU64::new(0)),
         admission: std::array::from_fn(|_| AtomicU64::new(0)),
         category_bytes: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -390,6 +399,7 @@ fn report(
     let mut causes = [0u64; CAUSES];
     let mut requests = 0;
     let mut glasses = Vec::new();
+    let mut unconfirmed = 0usize;
     let mut uploads = 0;
     let mut retired = 0;
     let mut evicted = 0;
@@ -435,6 +445,9 @@ fn report(
         if s.glass() != 0 && !r.reported_glass {
             r.reported_glass = true;
             glasses.push(s);
+        } else if s.glass() == 0 && !r.reported_glass && r.frame.unconfirmed.load(Ordering::Acquire) != 0 {
+            r.reported_glass = true;
+            unconfirmed += 1;
         }
     }
     glasses.sort_unstable_by_key(Snapshot::glass);
@@ -478,6 +491,7 @@ fn report(
     *reported_logs = logs;
     if requests == 0
         && glasses.is_empty()
+        && unconfirmed == 0
         && causes.iter().all(|n| *n == 0)
         && dropped == 0
         && log_dropped == 0
@@ -487,7 +501,7 @@ fn report(
     {
         return;
     }
-    let mut line=format!("n={} requests={requests} max_gap={max_gap:.3}ms idle_gap={idle_gap:.3}ms histogram(<8,<10,<16,<25,<33,<40,<100,100+)={bins:?} uploads={uploads} retired_bytes={retired} evicted_bytes={evicted} trace_dropped={dropped} log_dropped={log_dropped}",glasses.len());
+    let mut line=format!("n={} n_unconfirmed={unconfirmed} requests={requests} max_gap={max_gap:.3}ms idle_gap={idle_gap:.3}ms histogram(<8,<10,<16,<25,<33,<40,<100,100+)={bins:?} uploads={uploads} retired_bytes={retired} evicted_bytes={evicted} trace_dropped={dropped} log_dropped={log_dropped}",glasses.len());
     for (i, count) in causes.iter().enumerate() {
         let _ = write!(line, " cause={}:{}", CAUSE_NAMES[i], count);
     }

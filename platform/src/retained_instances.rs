@@ -14,12 +14,6 @@ use std::{
 /// than measuring a copy into an already hot cache line.
 pub const MAX_RETAINED_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 
-/// The allowance never falls below this: the startup probe measures one
-/// cold 4 MiB copy, and a machine busy at that instant (an index on every
-/// core, a compositor at 8K) measured kilobytes — a 58 MB publication
-/// backlog then drained at 3 KB per frame for minutes at 120 frames/s.
-pub const MIN_RETAINED_UPLOAD_BYTES: usize = MAX_RETAINED_UPLOAD_BYTES / 8;
-
 pub fn retained_upload_limit() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -29,10 +23,9 @@ pub fn retained_upload_limit() -> usize {
         destination.copy_from_slice(std::hint::black_box(&source));
         std::hint::black_box(&destination);
         let nanos = start.elapsed().as_nanos().max(1);
-        (((MAX_RETAINED_UPLOAD_BYTES as u128 * 2_000_000 / nanos)
+        ((MAX_RETAINED_UPLOAD_BYTES as u128 * 2_000_000 / nanos)
             .min(MAX_RETAINED_UPLOAD_BYTES as u128) as usize)
-            & !3)
-            .max(MIN_RETAINED_UPLOAD_BYTES)
+            & !3
     })
 }
 
