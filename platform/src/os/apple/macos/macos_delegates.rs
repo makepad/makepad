@@ -18,7 +18,7 @@ use {
             macos::{
                 macos_app::{try_with_macos_app, with_macos_app, MacosApp},
                 macos_event::MacosEvent,
-                macos_window::get_cocoa_window,
+                macos_window::{clear_marked_text_ivar, get_cocoa_window},
             },
         },
     },
@@ -782,6 +782,9 @@ pub fn define_cocoa_view_class() -> *const Class {
         _replacement_range: NSRange,
     ) {
         unsafe {
+            with_macos_app(|app| {
+                app.ime_keyboard.composition_changed(this as *const Object as usize);
+            });
             let marked_text_ref: &mut ObjcId = this.get_mut_ivar("markedText");
             let _: () = msg_send![(*marked_text_ref), release];
             let marked_text = NSMutableAttributedString::alloc(nil);
@@ -809,28 +812,24 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
 
-    // Clears the stored marked-text ivar and tells the input context the
-    // composition is finished. Does NOT notify the TextInput widget, so callers
-    // that have already updated/committed the widget can use it directly without
-    // emitting a second (and possibly destructive) text-input event.
-    unsafe fn clear_marked_text_ivar(this: &Object) {
-        let marked_text: ObjcId = *this.get_ivar("markedText");
-        let mutable_string = marked_text.mutable_string();
-        let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
-        let input_context: ObjcId = msg_send![this, inputContext];
-        let _: () = msg_send![input_context, discardMarkedText];
-    }
-
     extern "C" fn unmark_text(this: &Object, _sel: Sel) {
         unsafe {
+            // Native cleanup clears the ivar before discardMarkedText, which may
+            // call us again. Do not edit the newly focused widget on that path.
+            if has_marked_text(this, _sel) == NO {
+                return;
+            }
+            with_macos_app(|app| {
+                app.ime_keyboard.composition_changed(this as *const Object as usize);
+            });
             // AppKit asks us to discard the in-progress composition (e.g. the user
             // pressed Escape or the input session was interrupted). Remove the
-            // inline preview from the focused TextInput, then clear our state.
+            // inline preview from the focused TextInput after clearing our state.
             // (After a commit, `insert_text` clears the ivar directly instead of
             // routing through here, so this only fires for genuine discards and is
             // a no-op when the widget has no active composition.)
-            get_cocoa_window(this).send_text_input(String::new(), true);
             clear_marked_text_ivar(this);
+            get_cocoa_window(this).send_text_input(String::new(), true);
         }
     }
 
@@ -900,8 +899,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         string: ObjcId,
         replacement_range: NSRange,
     ) {
-        let cw = get_cocoa_window(this);
         unsafe {
+            if has_marked_text(this, _sel) != NO {
+                with_macos_app(|app| {
+                    app.ime_keyboard.composition_changed(this as *const Object as usize);
+                });
+            }
             let has_attr = msg_send![string, isKindOfClass: class!(NSAttributedString)];
             let characters = if has_attr {
                 msg_send![string, string]
@@ -909,29 +912,40 @@ pub fn define_cocoa_view_class() -> *const Class {
                 string
             };
             let string = nsstring_to_string(characters);
-            cw.send_text_input(string, replacement_range.length != 0);
+            // Finish native composition before application callbacks can move
+            // focus or start another one. The widget receives the commit below.
+            clear_marked_text_ivar(this);
+            get_cocoa_window(this).send_text_input(string, replacement_range.length != 0);
             let input_context: ObjcId = msg_send![this, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
-            let () = msg_send![cw.view, setNeedsDisplay: YES];
-            // The commit above already replaced any composition preview in the
-            // widget; just clear our marked-text state (don't route through
-            // `unmark_text`, which would emit a second text-input event).
-            clear_marked_text_ivar(this);
+            let () = msg_send![this, setNeedsDisplay: YES];
         }
     }
 
-    extern "C" fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
-        let _cw = get_cocoa_window(this);
+    extern "C" fn do_command_by_selector(this: &Object, _sel: Sel, command: Sel) {
+        let cancel = command == sel!(cancelOperation:);
+        with_macos_app(|app| {
+            app.ime_keyboard.command(this as *const Object as usize, cancel);
+        });
+        if cancel {
+            unmark_text(this, _sel);
+        }
     }
 
     extern "C" fn key_down(this: &Object, _sel: Sel, event: ObjcId) {
-        let cw = get_cocoa_window(this);
         // Only forward to NSTextInputContext when IME is active (a text field has focus).
         // Otherwise, typing outside the TextInput still trigger the system IME.
-        if cw.ime_active {
+        if get_cocoa_window(this).ime_active {
             unsafe {
+                let view = this as *const Object as usize;
+                let marked = has_marked_text(this, _sel) != NO;
+                with_macos_app(|app| app.ime_keyboard.begin_input_context(view, marked));
                 let input_context: ObjcId = msg_send![this, inputContext];
-                let () = msg_send![input_context, handleEvent: event];
+                let handled: BOOL = msg_send![input_context, handleEvent: event];
+                let marked = has_marked_text(this, _sel) != NO;
+                with_macos_app(|app| {
+                    app.ime_keyboard.end_input_context(view, handled != NO, marked);
+                });
             }
         }
     }
