@@ -239,6 +239,31 @@ pub struct WeakSharedInstances {
     bytes: usize,
 }
 
+impl std::fmt::Debug for SharedInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedInstances")
+            .field("id", &self.id())
+            .field("byte_len", &self.byte_len())
+            .field("phase", &self.receipt().phase())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WeakSharedInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakSharedInstances")
+            .field("bytes", &self.bytes)
+            .field("alive", &(self.publication.strong_count() != 0))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PublishReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishReceipt").field("phase", &self.phase()).finish()
+    }
+}
+
 impl WeakSharedInstances {
     pub fn upgrade(&self) -> Option<SharedInstances> {
         self.publication.upgrade().map(SharedInstances)
