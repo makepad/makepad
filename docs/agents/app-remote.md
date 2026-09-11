@@ -105,6 +105,31 @@ Read a returned PNG with the local image viewer when visual inspection is
 needed. Confirm the owned process exits after cleanup. Use `/quit` if a
 backend cannot grab; do not replace a failed grab with an OS screenshot.
 
+## GPU runs, hidden windows, and the simulated-GPU backend
+
+- The proof rig for anything visual is the native GPU backend (Metal on
+  macOS) in an owned `--remote` instance. `MAKEPAD_HIDE_WINDOWS=1` keeps its
+  windows off the user's screen; grabs and input still work because `/g`
+  forces a present on a hidden window. Measured on macOS (2026-09-10): the
+  first hidden `/g` answers in ~100 ms, later ones in ~2 s each, and `/gseq`
+  delivers at that ~2 s spacing regardless of `every_ms`; on an app that is
+  not redrawing, `/gseq` can time out ("grab timeout"). Rest/settle timing
+  proofs need a window that presents on its own (the user's, or a visible
+  unfocused one).
+- `MAKEPAD=headless` builds the simulated-GPU backend (`cfg(headless)`,
+  `platform/src/os/headless/`): a CPU raster that writes frames to files
+  with no window, no Metal shader compile and no presentation. It is for
+  logic and data-structure tests only. Never use it to prove a picture or to
+  chase a rendering bug, and never build it into the shared `target/`
+  (`CARGO_TARGET_DIR=target-headless`).
+- Known remote hazards: a hidden-window click is occasionally lost
+  (`Event::MouseDown` never arrives) — relaunch before debugging the widget;
+  tick-sampled keys need `/k?k=down` … ≥150 ms … `/k?k=up`, a `press` lands
+  between ticks; in the code map every `/g` drops keyboard focus, click the
+  map before the next key batch; `MAKEPAD_HIDE_WINDOWS` is implemented only
+  on macOS. Test instances of apps with audio or a shared home run with
+  `SANDBOX_MUTE=1` and their own `SANDBOX_HOME` / `--state-dir`.
+
 ## Coordinate and lifecycle details
 
 - Rectangles are layout points, window-local, with Y increasing downward.
