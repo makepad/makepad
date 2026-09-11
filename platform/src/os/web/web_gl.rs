@@ -668,6 +668,8 @@ impl Cx {
 
     pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        self.passes[draw_pass_id].painted_serial = self.repaint_id;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let dpi_uniforms_gen = self.next_uniform_gen();

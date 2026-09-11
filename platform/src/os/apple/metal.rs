@@ -242,14 +242,46 @@ impl Cx {
         self.draw_lists.publish_instance_retirement_pending() || retirement_pending
     }
 
+    /// Retirement maintenance without a paint: retired buffers whose GPU
+    /// use completed are released and the receipt published, so the app's
+    /// bounded maintenance wake converges at rest instead of repainting
+    /// for it (nothing repaints at rest; a paint is content).
+    pub(crate) fn maintain_instance_retirements(&mut self, metal_cx: &MetalCx) {
+        // no paint advances the repaint id: the bounded reclaim scan runs
+        // once per idle beat instead of once per repaint
+        self.draw_lists.1.reclaim_frame = None;
+        let _ = self.service_metal_instance_retirements(metal_cx);
+        let _ = metal_cx.collect_retired_instances(&mut self.draw_lists.1);
+        self.draw_lists
+            .1
+            .allocations
+            .set_pending_backend_retirements(metal_cx.retired_instances.borrow().len());
+        let _ = self.draw_lists.publish_instance_retirement_pending();
+    }
+
     fn upload_instance_buffers(&mut self, root: DrawListId, metal_cx: &MetalCx) -> bool {
         if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::UploadBegin); }
         let evicted_before = self.draw_lists.1.allocations.evicted_bytes();
         let retired_before = metal_cx.retired_instance_bytes.get();
         self.draw_lists.1.begin_frame(self.repaint_id);
         self.retry_metal_pipelines(metal_cx);
+        // The interactive allowance is the probe's 2 ms slice (with its
+        // floor); a window idle for a third of a second copies the whole cap
+        // per frame: a publication backlog drains in a few frames of rest.
+        self.draw_lists.1.limit = if input_idle_for_ms(300) {
+            crate::retained_instances::MAX_RETAINED_UPLOAD_BYTES
+        } else {
+            crate::retained_instances::retained_upload_limit()
+        };
         let requests = self.pending_instance_uploads(root);
-        self.prepare_retained_working_set(root);
+        // the working-set membership serves uploads, eviction and retirement:
+        // a camera-only paint with none owed skips the walk over every list
+        if !requests.is_empty()
+            || self.draw_lists.1.allocations.reclaim_needed()
+            || self.draw_lists.has_pending_instance_retirements()
+        {
+            self.prepare_retained_working_set(root);
+        }
         let mut retirement_pending = self.service_metal_instance_retirements(metal_cx);
         let mut eviction = std::mem::take(&mut self.draw_lists.1.eviction);
         let maintenance_limit = self.draw_lists.1.limit;
@@ -398,11 +430,12 @@ impl Cx {
                 budget.stats.install_us, budget.pending_bytes, budget.upload_pending_max.max(budget.pending_bytes),
                 budget.starved_frames, budget.allocations.bytes(), budget.allocations.refusals(), budget.allocations.evicted_bytes(), budget.allocations.waits(), budget.stats.identical_skips, critical_deferred, METAL_INSTANCE_ALLOCATIONS.load(Ordering::Relaxed), pool.bytes(), pool.reuses, budget.stats.category_bytes);
         }
-        let queued = self.draw_lists.publish_instance_retirement_pending();
+        // Retirement maintenance (queued releases, buffers the GPU still
+        // holds) completes at the next paint something else asks for; it
+        // never dirties the pass itself (a rest would never come). Only
+        // uploads still owed ask for another paint.
+        let _ = (retirement_pending, self.draw_lists.publish_instance_retirement_pending());
         pending != 0
-            || queued
-            || retirement_pending
-            || !metal_cx.retired_instances.borrow().is_empty()
     }
 
     /// A draw item of this list or its sub-lists that asks for instances
@@ -964,12 +997,6 @@ impl Cx {
                     );
                 }
 
-                self.os.draw_calls_done += 1;
-                self.os.instances_done = self.os.instances_done.saturating_add(instances);
-                self.os.vertices_done = self
-                    .os
-                    .vertices_done
-                    .saturating_add((geometry.index_count as u64).saturating_mul(instances));
                 if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
                     let index_type = match geometry.index_width {
                         2 => MTLIndexType::UInt16,
@@ -979,17 +1006,41 @@ impl Cx {
                             continue;
                         }
                     };
-                    let () = unsafe {
-                        msg_send![
-                            encoder,
-                            drawIndexedPrimitives: MTLPrimitiveType::Triangle
-                            indexCount: geometry.index_count as u64
-                            indexType: index_type
-                            indexBuffer: inner.buffer.as_id()
-                            indexBufferOffset: 0
-                            instanceCount: instances
-                        ]
+                    // The item's instance ranges, clamped to the resident
+                    // prefix (one draw per range); every instance otherwise.
+                    let whole = [0u32..instances as u32];
+                    let ranges: &[std::ops::Range<u32>] = if draw_item.instance_ranges.is_empty() {
+                        &whole
+                    } else {
+                        &draw_item.instance_ranges
                     };
+                    for range in ranges {
+                        let start = (range.start as u64).min(instances);
+                        let end = (range.end as u64).min(instances);
+                        if end <= start {
+                            continue;
+                        }
+                        let count = end - start;
+                        self.os.draw_calls_done += 1;
+                        self.os.instances_done = self.os.instances_done.saturating_add(count);
+                        self.os.vertices_done = self
+                            .os
+                            .vertices_done
+                            .saturating_add((geometry.index_count as u64).saturating_mul(count));
+                        let () = unsafe {
+                            msg_send![
+                                encoder,
+                                drawIndexedPrimitives: MTLPrimitiveType::Triangle
+                                indexCount: geometry.index_count as u64
+                                indexType: index_type
+                                indexBuffer: inner.buffer.as_id()
+                                indexBufferOffset: 0
+                                instanceCount: count
+                                baseVertex: 0u64
+                                baseInstance: start
+                            ]
+                        };
+                    }
                     draw_item.consumed_instance_id = draw_item.retained_instance_id;
                     draw_item.consumed_schema = draw_item.resident_schema;
                     draw_item.consumed_serial = metal_cx.current_cb_seq;
@@ -1718,7 +1769,11 @@ impl Cx {
             self.os.texture_bytes_uploaded as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
-        metal_cx.aborted_repaint != Some(self.repaint_id)
+        let painted = metal_cx.aborted_repaint != Some(self.repaint_id);
+        if painted {
+            self.passes[draw_pass_id].painted_serial = self.repaint_id;
+        }
+        painted
     }
 
     fn build_screenshot_struct(
@@ -2818,6 +2873,9 @@ impl MetalCx {
     #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn begin_repaint(&mut self) {
         metal_flush_submissions();
+        // a chunk whose allocation failed leaves once per repaint, not on
+        // every uniform bind (thousands per frame during a bake)
+        self.uniform_chunks.borrow_mut().retain(|chunk| !matches!(chunk.allocation.ready.get(), Some(None)));
         if self.cb_seq > 0 && self.repaint_tail_seqs.back() != Some(&self.cb_seq) {
             self.repaint_tail_seqs.push_back(self.cb_seq);
             while self.repaint_tail_seqs.len() > 16 {
@@ -3833,7 +3891,6 @@ impl MetalCx {
         let bytes = std::mem::size_of_val(data);
         let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
         let mut chunks = self.uniform_chunks.borrow_mut();
-        chunks.retain(|chunk| !matches!(chunk.allocation.ready.get(), Some(None)));
         for chunk in chunks.iter_mut() {
             let Some(Some(buffer)) = chunk.allocation.ready.get() else {
                 continue;
@@ -6261,14 +6318,30 @@ fn present_gpu_time(seconds: f64) {
 /// the input→glass latency. THE number behind "the first letter hangs".
 static INPUT_AT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The last input event's arrival (always stamped): a paint with no input
+/// for a while is an idle presenting window and may copy the whole
+/// allowance cap per frame instead of the interactive slice.
+static LAST_INPUT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// No input event for `ms` milliseconds.
+pub(crate) fn input_idle_for_ms(ms: u64) -> bool {
+    let last = LAST_INPUT_US.load(std::sync::atomic::Ordering::Relaxed);
+    last == 0 || now_us().saturating_sub(last) > ms * 1000
+}
+
 pub(crate) fn note_input_event() {
+    LAST_INPUT_US.store(now_us(), std::sync::atomic::Ordering::Relaxed);
     if !crate::makepad_error_log::trace_enabled("present") {
         return;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
+    let now = now_us();
     let _ = INPUT_AT_US.compare_exchange(
         0,
         now,

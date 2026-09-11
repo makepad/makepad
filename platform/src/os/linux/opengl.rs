@@ -1070,8 +1070,11 @@ impl Cx {
     ) -> Option<(Vec2d, f64)> {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let repaint_id = self.repaint_id;
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        pass.painted_serial = repaint_id;
         pass.os.shader_variant = SHADER_VARIANT_WINDOW;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {

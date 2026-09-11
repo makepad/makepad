@@ -347,6 +347,9 @@ mod imp {
             x: f64,
             y: f64,
         },
+        /// The window's own maximise (macOS: toggleFullScreen) — the test
+        /// hook for the maximise/occlusion proof.
+        Maximize,
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -947,9 +950,11 @@ mod imp {
         poll_with_present(cx, |_, _| None);
     }
 
+    /// Returns whether a present is still waiting on its window's drawable
+    /// (the caller schedules the next beat to poll it again).
     #[cfg(all(target_os = "macos", not(headless)))]
-    pub(crate) fn poll_macos(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> bool) {
-        poll_with_present(cx, |cx, window| Some(present(cx, window)));
+    pub(crate) fn poll_macos(cx: &mut Cx, present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
+        poll_with_present(cx, present)
     }
 
     #[cfg(all(target_os = "macos", not(headless)))]
@@ -964,11 +969,12 @@ mod imp {
         })
     }
 
-    fn poll_with_present(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) {
+    fn poll_with_present(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
         publish_windows(cx);
+        let mut pending = false;
 
         let cmds: Vec<Cmd> = {
             match queue().try_lock() {
@@ -978,10 +984,10 @@ mod imp {
         };
         // A due sequence frame precedes commands dispatched on this wake.
         poll_captures(cx);
-        present_captures(cx, &mut present);
+        pending |= present_captures(cx, &mut present);
         for cmd in cmds {
             poll_captures(cx);
-            present_captures(cx, &mut present);
+            pending |= present_captures(cx, &mut present);
             let wait_window = match &cmd {
                 Cmd::Input {
                     window, wait: true, ..
@@ -992,28 +998,37 @@ mod imp {
             apply(cx, cmd);
             // Do not batch later input ahead of a grab in this same drain.
             poll_captures(cx);
-            present_captures(cx, &mut present);
+            pending |= present_captures(cx, &mut present);
             if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
                 cx.request_remote_window_present(window);
-                if present(cx, window) == Some(false) {
-                    FRAME_WAITERS.with_borrow_mut(|waiters| {
-                        for (_, tx, _) in waiters.drain(..) {
-                            let _ = tx.send(Reply::Err(
-                                "requested input frame could not be submitted; retry".into(),
-                            ));
-                        }
-                    });
+                match present(cx, window) {
+                    Some(false) => {
+                        FRAME_WAITERS.with_borrow_mut(|waiters| {
+                            for (_, tx, _) in waiters.drain(..) {
+                                let _ = tx.send(Reply::Err(
+                                    "requested input frame could not be submitted; retry".into(),
+                                ));
+                            }
+                        });
+                    }
+                    // the pass stays dirty; the next beat paints it and the
+                    // waiters resolve on its repaint
+                    None => pending = true,
+                    Some(true) => {}
                 }
             }
             resolve_frame_waiters(cx);
         }
 
         poll_captures(cx);
-        present_captures(cx, &mut present);
+        pending |= present_captures(cx, &mut present);
         resolve_frame_waiters(cx);
+        pending
     }
 
-    fn present_captures(cx: &mut Cx, present: &mut impl FnMut(&mut Cx, WindowId) -> Option<bool>) {
+    /// Returns whether a capture's present is waiting on its drawable.
+    fn present_captures(cx: &mut Cx, present: &mut impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
+        let mut pending = false;
         let windows = CAPTURES.with_borrow(|captures| {
             let mut windows: Vec<usize> = captures.windows.values().copied().collect();
             windows.sort_unstable();
@@ -1026,6 +1041,7 @@ mod imp {
                 Err(_) => Some(false),
             };
             if result.is_none() {
+                pending = true;
                 continue;
             }
             // A failed drawable must not silently move this capture across
@@ -1045,6 +1061,7 @@ mod imp {
                 });
             });
         }
+        pending
     }
 
     fn resolve_frame_waiters(cx: &Cx) {
@@ -1276,6 +1293,12 @@ mod imp {
                             was_paste: false,
                             ..Default::default()
                         }),
+                        Input::Maximize => {
+                            cx.push_unique_platform_op(crate::cx_api::CxOsOp::MaximizeWindow(window_id));
+                            input_result = Some("{\"ok\":1,\"maximize\":1}".to_string());
+                            cx.redraw_all();
+                            continue;
+                        }
                         Input::DropFile { path, x, y } => {
                             let size = cx.windows[window_id].window_geom.inner_size;
                             if x >= size.x || y >= size.y {
@@ -1751,6 +1774,12 @@ mod imp {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
             }
+            // `/w?k=maximize`: the window's own maximise, answered after the
+            // next drawn frame with `wait` (the maximise/occlusion proof).
+            "/w" | "/window" => match p.get(&["k", "kind"]) {
+                Some("maximize") | Some("max") => send_input(p.window(), vec![Input::Maximize], p.flag(&["wait"])),
+                other => err(&format!("unknown window op {other:?}; k=maximize")),
+            },
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next
             // drawn frame so a following grab sees the change.

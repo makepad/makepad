@@ -144,6 +144,13 @@ impl DrawableWorker {
     }
 }
 
+/// A remote grab whose window has no drawable yet stays pending across
+/// beats (the worker's acquisition is polled, never awaited on the UI
+/// thread) for this long before the capture fails.
+const REMOTE_DRAWABLE_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_millis(1000);
+/// The beat at which a pending remote present is retried.
+pub(super) const REMOTE_PRESENT_RETRY: std::time::Duration = std::time::Duration::from_millis(16);
+
 #[derive(Clone)]
 pub struct MetalWindow {
     pub window_id: WindowId,
@@ -512,24 +519,28 @@ impl Cx {
     /// Seal one remote command's UI state into a presenting command buffer.
     /// This is deliberately not Paint: Paint advances animations/media before
     /// Draw and would move the capture past its arming boundary.
+    /// Seal a remote grab or wait=1 input frame on `window_id`: `Some(true)`
+    /// submitted, `Some(false)` failed, `None` the window's drawable is still
+    /// being acquired (the pass stays dirty; the caller polls again on the
+    /// next beat, up to `REMOTE_DRAWABLE_RETRY_LIMIT`).
     fn present_remote_window(
         &mut self,
         window_id: WindowId,
         metal_windows: &mut Vec<MetalWindow>,
         metal_cx: &mut MetalCx,
-    ) -> bool {
+    ) -> Option<bool> {
         let started = Instant::now();
         let Some(window) = metal_windows
             .iter_mut()
             .find(|window| window.window_id == window_id)
         else {
-            return false;
+            return Some(false);
         };
         if with_macos_app(|app| app.remove_window_metal_display_link(window.cocoa_window.window)) {
             window.link_is_metal = false;
         }
         self.os.remote_present_window = Some(window_id);
-        self.os.remote_presented = false;
+        self.os.remote_presented = None;
         self.handle_actions();
         if self.need_redrawing() {
             let time = with_macos_app(|app| app.time_now());
@@ -541,7 +552,7 @@ impl Cx {
         self.os.remote_present_window = None;
         crate::trace!(
             "remote.grab",
-            "sealed window={} repaint={} submitted={} submit_ms={:.3}",
+            "sealed window={} repaint={} submitted={:?} submit_ms={:.3}",
             window_id.id(),
             self.repaint_id,
             self.os.remote_presented,
@@ -550,7 +561,25 @@ impl Cx {
         // In particular, replace any retired CAMetalDisplayLink so ordinary
         // animation and lifecycle work still have a clock after this request.
         self.ensure_timer0_started();
-        self.os.remote_presented
+        match self.os.remote_presented {
+            Some(presented) => {
+                self.os.remote_present_waiting = None;
+                Some(presented)
+            }
+            None => {
+                let since = match self.os.remote_present_waiting {
+                    Some((id, since)) if id == window_id => since,
+                    _ => started,
+                };
+                self.os.remote_present_waiting = Some((window_id, since));
+                if started.duration_since(since) >= REMOTE_DRAWABLE_RETRY_LIMIT {
+                    self.os.remote_present_waiting = None;
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn update_macos_pointer_capture_pacing(&mut self) {
@@ -671,6 +700,12 @@ impl Cx {
         }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        // A beat with nothing to paint still services the backend's
+        // retirement debt (the maintenance a paint used to carry): it never
+        // dirties a pass, and its receipt lets the app's wake stop.
+        if passes_todo.is_empty() && self.draw_lists.has_pending_instance_retirements() {
+            self.maintain_instance_retirements(metal_cx);
+        }
         metal_cx.present_trace = (!passes_todo.is_empty()).then(|| crate::present_trace::begin(self.repaint_id + 1)).flatten();
         let _trace_end = crate::present_trace::RequestEnd(metal_cx.present_trace.clone());
         // Safety flush: if a previous repaint batched offscreen passes but
@@ -757,25 +792,28 @@ impl Cx {
                         } else {
                             NS_WINDOW_OCCLUSION_STATE_VISIBLE
                         };
+                        // The occlusion bit alone never gates a present: macOS
+                        // reported a window maximised on an 8K display occluded
+                        // for seconds and the window went dead. Only an occluded
+                        // window whose drawable pool is exhausted (the compositor
+                        // consuming nothing) skips its beat, and probes every
+                        // OCCLUSION_PROBE_INTERVAL; a window with a free drawable
+                        // presents whatever the bit says.
                         if occlusion & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0 {
+                            let now = Instant::now();
+                            let since = *metal_window.occluded_since.get_or_insert(now);
                             if in_flight >= PRESENT_GATE_IN_FLIGHT {
                                 metal_window
                                     .gate_closed_since
                                     .get_or_insert_with(Instant::now);
+                                if !remote_present && now.duration_since(since) < OCCLUSION_PROBE_INTERVAL {
+                                    if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::Occluded); }
+                                    self.repaint_pass(*draw_pass_id);
+                                    continue;
+                                }
+                                // the probe: present once, the next probe in an interval
+                                metal_window.occluded_since = Some(now);
                             }
-                            let now = Instant::now();
-                            let since = *metal_window.occluded_since.get_or_insert(now);
-                            if !remote_present
-                                && now.duration_since(since) < OCCLUSION_PROBE_INTERVAL
-                            {
-                                if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::Occluded); }
-                                self.repaint_pass(*draw_pass_id);
-                                continue;
-                            }
-                            // Fall through and present anyway: if the flag is stale we
-                            // recover, and if it's honest we spent one frame to find out.
-                            // The gate below still rebuilds the pool first if it's full.
-                            metal_window.occluded_since = Some(now);
                         } else {
                             metal_window.occluded_since = None;
                         }
@@ -791,6 +829,9 @@ impl Cx {
                         let acquired = if link_drawable.is_none() && !metal_window.link_is_metal {
                             let mut worker = metal_window.drawable_worker.borrow_mut();
                             let worker = worker.get_or_insert_with(|| DrawableWorker::new(metal_window.ca_layer));
+                            // a remote grab on a beat without a drawable
+                            // leaves the pass dirty and is polled again on
+                            // the next beat: never a wait on the UI thread
                             let drawable = worker.take();
                             if let Some(trace) = &metal_cx.present_trace {
                                 trace.drawable_wait(worker.started.map_or(0, |t| t.elapsed().as_nanos() as u64).max(worker.wait_ns.load(Ordering::Acquire)));
@@ -801,6 +842,11 @@ impl Cx {
                         // A ready drawable proves compositor capacity even if
                         // presented callbacks are late/lost. Acquisition is on
                         // the worker, so callback debt cannot starve this beat.
+                        // It also ends an occlusion probe: the window is being
+                        // consumed, the bit was stale.
+                        if acquired.is_some() {
+                            metal_window.occluded_since = None;
+                        }
                         // Present-gated pacing: with display sync on, a full
                         // drawable pool makes nextDrawable BLOCK the main
                         // thread until the compositor consumes a frame
@@ -930,7 +976,7 @@ impl Cx {
                             )
                         };
                         if remote_present {
-                            self.os.remote_presented = presented;
+                            self.os.remote_presented = Some(presented);
                         }
                         if presented && is_metal_link_drawable {
                             metal_link_trace_drawable_consumed();
@@ -1068,10 +1114,16 @@ impl Cx {
         // exclusive ownership of their supplied drawable; remote wakes and
         // deadlines use a separate unscoped event after that callback returns.
         if self.os.link_scope.is_none() && !matches!(&event, MacosEvent::LinkFire { .. }) {
-            crate::remote::poll_macos(self, |cx, window| {
+            let pending = crate::remote::poll_macos(self, |cx, window| {
                 cx.present_remote_window(window, metal_windows, metal_cx)
             });
-            with_macos_app(|app| app.schedule_remote_capture(crate::remote::next_grab_deadline()));
+            let mut deadline = crate::remote::next_grab_deadline();
+            if pending {
+                // a present waiting on its drawable is polled on the next beat
+                let retry = Instant::now() + REMOTE_PRESENT_RETRY;
+                deadline = Some(deadline.map_or(retry, |d| d.min(retry)));
+            }
+            with_macos_app(|app| app.schedule_remote_capture(deadline));
         }
         if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
             self.call_event_handler(&Event::Shutdown);
@@ -2568,7 +2620,10 @@ pub struct CxOs {
     pub(crate) pointer_capture_pacing: bool,
     /// Set only while sealing an external grab or wait=1 input frame.
     remote_present_window: Option<WindowId>,
-    remote_presented: bool,
+    /// Whether that frame was submitted (`None`: no drawable on this beat).
+    remote_presented: Option<bool>,
+    /// The window whose remote present is pending on a drawable, and since when.
+    remote_present_waiting: Option<(WindowId, Instant)>,
     /// Start time of the current idle stretch while timer0 is armed.
     pub(crate) timer0_idle_since: Option<f64>,
     pub(crate) media: CxAppleMedia,

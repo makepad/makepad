@@ -702,6 +702,8 @@ impl Cx {
             self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size, uniforms_gen);
         }
         self.passes[pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        self.passes[pass_id].painted_serial = self.repaint_id;
 
         let uniforms_gen = self.next_uniform_gen();
         self.passes[pass_id].set_dpi_factor(dpi_factor, uniforms_gen);

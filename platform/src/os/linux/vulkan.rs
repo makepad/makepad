@@ -3098,6 +3098,8 @@ impl CxVulkan {
         }
 
         cx.passes[draw_pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(true)
     }
 
@@ -3733,6 +3735,7 @@ impl CxVulkan {
         }
 
         cx.passes[draw_pass_id].paint_dirty = false;
+        cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(())
     }
 
