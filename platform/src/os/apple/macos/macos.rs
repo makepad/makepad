@@ -513,6 +513,8 @@ impl Cx {
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        // Before anything reads a relative path or loads a resource.
+        let dev_launch = dev_launch_begin();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         crate::startup_trace("event_loop: MetalCx::new begin");
@@ -558,6 +560,11 @@ impl Cx {
         }
         crate::startup_trace("event_loop: entering AppKit loop");
         MacosApp::event_loop();
+        if let Some(dir) = dev_launch {
+            // The app closed its own windows rather than being killed, which is
+            // the only outcome the runner can read as a clean exit.
+            let _ = std::fs::write(dir.join("status"), "0\n");
+        }
     }
 
     // `pass_root_window` now lives in os/cx_shared.rs — the Windows frame-latency
@@ -2431,4 +2438,41 @@ pub struct CxOs {
     pub(crate) native_camera_previews: HashMap<LiveId, MacosNativeCameraPreview>,
     pub(crate) system_browsers: HashMap<LiveId, MacosSystemBrowser>,
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
+}
+
+/// Completes the handshake with a development runner, if one launched us.
+///
+/// `cargo run` normally starts a bare executable, which macOS gives no bundle
+/// identity: microphone, speech, location and similar prompts are then attributed
+/// to the terminal or editor that spawned it, and are denied outright when that
+/// process lacks the matching usage description. A development runner works around
+/// this by launching a real `.app` through LaunchServices instead.
+///
+/// That costs three things the runner cannot recover on its own, because
+/// LaunchServices forks the process and starts it in `/`: it never learns the
+/// app's pid (so it has nothing to forward a Ctrl-C to), it cannot pass on the
+/// terminal's working directory, and it never sees the app's exit code. All three
+/// are only knowable in-process, so report them through the directory named by
+/// `MAKEPAD_DEV_LAUNCH_DIR`: adopt `MAKEPAD_DEV_WORKING_DIR`, write `pid` on the
+/// way in, and `status` on the way out.
+///
+/// Both variables are set only by such a runner, so an app launched any other way
+/// does nothing here.
+fn dev_launch_begin() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("MAKEPAD_DEV_LAUNCH_DIR")?);
+    let report = || -> std::io::Result<()> {
+        let working_dir = std::env::var_os("MAKEPAD_DEV_WORKING_DIR").ok_or_else(|| {
+            std::io::Error::other("the development runner supplied no working directory")
+        })?;
+        std::env::set_current_dir(working_dir)?;
+        std::fs::write(dir.join("pid"), format!("{}\n", std::process::id()))
+    };
+    if let Err(error) = report() {
+        // The runner is waiting on that pid, so fail here rather than leave it
+        // watching a process it cannot see.
+        eprintln!("makepad: could not complete the development launch: {error}");
+        let _ = std::fs::write(dir.join("status"), "1\n");
+        std::process::exit(1);
+    }
+    Some(dir)
 }
