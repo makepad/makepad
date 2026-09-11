@@ -653,10 +653,6 @@ pub struct TextFlow {
     #[rust]
     pub font_colors: SmallVec<[Vec4f; 8]>,
     #[rust]
-    pub combine_spaces: SmallVec<[bool; 4]>,
-    #[rust]
-    pub ignore_newlines: SmallVec<[bool; 4]>,
-    #[rust]
     pub bold: StackCounter,
     #[rust]
     pub italic: StackCounter,
@@ -1335,8 +1331,6 @@ impl TextFlow {
         self.y_shift_scales.clear();
         self.font_colors.clear();
         self.area_stack.clear();
-        self.combine_spaces.clear();
-        self.ignore_newlines.clear();
         self.first_thing_on_a_line = true;
         self.table_num_columns = 0;
         self.in_table_header = false;
@@ -2564,7 +2558,8 @@ impl Widget for TextFlowLink {
             }
         }
 
-        for area in self.drawn_areas.clone().into_iter() {
+        for i in 0..self.drawn_areas.len() {
+            let area = self.drawn_areas[i];
             match event.hits(cx, area) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus {
