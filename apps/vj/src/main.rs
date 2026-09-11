@@ -8979,6 +8979,12 @@ fn net_beat_info(net: NetClock, now: Instant) -> Option<BeatInfo> {
     })
 }
 
+/// How far one press walks the grid, and how far it walks with shift
+/// held. Five milliseconds is about the smallest step that can be heard
+/// against a kick; twenty-five is a nudge for a grid that is plainly out.
+const GRID_SHIFT_SECS: f64 = 0.005;
+const GRID_SHIFT_COARSE_SECS: f64 = 0.025;
+
 /// How long a deck's count lamp stays lit on the surface, and how long the
 /// first of the lap stays lit instead. The row has one brightness and no
 /// colour, so the length of the flash is the only way it can say which
@@ -35208,6 +35214,18 @@ impl MatchEvent for App {
             ] {
                 if self.ui.button(cx, id).clicked(actions) {
                     self.apply_grid_edit(cx, deck, edit);
+                }
+            }
+            // The pair that walks the whole grid a hair at a time, with
+            // shift for five hairs at once. A run of presses is one entry
+            // on the undo stack, the way a run of any other correction is.
+            for (id, way) in [(ids!(grid_earlier), -1.0), (ids!(grid_later), 1.0)] {
+                if let Some(modifiers) = self.ui.button(cx, id).clicked_modifiers(actions) {
+                    let step = match modifiers.shift {
+                        true => GRID_SHIFT_COARSE_SECS,
+                        false => GRID_SHIFT_SECS,
+                    };
+                    self.apply_grid_edit(cx, deck, GridEdit::Shift(step * way));
                 }
             }
             if self.ui.button(cx, ids!(clock_in_btn)).clicked(actions) {

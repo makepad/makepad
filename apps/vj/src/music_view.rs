@@ -3886,6 +3886,12 @@ script_mod! {
                         MusicLabel{text: "GRID"}
                         grid_one := MusicButton{width: 34 height: 22 text: "1"}
                         grid_here := MusicButton{width: 44 height: 22 text: "here"}
+                        // The same correction by a hair, for a grid whose
+                        // tempo is right and whose beats sit early or late:
+                        // the ear is the judge and the record keeps
+                        // playing. Shift walks five hairs at once.
+                        grid_earlier := MusicButton{width: 24 height: 22 text: "◂"}
+                        grid_later := MusicButton{width: 24 height: 22 text: "▸"}
                         grid_double := MusicButton{width: 34 height: 22 text: "×2"}
                         grid_halve := MusicButton{width: 34 height: 22 text: "÷2"}
                         grid_two_thirds := MusicButton{width: 38 height: 22 text: "×⅔"}

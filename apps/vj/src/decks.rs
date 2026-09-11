@@ -707,9 +707,11 @@ pub enum GridStep {
 
 /// A correction a hand makes to a measured grid.
 ///
-/// Three, because the analyser has three ways of being wrong and they are
-/// independent: the rulings can be in the wrong PLACE, the wrong ruling
-/// can be the ONE, and the whole thing can be at the wrong octave.
+/// The analyser has three ways of being wrong and they are independent:
+/// the rulings can be in the wrong PLACE, the wrong ruling can be the ONE,
+/// and the whole thing can be at the wrong octave. The place is corrected
+/// two ways -- onto the playhead in one press, or by a hair at a time when
+/// the record is running and the ear is the judge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GridEdit {
     /// Move every ruling so the nearest one lands on the playhead. The
@@ -721,7 +723,16 @@ pub enum GridEdit {
     /// Multiply the tempo, hinged on the playhead so the beat being
     /// listened to stays where it is.
     Scale(f64),
+    /// Walk every ruling by this many seconds, later for a positive one.
+    /// The tempo and the bar are untouched: this is the grid that counts
+    /// the right beats a little early or a little late.
+    Shift(f64),
 }
+
+/// The most a hand may walk a grid in one press. A grid that is out by
+/// more than a beat is not this correction's problem -- it is the wrong
+/// grid, and pulling a ruling onto the playhead is the press for that.
+pub const MAX_GRID_SHIFT_SECS: f64 = 1.0;
 
 /// What a press of SYNC is asking for.
 ///
@@ -4933,6 +4944,27 @@ impl DeckEngine {
                 }
                 old.hinged_at(at, old.bpm * ratio)
             }
+            GridEdit::Shift(secs) => {
+                if !secs.is_finite() || secs == 0.0 || secs.abs() > MAX_GRID_SHIFT_SECS {
+                    return None;
+                }
+                // The same arithmetic the pull onto the playhead does, with
+                // the operator's hair instead of the distance to the
+                // nearest ruling: every ruling moves together, so the beat
+                // LENGTH is untouched, and the anchor is wound back inside
+                // the first beat with the bar carried along so the one
+                // stays the one.
+                let mut first = old.first_beat_secs + secs;
+                let mut phase = old.downbeat_phase as i64;
+                let steps = (first / old.beat_secs).floor();
+                first -= steps * old.beat_secs;
+                phase -= steps as i64;
+                TrackGrid {
+                    first_beat_secs: first,
+                    downbeat_phase: phase.rem_euclid(4) as u32,
+                    ..old
+                }
+            }
         };
         if !grid.has_grid() || !(EDIT_BPM_MIN..=EDIT_BPM_MAX).contains(&grid.bpm) {
             return None;
@@ -7483,6 +7515,55 @@ mod tests {
         let cmds = e.grid_ready(deck, gen, grid(120.0, 0.0), None, None);
         assert!(sent(&cmds).is_empty(), "{cmds:?}");
         assert_eq!(e.deck(DeckId::A).grid.unwrap().bpm, 96.0);
+    }
+
+    /// The same correction by a hair: every ruling walks together, so the
+    /// tempo and the bar are untouched and only where the beats fall
+    /// changes. This is the one for a record that is playing, where the
+    /// ear is the judge and the playhead is wherever it happens to be.
+    #[test]
+    fn a_grid_can_be_walked_by_a_hair_without_moving_the_tempo_or_the_bar() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // rulings on the half second
+        e.observe(DeckId::A, 30.0, true);
+        let before = e.deck(DeckId::A).true_grid().expect("a grid");
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Shift(0.005)).expect("an edit");
+        assert!((grid.bpm - before.bpm).abs() < 1e-9, "the tempo is not touched");
+        assert!((grid.beat_secs - before.beat_secs).abs() < 1e-12, "nor the beat's length");
+        assert_eq!(grid.downbeat_phase, before.downbeat_phase, "and nor is the one");
+        // EVERY ruling is five milliseconds later than it was, the first
+        // and the two-hundredth by the same hair: a walk that moved the
+        // anchor alone, or paid for itself in tempo, would move them by
+        // different amounts.
+        for beat in [0.0, 1.0, 37.0, 200.0] {
+            let was = before.secs_at_beat(beat);
+            assert!(
+                (grid.secs_at_beat(beat) - (was + 0.005)).abs() < 1e-9,
+                "beat {beat} went to {} from {was}",
+                grid.secs_at_beat(beat)
+            );
+        }
+        let was = before.secs_at_beat(200.0);
+        // And back again, exactly.
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Shift(-0.005)).expect("an edit");
+        assert!((grid.secs_at_beat(200.0) - was).abs() < 1e-9);
+        assert!((grid.first_beat_secs - before.first_beat_secs).abs() < 1e-9);
+        // A walk longer than a beat is the wrong correction, and nothing
+        // that is not a number moves anything.
+        assert!(e.edit_grid(DeckId::A, GridEdit::Shift(1.5)).is_none());
+        assert!(e.edit_grid(DeckId::A, GridEdit::Shift(0.0)).is_none());
+        assert!(e.edit_grid(DeckId::A, GridEdit::Shift(f64::NAN)).is_none());
+        // A run of them is one entry on the undo stack, so taking it back
+        // undoes the run rather than the last hair.
+        for _ in 0..6 {
+            e.edit_grid(DeckId::A, GridEdit::Shift(0.005)).expect("an edit");
+        }
+        let (grid, _) = e.undo_grid(DeckId::A).expect("an undo");
+        assert!(
+            (grid.secs_at_beat(200.0) - was).abs() < 1e-9,
+            "the whole run came back: {}",
+            grid.secs_at_beat(200.0)
+        );
     }
 
     /// The analyser rules a grid; a hand corrects it. The nearest ruling
