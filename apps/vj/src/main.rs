@@ -8979,6 +8979,35 @@ fn net_beat_info(net: NetClock, now: Instant) -> Option<BeatInfo> {
     })
 }
 
+/// How long a deck's count lamp stays lit on the surface, and how long the
+/// first of the lap stays lit instead. The row has one brightness and no
+/// colour, so the length of the flash is the only way it can say which
+/// count this was.
+const COUNT_LAMP_SECS: f64 = 0.06;
+const COUNT_LAMP_ONE_SECS: f64 = 0.14;
+
+/// Whether a deck's count lamp is lit, this instant.
+///
+/// The same pulse the indicator on screen is drawn from, so the two can
+/// never disagree about where the beat is; what differs is that a lamp
+/// with one brightness says "the first of the lap" by staying on longer.
+fn count_lamp_lit(pulse: crate::decks::DeckPulse, beat_secs: f64) -> bool {
+    let speed = pulse.travel.abs() as f64;
+    if !(speed > 1e-3) || !(beat_secs > 0.0) {
+        return false;
+    }
+    let period = beat_secs / speed;
+    let since = pulse.phase.clamp(0.0, 1.0) * period;
+    let window = match pulse.index == 0 {
+        true => COUNT_LAMP_ONE_SECS,
+        false => COUNT_LAMP_SECS,
+    };
+    // Never more than half the count: under a hand a record can run at
+    // ten times its tempo, and a flash longer than the count itself would
+    // hold the lamp solid, which is the one thing it must never say.
+    since < window.min(period * 0.5)
+}
+
 /// One deck's count, as the indicator beside its tempo draws it.
 ///
 /// The reference is fixed and the widget resolves the phase at draw time,
@@ -10260,6 +10289,10 @@ pub struct App {
     /// Follow a beat clock arriving on the wire.
     #[rust]
     clock_in: bool,
+    /// The counts last sent to the surface, so a lamp that has not moved
+    /// costs nothing.
+    #[rust]
+    apc_counts_sent: [bool; 2],
     /// A plain press on a deck's lock is a gesture: tap to match once,
     /// hold to hand the lock over. Off is what the button has always done.
     #[rust]
@@ -17563,6 +17596,26 @@ p2 {}
         }
     }
 
+    /// Each deck's count, for the lamp under its fader: the same pulse the
+    /// indicator on screen is drawn from, and nothing at all while the
+    /// record is not moving.
+    fn deck_count_lamps(&self) -> [bool; 2] {
+        let mut lit = [false; 2];
+        for deck in [DeckId::A, DeckId::B] {
+            let snapshot = self.mixer.deck_snapshot(deck);
+            if !(snapshot.playing || snapshot.scratching) {
+                continue;
+            }
+            let state = self.decks.deck(deck);
+            let Some(pulse) = state.pulse_at(snapshot.position_secs, snapshot.platter_rate as f32)
+            else {
+                continue;
+            };
+            lit[deck.index()] = count_lamp_lit(pulse, state.counted_beat_secs());
+        }
+        lit
+    }
+
     fn sync_apc_leds(&mut self) {
         let splat_showing = self.apc.surface == ApcSurface::Music
             && self.splat_model.cols != 0
@@ -17635,6 +17688,7 @@ p2 {}
             .and_then(|slot| self.players[slot.index()].as_ref())
             .is_some_and(|player| !player.is_paused());
         let trace = self.midi_monitor;
+        frame.deck_counts = self.deck_count_lamps();
         for message in self.apc_leds.update(frame) {
             if trace {
                 // ch = LED behaviour (solid/pulse/blink per the device's
@@ -19582,6 +19636,16 @@ p2 {}
         self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
+        // The counts move several times a second, while the pads move only
+        // when the grid does -- which is why the surface is restated on a
+        // grid rebuild and not on a frame. Asking the decks is two atomic
+        // reads and some arithmetic, so the lamps are asked for every pump
+        // and the surface is restated only when one of them turns over.
+        let counts = self.deck_count_lamps();
+        if counts != self.apc_counts_sent {
+            self.apc_counts_sent = counts;
+            self.sync_apc_leds();
+        }
         // A finger still on a deck's lock past the hold: the lock goes
         // over under it, rather than at the release, so the lamp answers
         // the gesture while the finger is still there.
@@ -38175,6 +38239,41 @@ mod sync_tests {
     /// has reached, and the next beat where the sender's next tick is due.
     /// It expires rather than coasting -- a sender that stops without
     /// saying so must not keep the grid moving.
+    /// The count lamp flashes on every count and stays on longer for the
+    /// first of the lap, which is the only way a lamp with one brightness
+    /// can tell them apart. A record that is not moving does not count.
+    #[test]
+    fn the_count_lamp_says_which_count_it_was_by_how_long_it_stays() {
+        let pulse = |index, phase, travel| crate::decks::DeckPulse {
+            span_beats: 4,
+            index,
+            phase,
+            travel,
+            measured: true,
+        };
+        // Half a second a beat: the first of the lap holds 0.14 s, the
+        // rest 0.06 s.
+        let beat = 0.5;
+        assert!(count_lamp_lit(pulse(0, 0.0, 1.0), beat), "on the one");
+        assert!(count_lamp_lit(pulse(0, 0.27, 1.0), beat), "0.135s in, still lit");
+        assert!(!count_lamp_lit(pulse(0, 0.29, 1.0), beat), "0.145s in, out");
+        assert!(count_lamp_lit(pulse(2, 0.0, 1.0), beat), "on a count");
+        assert!(count_lamp_lit(pulse(2, 0.11, 1.0), beat), "0.055s in, still lit");
+        assert!(!count_lamp_lit(pulse(2, 0.13, 1.0), beat), "0.065s in, out");
+        // Twice the speed is half the beat, so the flash is the same
+        // length in seconds and a larger part of the count.
+        assert!(count_lamp_lit(pulse(2, 0.2, 2.0), beat), "0.05s in at double speed");
+        assert!(!count_lamp_lit(pulse(2, 0.3, 2.0), beat));
+        // Backwards counts too: the lamp follows the travel, not its sign.
+        assert!(count_lamp_lit(pulse(0, 0.0, -1.0), beat));
+        // A record held still, or one with no grid, does not count.
+        assert!(!count_lamp_lit(pulse(0, 0.0, 0.0), beat));
+        assert!(!count_lamp_lit(pulse(0, 0.0, 1.0), 0.0));
+        // A count shorter than the flash never leaves the lamp on for good.
+        assert!(!count_lamp_lit(pulse(0, 0.9, 1.0), 0.02));
+        assert!(count_lamp_lit(pulse(0, 0.1, 1.0), 0.02), "it still counts, at half the lap");
+    }
+
     /// The lock's gesture table. Off, a plain press is the latch it has
     /// always been; on, the finger says which of the lock's meanings it
     /// asked for. The modifiers mean the same thing either way.

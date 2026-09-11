@@ -25,6 +25,12 @@ pub const NOTE_LEFT: u8 = 0x61;
 pub const NOTE_SCENE_FIRST: u8 = 0x52;
 pub const NOTE_SCENE_LAST: u8 = 0x56;
 pub const NOTE_CLIP_STOP: u8 = 0x34;
+/// The button under each channel's fader, addressed by the strip it sits
+/// on rather than by a note of its own. The decks' counts go here: the two
+/// leftmost strips are deck A and deck B, the same two the faders drive.
+/// The small surface has no such row -- its buttons are all grid.
+pub const NOTE_STRIP_BUTTON: u8 = 0x32;
+
 pub const CC_MASTER: u8 = 0x0e;
 pub const CC_CROSSFADER: u8 = 0x0f;
 /// Channel volume faders: CC 7 on MIDI channels 0..7.
@@ -658,6 +664,9 @@ pub struct LedFrame {
     pub pads: [PadLed; PAD_COUNT],
     pub surface: ApcSurface,
     pub video_playing: bool,
+    /// Whether each deck's count lamp is lit this frame. The host decides
+    /// how long a count stays lit; this is only whether it is on now.
+    pub deck_counts: [bool; 2],
 }
 
 impl Default for LedFrame {
@@ -666,7 +675,20 @@ impl Default for LedFrame {
             pads: [PadLed::Off; PAD_COUNT],
             surface: ApcSurface::Video,
             video_playing: false,
+            deck_counts: [false; 2],
         }
+    }
+}
+
+/// The message that lights, or darkens, the count lamp on `strip`.
+///
+/// `None` for a surface with no strip buttons. The strip is the MIDI
+/// channel, which is how that row is addressed; the velocity is on or off,
+/// because these lamps have no colour to spend on saying more.
+pub fn strip_count_message(model: ApcModel, strip: u8, lit: bool) -> Option<[u8; 3]> {
+    match model {
+        ApcModel::Apc40Mk2 => Some([0x90 | (strip & 0x0f), NOTE_STRIP_BUTTON, lit as u8]),
+        ApcModel::ApcMiniMk2 => None,
     }
 }
 
@@ -712,6 +734,20 @@ impl LedDiff {
         {
             out.push([0x90, NOTE_PLAY, if next.video_playing { 127 } else { 0 }]);
         }
+        // The decks' counts, on the two strips their faders are on. Only
+        // while the music surface is up: off it, that row belongs to the
+        // lighting desk, exactly as the decode side already has it.
+        for strip in 0..2u8 {
+            let lit = next.surface == ApcSurface::Music && next.deck_counts[strip as usize];
+            let was = self.last.as_ref().is_some_and(|last| {
+                last.surface == ApcSurface::Music && last.deck_counts[strip as usize]
+            });
+            if lit != was || self.last.is_none() {
+                if let Some(message) = strip_count_message(self.model, strip, lit) {
+                    out.push(message);
+                }
+            }
+        }
         self.last = Some(next);
         out
     }
@@ -737,8 +773,80 @@ impl LedDiff {
         for note in [NOTE_PAN, NOTE_SENDS, NOTE_PLAY] {
             out.push([0x90, note, 0]);
         }
+        for strip in 0..2u8 {
+            if let Some(message) = strip_count_message(self.model, strip, false) {
+                out.push(message);
+            }
+        }
         self.last = None;
         out
+    }
+}
+
+#[cfg(test)]
+mod count_lamp_tests {
+    use super::*;
+
+    /// The counts go out on the two strips the decks' own faders are on,
+    /// only when they change, and only while the music surface is up.
+    #[test]
+    fn the_decks_counts_light_their_own_strips_and_only_when_they_change() {
+        let mut leds = LedDiff { model: ApcModel::Apc40Mk2, ..Default::default() };
+        let music = |counts| LedFrame {
+            surface: ApcSurface::Music,
+            deck_counts: counts,
+            ..Default::default()
+        };
+        // The first frame states everything, dark included.
+        let first = leds.update(music([false, false]));
+        assert!(first.contains(&[0x90, NOTE_STRIP_BUTTON, 0]), "strip 0 stated: {first:?}");
+        assert!(first.contains(&[0x91, NOTE_STRIP_BUTTON, 0]), "strip 1 stated");
+        // Deck A counts.
+        assert_eq!(
+            leds.update(music([true, false])),
+            vec![[0x90, NOTE_STRIP_BUTTON, 1]],
+            "one message, for the deck that counted"
+        );
+        assert!(leds.update(music([true, false])).is_empty(), "and nothing while it stays");
+        assert_eq!(leds.update(music([false, true])), vec![
+            [0x90, NOTE_STRIP_BUTTON, 0],
+            [0x91, NOTE_STRIP_BUTTON, 1],
+        ]);
+        // Off the music surface that row is the lighting desk's: the lamps
+        // go out and stay out however the decks count.
+        let away = leds.update(LedFrame {
+            surface: ApcSurface::Video,
+            deck_counts: [true, true],
+            ..Default::default()
+        });
+        assert!(away.contains(&[0x91, NOTE_STRIP_BUTTON, 0]), "the lit one went out: {away:?}");
+        assert!(
+            !away.iter().any(|m| m[1] == NOTE_STRIP_BUTTON && m[2] == 1),
+            "and nothing was lit: {away:?}"
+        );
+        // Everything out means these too.
+        let dark = leds.all_dark();
+        assert!(dark.contains(&[0x90, NOTE_STRIP_BUTTON, 0]));
+        assert!(dark.contains(&[0x91, NOTE_STRIP_BUTTON, 0]));
+    }
+
+    /// The small surface has no strip buttons, so it is sent none.
+    #[test]
+    fn the_small_surface_is_sent_no_count_lamps() {
+        assert_eq!(strip_count_message(ApcModel::ApcMiniMk2, 0, true), None);
+        let mut leds = LedDiff { model: ApcModel::ApcMiniMk2, ..Default::default() };
+        let out = leds.update(LedFrame {
+            surface: ApcSurface::Music,
+            deck_counts: [true, true],
+            ..Default::default()
+        });
+        // Note 0x32 is a PAD on this surface, so the strip messages are
+        // told apart by their channel: the strip's own, never the palette's.
+        assert!(
+            !out.iter().any(|m| m[1] == NOTE_STRIP_BUTTON && (m[0] & 0x0f) < 2),
+            "{out:?}"
+        );
+        assert!(!leds.all_dark().iter().any(|m| m[1] == NOTE_STRIP_BUTTON && (m[0] & 0x0f) < 2));
     }
 }
 
@@ -873,9 +981,12 @@ mod shutdown_tests {
         // The SAME frame as before the darkening: nothing changed, so a
         // diff that trusted its own memory would send nothing at all.
         let again = leds.update(LedFrame { surface: ApcSurface::Music, ..Default::default() });
+        // Every pad, the two mode lamps, the play lamp, and a count lamp
+        // for each deck: the two counts joined this frame when the decks
+        // got a lamp of their own under their faders.
         assert_eq!(
             again.len(),
-            PAD_COUNT + 3,
+            PAD_COUNT + 5,
             "coming back has to restate every pad and every lamp",
         );
     }
