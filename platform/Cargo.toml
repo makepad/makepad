@@ -24,6 +24,10 @@ harness = false
 name = "ui_hang"
 harness = false
 
+[[test]]
+name = "metal_alloc_probe"
+harness = false
+
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
