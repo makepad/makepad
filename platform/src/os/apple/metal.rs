@@ -422,7 +422,10 @@ impl Cx {
                 metal_cx.retired_instances.borrow().len(), metal_cx.instance_pool.borrow().bytes());
             trace.mark(PresentStage::UploadEnd);
         }
-        if crate::thread::ui_hang::hashing::enabled() && (budget.stats.bytes != 0 || pending != 0) {
+        // One line per painted frame with any upload: a trace topic, never a
+        // side effect of the atlas diagnostics switch (MAKEPAD_ATLAS_DIAGNOSTICS
+        // turned it on and a user's window logged it 150 times a second).
+        if crate::makepad_error_log::trace_enabled("gpu.upload") && (budget.stats.bytes != 0 || pending != 0) {
             static NAMES: std::sync::Once = std::sync::Once::new();
             NAMES.call_once(|| crate::log!("retained-upload names=[Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other]"));
             let pool = metal_cx.instance_pool.borrow();
