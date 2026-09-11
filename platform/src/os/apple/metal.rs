@@ -265,9 +265,11 @@ impl Cx {
         let retired_before = metal_cx.retired_instance_bytes.get();
         self.draw_lists.1.begin_frame(self.repaint_id);
         self.retry_metal_pipelines(metal_cx);
-        // The interactive allowance is the probe's 2 ms slice (with its
-        // floor); a window idle for a third of a second copies the whole cap
-        // per frame: a publication backlog drains in a few frames of rest.
+        // The interactive allowance is the probe's 2 ms slice (a floor on it
+        // showed as 13 ms drag frames: a bake's uploads landing in one
+        // frame); a window idle for a third of a second copies the whole
+        // cap per frame: a publication backlog drains in a few frames of
+        // rest, never during a gesture.
         self.draw_lists.1.limit = if input_idle_for_ms(300) {
             crate::retained_instances::MAX_RETAINED_UPLOAD_BYTES
         } else {
