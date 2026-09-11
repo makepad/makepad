@@ -1336,9 +1336,24 @@ impl CxDrawListPool {
     pub fn retained_list_demanded(&self, id: DrawListId) -> bool {
         !self.is_id_freed(id) && self[id].gpu_demand_epoch.get() == self.1.demand_epoch
     }
+    /// A list re-recorded through a publication replacement (a detached
+    /// list among them) is demanded until the next working-set walk says
+    /// otherwise: the O(1) counterpart of `reset_allocated` for a list that
+    /// keeps its slot.
+    pub fn set_retained_publication(&mut self, id: DrawListId, index: usize, publication: &crate::retained_instances::RetainedInstances) -> bool {
+        let replaced = self[id].draw_items.set_retained_publication(index, publication);
+        if replaced {
+            if let Some(slot) = self.1.working_set.get_mut(id.index()) {
+                *slot = true;
+            }
+        }
+        replaced
+    }
+
     /// Detach a completed cached backend publication. Keep the CPU recording
     /// and invalidate all upload/consumption proofs so re-entry retries it.
     pub fn evict_retained_item(&mut self, id: DrawListId, index: usize) {
+        self.1.evictions += 1;
         let item = &mut self[id].draw_items[index];
         item.retained_gpu_evicted = true;
         item.retained_instance_id = 0;
@@ -1573,6 +1588,16 @@ impl CxDrawListPool {
         self[id].gpu_demand_epoch.set(0);
         self[id].gpu_eviction_distance = f64::INFINITY;
         self[id].reset_draw_item_uniform_caches();
+        // A slot allocated (or reused) since the last working-set walk is
+        // demanded until that walk says otherwise — O(1) here, never a walk
+        // over every list per allocation (a 160 K-item wall allocates lists
+        // every frame of its load; walking them all made it 10× slower). A
+        // reused slot's stale `false` once evicted a wall's fresh recordings
+        // as off-demand (holes of 650 ms). A slot beyond the vector reads
+        // `true` already (`unwrap_or(true)`).
+        if let Some(slot) = self.1.working_set.get_mut(id.index()) {
+            *slot = true;
+        }
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -2125,14 +2150,15 @@ impl CxDrawItems {
     /// Replace a screen-derived immutable view without recording its parent.
     /// The producer still owns the complete CPU publication; backend storage
     /// follows its ordinary asynchronous replacement/retirement path.
-    pub fn set_retained_publication(&mut self, index: usize, publication: &crate::retained_instances::RetainedInstances) {
+    pub fn set_retained_publication(&mut self, index: usize, publication: &crate::retained_instances::RetainedInstances) -> bool {
         let item = &mut self[index];
-        if item.retained_instances.as_ref().is_some_and(|p|p.id()==publication.id()) {return;}
+        if item.retained_instances.as_ref().is_some_and(|p|p.id()==publication.id()) {return false;}
         item.retained_upload_range = publication.upload_since(item.retained_instance_id);
         item.retained_instances = Some(publication.clone());
         item.retained_gpu_evicted = false;
         item.instance_upload_pending = true;
         item.kind.draw_call_mut().unwrap().instance_dirty = true;
+        true
     }
 
     /// Hide a retained stage without discarding its backing or real receipts.

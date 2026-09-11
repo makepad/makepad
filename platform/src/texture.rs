@@ -1470,6 +1470,13 @@ impl Texture {
         &mut cx.textures[self.texture_id()].format
     }
 
+    /// The texels the backend allocated for this texture (a render target
+    /// after its first pass), `None` before any allocation: a cache that
+    /// sizes its UVs by a declared size can check the two agree.
+    pub fn allocated_size(&self, cx: &Cx) -> Option<(usize, usize)> {
+        cx.textures[self.texture_id()].alloc.as_ref().map(|a| (a.width, a.height))
+    }
+
     pub fn take_vec_u32(&self, cx: &mut Cx) -> Vec<u32> {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {

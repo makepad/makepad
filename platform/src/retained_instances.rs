@@ -87,6 +87,10 @@ pub struct RetainedUploadBudget {
     pub stats: RetainedUploadStats,
     pub totals: RetainedUploadStats,
     pub pending_bytes: usize,
+    /// Retained items detached from the GPU so far (`evict_retained_item`):
+    /// an application whose recorded content must stay resident re-walks
+    /// its owners when this moves, never every frame.
+    pub evictions: u64,
     pub upload_pending_max: usize,
     pub starved_frames: u64,
     pub max_frame_bytes: usize,
@@ -441,6 +445,7 @@ impl RetainedUploadBudget {
             stats: Default::default(),
             totals: Default::default(),
             pending_bytes: 0,
+            evictions: 0,
             upload_pending_max: 0,
             starved_frames: 0,
             max_frame_bytes: 0,
