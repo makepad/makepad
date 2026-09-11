@@ -125,6 +125,23 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
 
+    /// Re-target the current pass to rasterise at `dpi_factor`: the pass's
+    /// own density and the recording stack's dpi both change (an XR panel
+    /// drawing 2D children at its own density). Distinct from
+    /// `set_current_pass_display_dpi_factor`, which leaves the raster density
+    /// alone and only changes what screen-space decisions read.
+    pub fn set_current_pass_dpi_factor(&mut self, dpi_factor: f64) {
+        if let Some(pass_id) = self.pass_stack.last().map(|stack_item| stack_item.pass_id) {
+            if let Some(stack_item) = self.pass_stack.last_mut() {
+                stack_item.dpi_factor = dpi_factor;
+            }
+            let uniforms_gen = self.cx.next_uniform_gen();
+            let cxpass = &mut self.passes[pass_id];
+            cxpass.dpi_factor = Some(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor, uniforms_gen);
+        }
+    }
+
     /// The current pass is rasterised at its own density but displayed at
     /// `display`: `current_dpi_factor()` and the pass uniform
     /// `display_dpi_factor` read the display density from here to the end
