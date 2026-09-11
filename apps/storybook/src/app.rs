@@ -9,6 +9,7 @@ use crate::registry;
 use crate::remote;
 use crate::settings;
 use crate::theme;
+use crate::theme_panel::*;
 
 app_main!(App);
 
@@ -86,6 +87,7 @@ script_mod! {
                         }
                         tab_controls := RadioButtonTab{text: "Controls"}
                         tab_actions := RadioButtonTab{text: "Actions"}
+                        tab_tokens := RadioButtonTab{text: "Theme"}
                     }
                     // Every panel is built up front: the app writes into them
                     // before they are shown, and a page that does not exist
@@ -97,6 +99,9 @@ script_mod! {
                         docs := mod.storybook.DocsPanel{}
                         controls := mod.storybook.ControlsPanel{}
                         actions := mod.storybook.ActionsPanel{}
+                        // Not `theme`: that name is the token table every
+                        // sibling here reads its spacing from.
+                        tokens := mod.storybook.ThemePanel{}
                     }
                 }
             }
@@ -118,7 +123,7 @@ script_mod! {
     }
 }
 
-const PANELS: &[LiveId] = &[live_id!(docs), live_id!(controls), live_id!(actions)];
+const PANELS: &[LiveId] = &[live_id!(docs), live_id!(controls), live_id!(actions), live_id!(tokens)];
 
 #[derive(Script, ScriptHook)]
 pub struct App {
@@ -315,10 +320,14 @@ impl MatchEvent for App {
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(theme_select)).selected(actions) {
             theme::select(cx, index);
+            // A new theme is a new set of values; the panel reads it again
+            // rather than showing the old one's numbers under the new one's
+            // colours.
+            self.ui.theme_panel(cx, ids!(tokens)).reread(cx);
         }
         if let Some(index) = self
             .ui
-            .radio_button_set(cx, ids_array!(tab_docs, tab_controls, tab_actions))
+            .radio_button_set(cx, ids_array!(tab_docs, tab_controls, tab_actions, tab_tokens))
             .selected(cx, actions)
         {
             if let Some(page) = PANELS.get(index) {
@@ -365,6 +374,7 @@ impl AppMain for App {
         crate::docs::script_mod(vm);
         crate::controls::script_mod(vm);
         crate::actions::script_mod(vm);
+        crate::theme_panel::script_mod(vm);
         crate::stories::script_mod(vm);
         self::script_mod(vm)
     }

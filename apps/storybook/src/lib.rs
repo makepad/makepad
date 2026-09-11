@@ -22,3 +22,4 @@ pub mod settings;
 pub mod shell;
 pub mod stories;
 pub mod theme;
+pub mod theme_panel;
