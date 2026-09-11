@@ -1112,6 +1112,17 @@ script_mod! {
                                     text: "CLK"
                                 }
                             }
+                            // The other direction: follow a beat clock
+                            // arriving on an input the MIDI page already
+                            // hears. Off until asked, like its sibling —
+                            // a rig with no master clock must not have its
+                            // grid moved by a stray tick.
+                            Tip{ text: "Follow a MIDI beat clock arriving on an open input"
+                                clock_in_btn := ChromeButton{
+                                    width: 58
+                                    text: "CLK IN"
+                                }
+                            }
                             // The RIG GROUP: karaoke overlay pair, master
                             // fadeout, and the output window — the things
                             // that shape what the ROOM sees.
@@ -8847,14 +8858,17 @@ fn sprite_cycle_beats(frames: usize) -> u32 {
 
 /// The source ladder, as a decision.
 ///
-/// Operator first, always. Then: a deck FOLLOWING the room means the room
-/// is in charge and that deck's grid must never be read back (it would be
-/// chasing itself). Otherwise a playing deck is master — the normal show,
-/// and while it is, the detector has nothing to add but latency, because
-/// all it can hear is that deck's own output. The detector is the source
-/// only when the VJ is standing alone against somebody else's music.
+/// Operator first, always. Then a clock on the wire: asking to follow one
+/// is asking for the rig's own master, which outranks anything measured
+/// here. Then: a deck FOLLOWING the room means the room is in charge and
+/// that deck's grid must never be read back (it would be chasing itself).
+/// Otherwise a playing deck is master — the normal show, and while it is,
+/// the detector has nothing to add but latency, because all it can hear is
+/// that deck's own output. The detector is the source only when the VJ is
+/// standing alone against somebody else's music.
 fn resolve_clock_source(
     operator: bool,
+    net: bool,
     external_follow: bool,
     deck: bool,
     detector: bool,
@@ -8862,12 +8876,61 @@ fn resolve_clock_source(
     if operator {
         return ClockSource::Operator;
     }
+    if net {
+        return ClockSource::Net;
+    }
     match (external_follow, deck, detector) {
         (true, _, true) => ClockSource::External,
         (_, true, _) => ClockSource::Deck,
         (_, false, true) => ClockSource::Detector,
         _ => ClockSource::None,
     }
+}
+
+/// The clock inbox as this app addresses its senders: by MIDI port.
+///
+/// An alias because the field macro reads a type path and not a generic
+/// instantiation, and because every use here means this one.
+type ClockInbox = crate::midi_clock::ClockInbox<MidiPortId>;
+
+/// The newest reading from a clock on the wire, stamped with its arrival.
+#[derive(Clone, Copy, Debug)]
+pub struct NetClock {
+    pub bpm: f64,
+    /// Beats since the sender's run started, at `at`.
+    pub position_beats: f64,
+    pub at: Instant,
+    /// Whether a transport message placed the count, so the bar is the
+    /// sender's own rather than wherever its first tick happened to land.
+    pub anchored: bool,
+}
+
+/// A reading off the wire as a beat, carried forward to `now`.
+///
+/// `None` once the sender has been quiet longer than a run can be: a clock
+/// that stopped without saying so must not keep the grid moving.
+fn net_beat_info(net: NetClock, now: Instant) -> Option<BeatInfo> {
+    let age = now.saturating_duration_since(net.at).as_secs_f64();
+    if age > crate::midi_clock::MAX_TICK_GAP_SECS {
+        return None;
+    }
+    let period_secs = 60.0 / net.bpm;
+    if !period_secs.is_finite() || !(period_secs > 0.0) {
+        return None;
+    }
+    let position = net.position_beats + age / period_secs;
+    let next = position.floor() + 1.0;
+    Some(BeatInfo {
+        bpm: net.bpm as f32,
+        // A sender is telling us, not guessing: the only doubt is whether
+        // it is still there, and that is the age check above.
+        confidence: 1.0,
+        locked: true,
+        period: Duration::from_secs_f64(period_secs),
+        next_beat: now + Duration::from_secs_f64((next - position) * period_secs),
+        beat_index: (next.max(0.0) as u64) % BAR_BEATS,
+        beats_observed: position.max(0.0) as u64,
+    })
 }
 
 /// One deck's count, as the indicator beside its tempo draws it.
@@ -10148,6 +10211,15 @@ pub struct App {
     clock_sender: Option<crate::midi_clock::ClockSender>,
     #[rust]
     clock_out: bool,
+    /// Follow a beat clock arriving on the wire.
+    #[rust]
+    clock_in: bool,
+    /// The sender being followed and its tick count.
+    #[rust]
+    clock_inbox: ClockInbox,
+    /// The newest reading off the wire, and when it arrived.
+    #[rust]
+    clock_net: Option<NetClock>,
     /// Every output the clock is being sent to while it is on.
     #[rust]
     clock_out_ports: Vec<MidiPortId>,
@@ -15612,12 +15684,21 @@ p2 {}
             .clone()
             .filter(|beat| beat.locked && beat.confidence >= CONF_QUANTIZE);
         let deck = self.deck_beat();
+        let net = self.clock_net.and_then(|net| net_beat_info(net, Instant::now()));
         let machine = match resolve_clock_source(
             false,
+            net.is_some(),
             self.decks.any_external_sync(),
             deck.is_some(),
             detector.is_some(),
         ) {
+            // A sender that never said START has a count but no bar, and
+            // says so: its corrections are phase-only, exactly like the
+            // room's.
+            ClockSource::Net => {
+                let anchored = self.clock_inbox.anchored();
+                net.map(|beat| (beat, anchored, ClockSource::Net))
+            }
             ClockSource::External => detector.map(|beat| (beat, false, ClockSource::External)),
             ClockSource::Deck => deck.map(|beat| (beat, true, ClockSource::Deck)),
             ClockSource::Detector => detector.map(|beat| (beat, false, ClockSource::Detector)),
@@ -15746,6 +15827,22 @@ p2 {}
         self.clock_sender = Some(sender);
     }
 
+    /// Follow a beat clock arriving on the wire, or stop.
+    ///
+    /// This opens nothing: a clock is heard on the inputs the MIDI page
+    /// already hears, so a sender on a port nobody enabled is not followed
+    /// — the same rule every other message on the wire obeys. Switching it
+    /// off forgets the sender, so a reading from a machine that has gone
+    /// can never drive the grid.
+    fn set_clock_in(&mut self, on: bool) {
+        self.clock_in = on;
+        self.clock_inbox.forget();
+        self.clock_net = None;
+        if on && self.clock_out {
+            log!("clock: following and sending at once — a cable that loops back will chase itself");
+        }
+    }
+
     /// Hand the sender this pump's view of the beat. Cheap: a lock and
     /// five writes, on a thread that never waits for it.
     fn pump_clock_out(&mut self) {
@@ -15820,6 +15917,7 @@ p2 {}
     fn save_clock_settings(&self) {
         let mut store = crate::settings::Settings::new();
         store.set_bool("clock.midi_out", self.clock_out);
+        store.set_bool("clock.midi_in", self.clock_in);
         let _ = crate::durable::write_file(&Self::clock_settings_path(), store.to_text());
     }
 
@@ -15830,6 +15928,9 @@ p2 {}
         let store = crate::settings::Settings::from_text(&body);
         if store.bool("clock.midi_out", false) {
             self.set_clock_out(cx, true);
+        }
+        if store.bool("clock.midi_in", false) {
+            self.set_clock_in(true);
         }
     }
 
@@ -17246,6 +17347,26 @@ p2 {}
         let mut wheel_turned = [false; 2];
         for _ in 0..256 {
             let Some((port, data)) = self.midi_input.receive() else { break };
+            // The clock on the wire, when the operator has asked to follow
+            // one. Twenty-four ticks a beat is a torrent nothing else here
+            // wants: a clock byte stops with the inbox, so the learn layer,
+            // the surface and the monitor never see one.
+            if self.clock_in && crate::midi_clock::is_clock_byte(data.data[0]) {
+                let at = cx.seconds_since_app_start();
+                if let Some(reading) = self.clock_inbox.byte(port, data.data[0], at) {
+                    self.clock_net = Some(NetClock {
+                        bpm: reading.bpm,
+                        position_beats: reading.position_beats,
+                        at: Instant::now(),
+                        anchored: self.clock_inbox.anchored(),
+                    });
+                }
+                // A sender that says STOP has left; nothing carries on.
+                if !self.clock_inbox.running() {
+                    self.clock_net = None;
+                }
+                continue;
+            }
             // LEARN layer first, on EVERY port: an armed control binds to
             // the next CC that moves; a learned CC then drives its control
             // INSTEAD of whatever the hardwired surface meant by it.
@@ -26879,6 +27000,7 @@ p2 {}
             // A coasting clock says so: it is still running the grid it last
             // believed, and that is the honest word for it.
             None if self.beat_clock.coasting() => "HOLD",
+            None if self.clock_source == ClockSource::Net => "● WIRE",
             None if self.clock_source == ClockSource::External => "● EXT",
             None => match deck_source {
                 Some(DeckId::A) => "● DECK A",
@@ -29301,6 +29423,7 @@ p2 {}
         }
         self.refresh_splat_surface(cx);
         self.paint_lit(cx, ids!(clock_out_btn), self.clock_out);
+        self.paint_lit(cx, ids!(clock_in_btn), self.clock_in);
         self.paint_lit(cx, ids!(auto_sync), self.decks.auto_sync);
         self.paint_lit(cx, ids!(auto_dj), self.autopilot.on());
         self.paint_lit(cx, ids!(auto_vocal), self.autopilot.vocal_guard);
@@ -34908,6 +35031,11 @@ impl MatchEvent for App {
                     self.apply_grid_edit(cx, deck, edit);
                 }
             }
+            if self.ui.button(cx, ids!(clock_in_btn)).clicked(actions) {
+            self.set_clock_in(!self.clock_in);
+            self.save_clock_settings();
+            self.paint_lit(cx, ids!(clock_in_btn), self.clock_in);
+        }
             if self.ui.button(cx, ids!(clock_out_btn)).clicked(actions) {
             self.set_clock_out(cx, !self.clock_out);
             self.save_clock_settings();
@@ -37902,19 +38030,50 @@ mod sync_tests {
         use ClockSource::*;
         // The normal show: a deck is playing, so the deck IS the clock and
         // the detector — which can only hear that deck — is not consulted.
-        assert_eq!(resolve_clock_source(false, false, true, true), Deck);
-        assert_eq!(resolve_clock_source(false, false, true, false), Deck);
+        assert_eq!(resolve_clock_source(false, false, false, true, true), Deck);
+        assert_eq!(resolve_clock_source(false, false, false, true, false), Deck);
         // VJ standalone against somebody else's music.
-        assert_eq!(resolve_clock_source(false, false, false, true), Detector);
+        assert_eq!(resolve_clock_source(false, false, false, false, true), Detector);
         // A deck following the room: the room leads, the deck's own grid is
         // never read back or it would be chasing itself.
-        assert_eq!(resolve_clock_source(false, true, true, true), External);
+        assert_eq!(resolve_clock_source(false, false, true, true, true), External);
         // ...but EXT with nothing detected falls back to the deck rather
         // than to nothing at all.
-        assert_eq!(resolve_clock_source(false, true, true, false), Deck);
+        assert_eq!(resolve_clock_source(false, false, true, true, false), Deck);
+        // A clock on the wire is the rig's own master: it outranks the
+        // room and the decks, and the operator outranks it.
+        assert_eq!(resolve_clock_source(false, true, true, true, true), Net);
+        assert_eq!(resolve_clock_source(false, true, false, false, false), Net);
         // The operator outranks every one of them.
-        assert_eq!(resolve_clock_source(true, true, true, true), Operator);
-        assert_eq!(resolve_clock_source(false, false, false, false), None);
+        assert_eq!(resolve_clock_source(true, true, true, true, true), Operator);
+        assert_eq!(resolve_clock_source(false, false, false, false, false), None);
+    }
+
+    /// A reading off the wire is a beat: the tempo it names, the count it
+    /// has reached, and the next beat where the sender's next tick is due.
+    /// It expires rather than coasting -- a sender that stops without
+    /// saying so must not keep the grid moving.
+    #[test]
+    fn a_clock_off_the_wire_becomes_a_beat_and_then_expires() {
+        let at = Instant::now();
+        let net = NetClock { bpm: 120.0, position_beats: 8.0, at, anchored: true };
+        let beat = net_beat_info(net, at).expect("a beat");
+        assert!((beat.bpm - 120.0).abs() < 1e-6);
+        assert!((beat.period.as_secs_f64() - 0.5).abs() < 1e-9);
+        assert_eq!(beat.beats_observed, 8);
+        assert_eq!(beat.beat_index, 1, "beat 9 of the run is the second of its bar");
+        assert!(beat.next_beat.saturating_duration_since(at).as_secs_f64() > 0.49);
+        // A quarter of a beat later the next one is a quarter nearer.
+        let later = at + Duration::from_millis(125);
+        let beat = net_beat_info(net, later).expect("still a beat");
+        let until = beat.next_beat.saturating_duration_since(later).as_secs_f64();
+        assert!((until - 0.375).abs() < 1e-3, "{until}");
+        // Past the gap that ends a run, there is no beat at all.
+        let gone = at + Duration::from_secs_f64(crate::midi_clock::MAX_TICK_GAP_SECS + 0.1);
+        assert!(net_beat_info(net, gone).is_none(), "a sender that went quiet stops the grid");
+        // A tempo that is not a tempo moves nothing.
+        let bad = NetClock { bpm: 0.0, ..net };
+        assert!(net_beat_info(bad, at).is_none());
     }
 
     /// A record under a hand is reporting where the finger is. The room's

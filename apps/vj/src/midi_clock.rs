@@ -183,10 +183,16 @@ impl ClockListener {
         }
         // A gap far too long to be this run's next tick means the sender
         // stopped without saying so, or the wire went away: start again
-        // rather than averaging across the hole.
+        // rather than averaging across the hole. A gap of NOTHING is the
+        // opposite case and must not reset anything: a caller that reads
+        // its wire in batches -- a frame pump, say -- hands two ticks the
+        // same arrival time whenever both landed between two reads, which
+        // at any real tempo is most beats. Resetting on that would mean
+        // such a caller never held a tempo at all. Time going BACKWARDS is
+        // still a hole.
         if let Some(last) = self.arrivals.last() {
             let gap = at_secs - last;
-            if !(gap > 0.0) || gap > MAX_TICK_GAP_SECS {
+            if gap < 0.0 || gap > MAX_TICK_GAP_SECS {
                 self.reset();
             }
         }
@@ -224,12 +230,87 @@ impl ClockListener {
 /// Longer than this between ticks and the run is over, whatever the sender
 /// meant. Two seconds is 30 BPM at 24 ppqn -- far slower than any music,
 /// so nothing musical is ever cut in half by it.
-const MAX_TICK_GAP_SECS: f64 = 2.0;
+pub const MAX_TICK_GAP_SECS: f64 = 2.0;
 
 /// The band a reading is believed inside. Wider than the analyser's,
 /// because a sender is a machine and is telling us rather than guessing.
 const MIN_CLOCK_BPM: f64 = 20.0;
 const MAX_CLOCK_BPM: f64 = 400.0;
+
+/// Whether a byte off the wire is part of a beat clock at all.
+pub fn is_clock_byte(byte: u8) -> bool {
+    matches!(byte, CLOCK_TICK | CLOCK_START | CLOCK_CONTINUE | CLOCK_STOP)
+}
+
+/// Which port's clock is being followed.
+///
+/// More than one machine on the wire can be sending ticks, and averaging
+/// two senders' arrivals gives a tempo neither of them is playing. So the
+/// first port to send one owns the clock, and another port's ticks are
+/// ignored while it keeps sending. Let it go quiet for longer than a run
+/// can be and the next port to speak takes it over -- which is what
+/// unplugging one machine and starting another looks like from here.
+#[derive(Clone, Debug)]
+pub struct ClockInbox<P> {
+    owner: Option<P>,
+    last_secs: f64,
+    listener: ClockListener,
+}
+
+impl<P> Default for ClockInbox<P> {
+    fn default() -> Self {
+        ClockInbox { owner: None, last_secs: f64::NEG_INFINITY, listener: ClockListener::new() }
+    }
+}
+
+impl<P: Copy + PartialEq> ClockInbox<P> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The port whose clock is being followed, if any.
+    pub fn owner(&self) -> Option<P> {
+        self.owner
+    }
+
+    /// Whether the followed sender is running.
+    pub fn running(&self) -> bool {
+        self.listener.running()
+    }
+
+    /// Whether a transport message has placed the count, so the bar being
+    /// reported is the sender's own and not a guess.
+    pub fn anchored(&self) -> bool {
+        self.listener.anchored()
+    }
+
+    /// One byte, with the port it came in on. Returns a reading when this
+    /// byte was a tick from the owning port and enough of them have
+    /// arrived to mean a tempo.
+    pub fn byte(&mut self, port: P, byte: u8, at_secs: f64) -> Option<ClockReading> {
+        if !is_clock_byte(byte) || !at_secs.is_finite() {
+            return None;
+        }
+        // A clock going backwards in time is a clock that was restarted.
+        let quiet = at_secs < self.last_secs || at_secs - self.last_secs > MAX_TICK_GAP_SECS;
+        match self.owner {
+            Some(owner) if owner == port => {}
+            Some(_) if !quiet => return None,
+            _ => {
+                self.owner = Some(port);
+                self.listener = ClockListener::new();
+            }
+        }
+        self.last_secs = at_secs;
+        self.listener.byte(byte, at_secs)
+    }
+
+    /// Forget the sender and its count: the switch went off, or the ports
+    /// changed under it.
+    pub fn forget(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// What the sender needs to know, written by the pump and read by the
 /// thread that does the sending.
@@ -443,6 +524,39 @@ mod tests {
         assert!((half - 0.5 / 24.0).abs() < 1e-12, "{half}");
     }
 
+    /// One sender at a time: two machines ticking at once would average
+    /// into a tempo neither is playing.
+    #[test]
+    fn the_clock_being_followed_is_one_senders_until_that_one_goes_quiet() {
+        let mut inbox = ClockInbox::<u8>::new();
+        let step = 60.0 / (120.0 * TICKS_PER_BEAT as f64);
+        let mut at = 10.0;
+        let mut last = None;
+        for _ in 0..TICKS_PER_BEAT {
+            last = inbox.byte(1, CLOCK_TICK, at).or(last);
+            // The other machine in the rig, ticking half as fast.
+            assert_eq!(inbox.byte(2, CLOCK_TICK, at + step / 2.0), None, "not this one's clock");
+            at += step;
+        }
+        assert_eq!(inbox.owner(), Some(1));
+        let reading = last.expect("a tempo");
+        assert!((reading.bpm - 120.0).abs() < 0.5, "{}", reading.bpm);
+        // The owner goes quiet for longer than a run can be: the other
+        // machine takes the clock over.
+        at += MAX_TICK_GAP_SECS + 0.1;
+        for _ in 0..TICKS_PER_BEAT {
+            inbox.byte(2, CLOCK_TICK, at);
+            at += step * 2.0;
+        }
+        assert_eq!(inbox.owner(), Some(2), "the one still sending");
+        let reading = inbox.byte(2, CLOCK_TICK, at).expect("a tempo");
+        assert!((reading.bpm - 60.0).abs() < 0.5, "and its own tempo: {}", reading.bpm);
+        // Anything that is not a clock byte is not this inbox's business.
+        assert_eq!(inbox.byte(2, 0x90, at), None);
+        inbox.forget();
+        assert_eq!(inbox.owner(), None);
+    }
+
     #[test]
     fn arriving_ticks_become_a_tempo_and_a_place_in_the_bar() {
         let mut listener = ClockListener::new();
@@ -483,6 +597,37 @@ mod tests {
         let reading = last.expect("a tempo");
         assert!((reading.bpm - 90.0).abs() < 1e-6, "{} — averaged over the hole", reading.bpm);
         assert!(!listener.anchored(), "and it no longer claims to know the bar");
+    }
+
+    /// A caller that reads its wire in batches stamps everything that
+    /// arrived between two reads with the same time. That is what a frame
+    /// pump on a loaded machine does -- thirty reads a second against a
+    /// hundred and twenty-eight beats a minute is fifty-one ticks a second
+    /// -- and the tempo that comes out is still the sender's, give or take
+    /// the read it was seen in.
+    #[test]
+    fn ticks_read_in_batches_still_make_the_senders_tempo() {
+        let mut listener = ClockListener::new();
+        let tick = 60.0 / (128.0 * TICKS_PER_BEAT as f64);
+        let read = 1.0 / 30.0;
+        let mut last = None;
+        let mut batched = 0;
+        let mut previous = f64::NAN;
+        for index in 0..(TICKS_PER_BEAT * 4) {
+            // The read that first sees this tick: the one it fell before.
+            let at = (index as f64 * tick / read).ceil() * read;
+            if at == previous {
+                batched += 1;
+            }
+            previous = at;
+            last = listener.tick(at).or(last);
+        }
+        assert!(batched > 10, "the point of the test is a shared read: {batched}");
+        let reading = last.expect("a tempo");
+        // One read of slack at each end of the window is what the
+        // quantisation can cost, and at this tempo that is about six BPM.
+        assert!((reading.bpm - 128.0).abs() < 12.0, "{} is not the sender's", reading.bpm);
+        assert!(listener.running());
     }
 
     #[test]
