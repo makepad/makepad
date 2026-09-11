@@ -127,6 +127,7 @@ pub mod slidesview;
 pub mod scrollbar;
 pub mod portallist;
 pub mod tile_list;
+pub mod item_grid;
 pub mod log_list;
 pub mod filetree;
 pub mod rotary;
@@ -234,6 +235,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     scrollbar::script_mod(vm);
     portallist::script_mod(vm);
     tile_list::script_mod(vm);
+    item_grid::script_mod(vm);
     log_list::script_mod(vm);
     filetree::script_mod(vm);
     spinner::script_mod(vm);
@@ -364,6 +366,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         scrollbar::STORIES,
         portallist::STORIES,
         tile_list::STORIES,
+        item_grid::STORIES,
         log_list::STORIES,
         filetree::STORIES,
         spinner::STORIES,

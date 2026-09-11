@@ -1338,6 +1338,33 @@
    ]
   },
   {
+   "component": "ItemGrid",
+   "aka": [
+    "card picker",
+    "gallery picker",
+    "thumbnail picker",
+    "asset browser",
+    "media picker",
+    "multi select grid",
+    "selectable tiles",
+    "choose many things"
+   ],
+   "does": [
+    "keeps which items are chosen",
+    "shift sweeps the run between two presses",
+    "the primary key flips one and leaves the rest",
+    "arrows move by a whole row",
+    "one at a time or many at once",
+    "answers with an item index",
+    "opens on a second press or return",
+    "space flips the one under the ring",
+    "select all with the primary key",
+    "scrolls the cursor into view",
+    "reflows to the width",
+    "only draws the rows on screen"
+   ]
+  },
+  {
    "component": "KanbanBoard",
    "aka": [
     "task board",
