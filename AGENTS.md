@@ -120,6 +120,18 @@ use current source for API signatures and working examples.
   visual verification is needed. Avoid unrelated or routine captures.
 - Command-line builds, tests, linting, and file operations run directly in
   the shell.
+- Rendering is verified on the real GPU backend, never on the headless
+  raster (user, 2026-09-11: "chasing bugs in headless is useless"). Any
+  picture, pixel, outline, colour, LOD, tile or frame-timing question is
+  answered with an owned `--remote` instance of the release build on the
+  native backend (Metal here) and `/g` / `/gseq` grabs, compared in RGB.
+  `MAKEPAD=headless` suites are for logic and data-structure tests only
+  (layout, budgets, orderings, parsers); a headless raster gate never
+  stands in for a GPU proof and is never used to diagnose a rendering bug.
+  On macOS a hidden window (`MAKEPAD_HIDE_WINDOWS=1`) does not present
+  frames: it proves shader compilation (`[E] Metal shader` count) and log
+  behaviour, not pictures. For a pixel proof launch the instance visible,
+  unfocused, small, off to the side, and close it with `/gq`.
 
 ## App ownership, focus, and screenshots
 
