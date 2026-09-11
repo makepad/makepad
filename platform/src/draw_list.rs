@@ -360,6 +360,7 @@ impl Cx {
         scan.allowance = [self.draw_lists.1.limit; 4];
         scan.deferred_bytes = 0;
         scan.critical.clear();
+        scan.immediate.clear();
         scan.critical_eligible = 0;
         scan.critical_deferred = 0;
         scan.examined = 0;
@@ -372,6 +373,16 @@ impl Cx {
             &mut scan,
         );
         let mut available = self.draw_lists.1.limit;
+        // Frame ink first, all of it: a draw item's own data is copied whole
+        // in the frame that recorded it.
+        for index in 0..scan.immediate.len() {
+            let request = scan.immediate[index];
+            if scan.best[request.list.index()] != request.priority {
+                continue;
+            }
+            let request = self.resolve_upload_category(request);
+            scan.requests.push(request);
+        }
         // Present-blocking items first: a rotating cursor must never defer a
         // payload the next paint cannot do without. The frame allowance still
         // bounds them; anything it cannot fit is counted, not silently skipped.
@@ -417,7 +428,7 @@ impl Cx {
                 if scan.best[request.list.index()] != request.priority {
                     continue;
                 }
-                if scan.requests.len() == 256 || (bytes != 0 && available < stride) {
+                if scan.requests.len() >= scan.immediate.len() + 256 || (bytes != 0 && available < stride) {
                     scan.deferred_bytes = scan.deferred_bytes.saturating_add(bytes.max(1));
                     continue;
                 }
@@ -432,6 +443,7 @@ impl Cx {
                 scan.cursor[p] = 0;
             }
         }
+        scan.served = scan.requests.len();
         std::mem::take(&mut scan.requests)
     }
 
@@ -459,6 +471,31 @@ impl Cx {
             };
         }
         request
+    }
+
+    /// Why the last upload collection did or did not reach one item: the
+    /// collector's frame counters plus the per-list proofs it consults
+    /// (`clean_leaf`, the exact counters, reachability, demand). O(1); read
+    /// by the Metal hole line so a starved draw item names its cause.
+    pub fn instance_upload_verdict(&self, root: DrawListId, list: DrawListId, item: usize) -> InstanceUploadVerdict {
+        let scan = self.draw_lists[root].upload_collection.borrow();
+        let reached = scan.best.get(list.index()).copied().unwrap_or(3);
+        let target = &self.draw_lists[list];
+        let counters = target.draw_items.instance_counters.get();
+        InstanceUploadVerdict {
+            served: scan.served,
+            critical_eligible: scan.critical_eligible,
+            critical_deferred: scan.critical_deferred,
+            deferred_bytes: scan.deferred_bytes,
+            examined: scan.examined,
+            limit: self.draw_lists.1.limit,
+            list_reached: reached != 3,
+            list_priority: reached,
+            clean_leaf: target.draw_items.clean_leaf.get(),
+            counters_proof: counters.map(|c| c.map(|c| c.upload_pending).unwrap_or(true)),
+            demanded: self.draw_lists.retained_list_demanded(list),
+            upload_needed: item < target.draw_items.len() && target.draw_items[item].retained_upload_needed(),
+        }
     }
 
     pub fn instance_upload_collection_critical_deferred(&self, root: DrawListId) -> usize {
@@ -656,11 +693,13 @@ impl Cx {
                 || item.instances.as_ref().map_or(0, |v| v.len() / call.total_instance_slots),
                 |_| item.retained_instance_count,
             );
+            if item.retained_instances.is_none() {
+                scan.immediate.push(InstanceUploadRequest { list: id, item: item_id, category, priority });
+                continue;
+            }
             let critical = wanted != 0
-                && !(item.retained_progressive && item.retained_instances.is_some())
-                && ((item.retained_instances.is_none() && (item.instance_upload_pending || call.instance_dirty))
-                    || item.retained_gpu_evicted
-                    || (item.retained_instances.is_some() && item.retained_instance_id == 0));
+                && !item.retained_progressive
+                && (item.retained_gpu_evicted || item.retained_instance_id == 0);
             if critical {
                 let ordinal = scan.critical_eligible;
                 scan.critical_eligible += 1;
@@ -976,9 +1015,36 @@ struct InstanceUploadCollection {
     /// immediate payload, a first or GPU-evicted publication). They are
     /// served before every rotating class, bounded only by the frame allowance.
     critical: Vec<(InstanceUploadRequest, usize, usize, usize)>,
+    /// Frame ink owed this frame: served whole, every frame, before anything
+    /// else — no cap, no allowance, no rotation (residency by construction).
+    immediate: Vec<InstanceUploadRequest>,
     critical_cursor: usize,
     critical_eligible: usize,
     critical_deferred: usize,
+    /// Requests handed to the backend by the last collection (a diagnostic
+    /// for the hole line: "served N of the critical M this frame").
+    served: usize,
+}
+
+/// The upload collector's view of one draw item after its last run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InstanceUploadVerdict {
+    pub served: usize,
+    pub critical_eligible: usize,
+    pub critical_deferred: usize,
+    pub deferred_bytes: usize,
+    pub examined: usize,
+    pub limit: usize,
+    /// The collector's walk from the root reached this list at all.
+    pub list_reached: bool,
+    pub list_priority: u8,
+    /// The list's cached "nothing to upload here" proof — a stale one hides
+    /// an item from every collection until the list re-records.
+    pub clean_leaf: bool,
+    /// The exact counters' `upload_pending` (None: no counters cached).
+    pub counters_proof: Option<bool>,
+    pub demanded: bool,
+    pub upload_needed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1336,6 +1402,76 @@ impl CxDrawListPool {
     pub fn retained_list_demanded(&self, id: DrawListId) -> bool {
         !self.is_id_freed(id) && self[id].gpu_demand_epoch.get() == self.1.demand_epoch
     }
+    /// Attach a ready shared-instance block to a draw item: the residency
+    /// lease of the DL-1 contract. Refuses an unready, failed or released
+    /// block and a range or stride that does not fit — the item keeps what
+    /// it had. O(1): an `Arc` clone and a receipt read. Through the adapter
+    /// the block also becomes the item's retained publication (the old draw
+    /// path copies it under its allowance until DL-3's per-publication
+    /// backing lands); `instance_ranges` limits the draw to the slice.
+    pub fn attach_shared(
+        &mut self,
+        id: DrawListId,
+        index: usize,
+        block: &crate::shared_instances::SharedInstances,
+        first: usize,
+        count: usize,
+    ) -> Result<(), AttachError> {
+        if self.is_id_freed(id) || index >= self[id].draw_items.len() {
+            return Err(AttachError::NoDrawCall);
+        }
+        let receipt = block.receipt();
+        if receipt.released() { return Err(AttachError::Released); }
+        if receipt.failed() { return Err(AttachError::Failed); }
+        if !receipt.upload_ready() { return Err(AttachError::NotReady); }
+        let Some(range) = block.slice(first, count) else { return Err(AttachError::RangeOutOfBounds); };
+        let slots = self[id].draw_items[index]
+            .kind
+            .draw_call()
+            .map(|call| call.total_instance_slots)
+            .ok_or(AttachError::NoDrawCall)?;
+        if slots == 0 || block.slots() != slots { return Err(AttachError::StrideMismatch); }
+        let publication = block.retained();
+        self.set_retained_publication(id, index, &publication);
+        let item = &mut self[id].draw_items[index];
+        item.retained_instance_count = count;
+        item.retained_prefetched = true;
+        item.instance_ranges = if first == 0 && count == block.count() {
+            Vec::new()
+        } else {
+            vec![range.start as u32..range.end as u32]
+        };
+        item.shared = Some((block.clone(), range));
+        let items = &self[id].draw_items;
+        items.clean_leaf.set(false);
+        items.instance_counters.set(None);
+        Ok(())
+    }
+
+    /// Release a draw item's lease: the item draws nothing until the next
+    /// attach; the block's backing is retired by the backend once its last
+    /// reader completes (`retire_complete`).
+    pub fn detach_shared(&mut self, id: DrawListId, index: usize) -> bool {
+        if self.is_id_freed(id) || index >= self[id].draw_items.len() { return false; }
+        let item = &mut self[id].draw_items[index];
+        if item.shared.take().is_none() { return false; }
+        // The lease goes with the adapter publication: the item becomes an
+        // immediate with zero bytes, the collector serves it, and the backend
+        // retires its buffer through the completed-reader path (contract §3.4).
+        item.retained_instances = None;
+        item.retained_instance_count = 0;
+        item.retained_prefetched = false;
+        item.instance_ranges.clear();
+        item.instance_upload_pending = true;
+        if let Some(call) = item.kind.draw_call_mut() {
+            call.instance_dirty = true;
+        }
+        let items = &self[id].draw_items;
+        items.clean_leaf.set(false);
+        items.instance_counters.set(None);
+        true
+    }
+
     /// A list re-recorded through a publication replacement (a detached
     /// list among them) is demanded until the next working-set walk says
     /// otherwise: the O(1) counterpart of `reset_allocated` for a list that
@@ -1354,6 +1490,11 @@ impl CxDrawListPool {
     /// and invalidate all upload/consumption proofs so re-entry retries it.
     pub fn evict_retained_item(&mut self, id: DrawListId, index: usize) {
         self.1.evictions += 1;
+        // The list's cached "nothing to upload" proofs no longer hold: an
+        // evicted item in a leaf whose proof said clean was never collected
+        // again until the list re-recorded (the reclaim path resets both).
+        self[id].draw_items.clean_leaf.set(false);
+        self[id].draw_items.instance_counters.set(None);
         let item = &mut self[id].draw_items[index];
         item.retained_gpu_evicted = true;
         item.retained_instance_id = 0;
@@ -1816,7 +1957,31 @@ pub struct CxDrawItem {
     /// D3D11, WebGL and Vulkan draw the whole item (ranges ignored: more
     /// work, the same pixels).
     pub instance_ranges: Vec<std::ops::Range<u32>>,
+    /// The residency lease of the DL-1 contract: a ready shared-instance
+    /// block and the instance range this item draws from it (`attach_shared`
+    /// refuses an unready block, so a draw of one is impossible by
+    /// construction). Until DL-5 deletes the retained path, the attached
+    /// block also drives the old fields through its adapter publication.
+    pub shared: Option<(crate::shared_instances::SharedInstances, std::ops::Range<usize>)>,
     pub os: CxOsDrawCall,
+}
+
+/// Why `CxDrawListPool::attach_shared` refused a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachError {
+    /// The block's upload has not completed (`receipt().upload_ready()` is
+    /// false): draw the previous ready block, or nothing, and attach later.
+    NotReady,
+    /// The block's upload failed; the producer republishes.
+    Failed,
+    /// The block was released; a new publication is needed.
+    Released,
+    /// `first + count` exceeds the block's instance count.
+    RangeOutOfBounds,
+    /// The block's stride is not the draw call's instance stride.
+    StrideMismatch,
+    /// The list is dead, the item index is out of range, or the item is not a draw call.
+    NoDrawCall,
 }
 
 impl CxDrawItem {
@@ -2312,6 +2477,7 @@ impl CxDrawItems {
             self.buffer.push(allocation.initialize(CxDrawItem {
                 instance_upload_pending: false,
                 immediate_hash: 0,
+                shared: None,
                 redraw_id: 0,
                 kind: CxDrawKind::Empty,
                 draw_item_id: self.buffer.len(),
@@ -2502,6 +2668,7 @@ impl CxDrawItems {
                 instance_ranges: Vec::new(),
                 instance_upload_pending: false,
                 immediate_hash: 0,
+                shared: None,
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
             }));
@@ -2530,6 +2697,8 @@ impl CxDrawItems {
             draw_item.consumed_serial = 0;
             draw_item.consumed_uniforms_gen = 0;
             draw_item.instance_ranges.clear();
+            // A reused slot never keeps a previous record's lease.
+            draw_item.shared = None;
             draw_item.redraw_id = redraw_id;
         }
         self.used += 1;
@@ -3206,6 +3375,34 @@ mod retained_sub_list_tests {
         assert!(!cx.draw_lists.publish_instance_retirement_pending());
     }
 
+    /// A pressure eviction detaches an item's GPU backing; the list's cached
+    /// "nothing to upload here" proofs (`clean_leaf`, the exact counters) must
+    /// fall with it, or the collector skips the leaf and the item is never
+    /// uploaded again until the list happens to re-record (a hole that only a
+    /// re-record could end — the Source Library wall, 2026-09-11).
+    #[test]
+    fn a_pressure_eviction_drops_the_leafs_clean_proofs() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        let retained =
+            crate::retained_instances::RetainedInstances::new(4, vec![1.0; 64].into()).unwrap();
+        let item = cx.draw_lists[list.id()].draw_items.push_item(1, CxDrawKind::Empty);
+        item.retained_instances = Some(retained);
+        item.retained_instance_count = 16;
+        let items = &cx.draw_lists[list.id()].draw_items;
+        items.clean_leaf.set(true);
+        items.instance_counters.set(Some(Ok(DrawItemInstanceCounters {
+            calls: 1, instances: 16, dirty_instances: 0, dirty_bytes: 0,
+            upload_pending: false, recording_refused: false,
+        })));
+        cx.draw_lists.evict_retained_item(list.id(), 0);
+        let items = &cx.draw_lists[list.id()].draw_items;
+        assert!(!items.clean_leaf.get(), "an evicted item is collectable again");
+        assert!(items.instance_counters.get().is_none(), "the exact counters no longer prove anything");
+        assert!(items[0].retained_gpu_evicted && items[0].instance_upload_pending);
+        assert!(items[0].retained_upload_needed());
+    }
+
     /// The retained-sub-list contract: a parent list may keep naming a child
     /// list that its owner dropped (a map tile evicted at event time, a hidden
     /// page). The dropped id stays dead — before AND after the pool hands its
@@ -3697,6 +3894,47 @@ mod uniform_generation_tests {
         );
     }
 
+    /// The DL-1 lease: attaching a shared block is refused while its upload
+    /// is pending and accepted once ready; the range must fit, the stride
+    /// must match, and the item then draws exactly the attached slice.
+    #[test]
+    fn attach_shared_refuses_unready_blocks_and_leases_ready_ones() {
+        use crate::draw_list::AttachError;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        let mut call = test_draw_call(1);
+        call.total_instance_slots = 4;
+        cx.draw_lists[list.id()].draw_items.push_item(1, CxDrawKind::DrawCall(call));
+        let block = cx
+            .publish_instances(4, vec![1.0; 64].into(), crate::shared_instances::PublishHints::default())
+            .expect("a 64-float block publishes");
+        assert_eq!(
+            cx.draw_lists.attach_shared(list.id(), 0, &block, 0, 16),
+            Err(AttachError::NotReady),
+            "an unready block is refused; the item keeps what it had"
+        );
+        assert!(cx.draw_lists[list.id()].draw_items[0].shared.is_none());
+        block.receipt().mark_ready();
+        assert_eq!(cx.draw_lists.attach_shared(list.id(), 0, &block, 0, 17), Err(AttachError::RangeOutOfBounds));
+        assert_eq!(cx.draw_lists.attach_shared(list.id(), 0, &block, 4, 8), Ok(()));
+        let item = &cx.draw_lists[list.id()].draw_items[0];
+        assert_eq!(item.shared.as_ref().map(|(_, r)| r.clone()), Some(4..12));
+        assert_eq!(item.instance_ranges, vec![4..12]);
+        assert_eq!(item.retained_instance_count, 8);
+        assert!(item.retained_instances.is_some(), "the adapter publication drives the old draw path");
+        let stride_mismatch = cx
+            .publish_instances(3, vec![1.0; 9].into(), crate::shared_instances::PublishHints::default())
+            .unwrap();
+        stride_mismatch.receipt().mark_ready();
+        assert_eq!(cx.draw_lists.attach_shared(list.id(), 0, &stride_mismatch, 0, 3), Err(AttachError::StrideMismatch));
+        assert!(cx.draw_lists.detach_shared(list.id(), 0));
+        let item = &cx.draw_lists[list.id()].draw_items[0];
+        assert!(item.shared.is_none() && item.retained_instance_count == 0 && item.instance_ranges.is_empty());
+        assert!(item.retained_instances.is_none(), "detach releases the adapter publication");
+        assert!(item.retained_upload_needed(), "the zero-byte immediate is collected, so the backend retires the buffer");
+        assert!(!cx.draw_lists.detach_shared(list.id(), 0), "detaching twice is a no-op");
+    }
+
     #[test]
     fn upload_collector_services_beyond_256_and_lower_priorities() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -3715,15 +3953,12 @@ mod uniform_generation_tests {
             cx.draw_lists[root.id()].append_sub_list(1, child.id());
             children.push(child);
         }
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..32 {
-            let requests = cx.pending_instance_uploads(root.id());
-            assert!(requests.len() <= 256);
-            for r in &requests {
-                seen.insert(r.list);
-            }
-            cx.recycle_instance_uploads(root.id(), requests);
-        }
+        // Frame ink is served whole every frame: all 900 dirty recordings
+        // are requested in the first collection, no cap, no rotation.
+        let requests = cx.pending_instance_uploads(root.id());
+        assert_eq!(requests.len(), children.len(), "every owed immediate item is served in its frame");
+        let seen: std::collections::HashSet<_> = requests.iter().map(|r| r.list).collect();
+        cx.recycle_instance_uploads(root.id(), requests);
         assert_eq!(
             seen.len(),
             children.len(),

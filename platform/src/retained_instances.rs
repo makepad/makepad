@@ -498,6 +498,31 @@ impl RetainedUploadBudget {
         remaining.start..remaining.start + bytes
     }
 
+    /// Frame ink is copied whole regardless of the allowance; the statistics
+    /// still count it, and the allowance for retained publications shrinks by
+    /// what the frame's own data took.
+    pub fn copied_whole(
+        &mut self,
+        bytes: usize,
+        stride_bytes: usize,
+        category: UploadCategory,
+        elapsed: std::time::Duration,
+    ) {
+        let instances = bytes / stride_bytes;
+        self.install_ns += elapsed.as_nanos();
+        self.total_install_ns += elapsed.as_nanos();
+        for stats in [&mut self.stats, &mut self.totals] {
+            stats.bytes += bytes;
+            stats.instances_uploaded += instances;
+            stats.category_bytes[category as usize] += bytes;
+            stats.category_instances[category as usize] += instances;
+        }
+        self.stats.install_us = (self.install_ns / 1000).min(u64::MAX as u128) as u64;
+        self.totals.install_us = (self.total_install_ns / 1000).min(u64::MAX as u128) as u64;
+        self.max_frame_bytes = self.max_frame_bytes.max(self.stats.bytes);
+        self.max_install_us = self.max_install_us.max(self.stats.install_us);
+    }
+
     pub fn copied(
         &mut self,
         bytes: usize,
@@ -623,6 +648,13 @@ impl RetainedInstances {
     }
     pub fn slots(&self) -> usize {
         self.0.slots
+    }
+    /// The producer's `Arc` this publication was built over — the same
+    /// allocation, no copy — so a merged block can be published on the
+    /// shared-instance registry (`Cx::publish_instances`) without a second
+    /// copy of the bytes (DL-4's glyph block).
+    pub fn shared_data(&self) -> Arc<[f32]> {
+        self.0.data.clone()
     }
     pub fn data(&self) -> &[f32] {
         &self.0.data[..self.0.len]

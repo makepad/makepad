@@ -375,7 +375,6 @@ impl Cx {
                 continue;
             }
             let before = budget.stats.bytes;
-            let was_capacity_waiting = item.os.instance_buffer.capacity_waiting;
             // One hard allowance for the whole repaint, including first and
             // immediate publications. Keep the previous complete buffer until
             // a replacement finishes; every copy uses the same bounded range.
@@ -391,9 +390,6 @@ impl Cx {
                 request.category,
                 budget,
             );
-            if item.os.instance_buffer.capacity_waiting && !was_capacity_waiting {
-                crate::log!("retained-upload capacity_wait list={:?} owner={} item={} publication={} allocation_bytes={} allocation_limit={} retry=true", request.list, list.debug_id, request.item, target, budget.allocations.bytes(), budget.allocations.limit());
-            }
             let bytes = budget.stats.bytes - before;
             self.os.bytes_written = self.os.bytes_written.saturating_add(bytes);
             self.os.instance_bytes_uploaded =
@@ -443,60 +439,94 @@ impl Cx {
         pending != 0
     }
 
-    /// A draw item of this list or its sub-lists that asks for instances
-    /// and has none resident: painting the list now would leave a hole
-    /// where it belongs. A partial prefix is not a hole — that is the
-    /// previous ink a replacement keeps until its copy completes.
-    fn draw_list_has_unresident_draw(&self, draw_list_id: DrawListId, trace: Option<&crate::present_trace::Trace>) -> bool {
-        let mut blocked = false;
+    /// Present-trace census of the pass's draw items with nothing resident
+    /// (`missing_items=` / `first_missing_*` in the `present` topic): a count
+    /// for the measurement lanes, never a gate.
+    fn trace_unresident_draws(&self, draw_list_id: DrawListId, trace: &crate::present_trace::Trace) {
         let len = self.draw_lists[draw_list_id].draw_item_order_len();
         for order_index in 0..len {
-            let Some(item_id) =
-                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
-            else {
-                continue;
-            };
+            let Some(item_id) = self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index) else { continue; };
             let item = &self.draw_lists[draw_list_id].draw_items[item_id];
             if let Some(sub_list_id) = item.kind.sub_list() {
-                if !self.draw_lists.is_id_freed(sub_list_id)
-                    && self.draw_list_has_unresident_draw(sub_list_id, trace)
-                {
-                    if trace.is_none() { return true; }
-                    blocked = true;
+                if !self.draw_lists.is_id_freed(sub_list_id) {
+                    self.trace_unresident_draws(sub_list_id, trace);
                 }
                 continue;
             }
-            let Some(call) = item.kind.draw_call() else {
-                continue;
-            };
+            let Some(call) = item.kind.draw_call() else { continue; };
             let sh = &self.draw_shaders[call.draw_shader_id.index];
-            if sh.os_shader_id.is_none() {
-                continue;
-            }
+            if sh.os_shader_id.is_none() { continue; }
             let slots = sh.mapping.instances.total_slots;
-            if slots == 0 {
-                continue;
-            }
-            let resident = item
-                .os
-                .instance_buffer
-                .inner
-                .as_ref()
-                .map_or(0, |inner| inner.len / (slots * 4));
-            if item.blocks_present(resident) {
-                if trace.is_none() { return true; }
-                blocked = true;
-            }
-            if let Some(trace) = trace {
-                let wanted = item.retained_instances.as_ref().map_or_else(
-                    || item.instances.as_ref().map_or(0, |v| v.len() / slots),
-                    |_| item.retained_instance_count);
-                if wanted != 0 && (resident == 0 || (item.instance_upload_pending && item.retained_instances.is_none())) {
-                    trace.missing_item(draw_list_id.index(), call.draw_shader_id.index, wanted, item.retained_progressive);
-                }
+            if slots == 0 { continue; }
+            let resident = item.os.instance_buffer.inner.as_ref().map_or(0, |inner| inner.len / (slots * 4));
+            let wanted = item.retained_instances.as_ref().map_or_else(
+                || item.instances.as_ref().map_or(0, |v| v.len() / slots),
+                |_| item.retained_instance_count);
+            if wanted != 0 && (resident == 0 || (item.instance_upload_pending && item.retained_instances.is_none())) {
+                trace.missing_item(draw_list_id.index(), call.draw_shader_id.index, wanted, item.retained_progressive);
             }
         }
-        blocked
+    }
+
+    /// The first draw item of the pass with nothing resident, named: which
+    /// list and item, what it wants, every flag the residency and upload
+    /// paths consult, the state of its Metal backing, and the collector's
+    /// verdict on it — so a hole names its cause instead of its duration.
+    fn describe_unresident_draw(&self, root: DrawListId, draw_list_id: DrawListId, metal_cx: &MetalCx) -> Option<String> {
+        let len = self.draw_lists[draw_list_id].draw_item_order_len();
+        for order_index in 0..len {
+            let Some(item_id) = self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index) else { continue; };
+            let item = &self.draw_lists[draw_list_id].draw_items[item_id];
+            if let Some(sub_list_id) = item.kind.sub_list() {
+                if !self.draw_lists.is_id_freed(sub_list_id) {
+                    if let Some(found) = self.describe_unresident_draw(root, sub_list_id, metal_cx) { return Some(found); }
+                }
+                continue;
+            }
+            let Some(call) = item.kind.draw_call() else { continue; };
+            let sh = &self.draw_shaders[call.draw_shader_id.index];
+            if sh.os_shader_id.is_none() { continue; }
+            let slots = sh.mapping.instances.total_slots;
+            if slots == 0 { continue; }
+            let buffer = &item.os.instance_buffer;
+            let resident = buffer.inner.as_ref().map_or(0, |inner| inner.len / (slots * 4));
+            if !item.blocks_present(resident) { continue; }
+            let wanted = item.retained_instances.as_ref().map_or_else(
+                || item.instances.as_ref().map_or(0, |v| v.len() / slots),
+                |_| item.retained_instance_count);
+            let bytes = item.retained_instances.as_ref().map_or_else(
+                || item.instances.as_ref().map_or(0, |v| v.len() * 4),
+                |p| (item.retained_upload_range.len() * 4).min(p.byte_len()));
+            let verdict = self.instance_upload_verdict(root, draw_list_id, item_id);
+            let budget = &self.draw_lists.1;
+            let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+            let backing = match (&buffer.inner, &buffer.pending, &buffer.allocation) {
+                (Some(inner), _, _) => format!("inner len={} cap={} bound_seq={}", inner.len, inner.capacity, inner.last_bound_seq),
+                (None, Some(pending), _) => format!("pending pub={} copied={}/{} cap={} bound_seq={}",
+                    pending.publication, pending.copied, pending.end, pending.inner.capacity, pending.inner.last_bound_seq),
+                (None, None, Some(allocation)) => match allocation.ready.get() {
+                    Some(None) | None => format!("allocation cap={} FAILED", allocation.capacity),
+                    Some(Some(_)) => format!("allocation cap={} ready, not yet taken ({} ms)", allocation.capacity, allocation.requested.elapsed().as_millis()),
+                },
+                (None, None, None) => "none".to_string(),
+            };
+            let retired = metal_cx.retired_instances.borrow();
+            return Some(format!(
+                "list {:?}#{} item {} shader {:?} wanted={} bytes={} retained={} pub_id={} progressive={} evicted={} upload_pending={} dirty={} zero_ink={} prefetched={} \
+                 backing=[{} spares={}] collector=[reached={} prio={} clean_leaf={} counters_pending={:?} demanded={} upload_needed={} served={} critical={}/{} deferred_bytes={} examined={} limit={}] \
+                 retired_queue={}/{} retirements_in_flight={} retirement_room={} allocations=[bytes={} high={} reclaim={} pending_retirements={} visible_overflow={}] cb completed={} current={}",
+                self.draw_lists[draw_list_id].debug_id, draw_list_id.index(), item_id, sh.debug_id, wanted, bytes,
+                item.retained_instances.is_some(), item.retained_instance_id, item.retained_progressive, item.retained_gpu_evicted,
+                item.instance_upload_pending, call.instance_dirty, item.retained_zero_ink(), item.retained_prefetched,
+                backing, buffer.spares.iter().filter(|s| s.is_some()).count(),
+                verdict.list_reached, verdict.list_priority, verdict.clean_leaf, verdict.counters_proof, verdict.demanded, verdict.upload_needed,
+                verdict.served, verdict.critical_eligible.saturating_sub(verdict.critical_deferred), verdict.critical_eligible, verdict.deferred_bytes, verdict.examined, verdict.limit,
+                retired.len(), retired.capacity(), budget.retirements.load(Ordering::Acquire), retired.len() < retired.capacity(),
+                budget.allocations.bytes(), budget.allocations.pressure_high(), budget.allocations.reclaim_needed(), budget.allocations.has_pending_retirements(), budget.allow_visible_overflow,
+                completed, metal_cx.cb_seq,
+            ));
+        }
+        None
     }
 
     fn render_view(
@@ -736,8 +766,7 @@ impl Cx {
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
                 if geometry.dirty {
-                    metal_cx.uniforms_starved.set(true);
-                    self.passes[draw_pass_id].paint_dirty = true;
+                    crate::error!("Metal: geometry buffer allocation failed; the draw is skipped");
                     continue 'draw_items;
                 }
 
@@ -760,6 +789,13 @@ impl Cx {
                 geometry.os.vertex_buffer.mark_bound(metal_cx);
                 geometry.os.index_buffer.mark_bound(metal_cx);
                 draw_item.os.instance_buffer.mark_bound(metal_cx);
+                if let Some((block, _)) = &draw_item.shared {
+                    // The lease's receipt: encoded now, submitted when this
+                    // command buffer commits (`submit_encoded_receipts`).
+                    let receipt = block.receipt();
+                    receipt.mark_encoded(metal_cx.current_cb_seq);
+                    metal_cx.encoded_receipts.borrow_mut().push((receipt, draw_call.uniforms_gen));
+                }
 
                 if let Some(inner) = geometry.os.vertex_buffer.inner.as_ref() {
                     unsafe {
@@ -872,8 +908,7 @@ impl Cx {
                             || uniform.os.buffer.inner.is_none()
                         {
                             if !uniform.os.buffer.update(metal_cx, &uniform.data) {
-                                metal_cx.uniforms_starved.set(true);
-                                self.passes[draw_pass_id].paint_dirty = true;
+                                crate::error!("Metal: uniform buffer allocation failed; the draw is skipped");
                                 continue 'draw_items;
                             }
                             uniform.os.uploaded_generation = uniform.generation;
@@ -1398,38 +1433,19 @@ impl Cx {
             // for its finite diagnostics/settle chain.
             self.passes[draw_pass_id].paint_dirty = true;
         }
-        // A draw item with nothing resident yet — a large first allocation
-        // still with the allocator thread, a first copy the budget could not
-        // finish — would paint as a hole (the first frame of a new gauss
-        // stack painted nothing, and the phone showed the desktop through
-        // it). Stop the repaint instead: no command buffer, no clear, the
-        // last frame stays up, the next repaint paints it whole. Bounded per
-        // streak of repaints, so an allocation that never lands degrades to
-        // the hole rather than to a frozen screen.
-        if self.draw_list_has_unresident_draw(draw_list_id, metal_cx.present_trace.as_ref()) {
-            let consecutive = metal_cx.hole_streak_repaint + 1 == self.repaint_id;
-            let since = match metal_cx.hole_streak_since {
-                Some(since) if consecutive => since,
-                _ => Instant::now(),
-            };
-            metal_cx.hole_streak_repaint = self.repaint_id;
-            metal_cx.hole_streak_since = Some(since);
-            if since.elapsed() < METAL_HOLE_ABORT_MAX {
-                metal_cx.abort_repaint(self.repaint_id, "instances not resident");
-                self.passes[draw_pass_id].paint_dirty = true;
-                let () = unsafe { msg_send![pool, release] };
-                return false;
+        // Frame ink is resident by construction (copied whole, synchronously,
+        // above). A retained publication whose first copy is still owed draws
+        // nothing until it is ready — the producer's contract (publish, then
+        // attach once ready) — and the repaint is never held for it. Under
+        // `MAKEPAD_TRACE=gpu.hole` such an item is named, so a producer that
+        // attaches too early sees exactly which item drew nothing and why.
+        if crate::makepad_error_log::trace_enabled("gpu.hole") {
+            if let Some(found) = self.describe_unresident_draw(draw_list_id, draw_list_id, metal_cx) {
+                crate::log!("gpu.hole: repaint {} draws an item with nothing resident — {}", self.repaint_id, found);
             }
-            if !metal_cx.hole_logged {
-                metal_cx.hole_logged = true;
-                crate::log!(
-                    "metal: painting with a hole — a draw item has had nothing resident for {} ms (repaint {})",
-                    since.elapsed().as_millis(),
-                    self.repaint_id
-                );
-            }
-        } else {
-            metal_cx.hole_logged = false;
+        }
+        if let Some(trace) = &metal_cx.present_trace {
+            self.trace_unresident_draws(draw_list_id, trace);
         }
         // Frame batching regressed badly at large window sizes (3fps —
         // suspicion: hazard-serialized encoders on one buffer defeating
@@ -1514,10 +1530,6 @@ impl Cx {
             &mut encoders,
             &metal_cx,
         );
-        if metal_cx.uniforms_starved.replace(false) {
-            metal_cx.abort_repaint(self.repaint_id, "uniforms not resident");
-            self.passes[draw_pass_id].paint_dirty = true;
-        }
         metal_cx.register_pass(draw_pass_id, &self.passes[draw_pass_id].debug_name);
         let gpu_profile_label = Self::gpu_profile_enabled().then(|| {
             let name = &self.passes[draw_pass_id].debug_name;
@@ -1631,6 +1643,7 @@ impl Cx {
                     None,
                     pass_window_id,
                 );
+                metal_cx.submit_encoded_receipts();
                 self.commit_command_buffer(
                     screenshot,
                     None,
@@ -1644,7 +1657,8 @@ impl Cx {
             }
             DrawPassMode::Texture => {
                 if !batch_this_pass {
-                    self.commit_command_buffer(
+                    metal_cx.submit_encoded_receipts();
+                self.commit_command_buffer(
                         None,
                         None,
                         gpu_frame_group_key,
@@ -1659,6 +1673,7 @@ impl Cx {
                 // with the window pass.
             }
             DrawPassMode::StdinTexture => {
+                metal_cx.submit_encoded_receipts();
                 self.commit_command_buffer(
                     None,
                     None,
@@ -2258,19 +2273,12 @@ pub struct MetalCx {
     /// texture that had never rendered (the first frame of a new gauss
     /// stack: the desktop through the phone, one black frame).
     aborted_repaint: Option<u64>,
-    /// A draw item of the pass being encoded found no uniform arena room
-    /// (`bind_inline_uniforms`): the repaint is aborted after the encode.
-    uniforms_starved: std::cell::Cell<bool>,
-    /// Consecutive repaints stopped because a draw item had nothing
-    /// resident, and the last repaint that was.
-    /// When the current run of repaints stopped for an unresident draw item
-    /// began, and the repaint that last stopped: a run that outlives
-    /// `METAL_HOLE_ABORT_MAX` paints with the hole and logs it once.
-    hole_streak_since: Option<Instant>,
-    hole_streak_repaint: u64,
-    hole_logged: bool,
     uniform_chunks: RefCell<Vec<MetalUniformChunk>>,
     retired_instances: RefCell<VecDeque<MetalBuffer>>,
+    /// Shared-instance receipts encoded into the command buffer being built
+    /// (with the uniform revision they were bound under), marked submitted
+    /// when it commits.
+    encoded_receipts: RefCell<Vec<(crate::shared_instances::PublishReceipt, u64)>>,
     instance_pool: RefCell<crate::retained_instances::RetainedBufferPool<MetalBufferInner>>,
     /// Frame-batched command buffer: offscreen texture passes append their
     /// encoders here instead of committing one buffer each — a 12-pass
@@ -2900,7 +2908,6 @@ impl MetalCx {
                 "submitter saturated" => PresentCause::SubmitterFull,
                 "render setup pending" => PresentCause::SetupPending,
                 "command buffer cap" => PresentCause::CommandBufferCap,
-                "instances not resident" => PresentCause::InstancesNotResident,
                 "uniforms not resident" => PresentCause::UniformsNotResident,
                 _ => PresentCause::PassAborted,
             });
@@ -3157,7 +3164,7 @@ impl MetalCx {
             tex
         };
         let (staging_tx, staging_returned) = std::sync::mpsc::sync_channel(STAGING_POOL_MAX_COUNT);
-        let mut uniform_chunks = Vec::with_capacity(METAL_UNIFORM_MAX_CHUNKS);
+        let mut uniform_chunks = Vec::new();
         // Reserve two chunks per in-flight frame before any camera draw.
         for _ in 0..6 {
             let Some(charge) = budget.reserve(METAL_UNIFORM_CHUNK_BYTES) else {
@@ -3174,6 +3181,7 @@ impl MetalCx {
             retired_instance_bytes: std::cell::Cell::new(0),
             uniform_chunks: RefCell::new(uniform_chunks),
             retired_instances: RefCell::new(VecDeque::with_capacity(16_384)),
+            encoded_receipts: RefCell::new(Vec::new()),
             instance_pool: RefCell::new(crate::retained_instances::RetainedBufferPool::new(
                 envelope,
             )),
@@ -3185,10 +3193,6 @@ impl MetalCx {
             render_setup,
             render_setup_queued,
             aborted_repaint: None,
-            uniforms_starved: std::cell::Cell::new(false),
-            hole_streak_since: None,
-            hole_streak_repaint: 0,
-            hole_logged: false,
             frame_command_buffer: None,
             frame_command_buffer_seq: 0,
             cb_seq: 0,
@@ -3729,33 +3733,18 @@ struct MetalBuffer {
     // The GPU can retain up to three frames. Recycle completed allocations
     // instead of asking the driver for every immediate/chrome recording.
     spares: [Option<MetalBufferInner>; 3],
-    capacity_waiting: bool,
 }
 
 struct MetalInstanceAllocation {
     capacity: usize,
     ready: std::sync::OnceLock<Option<RcObjcId>>,
     charge: Option<crate::retained_instances::RetainedAllocation>,
+    /// When the request was made: the hole line reports how long a first
+    /// allocation has been with the allocator thread.
+    requested: Instant,
 }
 
 const METAL_UNIFORM_CHUNK_BYTES: usize = 4 * 1024 * 1024;
-const METAL_UNIFORM_MAX_CHUNKS: usize = 32;
-/// First instance allocations up to this size are made on the UI thread,
-/// in the microseconds they cost. Instance copies still share the frame's
-/// bounded upload allowance, including the first copy. A
-/// fixed 64 KiB here sent every shadow-cascade, particle and decal buffer
-/// of a game to the allocator thread, the repaint stopped for it, and after
-/// a few stops the frame painted with the hole — every shadow blinked while
-/// the camera moved. Derived from the retained envelope (physical/2 on a
-/// desktop): one 512th of it, 1..16 MiB, so a small machine keeps its UI
-/// thread light and a big one never paints a hole for a frame's own data.
-fn sync_allocation_bytes(allocations: &crate::retained_instances::RetainedAllocationBudget) -> usize {
-    allocations.sync_allocation_bytes()
-}
-/// How long a repaint may keep stopping for a draw item with nothing
-/// resident — the last frame stays up meanwhile — before the frame paints
-/// with the hole and says so. A stale frame is invisible; a hole is not.
-const METAL_HOLE_ABORT_MAX: Duration = Duration::from_millis(400);
 
 struct MetalUniformChunk {
     allocation: Arc<MetalInstanceAllocation>,
@@ -3787,6 +3776,7 @@ impl MetalUniformChunk {
             capacity,
             ready: std::sync::OnceLock::new(),
             charge: Some(charge),
+            requested: Instant::now(),
         });
         let _ = allocation.ready.set(Some(buffer));
         Some(Self {
@@ -3798,6 +3788,14 @@ impl MetalUniformChunk {
 }
 
 impl MetalCx {
+    /// Every shared-instance receipt encoded into the command buffer being
+    /// committed moves to `Submitted{serial}` under its binding revision.
+    fn submit_encoded_receipts(&self) {
+        let serial = self.current_cb_seq;
+        for (receipt, revision) in self.encoded_receipts.borrow_mut().drain(..) {
+            receipt.mark_submitted(serial, revision);
+        }
+    }
     fn has_retirement_room(&self) -> bool {
         let queue = self.retired_instances.borrow();
         queue.len() < queue.capacity()
@@ -3945,27 +3943,39 @@ impl MetalCx {
             chunk.used = offset + bytes;
             return true;
         }
-        if chunks.len() < METAL_UNIFORM_MAX_CHUNKS
-            && !chunks
-                .iter()
-                .any(|chunk| chunk.allocation.ready.get().is_none())
-        {
-            let capacity = bytes.next_power_of_two().max(METAL_UNIFORM_CHUNK_BYTES);
-            // Uniforms serve every visible draw, including ordinary chrome.
-            // Their bounded arena must not be vetoed by bulk retained storage.
-            if !budget.can_reserve(capacity) {
-                budget.wait_for_reclaim(capacity);
-            }
-            let charge = budget.reserve_visible(capacity);
-            if let Some(chunk) = MetalUniformChunk::request(self.device, capacity, charge) {
-                chunks.push(chunk);
-            }
+        // Every chunk is busy or full: the ring grows by one chunk, allocated
+        // and page-touched right here, and the uniforms are bound from it.
+        // The ring's depth is whatever the frames in flight need; there is
+        // no cap and no starvation (a skipped draw was a hole).
+        let capacity = bytes.next_power_of_two().max(METAL_UNIFORM_CHUNK_BYTES);
+        if !budget.can_reserve(capacity) {
+            budget.wait_for_reclaim(capacity);
         }
-        // The draw item is skipped by the caller; a skipped item is a hole,
-        // and a repaint paints whole or not at all — the pass owner aborts
-        // the repaint once its draw list is encoded.
-        self.uniforms_starved.set(true);
-        false
+        let charge = budget.reserve_visible(capacity);
+        let Some(mut chunk) = MetalUniformChunk::request(self.device, capacity, charge) else {
+            crate::error!("Metal uniform ring: a {} byte chunk could not be allocated", capacity);
+            return false;
+        };
+        let Some(Some(buffer)) = chunk.allocation.ready.get() else { return false; };
+        let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
+        if contents.is_null() { return false; }
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().cast::<u8>(), contents, bytes);
+            #[cfg(target_os = "macos")]
+            {
+                let range = NSRange { location: 0, length: bytes as u64 };
+                let _: () = msg_send![buffer.as_id(), didModifyRange: range];
+            }
+            let _: () = msg_send![encoder, setVertexBuffer:buffer.as_id() offset:0u64 atIndex:index];
+            let _: () = msg_send![encoder, setFragmentBuffer:buffer.as_id() offset:0u64 atIndex:index];
+        }
+        chunk.seq = self.current_cb_seq;
+        if let Some(charge) = &chunk.allocation.charge {
+            charge.submitted(chunk.seq);
+        }
+        chunk.used = bytes;
+        chunks.push(chunk);
+        true
     }
 }
 
@@ -4042,7 +4052,6 @@ enum MetalAllocationRequest {
         crate::draw_shader::DrawShaderColorFormat,
         Arc<MetalPipelines>,
     ),
-    Instances(RcObjcId, Arc<MetalInstanceAllocation>),
     RetireInstances(MetalBuffer, Arc<AtomicUsize>, Option<crate::present_trace::Trace>),
     RenderSetup(RcObjcId, Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>),
 }
@@ -4066,23 +4075,6 @@ fn metal_buffer_allocator() -> &'static std::sync::mpsc::SyncSender<MetalAllocat
                         drop(buffer);
                         if let Some(trace) = &trace { trace.mark(PresentStage::RetirementEnd); }
                         counter.fetch_sub(1, Ordering::AcqRel);
-                    }
-                    MetalAllocationRequest::Instances(device, allocation) => {
-                        if Arc::strong_count(&allocation) > 1 {
-                            let buffer = NonNull::new(unsafe {
-                                msg_send![device.as_id(), newBufferWithLength: allocation.capacity as u64 options:nil]
-                            }).map(RcObjcId::from_owned);
-                            if let Some(buffer) = &buffer {
-                                METAL_INSTANCE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-                                let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
-                                if !contents.is_null() {
-                                    for offset in (0..allocation.capacity).step_by(4096) {
-                                        unsafe { contents.add(offset).write_volatile(0); }
-                                    }
-                                }
-                            }
-                            let _ = allocation.ready.set(buffer);
-                        }
                     }
                     MetalAllocationRequest::RenderSetup(device, ready) => {
                         if Arc::strong_count(&ready) > 1 {
@@ -4166,9 +4158,6 @@ impl MetalBuffer {
         let end = range.end.min(data.len()) * 4;
         if end == 0 {
             if self.capacity_bytes() != 0 {
-                if !metal_cx.has_retirement_room() {
-                    return 1;
-                }
                 metal_cx
                     .retired_instances
                     .borrow_mut()
@@ -4207,9 +4196,6 @@ impl MetalBuffer {
                     pending.copied = 0;
                     pending.end = end;
                 } else {
-                    if self.pending.is_some() && !metal_cx.has_retirement_room() {
-                        return end;
-                    }
                     if let Some(pending) = self.pending.take() {
                         metal_cx
                             .retired_instances
@@ -4222,7 +4208,11 @@ impl MetalBuffer {
                 }
             }
         }
-        if budget.range(0..end, slots * 4).is_empty() {
+        // Frame ink (publication 0) is copied whole this frame: no allowance
+        // applies to a draw item's own data. Retained publications copy the
+        // allowance's range and continue next frame.
+        let whole = publication == 0;
+        if !whole && budget.range(0..end, slots * 4).is_empty() {
             return self.pending.as_ref().map_or(end, |p| end - p.copied);
         }
         let start_time = std::time::Instant::now();
@@ -4242,7 +4232,7 @@ impl MetalBuffer {
             let replace_in_place =
                 self.inner.as_ref().is_some_and(|inner| {
                     inner.capacity >= end && inner.last_bound_seq <= completed
-                }) && budget.range(0..end, slots * 4).end == end;
+                }) && (whole || budget.range(0..end, slots * 4).end == end);
             let (inner, copied) = if let Some(inner) = append {
                 (
                     MetalBufferInner {
@@ -4273,9 +4263,6 @@ impl MetalBuffer {
                     .as_ref()
                     .is_some_and(|a| a.capacity < capacity)
                 {
-                    if !metal_cx.has_retirement_room() {
-                        return end;
-                    }
                     metal_cx
                         .retired_instances
                         .borrow_mut()
@@ -4291,8 +4278,7 @@ impl MetalBuffer {
                     for spare in &mut self.spares {
                         if spare.as_ref().is_some_and(|inner| {
                             inner.capacity < capacity && inner.last_bound_seq <= completed
-                        }) && metal_cx.has_retirement_room()
-                        {
+                        }) {
                             metal_cx
                                 .retired_instances
                                 .borrow_mut()
@@ -4302,54 +4288,39 @@ impl MetalBuffer {
                                 });
                         }
                     }
+                    // Pressure never refuses the backing a draw needs: the
+                    // charge is taken as visible overflow and the producer's
+                    // policy (eviction, publishing less) brings the total back
+                    // under the envelope. A refused allocation was a hole.
                     let pressure = !budget.allocations.can_reserve(capacity);
                     if pressure {
                         budget.allocations.wait_for_reclaim(capacity);
-                        self.capacity_waiting = true;
-                        if !(publication == 0 && capacity <= sync_allocation_bytes(&budget.allocations))
-                            && !budget.allow_visible_overflow
-                        {
-                            return end;
-                        }
                     }
                     let charge = if pressure {
                         budget.allocations.reserve_visible(capacity)
                     } else {
                         budget.allocations.reserve(capacity).unwrap()
                     };
-                    self.capacity_waiting = false;
                     let allocation = Arc::new(MetalInstanceAllocation {
                         capacity,
                         ready: std::sync::OnceLock::new(),
                         charge: Some(charge),
+                        requested: Instant::now(),
                     });
-                    if capacity <= sync_allocation_bytes(&budget.allocations) {
-                        // A small buffer is allocated right here, in the
-                        // microseconds it costs, so the draw it serves lands
-                        // in this frame. Only a large one takes the
-                        // allocator thread's round trip.
-                        let buffer = NonNull::new(unsafe {
-                            msg_send![metal_cx.device, newBufferWithLength: capacity as u64 options: nil]
-                        })
-                        .map(RcObjcId::from_owned);
-                        if buffer.is_some() {
-                            METAL_INSTANCE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-                        }
-                        let _ = allocation.ready.set(buffer);
-                        self.allocation = Some(allocation);
-                    } else {
-                        let device = RcObjcId::from_unowned(NonNull::new(metal_cx.device).unwrap());
-                        if metal_buffer_allocator()
-                            .try_send(MetalAllocationRequest::Instances(
-                                device,
-                                allocation.clone(),
-                            ))
-                            .is_ok()
-                        {
-                            self.allocation = Some(allocation);
-                        }
-                        return end;
+                    // Residency by construction: a draw item's backing is
+                    // allocated right here, whatever its size (DL-0: a 50 MiB
+                    // shared buffer is a few ms of first touch, never a frame
+                    // painted without it). No allocator-thread round trip, no
+                    // size threshold.
+                    let buffer = NonNull::new(unsafe {
+                        msg_send![metal_cx.device, newBufferWithLength: capacity as u64 options: nil]
+                    })
+                    .map(RcObjcId::from_owned);
+                    if buffer.is_some() {
+                        METAL_INSTANCE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
                     }
+                    let _ = allocation.ready.set(buffer);
+                    self.allocation = Some(allocation);
                 }
                 let allocation = self.allocation.as_ref().unwrap();
                 let Some(buffer) = allocation.ready.get() else {
@@ -4381,7 +4352,7 @@ impl MetalBuffer {
             });
         }
         let pending = self.pending.as_mut().unwrap();
-        let copy = budget.range(pending.copied..pending.end, slots * 4);
+        let copy = if whole { pending.copied..pending.end } else { budget.range(pending.copied..pending.end, slots * 4) };
         let dst: *mut std::ffi::c_void =
             unsafe { msg_send![pending.inner.buffer.as_id(), contents] };
         if dst.is_null() {
@@ -4404,7 +4375,11 @@ impl MetalBuffer {
                 let _: () = msg_send![pending.inner.buffer.as_id(),didModifyRange:range];
             }
         }
-        budget.copied(copy.len(), slots * 4, category, start_time.elapsed());
+        if whole {
+            budget.copied_whole(copy.len(), slots * 4, category, start_time.elapsed());
+        } else {
+            budget.copied(copy.len(), slots * 4, category, start_time.elapsed());
+        }
         pending.copied = copy.end;
         let remaining = pending.end - pending.copied;
         // Publish only complete immutable records. Later frames append beyond
@@ -4424,24 +4399,13 @@ impl MetalBuffer {
             self.inner = Some(prefix);
         }
         if remaining == 0 {
-            if self
-                .inner
-                .as_ref()
-                .is_some_and(|old| old.buffer.as_id() != pending.inner.buffer.as_id())
-                && !metal_cx.has_retirement_room()
-                && self.spares.iter().all(Option::is_some)
-            {
-                // Copy is complete; installation waits for bounded retirement
-                // capacity while both old and new destinations remain owned.
-                return 1;
-            }
             let mut complete = self.pending.take().unwrap().inner;
             complete.len = end;
             if let Some(old) = self.inner.replace(complete) {
                 // An append shares the same buffer; keep only one owner in
                 // this pool so later reuse cannot overwrite a live prefix.
                 if old.buffer.as_id() != self.inner.as_ref().unwrap().buffer.as_id() {
-                    if publication == 0 || !metal_cx.has_retirement_room() {
+                    if publication == 0 {
                         if let Some(slot) = self.spares.iter_mut().find(|slot| slot.is_none()) {
                             *slot = Some(old);
                         } else {
@@ -4488,7 +4452,6 @@ impl MetalBuffer {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
             if self.inner.is_some() {
-                if !metal_cx.has_retirement_room() { return false; }
                 metal_cx.retired_instances.borrow_mut().push_back(MetalBuffer {inner:self.inner.take(),..Default::default()});
             }
             return true;
@@ -4530,7 +4493,6 @@ impl MetalBuffer {
         // Geometry and custom uniforms follow the same completed-reader
         // retirement path as instance backing. A driver release must not run
         // inside paint, even when Metal also retains the old object.
-        if self.inner.is_some() && !metal_cx.has_retirement_room() { return false; }
         let Some(buffer) = NonNull::new(unsafe {
                     msg_send![
                         metal_cx.device,
@@ -6233,6 +6195,36 @@ mod vec_upload_tests {
             PointUsize::new(0, dirty_rows.start),
             SizeUsize::new(width, dirty_rows.end - dirty_rows.start),
         ))
+    }
+
+    /// Frame ink is resident by construction: a draw item's own recording is
+    /// copied whole in the frame that produced it, whatever the retained
+    /// allowance has left. Retained publications stay bounded by it.
+    #[test]
+    fn frame_ink_is_copied_whole_regardless_of_the_allowance() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let metal_cx = MetalCx::new(&mut cx.draw_lists.1.allocations);
+        let mut budget = crate::retained_instances::RetainedUploadBudget::new(1024);
+        let data = vec![1.0f32; 1 << 18]; // 1 MiB, a thousand times the allowance
+        let mut ink = MetalBuffer::default();
+        let remaining = ink.update_retained(
+            &metal_cx, &data, 0..data.len(), 0, true, false, false, 4,
+            crate::retained_instances::UploadCategory::Other, &mut cx.draw_lists.1,
+        );
+        let _ = &mut budget;
+        assert_eq!(remaining, 0, "frame ink never leaves a remainder");
+        assert_eq!(ink.inner.as_ref().map(|inner| inner.len), Some(data.len() * 4));
+        assert!(ink.pending.is_none() && ink.allocation.is_none(), "one synchronous allocation, one copy");
+        // The same bytes as a retained publication copy only what the
+        // allowance grants this frame.
+        cx.draw_lists.1.limit = 1024;
+        let mut publication = MetalBuffer::default();
+        let remaining = publication.update_retained(
+            &metal_cx, &data, 0..data.len(), 7, true, false, false, 4,
+            crate::retained_instances::UploadCategory::Other, &mut cx.draw_lists.1,
+        );
+        assert!(remaining > 0, "a retained publication is paced by the allowance");
+        assert!(publication.inner.is_none(), "an incomplete publication is not resident");
     }
 
     #[test]
