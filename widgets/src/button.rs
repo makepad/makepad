@@ -639,7 +639,6 @@ impl Widget for Button {
                     );
                 }
                 self.animator_play(cx, ids!(hover.down));
-                self.set_key_focus(cx);
             }
             Hit::FingerHoverIn(_) => {
                 if self.enabled {
