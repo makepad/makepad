@@ -315,7 +315,7 @@ fn name_store_save(renames: &[TweakRename]) {
         return;
     }
     let mut out = String::from(
-        "# makepad widget names — typed in the F12 Props tab, one per line\n\
+        "# makepad widget names — typed in the Shift+F10 Props tab, one per line\n\
          # reference\tcurrent name\twanted name\n",
     );
     for rename in renames {
@@ -540,7 +540,7 @@ fn note_store_save(notes: &[TweakNote]) {
         return;
     }
     let mut out = String::from(
-        "# makepad tweak notes — pinned from the F12 note card, one per line\n\
+        "# makepad tweak notes — pinned from the Shift+F10 note card, one per line\n\
          # path\\tdx\\tdy\\tw\\th\\ttext (\\\\n for newlines)\n",
     );
     for note in pinned {
