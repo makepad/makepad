@@ -33,9 +33,11 @@ use crate::track_key::KeyEstimate;
 use makepad_asset_data::BlobId;
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// The independent judge of the grid this file publishes: a second onset
 /// front end, a second tracker, and the standard beat-tracking metrics.
@@ -3224,15 +3226,274 @@ pub struct AnalysisDone {
     pub cached: bool,
 }
 
-/// One analysis thread. Track analysis is seconds of work on a long file and
-/// must never touch the UI thread or the audio callback.
+/// How the two analysis lanes are staffed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaneSchedule {
+    /// Workers standing ready for a deck's own load. They never stand
+    /// down: a deck load is where the wait is felt, and the model a worker
+    /// holds is loaded once and kept.
+    pub deck_workers: usize,
+    /// The most workers the background pass may have at once. They are
+    /// spawned as its jobs queue up and stood down when the lane drains.
+    pub batch_workers: usize,
+    /// How long an idle pass worker waits for more before it goes.
+    pub batch_idle: Duration,
+}
+
+impl LaneSchedule {
+    /// For a machine with `cores`: one worker per deck, so both can load at
+    /// once, and up to half the cores for the pass, capped at four. An
+    /// analysis holds the whole decoded record and its own buffers, and a
+    /// worker holds its own copy of the beats model, so the pass is sized
+    /// by memory rather than by cores.
+    pub fn for_cores(cores: usize) -> LaneSchedule {
+        LaneSchedule {
+            deck_workers: if cores >= 2 { 2 } else { 1 },
+            batch_workers: (cores / 2).clamp(1, 4),
+            batch_idle: Duration::from_secs(60),
+        }
+    }
+
+    pub fn for_this_machine() -> LaneSchedule {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        LaneSchedule::for_cores(cores)
+    }
+}
+
+/// A lock that survives a worker panicking while it held it: the pool has
+/// to keep serving the decks whatever one job did.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct LaneState {
+    jobs: VecDeque<AnalysisJob>,
+    /// Workers on this lane, free or busy.
+    alive: usize,
+    /// Workers running a job right now. A worker just brought up counts as
+    /// free from the moment it exists, so a poll that lands before it has
+    /// reached the queue does not bring up another for the same job.
+    busy: usize,
+    /// The pool is gone: every worker leaves at its next look.
+    closed: bool,
+    /// The machine refused a thread the last time one was asked for. Said
+    /// once in the log, not once a frame.
+    spawn_refused: bool,
+}
+
+/// One lane of the pool: its queue, and the rules for the workers on it.
+struct Lane {
+    state: Mutex<LaneState>,
+    more: Condvar,
+    max_workers: usize,
+    /// Workers that stay however long the lane is idle. The deck lane keeps
+    /// them all; the pass lane keeps one, with the model it has loaded, so a
+    /// pass fed a record a minute does not reload the model every time.
+    keep_workers: usize,
+    /// How long a worker above `keep_workers` waits for a job before it
+    /// leaves.
+    idle: Duration,
+    /// The pass lane: a job taken here is not started while a deck is
+    /// waiting on the other lane.
+    yields_to_decks: bool,
+}
+
+/// A worker's seat on its lane, given back on any exit -- an idle leave,
+/// the pool closing, or a panic in a job -- so the lane can be staffed
+/// again. The idle leave gives it back itself, under the lock the decision
+/// is made under; the drop is for the exits nobody decided. (A build that
+/// aborts on panic never unwinds to here: the process ends with the job.)
+struct Seat {
+    lane: Arc<Lane>,
+    given_back: bool,
+    /// Holding a job: counted busy on the lane.
+    has_job: bool,
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        if !self.given_back {
+            let mut state = lock(&self.lane.state);
+            state.alive = state.alive.saturating_sub(1);
+            if self.has_job {
+                state.busy = state.busy.saturating_sub(1);
+            }
+        }
+    }
+}
+
+impl Lane {
+    /// The next job for a worker, or `None` when the worker should leave:
+    /// the pool closed, or the lane's idle time passed with nothing queued
+    /// and more workers than it keeps. Leaving is decided under the same
+    /// lock `submit` pushes under, so a job pushed as a worker leaves finds
+    /// either that worker or a fresh one.
+    fn next_job(&self, seat: &mut Seat) -> Option<AnalysisJob> {
+        let mut state = lock(&self.state);
+        // The idle clock starts when the worker first finds nothing to do
+        // with more workers on the lane than it keeps, not when it arrives:
+        // a kept worker woken for a job another worker took must not leave
+        // at once, with its model, over a wait it never had.
+        let mut deadline: Option<Instant> = None;
+        if seat.has_job {
+            state.busy -= 1;
+            seat.has_job = false;
+        }
+        loop {
+            if state.closed {
+                state.alive -= 1;
+                seat.given_back = true;
+                return None;
+            }
+            if let Some(job) = state.jobs.pop_front() {
+                state.busy += 1;
+                seat.has_job = true;
+                return Some(job);
+            }
+            if state.alive <= self.keep_workers || self.idle == Duration::MAX {
+                state = self.more.wait(state).unwrap_or_else(|p| p.into_inner());
+                continue;
+            }
+            let now = Instant::now();
+            let deadline = *deadline.get_or_insert_with(|| now.checked_add(self.idle).unwrap_or(now));
+            if now >= deadline {
+                state.alive -= 1;
+                seat.given_back = true;
+                return None;
+            }
+            state = self
+                .more
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+    }
+}
+
+/// What the lanes share.
+struct PoolShared {
+    /// Jobs a deck is waiting on, pending or running, so the pass lane can
+    /// hold back while there are any.
+    deck_busy: Mutex<usize>,
+    deck_idle: Condvar,
+    /// The longest the pass waits for the decks before it goes ahead
+    /// anyway: a deck job that never came back must not starve the pass
+    /// for the rest of the night.
+    deck_wait_cap: Duration,
+    /// The beats model runs on the show's own graphics device. Its loads
+    /// and runs take turns through this, however many workers the lanes
+    /// have, so the pass never puts two inferences on the device the
+    /// picture is drawn with.
+    model_gate: Mutex<()>,
+    /// The pool is gone.
+    closed: AtomicBool,
+    /// Where the sidecars go when not the operator's cache: the tests'.
+    cache_root: Option<PathBuf>,
+}
+
+/// A deck job in flight, counted from the moment it is taken until the
+/// moment its worker is done with it -- finished, refused, or panicked.
+struct DeckBusy<'a>(&'a PoolShared);
+
+impl Drop for DeckBusy<'_> {
+    fn drop(&mut self) {
+        self.0.deck_finished();
+    }
+}
+
+impl PoolShared {
+    fn deck_started(&self) {
+        *lock(&self.deck_busy) += 1;
+        self.deck_idle.notify_all();
+    }
+
+    fn deck_finished(&self) {
+        let mut busy = lock(&self.deck_busy);
+        *busy = busy.saturating_sub(1);
+        if *busy == 0 {
+            self.deck_idle.notify_all();
+        }
+    }
+
+    /// Block while a deck is waiting on the deck lane, up to the cap, or
+    /// until the pool closes. True when the decks were idle on return.
+    fn wait_deck_idle(&self) -> bool {
+        let deadline = Instant::now() + self.deck_wait_cap;
+        let mut busy = lock(&self.deck_busy);
+        while *busy > 0 {
+            if self.closed.load(Ordering::Relaxed) {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            busy = self
+                .deck_idle
+                .wait_timeout(busy, deadline - now)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+        true
+    }
+
+    /// A turn at the model. The deck lane takes the next one. The pass lane
+    /// takes one only while no deck is waiting: it waits for the decks
+    /// first, and a turn it got while a deck arrived behind it is given
+    /// back untaken, so a deck's run never queues behind pass workers
+    /// already in line. Past the cap on the wait, or with the pool
+    /// closing, it goes ahead.
+    fn model_turn(&self, yields_to_decks: bool) -> MutexGuard<'_, ()> {
+        loop {
+            let decks_idle = !yields_to_decks || self.wait_deck_idle();
+            let turn = lock(&self.model_gate);
+            if !decks_idle
+                || !yields_to_decks
+                || *lock(&self.deck_busy) == 0
+                || self.closed.load(Ordering::Relaxed)
+            {
+                return turn;
+            }
+            drop(turn);
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// A record a worker could not measure: the job faulted, and the caller
+/// has a slot or a deck waiting on an answer that is not coming.
+pub struct AnalysisFailed {
+    pub deck: Option<DeckId>,
+    pub gen: u64,
+    pub key: AnalysisKey,
+    pub error: String,
+}
+
+/// What a panic said, for the log.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return text.to_string();
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    "a fault with no message".into()
+}
+
+/// The analysis workers. Track analysis is seconds of work on a long file
+/// and must never touch the UI thread or the audio callback.
+///
+/// Two lanes: the decks' own loads on one, the background pass over the
+/// library on the other. A deck's answer never queues behind the pass, and
+/// the pass does not start a job while a deck is waiting for its own.
 pub struct AnalysisPool {
-    /// Jobs a deck is waiting on.
-    deck_tx: Sender<AnalysisJob>,
-    /// Jobs nothing on screen is waiting on: the background pass over the
-    /// library.
-    batch_tx: Sender<AnalysisJob>,
+    deck: Arc<Lane>,
+    batch: Arc<Lane>,
+    shared: Arc<PoolShared>,
+    done_tx: Sender<AnalysisDone>,
     rx: Receiver<AnalysisDone>,
+    failed_tx: Sender<AnalysisFailed>,
+    failed_rx: Receiver<AnalysisFailed>,
 }
 
 impl Default for AnalysisPool {
@@ -3241,22 +3502,42 @@ impl Default for AnalysisPool {
     }
 }
 
-/// One analysis worker: take jobs until the queue is gone.
+/// One analysis worker: take the lane's jobs until it says to leave.
 ///
 /// A free function rather than a closure so the pool can run more than
 /// one of it. The model is loaded per THREAD (and reloaded when the
-/// checkpoint changes), so two workers hold two copies -- which is the
+/// checkpoint changes), so every worker holds its own copy -- which is the
 /// price of not making a deck load wait, and is paid only when a model is
 /// installed at all.
-fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>) {
+fn run_analysis_jobs(
+    lane: Arc<Lane>,
+    shared: Arc<PoolShared>,
+    done_tx: Sender<AnalysisDone>,
+    failed_tx: Sender<AnalysisFailed>,
+) {
+            let mut seat = Seat { lane: lane.clone(), given_back: false, has_job: false };
             let mut beats_checkpoint: Option<PathBuf> = None;
             let mut beats_model: Option<BeatsModel> = None;
             let mut beats_model_error: Option<String> = None;
-            while let Ok(job) = jobs.recv() {
+            while let Some(job) = lane.next_job(&mut seat) {
+                // Deck first: a job the pass queued is held, not started,
+                // while a deck is waiting on the other lane for the CPU it
+                // would take.
+                if lane.yields_to_decks {
+                    shared.wait_deck_idle();
+                }
+                if shared.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                let _busy = job.deck.is_some().then(|| DeckBusy(&shared));
                 // Per job, not once per thread: the operator can move the
                 // cache root mid-session, and a worker holding the old one
                 // would keep writing sidecars where nothing reads them.
-                let dir = cache_dir();
+                let dir = shared.cache_root.clone().unwrap_or_else(cache_dir);
+                // One bad record must not cost the lane: a fault in the
+                // measurement is caught here, reported, and the worker goes
+                // on to the next job.
+                let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let (mut analysis, cached) = match load_cached(&dir, &job.key) {
                     // A partial result is not something a deck may have:
                     // it was measured to fill a column, and this is the
@@ -3309,6 +3590,9 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                             beats_checkpoint = Some(checkpoint.clone());
                             beats_model = None;
                             beats_model_error = None;
+                            // A load compiles the graph on the device: a
+                            // turn like any run.
+                            let _turn = shared.model_turn(lane.yields_to_decks);
                             match BeatsModel::load(checkpoint) {
                                 Ok(model) => beats_model = Some(model),
                                 Err(error) => beats_model_error = Some(error.to_string()),
@@ -3324,7 +3608,12 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                                 Err(error) => makepad_widgets::log!(
                                     "beats: kept comb grid; resample failed: {error}"
                                 ),
-                                Ok(mono) => match model.analyze(&mono) {
+                                // The resample above is CPU work and takes
+                                // no turn; the run on the device does.
+                                Ok(mono) => match {
+                                    let _turn = shared.model_turn(lane.yields_to_decks);
+                                    model.analyze(&mono)
+                                } {
                                     Err(error) => makepad_widgets::log!(
                                         "beats: kept comb grid; analysis failed: {error}"
                                     ),
@@ -3362,19 +3651,31 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                         }
                     }
                 }
-                if should_store {
+                // Nothing is written for a pool that has gone.
+                if should_store && !shared.closed.load(Ordering::Relaxed) {
                     store_cached(&dir, &job.key, &analysis);
                 }
-                if done_tx
-                    .send(AnalysisDone {
-                        deck: job.deck,
-                        gen: job.gen,
-                        key: job.key,
-                        analysis: Arc::new(analysis),
-                        cached: straight_from_cache,
-                    })
-                    .is_err()
-                {
+                (analysis, straight_from_cache)
+                }));
+                let sent = match measured {
+                    Ok((analysis, cached)) => done_tx
+                        .send(AnalysisDone {
+                            deck: job.deck,
+                            gen: job.gen,
+                            key: job.key,
+                            analysis: Arc::new(analysis),
+                            cached,
+                        })
+                        .is_ok(),
+                    Err(payload) => {
+                        let error = panic_message(payload.as_ref());
+                        makepad_widgets::log!("analysis: a record could not be measured: {error}");
+                        failed_tx
+                            .send(AnalysisFailed { deck: job.deck, gen: job.gen, key: job.key, error })
+                            .is_ok()
+                    }
+                };
+                if !sent {
                     return;
                 }
             }
@@ -3382,36 +3683,146 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
 
 impl AnalysisPool {
     pub fn new() -> AnalysisPool {
-        let (deck_tx, deck_jobs) = channel::<AnalysisJob>();
-        let (batch_tx, batch_jobs) = channel::<AnalysisJob>();
+        AnalysisPool::with_schedule(LaneSchedule::for_this_machine())
+    }
+
+    /// Two lanes, and the whole reason for two: a deck waiting to be
+    /// loaded must never queue behind a background pass over the library.
+    /// One queue would make it, and the wait is the length of a whole
+    /// analysis -- seconds, with a record on the way in. The deck lane is
+    /// staffed now and stays; the pass lane is staffed as its jobs arrive.
+    pub fn with_schedule(schedule: LaneSchedule) -> AnalysisPool {
+        AnalysisPool::with_schedule_in(schedule, None)
+    }
+
+    /// The same, with the sidecars going under `cache_root` rather than
+    /// the operator's cache. For the tests, which must not leave records
+    /// in a real library.
+    pub fn with_schedule_in(schedule: LaneSchedule, cache_root: Option<PathBuf>) -> AnalysisPool {
         let (done_tx, rx) = channel::<AnalysisDone>();
-        // Two workers, and the whole reason for two: a deck waiting to be
-        // loaded must never queue behind a background pass over the
-        // library. One queue would make it, and the wait is the length of
-        // a whole analysis -- seconds, with a record on the way in.
-        for (name, jobs) in [
-            ("vj-wave-analysis", deck_jobs),
-            ("vj-wave-batch", batch_jobs),
-        ] {
-            let done_tx = done_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(name.into())
-                .spawn(move || run_analysis_jobs(jobs, done_tx));
+        let (failed_tx, failed_rx) = channel::<AnalysisFailed>();
+        let shared = Arc::new(PoolShared {
+            deck_busy: Mutex::new(0),
+            deck_idle: Condvar::new(),
+            deck_wait_cap: Duration::from_secs(30),
+            model_gate: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            cache_root,
+        });
+        let lane = |max_workers: usize, keep_workers, idle, yields_to_decks| {
+            Arc::new(Lane {
+                state: Mutex::new(LaneState {
+                    jobs: VecDeque::new(),
+                    alive: 0,
+                    busy: 0,
+                    closed: false,
+                    spawn_refused: false,
+                }),
+                more: Condvar::new(),
+                max_workers,
+                keep_workers,
+                idle,
+                yields_to_decks,
+            })
+        };
+        let deck_workers = schedule.deck_workers.max(1);
+        let deck = lane(deck_workers, deck_workers, Duration::MAX, false);
+        let batch = lane(schedule.batch_workers.max(1), 1, schedule.batch_idle, true);
+        let pool = AnalysisPool { deck, batch, shared, done_tx, rx, failed_tx, failed_rx };
+        {
+            let mut state = lock(&pool.deck.state);
+            for _ in 0..pool.deck.max_workers {
+                pool.spawn_worker(&pool.deck, &mut state);
+            }
         }
-        AnalysisPool { deck_tx, batch_tx, rx }
+        pool
+    }
+
+    /// One more worker on `lane`, counted under the lane's lock so the
+    /// count and the thread agree. A machine that refuses the thread is
+    /// logged once; the job waits, and every poll asks again.
+    fn spawn_worker(&self, lane: &Arc<Lane>, state: &mut LaneState) {
+        let (lane_ref, shared) = (lane.clone(), self.shared.clone());
+        let (done_tx, failed_tx) = (self.done_tx.clone(), self.failed_tx.clone());
+        let name = match lane.yields_to_decks {
+            true => "vj-wave-batch",
+            false => "vj-wave-analysis",
+        };
+        match std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || run_analysis_jobs(lane_ref, shared, done_tx, failed_tx))
+        {
+            Ok(_) => {
+                state.alive += 1;
+                state.spawn_refused = false;
+            }
+            Err(error) => {
+                if !state.spawn_refused {
+                    makepad_widgets::log!("analysis: no thread for the {name} lane: {error}");
+                }
+                state.spawn_refused = true;
+            }
+        }
+    }
+
+    /// Bring up a worker when `lane` has more jobs queued than workers free
+    /// to take one, to its limit. Called on every submit, and on every poll
+    /// for the jobs a lost worker or a refused thread left behind.
+    fn staff(&self, lane: &Arc<Lane>, state: &mut LaneState) {
+        let free = state.alive.saturating_sub(state.busy);
+        if state.alive < lane.max_workers && state.jobs.len() > free {
+            self.spawn_worker(lane, state);
+        }
     }
 
     /// Queue a job on the lane its asker belongs to: a deck's own load
-    /// on the deck lane, the background pass on the batch lane.
+    /// on the deck lane, the background pass on the pass lane. A pass job
+    /// with no worker free to take it brings one up, to the lane's limit.
     pub fn submit(&self, job: AnalysisJob) {
         let lane = match job.deck {
-            Some(_) => &self.deck_tx,
-            None => &self.batch_tx,
+            Some(_) => {
+                self.shared.deck_started();
+                &self.deck
+            }
+            None => &self.batch,
         };
-        let _ = lane.send(job);
+        let mut state = lock(&lane.state);
+        state.jobs.push_back(job);
+        self.staff(lane, &mut state);
+        drop(state);
+        lane.more.notify_one();
+    }
+
+    /// Workers on the pass lane right now, waiting or busy.
+    pub fn batch_workers_alive(&self) -> usize {
+        lock(&self.batch.state).alive
+    }
+
+    /// Workers on the pass lane not running a job right now.
+    pub fn batch_workers_free(&self) -> usize {
+        let state = lock(&self.batch.state);
+        state.alive.saturating_sub(state.busy)
+    }
+
+    /// Workers standing ready for the decks.
+    pub fn deck_workers_alive(&self) -> usize {
+        lock(&self.deck.state).alive
+    }
+
+    /// The records no worker could measure since the last poll.
+    pub fn poll_failed(&self) -> Vec<AnalysisFailed> {
+        let mut out = Vec::new();
+        while let Ok(failed) = self.failed_rx.try_recv() {
+            out.push(failed);
+        }
+        out
     }
 
     pub fn poll(&self) -> Vec<AnalysisDone> {
+        for lane in [&self.deck, &self.batch] {
+            let mut state = lock(&lane.state);
+            self.staff(lane, &mut state);
+        }
         let mut out = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -3420,6 +3831,27 @@ impl AnalysisPool {
             }
         }
         out
+    }
+}
+
+/// The pool going away takes its workers with it: what is queued is
+/// dropped unread, a worker waiting for a job or for the decks leaves at
+/// once, and one in the middle of a job leaves when the job is done.
+impl Drop for AnalysisPool {
+    fn drop(&mut self) {
+        self.shared.closed.store(true, Ordering::Relaxed);
+        for lane in [&self.deck, &self.batch] {
+            let mut state = lock(&lane.state);
+            state.closed = true;
+            state.jobs.clear();
+            drop(state);
+            lane.more.notify_all();
+        }
+        // Under the lock the waiters check `closed` under, or a worker
+        // between its check and its wait would sleep on to the cap.
+        let busy = lock(&self.shared.deck_busy);
+        self.shared.deck_idle.notify_all();
+        drop(busy);
     }
 }
 
@@ -4563,53 +4995,442 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Forgetting one record takes its stored answer and nothing else.
-    /// A deck's own load and the background pass over the library go
-    /// down different lanes, so neither can be stuck behind the other.
-    #[test]
-    fn a_deck_load_does_not_queue_behind_the_background_pass() {
-        let pool = AnalysisPool::new();
-        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
-        // Ten background jobs, then one a deck is waiting on.
-        for n in 0..10 {
-            pool.submit(AnalysisJob {
-                deck: None,
-                gen: n,
-                key: AnalysisKey::from_blob(BlobId::hash_of(format!("batch{n}").as_bytes())),
-                pcm: pcm.clone(),
-                beats_model: None,
-                tag_bpm: None,
-                fast: false,
-            });
-        }
-        pool.submit(AnalysisJob {
-            deck: Some(DeckId::A),
-            gen: 99,
-            key: AnalysisKey::from_blob(BlobId::hash_of(b"the deck's own")),
+    fn pool_job(deck: Option<DeckId>, gen: u64, pcm: &Arc<TrackPcm>) -> AnalysisJob {
+        AnalysisJob {
+            deck,
+            gen,
+            key: AnalysisKey::from_blob(BlobId::hash_of(format!("pool job {gen}").as_bytes())),
             pcm: pcm.clone(),
             beats_model: None,
             tag_bpm: None,
             fast: false,
-        });
-        // The deck's answer comes back without the ten in front of it
-        // having to finish first.
-        let started = std::time::Instant::now();
-        let mut deck_at = None;
-        let mut batches = 0;
-        while started.elapsed() < std::time::Duration::from_secs(20) {
+        }
+    }
+
+    /// A pool for a test: its sidecars go to a scratch directory, never
+    /// the operator's cache. Hand the directory back to `done_with`.
+    fn test_pool(deck: usize, batch: usize, idle: Duration) -> (AnalysisPool, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "vj-pool-{}-{}",
+            std::process::id(),
+            crate::wave_analysis::tests::POOL_DIRS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let schedule = LaneSchedule { deck_workers: deck, batch_workers: batch, batch_idle: idle };
+        (AnalysisPool::with_schedule_in(schedule, Some(dir.clone())), dir)
+    }
+
+    static POOL_DIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn done_with(pool: AnalysisPool, dir: PathBuf) {
+        drop(pool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Wait up to `secs` for `holds` to be true.
+    fn settle(secs: u64, mut holds: impl FnMut() -> bool) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(secs) {
+            if holds() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        holds()
+    }
+
+    /// Poll the pool for up to `secs`, handing every result to `each`;
+    /// stops early when `each` returns true.
+    fn poll_until(pool: &AnalysisPool, secs: u64, mut each: impl FnMut(AnalysisDone) -> bool) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(secs) {
             for done in pool.poll() {
-                match done.deck {
-                    Some(_) => deck_at = deck_at.or(Some(batches)),
-                    None => batches += 1,
+                if each(done) {
+                    return;
                 }
             }
-            if deck_at.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// One worker per deck so both can load at once; the pass gets half
+    /// the cores and never more than four, whatever the machine has.
+    #[test]
+    fn the_lanes_are_staffed_by_the_core_count_with_the_pass_capped() {
+        let sizes = |cores| {
+            let s = LaneSchedule::for_cores(cores);
+            (s.deck_workers, s.batch_workers)
+        };
+        assert_eq!(sizes(0), (1, 1), "a machine that will not say has one of each");
+        assert_eq!(sizes(1), (1, 1));
+        assert_eq!(sizes(2), (2, 1));
+        assert_eq!(sizes(4), (2, 2));
+        assert_eq!(sizes(8), (2, 4));
+        assert_eq!(sizes(32), (2, 4), "capped: each worker holds a whole record and a model");
+        let (pool, dir) = test_pool(2, 4, Duration::from_secs(60));
+        assert_eq!(pool.deck_workers_alive(), 2, "standing ready for both decks");
+        assert_eq!(pool.batch_workers_alive(), 0, "and nobody for a pass that has not started");
+        done_with(pool, dir);
+        // A schedule of nothing still runs: one worker a lane.
+        let (pool, dir) = test_pool(0, 0, Duration::from_secs(60));
+        assert_eq!(pool.deck_workers_alive(), 1);
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.submit(pool_job(None, 1, &pcm));
+        let mut back = false;
+        poll_until(&pool, 20, |_| {
+            back = true;
+            back
+        });
+        assert!(back, "a pass job still came back");
+        assert_eq!(pool.batch_workers_alive(), 1);
+        done_with(pool, dir);
+    }
+
+    /// A deck's own load and the background pass over the library go
+    /// down different lanes, so neither can be stuck behind the other; and
+    /// the pass holds its next job while a deck is waiting, so the only
+    /// pass jobs that finish ahead of the deck are the ones already running
+    /// when it asked.
+    #[test]
+    fn a_deck_load_does_not_queue_behind_the_background_pass() {
+        let (pool, dir) = test_pool(1, 2, Duration::from_secs(60));
+        // Ten pass jobs, then one a deck is waiting on. Only pass jobs
+        // already running when the deck asked can finish ahead of it: the
+        // rest are held, however fast or slow this machine is.
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        for n in 0..10 {
+            pool.submit(pool_job(None, n, &pcm));
+        }
+        pool.submit(pool_job(Some(DeckId::A), 99, &pcm));
+        let mut deck_at = None;
+        let mut batches = 0;
+        poll_until(&pool, 40, |done| {
+            match done.deck {
+                Some(_) => deck_at = Some(batches),
+                None => batches += 1,
+            }
+            deck_at.is_some()
+        });
         let deck_at = deck_at.expect("the deck's analysis came back");
-        assert!(deck_at < 9, "it waited for {deck_at} background jobs");
+        assert!(deck_at <= 2, "it waited for {deck_at} pass jobs; at most the two already running");
+        assert!(pool.batch_workers_alive() <= 2, "never more workers than the lane allows");
+        // And the deck's job is no longer counted against the pass once
+        // its worker is done with it.
+        assert!(settle(5, || *lock(&pool.shared.deck_busy) == 0), "the deck count went back to zero");
+        done_with(pool, dir);
+    }
+
+    /// The pass lane brings up a worker only for a job no waiting worker
+    /// will take: a second job after the first has come back is taken by
+    /// the worker that is waiting, not by a new one.
+    #[test]
+    fn the_pass_lane_never_brings_up_a_worker_it_does_not_need() {
+        let (pool, dir) = test_pool(1, 2, Duration::from_secs(60));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.submit(pool_job(None, 1, &pcm));
+        assert_eq!(pool.batch_workers_alive(), 1);
+        poll_until(&pool, 20, |_| true);
+        assert!(settle(5, || pool.batch_workers_free() == 1), "the worker is free again");
+        pool.submit(pool_job(None, 2, &pcm));
+        let mut back = false;
+        poll_until(&pool, 20, |_| {
+            back = true;
+            back
+        });
+        assert!(back);
+        assert_eq!(pool.batch_workers_alive(), 1, "the waiting worker took it");
+        // A worker running a job is not free: the next job brings up another.
+        pool.submit(pool_job(None, 3, &pcm));
+        assert!(settle(5, || pool.batch_workers_free() == 0), "the worker took it");
+        pool.submit(pool_job(None, 4, &pcm));
+        assert_eq!(pool.batch_workers_alive(), 2, "a second worker for the second job");
+        done_with(pool, dir);
+    }
+
+    /// While a deck is waiting on its lane, the pass holds the job it took
+    /// and starts nothing; the moment the deck is served, the pass goes on.
+    /// The deck's wait is raised through the pool's own state so this
+    /// depends on no analysis being faster or slower than another.
+    #[test]
+    fn the_pass_holds_its_job_while_a_deck_is_waiting() {
+        // The cap on the wait (30 s) is longer than the poll below (20 s):
+        // if the release did not wake the workers, the test would time out
+        // rather than pass on the cap.
+        let (pool, dir) = test_pool(1, 2, Duration::from_secs(60));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.shared.deck_started();
+        for n in 0..4 {
+            pool.submit(pool_job(None, n, &pcm));
+        }
+        let mut early = 0;
+        poll_until(&pool, 1, |_| {
+            early += 1;
+            false
+        });
+        assert_eq!(early, 0, "a pass job finished while a deck was waiting");
+        assert!(pool.batch_workers_alive() >= 1, "the workers are up, holding their jobs");
+        pool.shared.deck_finished();
+        let mut later = 0;
+        poll_until(&pool, 20, |_| {
+            later += 1;
+            later == 4
+        });
+        assert_eq!(later, 4, "and every held job ran once the deck was served");
+        done_with(pool, dir);
+    }
+
+    /// The pass lane is staffed as jobs arrive; when it has drained, the
+    /// extra workers stand down after the idle time and one stays, with
+    /// the model it loaded, for whatever comes next.
+    #[test]
+    fn the_pass_lane_stands_down_to_one_when_it_drains() {
+        let (pool, dir) = test_pool(1, 2, Duration::from_millis(150));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        for n in 0..3 {
+            pool.submit(pool_job(None, n, &pcm));
+        }
+        assert_eq!(pool.batch_workers_alive(), 2, "three jobs at once is two workers");
+        let mut done = 0;
+        poll_until(&pool, 20, |_| {
+            done += 1;
+            done == 3
+        });
+        assert_eq!(done, 3, "the three pass jobs came back");
+        assert!(settle(10, || pool.batch_workers_alive() == 1), "one stayed, the other left");
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(pool.batch_workers_alive(), 1, "and the one that stays does not leave");
+        pool.submit(pool_job(None, 7, &pcm));
+        let mut back = false;
+        poll_until(&pool, 20, |result| {
+            back = result.gen == 7;
+            back
+        });
+        assert!(back, "the kept worker took the job");
+        assert_eq!(pool.batch_workers_alive(), 1);
+        done_with(pool, dir);
+    }
+
+    /// The pool going away takes its workers with it, the ones waiting for
+    /// a job and the ones ready for the decks alike.
+    #[test]
+    fn dropping_the_pool_lets_its_workers_go() {
+        let (pool, dir) = test_pool(2, 2, Duration::from_secs(60));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.submit(pool_job(None, 1, &pcm));
+        poll_until(&pool, 20, |_| true);
+        let (deck, batch) = (pool.deck.clone(), pool.batch.clone());
+        assert_eq!(lock(&deck.state).alive, 2);
+        assert_eq!(lock(&batch.state).alive, 1);
+        drop(pool);
+        assert!(
+            settle(5, || lock(&deck.state).alive == 0 && lock(&batch.state).alive == 0),
+            "every worker left: deck {} pass {}",
+            lock(&deck.state).alive,
+            lock(&batch.state).alive
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_shared(deck_wait_cap: Duration) -> PoolShared {
+        PoolShared {
+            deck_busy: Mutex::new(0),
+            deck_idle: Condvar::new(),
+            deck_wait_cap,
+            model_gate: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            cache_root: None,
+        }
+    }
+
+    /// A pass worker holding its job for the decks leaves at once when the
+    /// pool goes, not when the cap on its wait runs out.
+    #[test]
+    fn a_pass_worker_waiting_for_the_decks_leaves_when_the_pool_does() {
+        let (pool, dir) = test_pool(1, 2, Duration::from_secs(60));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.shared.deck_started();
+        pool.submit(pool_job(None, 1, &pcm));
+        assert!(
+            settle(5, || pool.batch_workers_alive() == 1 && pool.batch_workers_free() == 0),
+            "the worker took the job and is holding it for the deck"
+        );
+        let lane = pool.batch.clone();
+        drop(pool);
+        // The cap is 30 s; a lost wake-up would take that long.
+        assert!(settle(5, || lock(&lane.state).alive == 0), "it left when the pool did");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A worker that panics with a job in hand gives its seat and its
+    /// busy count back, so the lane can be staffed again.
+    #[test]
+    fn a_panicking_worker_gives_its_seat_back() {
+        let lane = Arc::new(Lane {
+            state: Mutex::new(LaneState {
+                jobs: VecDeque::new(),
+                alive: 1,
+                busy: 1,
+                closed: false,
+                spawn_refused: false,
+            }),
+            more: Condvar::new(),
+            max_workers: 2,
+            keep_workers: 1,
+            idle: Duration::from_secs(60),
+            yields_to_decks: true,
+        });
+        let seated = lane.clone();
+        let _ = std::thread::spawn(move || {
+            let _seat = Seat { lane: seated, given_back: false, has_job: true };
+            panic!("the record was bad");
+        })
+        .join();
+        let state = lock(&lane.state);
+        assert_eq!((state.alive, state.busy), (0, 0), "seat and busy count both given back");
+    }
+
+    /// A deck job that panics frees the count the pass is waiting on.
+    #[test]
+    fn a_panicking_deck_job_frees_the_pass() {
+        let shared = Arc::new(test_shared(Duration::from_secs(30)));
+        shared.deck_started();
+        let inner = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _busy = DeckBusy(&inner);
+            panic!("the record was bad");
+        })
+        .join();
+        assert_eq!(*lock(&shared.deck_busy), 0);
+        assert!(shared.wait_deck_idle(), "the pass may go on");
+    }
+
+    /// The pass lane's turn at the model steps back for a deck that
+    /// arrived while it was in line; the deck lane's turn waits for
+    /// nothing but the model.
+    #[test]
+    fn a_pass_turn_at_the_model_steps_back_for_a_deck() {
+        let shared = Arc::new(test_shared(Duration::from_secs(30)));
+        // The test plays a worker holding the model; a pass worker lines up.
+        let held = lock(&shared.model_gate);
+        let in_line = shared.clone();
+        let pass = std::thread::spawn(move || {
+            let _turn = in_line.model_turn(true);
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!pass.is_finished(), "in line behind the held model");
+        // A deck arrives while the pass is in line, and the model frees.
+        shared.deck_started();
+        drop(held);
+        // The pass does not take the turn -- given time to have taken it
+        // wrongly -- and the model is free for the deck.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!pass.is_finished(), "the pass is still waiting for the deck");
+        assert!(
+            settle(5, || shared.model_gate.try_lock().is_ok()),
+            "the model is there for the deck"
+        );
+        {
+            let _deck_turn = shared.model_turn(false);
+            assert_eq!(*lock(&shared.deck_busy), 1, "the deck's turn waited for nothing but the model");
+        }
+        shared.deck_finished();
+        pass.join().expect("the pass took its turn once the deck was done");
+    }
+
+    /// Leaving is decided under the lock a job is pushed under: a worker
+    /// whose idle time ran out while the lock was held finds the job pushed
+    /// meanwhile and takes it, rather than leaving it to nobody.
+    #[test]
+    fn a_job_pushed_as_a_worker_leaves_is_taken_not_stranded() {
+        let (pool, dir) = test_pool(1, 2, Duration::from_millis(100));
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.submit(pool_job(None, 1, &pcm));
+        pool.submit(pool_job(None, 2, &pcm));
+        let mut done = 0;
+        poll_until(&pool, 20, |_| {
+            done += 1;
+            done == 2
+        });
+        assert_eq!(done, 2);
+        assert!(settle(5, || pool.batch_workers_free() == 2), "both waiting");
+        // Hold the lane while the extra worker's idle time runs out, then
+        // push a job the way submit does, under the same lock.
+        {
+            let mut state = lock(&pool.batch.state);
+            std::thread::sleep(Duration::from_millis(300));
+            state.jobs.push_back(pool_job(None, 3, &pcm));
+            pool.staff(&pool.batch, &mut state);
+            assert!(state.alive <= 2, "no third worker for a job two can take");
+        }
+        pool.batch.more.notify_one();
+        let mut back = false;
+        poll_until(&pool, 20, |result| {
+            back = result.gen == 3;
+            back
+        });
+        assert!(back, "the job was taken");
+        assert!(settle(10, || pool.batch_workers_alive() == 1), "and the extra worker then left");
+        done_with(pool, dir);
+    }
+
+    /// A record the worker cannot measure comes back as a failure, so the
+    /// pass gets its slot back, and the lane goes on to the next record.
+    #[test]
+    fn a_record_that_cannot_be_measured_is_reported_and_the_lane_goes_on() {
+        let (pool, dir) = test_pool(1, 1, Duration::from_secs(60));
+        let bad = Arc::new(TrackPcm { frames: Vec::new(), sample_rate: 0 });
+        pool.submit(pool_job(None, 1, &bad));
+        let good = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        pool.submit(pool_job(None, 2, &good));
+        let started = Instant::now();
+        let (mut failed, mut back) = (None, false);
+        while started.elapsed() < Duration::from_secs(20) && !(failed.is_some() && back) {
+            for f in pool.poll_failed() {
+                failed = Some(f);
+            }
+            for done in pool.poll() {
+                back |= done.gen == 2;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let failed = failed.expect("the bad record was reported");
+        assert_eq!(failed.gen, 1);
+        assert!(!failed.error.is_empty());
+        assert!(back, "the next record was measured by the same lane");
+        assert_eq!(pool.batch_workers_alive(), 1);
+        done_with(pool, dir);
+    }
+
+    /// A lock a panicking job poisoned is still a lock: the pool keeps
+    /// serving the decks whatever one job did.
+    #[test]
+    fn a_poisoned_lock_is_still_a_lock() {
+        let shared = Arc::new(Mutex::new(3usize));
+        let poisoner = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("a job went wrong while it held the lane");
+        })
+        .join();
+        assert!(shared.lock().is_err(), "std says poisoned");
+        assert_eq!(*lock(&shared), 3, "and the pool reads it anyway");
+    }
+
+    /// The pass waits for the decks, and not forever: a deck job that never
+    /// reported back would otherwise starve the pass for the night.
+    #[test]
+    fn the_pass_waits_for_the_decks_but_not_past_the_cap() {
+        let shared = test_shared(Duration::from_millis(80));
+        assert!(shared.wait_deck_idle(), "nothing to wait for");
+        shared.deck_started();
+        let started = Instant::now();
+        assert!(!shared.wait_deck_idle(), "still busy when the cap ran out");
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        shared.deck_finished();
+        assert!(shared.wait_deck_idle(), "and free again once the deck is done");
+        shared.deck_finished();
+        assert!(shared.wait_deck_idle(), "a finish with nothing started does not go negative");
     }
 
     /// A change to one detector costs that product's work and no more.

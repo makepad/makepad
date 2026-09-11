@@ -27046,6 +27046,16 @@ p2 {}
     /// Take finished whole-track analyses: publish the grid to the engine,
     /// and upload the waveform tiles as textures for the deck surface.
     fn pump_analysis(&mut self, cx: &mut Cx) {
+        // A record the worker could not measure: the pass gets its slot
+        // back and the log says which record; a deck stays as it was,
+        // unmeasured, the way it always did when no answer came.
+        for failed in self.analysis.poll_failed() {
+            error!("analysis: {} could not be measured: {}", failed.key.as_str(), failed.error);
+            if failed.deck.is_none() {
+                self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
+                self.refresh_prep_status(cx);
+            }
+        }
         for done in self.analysis.poll() {
             // File it against the track FIRST, before any deck gate below can
             // drop it. A result the deck no longer wants — the operator moved
