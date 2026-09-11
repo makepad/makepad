@@ -107,10 +107,12 @@ script_mod! {
         flow: Overlay
 
         ground := mod.storybook.GlassGround{}
-        scrim := View{
+        // SolidView, not a View with show_bg: a bare View's draw_bg has no
+        // `color`, so the wash was declared here for as long as the page
+        // existed and never painted a pixel.
+        scrim := SolidView{
             width: Fill
             height: Fill
-            show_bg: true
             draw_bg +: {color: #x02040a26}
         }
         body := View{
@@ -131,14 +133,15 @@ script_mod! {
         }
     }
 
-    /** The same band with nothing worth bending on it, for the comparison
-     * every glass page should make once.
+    /** The same band with nothing on it at all, for the comparison every
+     * glass page should make once: the demo stands over the page itself,
+     * which is what a reader who drops one of these on a plain window gets.
      *
-     * Both layers are overridden BY NAME. Writing the replacements as
+     * Both layers are switched off BY NAME. Writing replacements as
      * anonymous children would add a fourth and a fifth layer instead, and
-     * the opaque one would be painted last, over the demo. */
+     * whatever was painted last would land over the demo. */
     mod.storybook.FlatStage = mod.storybook.GlassStage{
         ground +: {visible: false}
-        scrim +: {draw_bg +: {color: #x101018}}
+        scrim +: {visible: false}
     }
 }
