@@ -644,6 +644,24 @@ impl MacosApp {
     unsafe fn process_ns_event(ns_event: ObjcId) {
         let ev_type: NSEventType = msg_send![ns_event, type];
 
+        // Snapshot the IME composition state *before* AppKit dispatches this event.
+        // `sendEvent:` routes a key press through the view's `keyDown:` into
+        // `NSTextInputContext`, and while an IME has marked (composition) text it
+        // consumes the key itself: Return/Space commit the candidate, digits pick
+        // one, arrows navigate, Escape discards, Backspace edits the preedit.
+        // A committing key clears the marked text during that dispatch, so the
+        // state has to be observed up front.
+        let ime_consumed_key = matches!(ev_type, NSEventType::NSKeyDown)
+            && with_macos_app(|app| {
+                for (_, view) in &app.cocoa_windows {
+                    let marked: bool = unsafe { msg_send![*view, hasMarkedText] };
+                    if marked {
+                        return true;
+                    }
+                }
+                false
+            });
+
         let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
         // Clear the menu-consumed marker so we can tell after `sendEvent:`
         // whether the main menu took this NSEvent as a key equivalent.
@@ -675,6 +693,14 @@ impl MacosApp {
             }
             NSEventType::NSKeyDown => {
                 if with_macos_app(|app| app.menu_command_fired) {
+                    return;
+                }
+                if ime_consumed_key {
+                    // The IME handled this key as part of a composition (see the
+                    // snapshot above). Don't also deliver it as a KeyDown: a Return
+                    // that merely committed a candidate would otherwise be taken as
+                    // a submit, and a Backspace that deleted the last preedit
+                    // character would also delete committed text.
                     return;
                 }
                 if let Some(key_code) = get_event_keycode(ns_event) {
@@ -737,21 +763,6 @@ impl MacosApp {
                         _ => {}
                     }
                     let time = with_macos_app(|app: &mut MacosApp| app.time_now());
-                    // lets check if we have marked text
-                    if KeyCode::Backspace == key_code {
-                        // we have to check if we dont have any marked text in our windows
-                        if with_macos_app(|app| {
-                            for (_, view) in &app.cocoa_windows {
-                                let marked = unsafe { msg_send![*view, hasMarkedText] };
-                                if marked {
-                                    return true;
-                                }
-                            }
-                            false
-                        }) {
-                            return;
-                        }
-                    }
                     MacosApp::do_callback(MacosEvent::KeyDown(KeyEvent {
                         key_code: key_code,
                         is_repeat: is_repeat,
