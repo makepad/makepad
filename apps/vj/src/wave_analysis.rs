@@ -2600,6 +2600,13 @@ impl AnalysisKey {
     /// Local files have no digest handy; key on path + size + mtime, which
     /// changes whenever the bytes do.
     pub fn from_path(path: &Path) -> AnalysisKey {
+        AnalysisKey::from_path_with(path, crate::media::container_trim_enabled())
+    }
+
+    /// The same, with the container-edit gate folded in: a grid measured
+    /// on a sound cut to its edit must not answer for the sound as it
+    /// decodes without it, or the beat sits a padding's worth off.
+    pub fn from_path_with(path: &Path, container_trim: bool) -> AnalysisKey {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         let mut feed = |bytes: &[u8]| {
             for byte in bytes {
@@ -2616,6 +2623,9 @@ impl AnalysisKey {
                 }
             }
         }
+        if container_trim {
+            feed(b"container-edit");
+        }
         AnalysisKey(format!("local-{hash:016x}"))
     }
 
@@ -2628,6 +2638,22 @@ impl AnalysisKey {
     /// through the media worker, which knows nothing about analysis.
     pub fn from_raw(raw: String) -> AnalysisKey {
         AnalysisKey(raw)
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::AnalysisKey;
+
+    /// One file, two ways of decoding it, two records: the gate is part
+    /// of the key, so a stale grid never answers for the other decode.
+    #[test]
+    fn the_container_edit_gate_is_part_of_the_key() {
+        let path = std::path::Path::new("some/track.m4a");
+        let plain = AnalysisKey::from_path_with(path, false);
+        let cut = AnalysisKey::from_path_with(path, true);
+        assert_ne!(plain, cut);
+        assert_eq!(plain, AnalysisKey::from_path_with(path, false), "and each is stable");
     }
 }
 

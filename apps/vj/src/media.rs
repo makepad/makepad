@@ -2320,6 +2320,98 @@ fn retry_by_content(
     decode_container(path, found, max_frames)
 }
 
+/// Whether the sound of a container is cut to the edit its index declares.
+/// Off unless `VJ_CONTAINER_EDIT_TRIM=1`: what a platform does with the
+/// encoder's front padding differs from one to the next and has been
+/// measured on one, so the default is the decode exactly as it was.
+pub fn container_trim_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("VJ_CONTAINER_EDIT_TRIM").map(|value| value.trim() == "1").unwrap_or(false)
+    })
+}
+
+/// One codec frame: how far a decode may miss the length the container
+/// declares and still be the same sound.
+const TRIM_SLACK_FRAMES: usize = 1024;
+
+/// Where the sound the container declares sits inside what the platform
+/// handed back. `skip` and `keep` are the edit in frames; `decoded` is how
+/// many frames came out. Returns (frames to drop at the front, frames to
+/// keep after them).
+///
+/// A platform that applied the edit itself hands back about `keep`
+/// frames; one that left the padding in hands back about `skip + keep`,
+/// often with the encoder's tail padding after that. The first case is
+/// tested first, and a decode that is not clearly the second is left
+/// alone: dropping `skip` frames from a sound that was already cut would
+/// take the beginning of the music with it. The slack is always less than
+/// the padding, so the two cases cannot meet.
+pub(crate) fn container_front_trim(decoded: usize, skip: u64, keep: u64) -> (usize, usize) {
+    let (skip, keep) = (skip as usize, keep as usize);
+    if skip == 0 || keep == 0 {
+        return (0, decoded);
+    }
+    let slack = TRIM_SLACK_FRAMES.min(skip - 1);
+    if decoded.abs_diff(keep) <= slack {
+        return (0, decoded);
+    }
+    if decoded + slack >= skip + keep {
+        return (skip, keep.min(decoded - skip));
+    }
+    (0, decoded)
+}
+
+/// What the container's index says about its sound, read from the file
+/// without decoding it: the `moov` box alone, found and bounded the way the
+/// picture path finds it.
+fn container_audio_edit(path: &Path) -> Result<Option<makepad_mp4_index::AudioEdit>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let header = makepad_mp4_index::locate_moov(size, &mut |offset, len| {
+        file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(len);
+        (&mut file).take(len as u64).read_to_end(&mut out).map_err(|e| e.to_string())?;
+        Ok(out)
+    })
+    .map_err(|e| e.to_string())?;
+    let moov_size = header.size.unwrap_or(size.saturating_sub(header.offset));
+    if moov_size > makepad_mp4_index::MAX_MOOV_BYTES || moov_size < header.header_len {
+        return Err("mp4 index over the size limit".into());
+    }
+    let payload = (moov_size - header.header_len) as usize;
+    file.seek(SeekFrom::Start(header.offset + header.header_len)).map_err(|e| e.to_string())?;
+    let mut moov = vec![0u8; payload];
+    file.read_exact(&mut moov).map_err(|e| e.to_string())?;
+    makepad_mp4_index::audio_edit(&moov).map_err(|e| e.to_string())
+}
+
+/// Cut the decoded sound to the edit the container declares, when the
+/// platform left the encoder's front padding in. Says what it did in the
+/// log, and when the index could not be read; the sound is then used as
+/// decoded.
+fn trim_to_container_edit(path: &Path, frames: &mut Vec<[i16; 2]>, sample_rate: u32) {
+    match container_audio_edit(path) {
+        Ok(Some(edit)) => {
+            let (skip, keep) = edit.in_samples(sample_rate);
+            let (drop, keep) = container_front_trim(frames.len(), skip, keep);
+            if drop > 0 || keep < frames.len() {
+                makepad_widgets::log!(
+                    "container edit: {} frames decoded, {keep} declared after {skip} of padding: cut to the edit",
+                    frames.len()
+                );
+                frames.drain(..drop);
+                frames.truncate(keep);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => makepad_widgets::log!(
+            "container edit: index not read ({error}); the sound is used as decoded"
+        ),
+    }
+}
+
 /// The platform's own decoder, for its sound alone.
 fn decode_platform_container(path: &PathBuf, max_frames: usize) -> Result<TrackPcm, String> {
     // A cache object's name is a digest and the platform demuxers key on
@@ -2352,6 +2444,9 @@ fn decode_platform_container(path: &PathBuf, max_frames: usize) -> Result<TrackP
     }
     if frames.is_empty() {
         return Err("the container decoded to zero frames".into());
+    }
+    if container_trim_enabled() {
+        trim_to_container_edit(path, &mut frames, sample_rate);
     }
     Ok(TrackPcm { frames, sample_rate })
 }
@@ -5428,6 +5523,237 @@ mod tests {
         let sound = VideoFileDecoder::open_audio(both.to_str().unwrap()).unwrap();
         assert_eq!(sound.info().width, 0, "no picture was negotiated");
         assert!(sound.info().has_audio);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The three things a platform can hand back for a container whose
+    /// index declares `keep` frames after `skip` of padding, and what is
+    /// done with each.
+    #[test]
+    fn the_containers_edit_is_applied_only_where_the_padding_was_left_in() {
+        let (skip, keep) = (2112u64, 44_100 * 60);
+        let d = keep as usize;
+        // The platform left the padding in, with the encoder's tail after it.
+        assert_eq!(container_front_trim(d + 2112 + 576, skip, keep), (2112, d));
+        // The platform left the padding in and lost a few frames of the tail.
+        assert_eq!(container_front_trim(d + 2112 - 5, skip, keep), (2112, d - 5));
+        // The platform applied the edit itself: nothing more to cut.
+        assert_eq!(container_front_trim(d, skip, keep), (0, d));
+        assert_eq!(container_front_trim(d + 7, skip, keep), (0, d + 7));
+        // Shorter than declared: not this edit's sound, left alone.
+        assert_eq!(container_front_trim(d - 5000, skip, keep), (0, d - 5000));
+        // Between the two, and not clearly the second: left alone.
+        assert_eq!(container_front_trim(d + 1050, skip, keep), (0, d + 1050));
+        // A padding no longer than the slack still tells the cases apart.
+        assert_eq!(container_front_trim(d, 1024, keep), (0, d));
+        assert_eq!(container_front_trim(d + 1024, 1024, keep), (1024, d));
+        // No edit to speak of.
+        assert_eq!(container_front_trim(d, 0, keep), (0, d));
+        assert_eq!(container_front_trim(d, skip, 0), (0, d));
+    }
+
+    /// A container from the repo's own encoder whose sound is silence up to
+    /// `onset` frames and a half-scale tone after, `total` frames in all.
+    fn onset_fixture(root: &Path, name: &str, onset: usize, total: usize) -> PathBuf {
+        use makepad_widgets::makepad_platform::video_file::{
+            PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        let path = root.join(name);
+        let mut encoder = VideoFileEncoder::new(
+            path.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: 64,
+                height: 48,
+                fps_num: 30,
+                fps_den: 1,
+                video_bitrate_bps: 2_000_000,
+                audio: Some(PcmAudioTrackOptions {
+                    sample_rate: 48_000,
+                    channels: 2,
+                    aac_bitrate_bps: 128_000,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let frame = vec![128u8; 64 * 48 * 3];
+        for _ in 0..30 {
+            encoder.push_frame_rgb8(&frame, None).unwrap();
+        }
+        let mut samples = vec![0i16; onset * 2];
+        for i in 0..(total - onset) {
+            let phase = 2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0;
+            let value = (0.5 * phase.sin() * 32767.0) as i16;
+            samples.push(value);
+            samples.push(value);
+        }
+        encoder.push_audio_i16(&samples).unwrap();
+        encoder.finish().unwrap();
+        path
+    }
+
+    /// Where the tone starts in a decode of an `onset_fixture`.
+    fn sound_onset(frames: &[[i16; 2]]) -> usize {
+        frames.iter().position(|f| f[0].abs() > 6_500).expect("the sound is in there")
+    }
+
+    /// Every box directly inside `data[start..end]`: (kind, box start,
+    /// payload start, box end). Enough of a walker to move one box.
+    fn boxes_in(data: &[u8], start: usize, end: usize) -> Vec<([u8; 4], usize, usize, usize)> {
+        let mut out = Vec::new();
+        let mut at = start;
+        while at + 8 <= end {
+            let mut size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let kind: [u8; 4] = data[at + 4..at + 8].try_into().unwrap();
+            let mut payload = at + 8;
+            if size == 1 && at + 16 <= end {
+                size = u64::from_be_bytes(data[at + 8..at + 16].try_into().unwrap()) as usize;
+                payload = at + 16;
+            } else if size == 0 {
+                size = end - at;
+            }
+            if size < 8 || at + size > end {
+                break;
+            }
+            out.push((kind, at, payload, at + size));
+            at += size;
+        }
+        out
+    }
+
+    /// The same file with an edit list on its sound track, saying the
+    /// presentation starts `skip` frames in and runs `keep` frames. Only
+    /// for a file whose index sits AFTER its samples, so growing the index
+    /// moves no chunk offset; None otherwise.
+    fn with_sound_edit(bytes: &[u8], skip: u64, keep: u64, rate: u32) -> Option<Vec<u8>> {
+        let top = boxes_in(bytes, 0, bytes.len());
+        let (_, moov_at, moov_payload, moov_end) = *top.iter().find(|b| &b.0 == b"moov")?;
+        let (_, mdat_at, ..) = *top.iter().find(|b| &b.0 == b"mdat")?;
+        if mdat_at > moov_at {
+            return None;
+        }
+        let moov_kids = boxes_in(bytes, moov_payload, moov_end);
+        let (_, _, mvhd_payload, _) = *moov_kids.iter().find(|b| &b.0 == b"mvhd")?;
+        let at = mvhd_payload + 4 + if bytes[mvhd_payload] == 1 { 16 } else { 8 };
+        let movie_timescale = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+        let is_sound = |payload: usize, end: usize| {
+            boxes_in(bytes, payload, end).iter().find(|b| &b.0 == b"mdia").is_some_and(
+                |(_, _, mdia_payload, mdia_end)| {
+                    boxes_in(bytes, *mdia_payload, *mdia_end)
+                        .iter()
+                        .find(|b| &b.0 == b"hdlr")
+                        .is_some_and(|(_, _, hdlr, _)| &bytes[hdlr + 8..hdlr + 12] == b"soun")
+                },
+            )
+        };
+        let (_, trak_at, trak_payload, _) = *moov_kids
+            .iter()
+            .filter(|b| &b.0 == b"trak")
+            .find(|(_, _, payload, end)| is_sound(*payload, *end))?;
+        let bx = |kind: &[u8; 4], payload: &[u8]| {
+            let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(payload);
+            out
+        };
+        let segment_duration = (keep as u128 * movie_timescale as u128 / rate as u128) as u32;
+        let mut elst = vec![0u8; 4]; // version 0, flags
+        elst.extend_from_slice(&1u32.to_be_bytes());
+        elst.extend_from_slice(&segment_duration.to_be_bytes());
+        elst.extend_from_slice(&(skip as i32).to_be_bytes());
+        elst.extend_from_slice(&[0, 1, 0, 0]); // media rate 1.0
+        let edts = bx(b"edts", &bx(b"elst", &elst));
+        let mut out = bytes.to_vec();
+        out.splice(trak_payload..trak_payload, edts.iter().copied());
+        for at in [moov_at, trak_at] {
+            let size = u32::from_be_bytes(out[at..at + 4].try_into().unwrap()) + edts.len() as u32;
+            out[at..at + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        Some(out)
+    }
+
+    /// The measurement the trim is built on, first half: a container from
+    /// the repo's own encoder, decoded through the platform. What the
+    /// encoder wrote about its padding, and where the sound came out. A
+    /// container that declares no edit is left alone, and its sound has to
+    /// be where the source had it already.
+    #[test]
+    fn a_container_without_an_edit_is_left_as_the_platform_decoded_it() {
+        let root = test_dir("container-no-edit");
+        std::fs::create_dir_all(&root).unwrap();
+        let (onset, total) = (24_000usize, 48_000usize);
+        let path = onset_fixture(&root, "onset.mp4", onset, total);
+        let edit = container_audio_edit(&path).expect("the index reads");
+        let pcm = decode_platform_container(&path, MAX_TRACK_FRAMES).expect("decodes");
+        let first_pts = {
+            let (_input, mut decoder) = open_container_audio(&path).unwrap();
+            decoder.next_audio().unwrap().map(|chunk| chunk.pts_100ns)
+        };
+        let raw_onset = sound_onset(&pcm.frames);
+        let (drop, keep) = match edit {
+            Some(edit) => {
+                let (skip, keep) = edit.in_samples(pcm.sample_rate);
+                container_front_trim(pcm.frames.len(), skip, keep)
+            }
+            None => (0, pcm.frames.len()),
+        };
+        println!(
+            "container edit measurement: {} frames decoded at {}, edit {:?}, first pts {first_pts:?}, onset {raw_onset}, source {onset}, cut ({drop}, {keep})",
+            pcm.frames.len(),
+            pcm.sample_rate,
+            edit,
+        );
+        let end = (drop + keep).min(pcm.frames.len());
+        let onset_after = sound_onset(&pcm.frames[drop..end]);
+        assert!(
+            onset_after.abs_diff(onset) <= 128,
+            "the sound starts where the source had it: {onset_after} vs {onset} (raw {raw_onset}, edit {edit:?})"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Second half: the same container with an edit list spliced onto its
+    /// sound track, declaring 2112 frames of padding. Whether the platform
+    /// honours the list or hands the padding back, the edit reaches the
+    /// sound exactly once: by the platform, or by the trim, never both
+    /// and never neither.
+    #[test]
+    fn a_containers_edit_is_applied_exactly_once() {
+        let root = test_dir("container-edit");
+        std::fs::create_dir_all(&root).unwrap();
+        let (onset, total) = (24_000usize, 48_000usize);
+        let plain = onset_fixture(&root, "plain.mp4", onset, total);
+        let raw = decode_platform_container(&plain, MAX_TRACK_FRAMES).expect("decodes");
+        let skip = 2112u64;
+        let keep = raw.frames.len() as u64 - skip;
+        let Some(edited) = with_sound_edit(&std::fs::read(&plain).unwrap(), skip, keep, 48_000)
+        else {
+            println!("container edit measurement: the index sits before the samples; no edit spliced");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+        let path = root.join("edited.mp4");
+        std::fs::write(&path, edited).unwrap();
+        let edit = container_audio_edit(&path).expect("the index reads").expect("the edit reads back");
+        assert_eq!(edit.in_samples(48_000), (skip, keep), "the spliced edit says what was written");
+
+        let pcm = decode_platform_container(&path, MAX_TRACK_FRAMES).expect("decodes");
+        let platform_applied = pcm.frames.len().abs_diff(keep as usize) <= TRIM_SLACK_FRAMES;
+        let (drop, keep_frames) = container_front_trim(pcm.frames.len(), skip, keep);
+        let end = (drop + keep_frames).min(pcm.frames.len());
+        let onset_after = sound_onset(&pcm.frames[drop..end]);
+        let expected = onset - skip as usize;
+        println!(
+            "container edit measurement with an edit list: {} frames decoded ({keep} declared after {skip}), platform applied the edit: {platform_applied}, trim cut {drop}, onset {} -> {onset_after}, expected {expected}",
+            pcm.frames.len(),
+            sound_onset(&pcm.frames),
+        );
+        assert!(
+            onset_after.abs_diff(expected) <= 128,
+            "applied once: {onset_after} vs {expected} (platform {platform_applied}, cut {drop})"
+        );
+        assert!(platform_applied != (drop > 0), "whoever applied it, the other did not");
         let _ = std::fs::remove_dir_all(&root);
     }
 
