@@ -2608,14 +2608,14 @@ impl Cx {
     }
 
     /// The producer's pacing input for this frame: room under the envelope
-    /// plus the backend's last copy observation, against the time the caller
-    /// still has in the frame.
+    /// plus the backend's last copy observation (recorded by the backend
+    /// through `Publications::record_observation`), against the time the
+    /// caller still has in the frame.
     pub fn publish_backpressure(
         &self,
         frame_remaining_ns: u64,
-        observed: crate::shared_instances::UploadObservation,
     ) -> crate::shared_instances::PublishBackpressure {
-        self.publications.backpressure(frame_remaining_ns, observed)
+        self.publications.backpressure(frame_remaining_ns)
     }
 
     /// Set the publication envelope from the machine's numbers
