@@ -1372,9 +1372,6 @@ impl Widget for MpSheets {
                 DataGridAction::EditCell { row, col, replace } => {
                     self.start_edit(cx, (row, col), replace);
                 }
-                DataGridAction::CellDoubleClicked { row, col } => {
-                    self.start_edit(cx, (row, col), None);
-                }
                 DataGridAction::CellClicked { .. } => {
                     if self.editing.is_some() {
                         self.commit_live_editor(cx);

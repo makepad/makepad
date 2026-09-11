@@ -2,8 +2,10 @@ use {
     crate::{
         flat_list::WidgetItem,
         makepad_derive_widget::*,
+        makepad_draw::text::selection::Cursor,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
+        text_input::TextInputWidgetRefExt,
         widget::*,
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
@@ -67,6 +69,27 @@ script_mod! {
                 color: uniform(#x00000038)
                 color_hover: uniform(#x00000060)
                 color_drag: uniform(#x00000085)
+            }
+        }
+
+        // The editor edit_cell seats: a text field that fills the cell it
+        // is drawn into, in the grid's own type size. A grid that wants
+        // another look declares its own Editor := TextInput{...} and that
+        // one takes this one's place; whatever it looks like it has to be
+        // a TextInput, since Return, Escape and the loss of the keyboard
+        // are read from it.
+        Editor := mod.widgets.TextInput{
+            width: Fill
+            height: Fill
+            margin: 0.
+            padding: Inset{left: 4, right: 4, top: 5, bottom: 3}
+            empty_text: ""
+            draw_bg +: {
+                border_radius: 0.
+                border_size: 2.0
+            }
+            draw_text +: {
+                text_style: theme.font_regular{font_size: 9.0}
             }
         }
     }
@@ -310,12 +333,36 @@ pub enum DataGridAction {
     SelectionChanged {
         selection: Option<GridSelection>,
     },
-    /// The user wants to edit a cell: F2/Enter/double-click (replace: None)
-    /// or typed text over a cell (replace: Some(typed)).
+    /// The person asked to edit a cell: F2, Return or a double-click with
+    /// `replace: None`, or typed straight over it with the typed text in
+    /// `replace`. The grid seats nothing yet. It holds no data, so only
+    /// the host knows what the cell says, and the host answers with
+    /// [`DataGrid::edit_cell`] and the text to start from — the cell's own
+    /// to amend it, or `replace` to replace it. A host that does not
+    /// answer has a read-only grid, which is what an unanswered request
+    /// ought to be.
     EditCell {
         row: usize,
         col: usize,
         replace: Option<String>,
+    },
+    /// The seated editor closed with a value: Return, Tab, a click
+    /// somewhere else, or the host asking. The grid has already put the
+    /// editor away and, for a key, moved the selection on; the text is the
+    /// host's to keep or to refuse. Refusing is nothing more than not
+    /// writing it down — the cell redraws with what the host still has —
+    /// and a host that wants the person to try again reopens the editor
+    /// with [`DataGrid::edit_cell`] and the refused text.
+    CellEdited {
+        row: usize,
+        col: usize,
+        text: String,
+    },
+    /// The seated editor was abandoned with Escape; the cell keeps what it
+    /// had.
+    EditCancelled {
+        row: usize,
+        col: usize,
     },
     /// Delete/Backspace pressed with a selection active.
     ClearCells,
@@ -589,6 +636,22 @@ pub struct DataGrid {
     /// selection, set by the app via [`DataGridRef::set_copy_provider`].
     #[rust]
     copy_provider: Option<CopyProvider>,
+    /// The cell whose editor is seated, as (row, data col). The grid owns
+    /// the editor from [`Self::edit_cell`] to the commit or the cancel: it
+    /// is the only party that can keep the item out of the reuse pool when
+    /// the cell scrolls away, and the only one that can turn the editor
+    /// losing the keyboard into a commit.
+    #[rust]
+    editing: Option<(usize, usize)>,
+    /// Set by [`Self::edit_cell`], cleared by the first draw after it. The
+    /// editor has no area until it has been drawn once, and key focus set
+    /// on an area that does not exist yet lands nowhere.
+    #[rust]
+    edit_focus_pending: bool,
+    /// Whether this frame's cell loop drew the editor, so that [`Self::end`]
+    /// knows to draw it where the loop did not reach.
+    #[rust]
+    editor_drawn: bool,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -686,6 +749,14 @@ impl DataGrid {
                 self.selection = None;
             } else if sel.anchor.1 >= cols || sel.head.1 >= cols {
                 self.selection = None;
+            }
+        }
+        // A cell that is no longer there cannot be edited. The editor
+        // item itself is retired by the next draw's sweep.
+        if let Some((row, col)) = self.editing {
+            if row >= rows || col >= cols {
+                self.editing = None;
+                self.edit_focus_pending = false;
             }
         }
         // If we're mid-draw (size set from the draw loop before iteration),
@@ -887,13 +958,28 @@ impl DataGrid {
         self.draw_bg.color = self.color_bg;
         self.draw_bg.draw_abs(cx, self.vp.widget_rect);
         cx.push_clip_rect(self.vp.data_rect);
+        self.editor_drawn = false;
         self.reset_iter();
     }
 
     /// Next visible cell in row-major order. The app draws each cell with
     /// [`Self::cell_text`], [`Self::cell_bg`] or a widget item; skipped cells
     /// simply show the grid background.
-    pub fn next_cell(&mut self, _cx: &mut Cx2d) -> Option<GridCell> {
+    ///
+    /// The cell being edited is never handed out: the grid draws its own
+    /// editor there and moves on, so a host's loop needs no case for it.
+    pub fn next_cell(&mut self, cx: &mut Cx2d) -> Option<GridCell> {
+        loop {
+            let cell = self.next_cell_in_order()?;
+            if self.editing == Some((cell.row, cell.col)) {
+                self.draw_editor(cx, &cell);
+                continue;
+            }
+            return Some(cell);
+        }
+    }
+
+    fn next_cell_in_order(&mut self) -> Option<GridCell> {
         let iter = self.iter.as_mut()?;
         loop {
             if iter.row >= self.vp.row1 || self.vp.vis_cols.is_empty() {
@@ -1081,8 +1167,47 @@ impl DataGrid {
         cx.pop_clip_rect();
     }
 
+    /// The seated editor, drawn in the cell it edits. Seeded once, in
+    /// [`Self::edit_cell`], and never here: a draw that wrote the seed
+    /// again would write over whatever has been typed since.
+    fn draw_editor(&mut self, cx: &mut Cx2d, cell: &GridCell) {
+        let Some(item) = self.item(cx, cell.row, cell.col, live_id!(Editor)) else {
+            return;
+        };
+        self.editor_drawn = true;
+        self.draw_item(cx, cell, &item, None);
+        // Only now does the editor have an area to hand the keyboard to.
+        if self.edit_focus_pending {
+            self.edit_focus_pending = false;
+            item.as_text_input().take_key_focus(cx);
+        }
+    }
+
     fn end(&mut self, cx: &mut Cx2d) {
         self.iter = None;
+        // The editor is drawn whether or not its cell was on screen this
+        // frame, under the same clip as the cells, so off screen it is cut
+        // away as any cell is. That keeps two things current. Its item: the
+        // sweep below retires every item nobody asked for, and a scroll
+        // that carried the edited cell out of view would otherwise pool the
+        // live editor with the text still in it, where the next reuse
+        // re-applies the template over it. And its area: the keyboard
+        // leaving the editor - the click somewhere else that ends an edit -
+        // is delivered to the area the editor drew last, and one from an
+        // earlier frame is refused before the editor sees it, so an edit
+        // scrolled out of view would never commit.
+        if let Some((row, col)) = self.editing {
+            if !self.editor_drawn {
+                let display_col = self.data_to_display(col);
+                let cell = GridCell {
+                    row,
+                    col,
+                    display_col,
+                    rect: self.cell_rect(row, display_col),
+                };
+                self.draw_editor(cx, &cell);
+            }
+        }
         cx.pop_clip_rect();
         self.draw_selection_overlay(cx);
         self.draw_headers(cx);
@@ -1435,6 +1560,178 @@ impl DataGrid {
             self.scroll.y = y1 - vh;
         }
         self.area.redraw(cx);
+    }
+
+    // ---------------------------------------------------------------
+    // editing
+    // ---------------------------------------------------------------
+
+    /// Seat the editor at a cell with `text` in it and the caret after the
+    /// last character. This is the host's answer to
+    /// [`DataGridAction::EditCell`]: the grid holds no data, so the text —
+    /// the cell's own to amend it, what was typed to replace it — has to
+    /// come from the side that does. An edit already under way is
+    /// committed first, so a host that reseats freely never loses one.
+    ///
+    /// The selection moves to the cell and the cell is scrolled into view.
+    /// The keyboard follows on the next draw, once the editor has an area
+    /// to give it to.
+    pub fn edit_cell(&mut self, cx: &mut Cx, row: usize, col: usize, text: &str) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        if self.editing.is_some() {
+            self.finish_edit(cx, None);
+        }
+        let Some(item) = self.item(cx, row, col, live_id!(Editor)) else {
+            return;
+        };
+        item.set_text(cx, text);
+        // set_text keeps the caret where it was, which in a fresh field is
+        // the start: the next character typed would land before the seed
+        // rather than after it.
+        item.as_text_input().set_cursor(
+            cx,
+            Cursor {
+                index: text.len(),
+                prefer_next_row: false,
+            },
+            false,
+        );
+        self.editing = Some((row, col));
+        self.edit_focus_pending = true;
+        let display_col = self.data_to_display(col);
+        if self.active_cell() != Some((row, col)) {
+            self.selection = Some(GridSelection::single(row, display_col));
+            self.emit_selection_changed(cx);
+        }
+        self.scroll_cell_into_view(cx, row, display_col);
+    }
+
+    /// Close the editor and report what it holds as
+    /// [`DataGridAction::CellEdited`], leaving the selection where it is:
+    /// how a click elsewhere, or a host's own control, ends an edit. Does
+    /// nothing when no editor is seated.
+    pub fn commit_edit(&mut self, cx: &mut Cx) {
+        self.finish_edit(cx, None);
+    }
+
+    /// Put the editor away and keep the cell as it was, reporting
+    /// [`DataGridAction::EditCancelled`].
+    pub fn cancel_edit(&mut self, cx: &mut Cx) {
+        let Some((row, col)) = self.editing.take() else {
+            return;
+        };
+        self.edit_focus_pending = false;
+        cx.widget_action(self.uid, DataGridAction::EditCancelled { row, col });
+        self.area.redraw(cx);
+    }
+
+    /// The cell whose editor is seated, as (row, data col).
+    pub fn editing(&self) -> Option<(usize, usize)> {
+        self.editing
+    }
+
+    /// The commit itself. `step` is how far the selection moves on
+    /// afterwards, for the keys that commit and step; `None` leaves it
+    /// where the person put it, since a click has already done that.
+    fn finish_edit(&mut self, cx: &mut Cx, step: Option<(isize, isize)>) {
+        let Some((row, col)) = self.editing.take() else {
+            return;
+        };
+        self.edit_focus_pending = false;
+        // From the item, not from the key that closed it: a click away
+        // and a host's commit have no key, and the field's text is the
+        // one thing every way of closing has in common.
+        let text = self
+            .get_item(row, col)
+            .map(|(_, editor)| editor.text())
+            .unwrap_or_default();
+        cx.widget_action(self.uid, DataGridAction::CellEdited { row, col, text });
+        if let Some((dr, dc)) = step {
+            let display_col = self.data_to_display(col);
+            self.selection = Some(GridSelection::single(row, display_col));
+            self.move_head(cx, dr, dc, false);
+            // The keyboard came from the grid and goes back to it, so the
+            // arrows work from the cell the selection just landed on.
+            cx.set_key_focus(self.area);
+        }
+        self.area.redraw(cx);
+    }
+
+    /// What the seated editor reported this pass, in the grid's own
+    /// verbs. Return commits and steps down, up with shift; Tab commits
+    /// and steps right, left with shift; Escape cancels; and the editor
+    /// losing the keyboard for any other reason — a click on another cell,
+    /// or anywhere else at all — commits where it stands. Return is looked
+    /// for before the focus loss it causes: the field drops the keyboard
+    /// before it reports the return, and a commit that took the loss for
+    /// the reason would step nowhere.
+    fn handle_editor_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let Some((row, col)) = self.editing else {
+            return;
+        };
+        let Some((_, editor)) = self.get_item(row, col) else {
+            return;
+        };
+        let editor = editor.as_text_input();
+        if let Some((_, mods)) = editor.returned(actions) {
+            self.finish_edit(cx, Some(if mods.shift { (-1, 0) } else { (1, 0) }));
+        } else if let Some(ke) = editor
+            .key_down_unhandled(actions)
+            .filter(|ke| ke.key_code == KeyCode::Tab)
+        {
+            self.finish_edit(cx, Some(if ke.modifiers.shift { (0, -1) } else { (0, 1) }));
+        } else if editor.escaped(actions) {
+            self.cancel_edit(cx);
+            cx.set_key_focus(self.area);
+        } else if editor.key_focus_lost(actions) {
+            self.finish_edit(cx, None);
+        }
+    }
+    /// A key that reaches the grid while an editor is seated: the frame
+    /// between [`Self::edit_cell`] and the draw that hands the editor the
+    /// keyboard, which two key messages queued behind one stalled frame
+    /// can straddle. The key is the editor's. Return, Tab and Escape do
+    /// what they would have done in the field, and anything else waits
+    /// for it. Read as a fresh request, a Return here would ask the host
+    /// to seat a second editor, and seating it would commit the first with
+    /// only what was typed before the frame.
+    fn key_while_seating(&mut self, cx: &mut Cx, ke: &KeyEvent) {
+        let shift = ke.modifiers.shift;
+        match ke.key_code {
+            KeyCode::ReturnKey | KeyCode::NumpadEnter => {
+                self.finish_edit(cx, Some(if shift { (-1, 0) } else { (1, 0) }));
+            }
+            KeyCode::Tab => {
+                self.finish_edit(cx, Some(if shift { (0, -1) } else { (0, 1) }));
+            }
+            KeyCode::Escape => self.cancel_edit(cx),
+            _ => (),
+        }
+    }
+    /// Text typed in that frame goes after the seed, where the next
+    /// character would have landed in the field, instead of raising a
+    /// second [`DataGridAction::EditCell`] whose answer would commit the
+    /// first edit with the seed alone.
+    fn typed_while_seating(&mut self, cx: &mut Cx, input: &str) {
+        let Some((row, col)) = self.editing else {
+            return;
+        };
+        let Some((_, editor)) = self.get_item(row, col) else {
+            return;
+        };
+        let mut text = editor.text();
+        text.push_str(input);
+        editor.set_text(cx, &text);
+        editor.as_text_input().set_cursor(
+            cx,
+            Cursor {
+                index: text.len(),
+                prefer_next_row: false,
+            },
+            false,
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1823,16 +2120,26 @@ impl Widget for DataGrid {
             }
         }
 
+        if let Event::Actions(actions) = event {
+            self.handle_editor_actions(cx, actions);
+        }
+
         match event.hits(cx, self.area) {
             Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
                 self.area.redraw(cx);
             }
             Hit::KeyDown(ke) => {
-                self.handle_key_down(cx, &ke);
+                if self.editing.is_some() {
+                    self.key_while_seating(cx, &ke);
+                } else {
+                    self.handle_key_down(cx, &ke);
+                }
             }
             Hit::TextInput(te) => {
                 if !te.input.is_empty() && !te.was_paste {
-                    if let Some((row, col)) = self.active_cell() {
+                    if self.editing.is_some() {
+                        self.typed_while_seating(cx, &te.input);
+                    } else if let Some((row, col)) = self.active_cell() {
                         cx.widget_action(
                             uid,
                             DataGridAction::EditCell {
@@ -1936,6 +2243,19 @@ impl Widget for DataGrid {
                         );
                         if fe.tap_count > 1 {
                             cx.widget_action(uid, DataGridAction::CellDoubleClicked { row, col });
+                            // And the same request F2 makes, so a host that
+                            // seats the grid's editor answers one action for
+                            // the keys and the mouse alike. A double-click on
+                            // the cell being edited lands on the editor, not
+                            // here.
+                            cx.widget_action(
+                                uid,
+                                DataGridAction::EditCell {
+                                    row,
+                                    col,
+                                    replace: None,
+                                },
+                            );
                         }
                     }
                     HitZone::Outside => (),
@@ -2217,6 +2537,32 @@ impl DataGridRef {
         self.borrow().and_then(|inner| inner.get_item(row, col))
     }
 
+    /// See [`DataGrid::edit_cell`].
+    pub fn edit_cell(&self, cx: &mut Cx, row: usize, col: usize, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.edit_cell(cx, row, col, text);
+        }
+    }
+
+    /// See [`DataGrid::commit_edit`].
+    pub fn commit_edit(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.commit_edit(cx);
+        }
+    }
+
+    /// See [`DataGrid::cancel_edit`].
+    pub fn cancel_edit(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.cancel_edit(cx);
+        }
+    }
+
+    /// The cell whose editor is seated, as (row, data col).
+    pub fn editing(&self) -> Option<(usize, usize)> {
+        self.borrow().and_then(|inner| inner.editing())
+    }
+
     pub fn set_copy_provider(&self, provider: Box<dyn FnMut(&GridSelection) -> String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.copy_provider = Some(provider);
@@ -2273,5 +2619,354 @@ impl DataGridRef {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text_input::{TextInputAction, TextInputRef};
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A grid built from its own type default, the way an app's DSL builds
+    /// one, with rows to edit and no window: everything below runs before
+    /// any draw, which is also when a host's first `edit_cell` runs.
+    fn grid(cx: &mut Cx) -> DataGrid {
+        let mut grid = cx.with_vm(DataGrid::script_new_with_default);
+        grid.set_grid_size(20, 3);
+        grid
+    }
+
+    fn editor(grid: &DataGrid) -> TextInputRef {
+        let (row, col) = grid.editing().expect("no editor seated");
+        let (_, editor) = grid.get_item(row, col).expect("no editor item");
+        editor.as_text_input()
+    }
+
+    /// What the seated editor would report, as the grid receives it.
+    fn from_editor(grid: &DataGrid, action: TextInputAction) -> Action {
+        Box::new(WidgetAction {
+            data: None,
+            action: Box::new(action),
+            widget_uid: editor(grid).widget_uid(),
+            group: None,
+        })
+    }
+
+    fn deliver(cx: &mut Cx, grid: &mut DataGrid, actions: ActionsBuf) -> Vec<DataGridAction> {
+        let uid = grid.widget_uid();
+        let emitted = cx.capture_actions(|cx| {
+            grid.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+        });
+        emitted.filter_widget_actions_cast::<DataGridAction>(uid).collect()
+    }
+
+    fn edited(actions: &[DataGridAction]) -> Vec<(usize, usize, String)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::CellEdited { row, col, text } => Some((*row, *col, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tab(shift: bool) -> KeyEvent {
+        KeyEvent {
+            key_code: KeyCode::Tab,
+            is_repeat: false,
+            modifiers: KeyModifiers {
+                shift,
+                ..Default::default()
+            },
+            time: 0.0,
+        }
+    }
+
+    /// The host's answer to EditCell: the editor is there, holds the text
+    /// it was given, and the caret is after it rather than before it, so
+    /// typing carries on from the seed instead of landing in front of it.
+    #[test]
+    fn edit_cell_seats_an_editor_holding_the_text_with_the_caret_after_it() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        assert_eq!(grid.editing(), Some((4, 1)));
+        assert_eq!(editor(&grid).text(), "abc");
+        assert_eq!(editor(&grid).cursor().index, 3);
+        assert_eq!(grid.active_cell(), Some((4, 1)), "the selection follows the edit");
+    }
+
+    #[test]
+    fn a_cell_the_grid_does_not_have_seats_nothing() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 25, 1, "abc");
+        assert_eq!(grid.editing(), None);
+        grid.edit_cell(&mut cx, 1, 3, "abc");
+        assert_eq!(grid.editing(), None);
+    }
+
+    /// Return hands the host the text the field holds, puts the editor
+    /// away, and steps the selection down so the next Return edits the
+    /// next row.
+    #[test]
+    fn return_commits_what_the_field_holds_and_steps_down() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        editor(&grid).set_text(&mut cx, "abcd");
+        let action = from_editor(
+            &grid,
+            TextInputAction::Returned("abcd".into(), KeyModifiers::default()),
+        );
+        let out = deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(edited(&out), vec![(4, 1, "abcd".to_string())]);
+        assert_eq!(grid.editing(), None);
+        assert_eq!(grid.active_cell(), Some((5, 1)));
+    }
+
+    #[test]
+    fn shift_return_steps_up_and_tab_steps_sideways() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let shift = KeyModifiers {
+            shift: true,
+            ..Default::default()
+        };
+
+        grid.edit_cell(&mut cx, 4, 1, "a");
+        let action = from_editor(&grid, TextInputAction::Returned("a".into(), shift));
+        deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(grid.active_cell(), Some((3, 1)));
+
+        grid.edit_cell(&mut cx, 4, 1, "a");
+        let action = from_editor(&grid, TextInputAction::KeyDownUnhandled(tab(false)));
+        let out = deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(edited(&out).len(), 1, "tab commits");
+        assert_eq!(grid.active_cell(), Some((4, 2)));
+
+        grid.edit_cell(&mut cx, 4, 1, "a");
+        let action = from_editor(&grid, TextInputAction::KeyDownUnhandled(tab(true)));
+        deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(grid.active_cell(), Some((4, 0)));
+    }
+
+    /// Stepping stops at the edge: a Return on the last row commits and
+    /// stays, rather than walking off the grid.
+    #[test]
+    fn stepping_off_the_last_row_stays_on_it() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 19, 1, "a");
+        let action = from_editor(
+            &grid,
+            TextInputAction::Returned("a".into(), KeyModifiers::default()),
+        );
+        deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(grid.active_cell(), Some((19, 1)));
+    }
+
+    /// Escape puts the editor away and says so, and says nothing about a
+    /// value: the host has nothing to write and the cell keeps what it
+    /// had. The selection stays on the cell that was being edited.
+    #[test]
+    fn escape_puts_the_editor_away_and_reports_no_value() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        editor(&grid).set_text(&mut cx, "abcd");
+        let action = from_editor(&grid, TextInputAction::Escaped);
+        let out = deliver(&mut cx, &mut grid, vec![action]);
+        assert!(edited(&out).is_empty(), "nothing was edited: {out:?}");
+        assert!(
+            out.iter()
+                .any(|a| matches!(a, DataGridAction::EditCancelled { row: 4, col: 1 })),
+            "the cancel is reported: {out:?}"
+        );
+        assert_eq!(grid.editing(), None);
+        assert_eq!(grid.active_cell(), Some((4, 1)));
+    }
+
+    /// The editor losing the keyboard — a click on another cell, or on
+    /// anything else — is a commit where it stands: the value is reported
+    /// and the selection is left wherever the click put it.
+    #[test]
+    fn losing_the_keyboard_commits_without_stepping() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        editor(&grid).set_text(&mut cx, "abcd");
+        let action = from_editor(&grid, TextInputAction::KeyFocusLost);
+        let out = deliver(&mut cx, &mut grid, vec![action]);
+        assert_eq!(edited(&out), vec![(4, 1, "abcd".to_string())]);
+        assert_eq!(grid.editing(), None);
+        assert_eq!(grid.active_cell(), Some((4, 1)));
+    }
+
+    /// The field drops the keyboard before it reports the Return, so the
+    /// two can arrive in one pass. That is one commit, and it steps: a
+    /// grid that took the focus loss for the reason would leave the
+    /// person on the row they just finished.
+    #[test]
+    fn a_return_and_the_focus_loss_it_causes_are_one_stepping_commit() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        let actions = vec![
+            from_editor(
+                &grid,
+                TextInputAction::Returned("abc".into(), KeyModifiers::default()),
+            ),
+            from_editor(&grid, TextInputAction::KeyFocusLost),
+        ];
+        let out = deliver(&mut cx, &mut grid, actions);
+        assert_eq!(edited(&out).len(), 1);
+        assert_eq!(grid.active_cell(), Some((5, 1)));
+    }
+
+    /// Commit before restart: seating a second editor while one is live
+    /// hands the host the first one's text first, so a host that reseats
+    /// on every request never loses an edit.
+    #[test]
+    fn a_second_edit_commits_the_first_before_it_starts() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "first");
+        let uid = grid.widget_uid();
+        let emitted = cx.capture_actions(|cx| grid.edit_cell(cx, 2, 0, "second"));
+        let out: Vec<DataGridAction> = emitted
+            .filter_widget_actions_cast::<DataGridAction>(uid)
+            .collect();
+        assert_eq!(edited(&out), vec![(4, 1, "first".to_string())]);
+        assert_eq!(grid.editing(), Some((2, 0)));
+        assert_eq!(editor(&grid).text(), "second");
+        assert_eq!(grid.active_cell(), Some((2, 0)));
+    }
+
+    /// The host's own commit and cancel, for a control outside the grid.
+    #[test]
+    fn the_host_can_commit_or_cancel_from_outside() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let uid = grid.widget_uid();
+
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        let emitted = cx.capture_actions(|cx| grid.commit_edit(cx));
+        let out: Vec<DataGridAction> = emitted
+            .filter_widget_actions_cast::<DataGridAction>(uid)
+            .collect();
+        assert_eq!(edited(&out), vec![(4, 1, "abc".to_string())]);
+        assert_eq!(grid.editing(), None);
+
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        let emitted = cx.capture_actions(|cx| grid.cancel_edit(cx));
+        let out: Vec<DataGridAction> = emitted
+            .filter_widget_actions_cast::<DataGridAction>(uid)
+            .collect();
+        assert!(edited(&out).is_empty());
+        assert!(out
+            .iter()
+            .any(|a| matches!(a, DataGridAction::EditCancelled { row: 4, col: 1 })));
+        assert_eq!(grid.editing(), None);
+
+        // And with nothing seated, neither says anything.
+        let emitted = cx.capture_actions(|cx| {
+            grid.commit_edit(cx);
+            grid.cancel_edit(cx);
+        });
+        assert_eq!(emitted.len(), 0);
+    }
+
+    /// An editor's reports are only read while it is seated: after a
+    /// cancel, the focus loss the cancel itself causes must not commit.
+    #[test]
+    fn a_focus_loss_after_the_editor_is_gone_commits_nothing() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        let lost = from_editor(&grid, TextInputAction::KeyFocusLost);
+        grid.cancel_edit(&mut cx);
+        let out = deliver(&mut cx, &mut grid, vec![lost]);
+        assert!(edited(&out).is_empty(), "{out:?}");
+    }
+
+    /// A grid that shrinks under the editor puts it away rather than
+    /// reporting a commit for a row that no longer exists.
+    #[test]
+    fn a_grid_that_shrinks_under_the_editor_puts_it_away() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 15, 1, "abc");
+        grid.set_grid_size(10, 3);
+        assert_eq!(grid.editing(), None);
+        let out = deliver(&mut cx, &mut grid, Vec::new());
+        assert!(edited(&out).is_empty());
+    }
+    /// The editor is drawn every frame, on screen or off, so its area is
+    /// always the current frame's and the keyboard leaving it - what a
+    /// click anywhere else does - reaches it after the cell has scrolled
+    /// away. Two frames at a size that shows a few rows: the edit is made
+    /// in one, the wheel carries the row off the bottom before the other,
+    /// and the focus loss still commits.
+    #[test]
+    fn an_edit_scrolled_out_of_view_still_commits_when_the_keyboard_leaves() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+        fn frame(cx: &mut Cx, grid: &mut DataGrid, pass: &DrawPass, draw_list: &mut DrawList2d) {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(dvec2(300.0, 100.0), Layout::flow_overlay());
+            // The host's loop, as a page writes it: every cell it is
+            // handed, and never the one being edited.
+            while !grid
+                .draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(300.0, 100.0))
+                .is_done()
+            {
+                while let Some(cell) = grid.next_cell(&mut cx2d) {
+                    grid.cell_text(&mut cx2d, &cell, "-");
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(pass);
+        }
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, dvec2(300.0, 100.0));
+        let mut draw_list = DrawList2d::new(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        frame(&mut cx, &mut grid, &pass, &mut draw_list);
+        let on_screen = editor(&grid).area();
+        assert!(on_screen.is_valid(&cx), "the editor was not drawn in its cell");
+        grid.scroll_cell_into_view(&mut cx, 19, 0);
+        frame(&mut cx, &mut grid, &pass, &mut draw_list);
+        assert_eq!(grid.editing(), Some((4, 1)), "the edit did not survive the scroll");
+        let off_screen = editor(&grid).area();
+        assert!(!on_screen.is_valid(&cx), "the second frame drew nothing new");
+        assert!(
+            off_screen.is_valid(&cx),
+            "the editor was not drawn once its cell left the viewport"
+        );
+        // The keyboard leaves the editor, as it does when anything else
+        // is clicked; the platform names the area it left.
+        let lost = cx.capture_actions(|cx| {
+            let leaving = KeyFocusEvent {
+                prev: off_screen,
+                focus: Area::Empty,
+            };
+            grid.handle_event(cx, &Event::KeyFocus(leaving), &mut Scope::empty());
+        });
+        let out = deliver(&mut cx, &mut grid, lost);
+        assert_eq!(edited(&out), vec![(4, 1, "abc".to_string())]);
+        assert_eq!(grid.editing(), None);
     }
 }
