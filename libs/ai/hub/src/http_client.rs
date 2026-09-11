@@ -18,13 +18,16 @@ use crate::error::AssetAiError;
 use makepad_network::SocketStream;
 use std::io::{Read, Write};
 #[cfg(not(target_os = "windows"))]
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 const MAX_REDIRECTS: usize = 8;
 #[cfg(any(not(target_os = "windows"), test))]
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// Per-address TCP connect bound for plain HTTP (see `connect`): a LAN node
+/// answers a SYN within milliseconds; anything past this is a dead box.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct HttpClientRequest<'a> {
     pub method: &'a str,
@@ -248,8 +251,33 @@ fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         Ok(Transport::Tls(stream))
     } else {
-        let stream = TcpStream::connect((url.host.as_str(), url.port))
-            .map_err(|e| AssetAiError::Http(format!("connect {}:{}: {e}", url.host, url.port)))?;
+        // A box that drops SYNs (powered down behind a switch, a firewall
+        // that swallows instead of refusing) must not hold a caller for the
+        // OS connect timeout — about 75 s on macOS — per address: a fleet
+        // probe joining nine boxes went dark for minutes because four of
+        // them had stopped answering with a reset. Each resolved address
+        // gets CONNECT_TIMEOUT; the last error is the one reported.
+        let addrs = (url.host.as_str(), url.port)
+            .to_socket_addrs()
+            .map_err(|e| AssetAiError::Http(format!("resolve {}:{}: {e}", url.host, url.port)))?;
+        let mut last = None;
+        let mut stream = None;
+        for addr in addrs {
+            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let stream = match stream {
+            Some(s) => s,
+            None => {
+                let e = last.map_or_else(|| "no address".to_string(), |e| e.to_string());
+                return Err(AssetAiError::Http(format!("connect {}:{}: {e}", url.host, url.port)));
+            }
+        };
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         Ok(Transport::Plain(stream))
