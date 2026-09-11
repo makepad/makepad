@@ -5,22 +5,22 @@ use current source for API signatures and working examples.
 
 ## Current delegation context
 
-- HIERARCHY (user, 2026-09-10): GROK does the mechanical work, CODEX / Astra
-  does the architecture and the hard things, FABLE manages.
-- Codex / Astra designs, reviews, and BUILDS the hard things: renderers,
-  shaders, worker pipelines, layout engines, crate geometry, memory/lifetime
-  contracts, and diagnose-and-fix of deep bugs. Give it the design of
-  record, exact file ownership, raw observations and acceptance criteria.
-- Grok does everything mechanical and every scripted proof: edits by recipe,
-  extractions, renames, reference sweeps, theme roles, test batteries,
-  hidden-instance walks, grabs, `/gseq` sequences, acceptance runs. A proof
-  lane writes observations; a fix lane (Astra) acts on them; Grok proves
-  again. Never bundle "prove + fix" into one lane.
-- Fable manages: writes the briefs, sequences and chains the lanes, reads
-  the reports, integrates and reviews, commits with explicit paths and
-  pushes, and relaunches the user. Fable forks build only when both
-  providers are down or a step needs the supervisor's full context; Fable
-  never runs scripted checks.
+- HIERARCHY (user, 2026-09-11, supersedes 2026-09-10): FABLE does the work,
+  CODEX reviews, GROK runs the scripted proofs.
+- Fable (the supervisor session and its Fable forks) designs and BUILDS
+  everything: renderers, shaders, worker pipelines, layout engines, crate
+  geometry, memory/lifetime contracts, diagnose-and-fix of deep bugs. One
+  Fable fork per complex step, partitioned by file ownership; the supervisor
+  writes the briefs, sequences the forks, reads the reports, integrates,
+  commits with explicit paths and pushes, and relaunches the user.
+- Codex / Astra does CODE REVIEWS only (read-only, ephemeral): adversarial
+  review of a diff or a design of record against the laws and the acceptance
+  criteria, findings back as a report. Codex never edits the tree and never
+  builds a lane.
+- Grok does the scripted proofs and small mechanical work: hidden-instance
+  walks, grabs, `/gseq` sequences, acceptance runs, extractions, renames,
+  reference sweeps. A proof lane writes observations; a Fable fork acts on
+  them; Grok proves again. Never bundle "prove + fix" into one lane.
 - Keep this hierarchy in the context of Studio flows and their root agents,
   including when resuming an archived lane. The user's later directions can
   change these roles for a particular task or flow.
