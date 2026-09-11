@@ -3,7 +3,7 @@
 //! All passes are GPU work recorded by the UI thread; there is no CPU readback,
 //! worker synchronization or pixel processing here. The chain requests no frames
 //! by itself. Call `run` only when the source changes; animation samples its cached
-//! textures. Native GPU backends and the headless renderer use the same shaders.
+//! textures. Native GPU backends and the gpusim renderer use the same shaders.
 use crate::{
     makepad_draw::*,
     window::{DrawGaussDownsample, DrawGaussUpsample},

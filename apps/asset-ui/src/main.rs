@@ -2608,7 +2608,7 @@ script_mod! {
                                                     // alpha_view flips to the matte —
                                                     // alpha as grayscale. Branchless:
                                                     // shader `if` on a uniform
-                                                    // mis-evaluates headless.
+                                                    // mis-evaluates on gpusim.
                                                     alpha_view: uniform(0.0)
                                                     pixel: fn() {
                                                         let color = self.get_color()

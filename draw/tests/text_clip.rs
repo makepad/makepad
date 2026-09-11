@@ -1,7 +1,7 @@
 //! PNG regression for retained text and quad clipping. Run with:
-//! MAKEPAD=headless RUSTFLAGS='--cfg headless' cargo test --release
+//! MAKEPAD=gpusim RUSTFLAGS='--cfg gpusim' cargo test --release
 //! -p makepad-draw --test text_clip -- --ignored --nocapture
-//! MAKEPAD_HEADLESS_OUT_DIR optionally retains the reference and clipped PNGs.
+//! MAKEPAD_GPUSIM_OUT_DIR optionally retains the reference and clipped PNGs.
 
 use makepad_draw::makepad_script::{
     shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
@@ -40,10 +40,10 @@ struct Scene {
 
 fn render(scene: Scene, directory: &Path) -> Vec<u8> {
     std::fs::create_dir_all(directory).unwrap();
-    std::env::set_var("MAKEPAD_HEADLESS_OUT_DIR", directory);
+    std::env::set_var("MAKEPAD_GPUSIM_OUT_DIR", directory);
     // Another explicit renderer gate in the same test binary may disable PNGs.
-    std::env::set_var("MAKEPAD_HEADLESS_FRAMES", "on");
-    std::env::set_var("MAKEPAD_HEADLESS_DPI", "1");
+    std::env::set_var("MAKEPAD_GPUSIM_FRAMES", "on");
+    std::env::set_var("MAKEPAD_GPUSIM_DPI", "1");
     let mut state = None;
     let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
         if matches!(event, Event::Startup) {
@@ -106,7 +106,7 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
                         );
                     }
                     println!(
-                        "{:?} text vertex backends: Metal GL/WebGL D3D11 WGSL headless OK",
+                        "{:?} text vertex backends: Metal GL/WebGL D3D11 WGSL gpusim OK",
                         scene.glyph_path
                     );
                 }
@@ -259,7 +259,7 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
         }
     }))));
     cx.borrow_mut().init_cx_os();
-    // The ordinary headless loop captures this app's drawable and returns
+    // The ordinary gpusim loop captures this app's drawable and returns
     // after one frame; no visible window or persistent process is launched.
     Cx::event_loop(cx);
     let bytes = std::fs::read(directory.join("window_0_frame_000000.png")).unwrap();
@@ -280,13 +280,13 @@ fn diff(a: &[u8], b: &[u8]) -> usize {
 }
 
 #[test]
-#[ignore = "requires a MAKEPAD=headless release build"]
+#[ignore = "requires a MAKEPAD=gpusim release build"]
 fn text_clips_like_quads_after_view_transform() {
     assert!(std::env::var("MAKEPAD")
         .unwrap_or_default()
-        .contains("headless"));
-    std::env::set_var("MAKEPAD_HEADLESS_DPI", "1");
-    let keep = std::env::var_os("MAKEPAD_HEADLESS_OUT_DIR");
+        .contains("gpusim"));
+    std::env::set_var("MAKEPAD_GPUSIM_DPI", "1");
+    let keep = std::env::var_os("MAKEPAD_GPUSIM_OUT_DIR");
     let directory = keep
         .as_ref()
         .map(std::path::PathBuf::from)

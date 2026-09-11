@@ -392,7 +392,7 @@ migration proved it changed no pixel:
   verify lever. Grab standalone AND with content.
 
 The sweep runs a REAL windowed gallery — the GPU path, ~4 minutes for the
-whole library. (A headless build renders the same documents on the CPU
+whole library. (A gpusim build renders the same documents on the CPU
 rasterizer with JIT-compiled shaders; it is far too slow for a 120-document
 sweep. Do not reach for it here.) The run self-terminates when the sweep
 finishes; if you drive an instance by hand, `/gq` it when you are done —

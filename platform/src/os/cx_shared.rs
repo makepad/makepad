@@ -282,7 +282,7 @@ impl Cx {
     /// repaint, so the caller should poll for the file to appear. Piggybacks on
     /// the studio screenshot pipeline: ids above `SCREENSHOT_FILE_ID_BASE` are
     /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
-    /// (Headless builds write frames to files on their own; this is for the
+    /// (Gpusim builds write frames to files on their own; this is for the
     /// live GPU-rendered app.)
     /// Returns the capture's request id, so the caller can later
     /// [`cancel_frame_capture`](Self::cancel_frame_capture) it.
@@ -675,14 +675,14 @@ impl Cx {
         modifiers: crate::event::KeyModifiers,
         time: f64,
     ) {
-        // `os::apple` does not exist in a headless build (see os/mod.rs), so
+        // `os::apple` does not exist in a gpusim build (see os/mod.rs), so
         // the pointer-lock transform has to be gated on the module's own cfg,
         // not on the target alone.
-        #[cfg(all(target_os = "macos", not(headless)))]
+        #[cfg(all(target_os = "macos", not(gpusim)))]
         let (abs, lock_delta) = crate::os::apple::macos::macos_app::with_macos_app(|app| {
             app.locked_mouse_transform(raw, delta, seed)
         });
-        #[cfg(not(all(target_os = "macos", not(headless))))]
+        #[cfg(not(all(target_os = "macos", not(gpusim))))]
         let (abs, lock_delta) = {
             let _ = (delta, seed);
             (raw, crate::makepad_math::DVec2::default())
@@ -703,7 +703,7 @@ impl Cx {
     /// scrub pin at the platform layer first — exactly what
     /// macos_window::send_mouse_up does for a physical up.
     pub fn dispatch_hw_pin_release(&mut self) {
-        #[cfg(all(target_os = "macos", not(headless)))]
+        #[cfg(all(target_os = "macos", not(gpusim)))]
         crate::os::apple::macos::macos_app::with_macos_app(|app| {
             if app.pointer_pin_mode {
                 app.set_pointer_pin(false);
@@ -809,7 +809,7 @@ impl Cx {
                 self.call_event_handler(&Event::KeyUp(e));
             }
             StudioToApp::TextInput(e) => {
-                #[cfg(all(target_vendor = "apple", not(headless)))]
+                #[cfg(all(target_vendor = "apple", not(gpusim)))]
                 crate::os::apple::metal::note_input_event();
                 self.call_event_handler(&Event::TextInput(e));
             }
@@ -977,8 +977,8 @@ impl Cx {
         }
     }
 
-    // Same logic as headless::raster::encode_png_rgba which is behind
-    // cfg(headless) and unavailable to the windowed backend.
+    // Same logic as gpusim::raster::encode_png_rgba which is behind
+    // cfg(gpusim) and unavailable to the windowed backend.
     #[allow(dead_code)]
     pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         use makepad_zune_png::{

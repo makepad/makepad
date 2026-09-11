@@ -52,7 +52,7 @@ fn set_u32(buf: &mut [u8], offset: usize, val: u32) {
 }
 
 fn configured_render_threads(default_threads: usize) -> usize {
-    std::env::var("MAKEPAD_HEADLESS_THREADS")
+    std::env::var("MAKEPAD_GPUSIM_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -60,14 +60,14 @@ fn configured_render_threads(default_threads: usize) -> usize {
 }
 
 fn configured_parallel_min_tris(default_min: usize) -> usize {
-    std::env::var("MAKEPAD_HEADLESS_PARALLEL_MIN_TRIS")
+    std::env::var("MAKEPAD_GPUSIM_PARALLEL_MIN_TRIS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(default_min)
 }
 
 /// Per-frame raster knobs, read from the environment once instead of on every
-/// draw list. `headless_render_view` recurses per sub-list, so the three
+/// draw list. `gpusim_render_view` recurses per sub-list, so the three
 /// `getenv` calls it used to make ran hundreds of times a frame.
 #[derive(Clone)]
 struct RenderOptions {
@@ -76,9 +76,9 @@ struct RenderOptions {
     parallel_min_tris: usize,
     /// Minimum estimated covered pixels before it is worth splitting.
     parallel_min_pixels: usize,
-    /// `MAKEPAD_HEADLESS_ONLY_SHADER` — draw only the named shader class.
+    /// `MAKEPAD_GPUSIM_ONLY_SHADER` — draw only the named shader class.
     only_shader: Option<String>,
-    /// `MAKEPAD_HEADLESS_DEBUG_TEXT` — dump per-fragment text shader state.
+    /// `MAKEPAD_GPUSIM_DEBUG_TEXT` — dump per-fragment text shader state.
     debug_text: bool,
 }
 
@@ -88,8 +88,8 @@ impl RenderOptions {
             threads,
             parallel_min_tris: configured_parallel_min_tris(1),
             parallel_min_pixels: parallel_min_pixels(),
-            only_shader: std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok(),
-            debug_text: std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok(),
+            only_shader: std::env::var("MAKEPAD_GPUSIM_ONLY_SHADER").ok(),
+            debug_text: std::env::var("MAKEPAD_GPUSIM_DEBUG_TEXT").is_ok(),
         }
     }
 }
@@ -102,7 +102,7 @@ const MIN_BAND_ROWS: usize = 8;
 /// quad does, and a UI frame is mostly button-sized quads.
 fn parallel_min_pixels() -> usize {
     const DEFAULT: usize = 2048;
-    std::env::var("MAKEPAD_HEADLESS_PARALLEL_MIN_PIXELS")
+    std::env::var("MAKEPAD_GPUSIM_PARALLEL_MIN_PIXELS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT)
@@ -231,7 +231,7 @@ pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>
 /// re-rendered. Buffers are reused in place (see [`Framebuffer::resize`]), so a
 /// pane-sized 3D pass costs one allocation, not one per frame.
 #[derive(Default)]
-pub(crate) struct HeadlessRenderTargets {
+pub(crate) struct GpusimRenderTargets {
     framebuffers: HashMap<usize, Framebuffer>,
     /// A test-owned budget in place of the derived one (see
     /// `render_target_budget_bytes`).
@@ -259,7 +259,7 @@ const RENDER_TARGET_IDLE_FRAMES: u64 = 120;
 /// written before they are read within the same frame. Derived from the
 /// process allowance (a quarter of it: the raster keeps float colour, four
 /// times a GPU's bytes per texel) unless a test set its own through
-/// `Cx::set_headless_render_target_budget`; 0 disables the cap. Targets the
+/// `Cx::set_gpusim_render_target_budget`; 0 disables the cap. Targets the
 /// application marked retained (`Texture::set_retained_render_target`) are
 /// never released by idleness or budget while their handle lives.
 fn render_target_budget_bytes(process_budget: usize, owned: Option<usize>) -> usize {
@@ -278,7 +278,7 @@ struct PassRaster {
     has_depth: bool,
 }
 
-impl HeadlessRenderTargets {
+impl GpusimRenderTargets {
     /// Portable readback preserves the attachment's premultiplied channels.
     pub(crate) fn read_color_raw_bgra8(
         &self,
@@ -312,7 +312,7 @@ impl HeadlessRenderTargets {
         Some(fb)
     }
 
-    /// CPU readback of a color render target — the headless twin of the GPU
+    /// CPU readback of a color render target — the gpusim twin of the GPU
     /// backends' `debug_read_render_texture`. Returns the framebuffer the
     /// raster last rendered for this texture as packed BGRA8 bytes, origin
     /// top-left (the byte layout the Metal readback returns; alpha
@@ -349,11 +349,11 @@ impl HeadlessRenderTargets {
     }
 }
 
-fn headless_texture_info(
+fn gpusim_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
     cache: &mut TextureConversionCache,
-    render_targets: &HeadlessRenderTargets,
+    render_targets: &GpusimRenderTargets,
 ) -> Option<[usize; 4]> {
     match &cxtexture.format {
         // Render-to-texture attachments carry no CPU-side vec: their pixels
@@ -375,7 +375,7 @@ fn headless_texture_info(
                 fb.height,
             ])
         }
-        _ => headless_vec_texture_info(texture_index, cxtexture, cache),
+        _ => gpusim_vec_texture_info(texture_index, cxtexture, cache),
     }
 }
 
@@ -469,7 +469,7 @@ fn bgra_u32_to_rgba(pixel: u32) -> [f32; 4] {
     ]
 }
 
-fn headless_vec_texture_info(
+fn gpusim_vec_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
     cache: &mut TextureConversionCache,
@@ -738,7 +738,7 @@ fn rasterize_band(
                             let a = color[3];
                             if a > 0.0 && a < 1.0 {
                                 eprintln!(
-                                    "[headless][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
+                                    "[gpusim][draw_text] px=({}, {}) lane=({}, {}) t=({:.6}, {:.6}) dFdx(t)=({:.6}, {:.6}) dFdy(t)=({:.6}, {:.6}) a={:.5}",
                                     x,
                                     y,
                                     lane_x,
@@ -833,22 +833,22 @@ fn rasterize_band(
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Cx {
-    fn headless_render_thread_count(&self) -> usize {
+    fn gpusim_render_thread_count(&self) -> usize {
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(self.cpu_cores.max(1));
         configured_render_threads(cpu_threads.max(1))
     }
 
-    /// Serial hooks for the headless upload recorder's software queue model.
+    /// Serial hooks for the gpusim upload recorder's software queue model.
     /// These do not render pixels and must not be used as GPU evidence.
-    pub fn headless_simulated_submit(&mut self) -> u64 {
+    pub fn gpusim_simulated_submit(&mut self) -> u64 {
         self.textures.1.serials.submit()
     }
-    pub fn headless_simulated_complete(&mut self, serial: u64) {
-        self.headless_simulated_complete_with_storage(serial, |_, _| ());
+    pub fn gpusim_simulated_complete(&mut self, serial: u64) {
+        self.gpusim_simulated_complete_with_storage(serial, |_, _| ());
     }
-    pub fn headless_simulated_complete_with_storage<P: Send + 'static>(
+    pub fn gpusim_simulated_complete_with_storage<P: Send + 'static>(
         &mut self,
         serial: u64,
         mut take_storage: impl FnMut(DrawListId, usize) -> P,
@@ -867,16 +867,16 @@ impl Cx {
     /// does.
     /// Test-owned render-target budget (bytes; 0 disables the cap) in place
     /// of the value derived from the process allowance.
-    pub fn set_headless_render_target_budget(&mut self, bytes: Option<usize>) {
+    pub fn set_gpusim_render_target_budget(&mut self, bytes: Option<usize>) {
         self.os.render_targets.budget_override = bytes;
     }
 
     /// Bytes the raster currently holds for offscreen colour targets.
-    pub fn headless_render_target_bytes(&self) -> usize {
+    pub fn gpusim_render_target_bytes(&self) -> usize {
         self.os.render_targets.bytes()
     }
 
-    pub fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
+    pub fn gpusim_render_all_passes(&mut self, time: f64) -> Vec<usize> {
         if self
             .draw_lists
             .retire_free_items(&self.task_pool(), self.repaint_id, |_| ())
@@ -885,14 +885,14 @@ impl Cx {
         }
         // This is also the public offscreen rendering entry point. Direct
         // callers need the same shader readiness as the event-loop path.
-        self.headless_compile_shaders();
+        self.gpusim_compile_shaders();
         let frame_start = std::time::Instant::now();
-        let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
+        let profile_enabled = std::env::var("MAKEPAD_GPUSIM_PROFILE").is_ok();
 
         let mut profile = RenderProfile::default();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
-        let options = RenderOptions::from_env(self.headless_render_thread_count());
+        let options = RenderOptions::from_env(self.gpusim_render_thread_count());
 
         let serial = (!passes_todo.is_empty()).then(|| self.textures.1.serials.submit());
         let mut results = Vec::new();
@@ -942,7 +942,7 @@ impl Cx {
                         1.0,
                     );
 
-                    self.headless_draw_pass(
+                    self.gpusim_draw_pass(
                         *draw_pass_id,
                         &options,
                         &mut fb,
@@ -971,7 +971,7 @@ impl Cx {
                     // nothing: no receipt for it
                     let paintable = self.passes[*draw_pass_id].main_draw_list_id.is_some()
                         && !self.passes[*draw_pass_id].color_textures.is_empty();
-                    self.headless_draw_pass_to_texture(
+                    self.gpusim_draw_pass_to_texture(
                         *draw_pass_id,
                         time,
                         &options,
@@ -993,7 +993,7 @@ impl Cx {
                 // Capture after this producer, before a later pass can write
                 // the same target. The raster store is temporarily borrowed.
                 std::mem::swap(&mut self.os.render_targets, &mut render_targets);
-                self.headless_capture_texture_readbacks(Some(*draw_pass_id));
+                self.gpusim_capture_texture_readbacks(Some(*draw_pass_id));
                 std::mem::swap(&mut self.os.render_targets, &mut render_targets);
             }
         }
@@ -1001,7 +1001,7 @@ impl Cx {
         // Hand the conversions and window buffers back for the next frame.
         self.os.texture_conversions = texture_cache;
         self.os.window_framebuffers = window_framebuffers;
-        self.headless_prune_render_targets(&mut render_targets, profile_enabled);
+        self.gpusim_prune_render_targets(&mut render_targets, profile_enabled);
         self.os.render_targets = render_targets;
 
         if let Some(serial) = serial {
@@ -1010,13 +1010,13 @@ impl Cx {
         let elapsed = frame_start.elapsed();
         if profile_enabled {
             crate::log!(
-                "[headless] frame render: {:.1}ms",
+                "[gpusim] frame render: {:.1}ms",
                 elapsed.as_secs_f64() * 1000.0
             );
         }
         if profile_enabled {
             crate::log!(
-                "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms texture={:.1}ms",
+                "[gpusim][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms texture={:.1}ms",
                 profile.draw_calls,
                 profile.serial_draw_calls,
                 profile.parallel_draw_calls,
@@ -1034,9 +1034,9 @@ impl Cx {
     /// Drop framebuffers whose texture slot is gone or has been recycled into
     /// something that is not a render target, so a churn of short-lived
     /// offscreen targets cannot grow the store without bound.
-    fn headless_prune_render_targets(
+    fn gpusim_prune_render_targets(
         &mut self,
-        render_targets: &mut HeadlessRenderTargets,
+        render_targets: &mut GpusimRenderTargets,
         profile_enabled: bool,
     ) {
         let pool = &self.textures.0.pool;
@@ -1102,7 +1102,7 @@ impl Cx {
             .retain(|texture_index, _| framebuffers.contains_key(texture_index));
         if profile_enabled {
             crate::log!(
-                "[headless][profile] render targets: {} live, {:.1} MB",
+                "[gpusim][profile] render targets: {} live, {:.1} MB",
                 render_targets.framebuffers.len(),
                 render_targets.bytes() as f64 / (1024.0 * 1024.0)
             );
@@ -1114,13 +1114,13 @@ impl Cx {
     /// texture find the pixels. The GPU backends do exactly this with a render
     /// pass descriptor; here the "texture" is the framebuffer itself.
     #[allow(clippy::too_many_arguments)]
-    fn headless_draw_pass_to_texture(
+    fn gpusim_draw_pass_to_texture(
         &mut self,
         draw_pass_id: DrawPassId,
         time: f64,
         options: &RenderOptions,
         texture_cache: &mut TextureConversionCache,
-        render_targets: &mut HeadlessRenderTargets,
+        render_targets: &mut GpusimRenderTargets,
         profile: Option<&mut RenderProfile>,
     ) {
         if self.passes[draw_pass_id].main_draw_list_id.is_none() {
@@ -1141,7 +1141,7 @@ impl Cx {
         // The shape a fix would take, if it is ever wanted: give the texture ONE
         // framebuffer of `height*6` rows, so face f occupies rows
         // `f*height..(f+1)*height` and the stacked buffer already IS the layout
-        // the sampler expects — no assembly step, and `headless_texture_info`
+        // the sampler expects — no assembly step, and `gpusim_texture_info`
         // reports the per-face height. That needs a y-origin on the viewport
         // (`setup_triangle` currently anchors at row 0) and a row-scoped clear,
         // since each face carries its own load action and clearing the whole
@@ -1153,7 +1153,7 @@ impl Cx {
         if color_texture.cube_face.is_some() {
             if render_targets.warned_cube_faces.insert(texture_id.0) {
                 crate::error!(
-                    "headless: pass renders to cube face {:?} of texture {} — \
+                    "gpusim: pass renders to cube face {:?} of texture {} — \
                      cube-face render targets are not implemented, so anything \
                      sampling this texture will read whatever was there before",
                     color_texture.cube_face,
@@ -1260,7 +1260,7 @@ impl Cx {
             }
         }
 
-        self.headless_draw_pass(
+        self.gpusim_draw_pass(
             draw_pass_id,
             options,
             &mut fb,
@@ -1272,19 +1272,19 @@ impl Cx {
 
         render_targets.framebuffers.insert(texture_id.0, fb);
         render_targets.touch(texture_id.0);
-        // headless_render_all_passes reserves the serial before rendering.
+        // gpusim_render_all_passes reserves the serial before rendering.
         self.textures[texture_id].producer_serial = self.frame_submission_serial();
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn headless_draw_pass(
+    fn gpusim_draw_pass(
         &mut self,
         draw_pass_id: DrawPassId,
         options: &RenderOptions,
         fb: &mut Framebuffer,
         pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
-        render_targets: &HeadlessRenderTargets,
+        render_targets: &GpusimRenderTargets,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_list_id = match self.passes[draw_pass_id].main_draw_list_id {
@@ -1295,7 +1295,7 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
         let mut zbias = 0.0f32;
 
-        self.headless_render_view(
+        self.gpusim_render_view(
             draw_pass_id,
             draw_list_id,
             &mut zbias,
@@ -1310,7 +1310,7 @@ impl Cx {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn headless_render_view(
+    fn gpusim_render_view(
         &mut self,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
@@ -1320,7 +1320,7 @@ impl Cx {
         fb: &mut Framebuffer,
         pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
-        render_targets: &HeadlessRenderTargets,
+        render_targets: &GpusimRenderTargets,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
@@ -1362,7 +1362,7 @@ impl Cx {
                 // list reported. See `CxDrawList::zbias_hold`.
                 if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
                     let mut held = *child_zbias;
-                    self.headless_render_view(
+                    self.gpusim_render_view(
                         draw_pass_id,
                         sub_list_id,
                         &mut held,
@@ -1376,7 +1376,7 @@ impl Cx {
                     );
                     *child_zbias += steps as f32 * zbias_step;
                 } else {
-                    self.headless_render_view(
+                    self.gpusim_render_view(
                         draw_pass_id,
                         sub_list_id,
                         child_zbias,
@@ -1439,11 +1439,11 @@ impl Cx {
             };
 
             // Load function pointers
-            let vertex_fn: VertexFn = match module.symbol("makepad_headless_vertex") {
+            let vertex_fn: VertexFn = match module.symbol("makepad_gpusim_vertex") {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let fragment_fn: FragmentFn = match module.symbol("makepad_headless_fragment") {
+            let fragment_fn: FragmentFn = match module.symbol("makepad_gpusim_fragment") {
                 Ok(f) => f,
                 Err(_) => continue,
             };
@@ -1545,7 +1545,7 @@ impl Cx {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
                     let __tex_t0 = std::time::Instant::now();
-                    let __info = headless_texture_info(
+                    let __info = gpusim_texture_info(
                         texture_id.0,
                         cxtexture,
                         texture_cache,
@@ -1574,7 +1574,7 @@ impl Cx {
                 tex_infos_ptr: *const [usize; 4],
                 tex_count: u32,
             );
-            if let Ok(fill_fn) = module.symbol::<FillUniformsFn>("makepad_headless_fill_rcx") {
+            if let Ok(fill_fn) = module.symbol::<FillUniformsFn>("makepad_gpusim_fill_rcx") {
                 unsafe {
                     fill_fn(
                         rcx_template.as_mut_ptr() as *mut f32,
@@ -1648,7 +1648,7 @@ impl Cx {
             }
             if sh.mapping.flags.debug_draw {
                 CxDrawShaderMapping::debug_dump_shader_draw_call(
-                    "headless",
+                    "gpusim",
                     draw_item_id,
                     sh,
                     draw_call,
@@ -1999,11 +1999,11 @@ pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, 
     let mut out = Vec::new();
     encoder
         .encode(&mut out)
-        .map_err(|err| format!("headless png encode failed: {err:?}"))?;
+        .map_err(|err| format!("gpusim png encode failed: {err:?}"))?;
     Ok(out)
 }
 
-impl crate::os::headless::CxOsTexture {
+impl crate::os::gpusim::CxOsTexture {
     pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
         None
     }

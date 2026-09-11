@@ -75,16 +75,16 @@ pub fn lock_from_audio<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(crate) fn wake_ui_event_loop() {
-    #[cfg(all(not(headless), target_os = "macos"))]
+    #[cfg(all(not(gpusim), target_os = "macos"))]
     crate::os::apple::macos::macos_app::wake_event_loop();
 
-    #[cfg(all(not(headless), target_arch = "wasm32"))]
+    #[cfg(all(not(gpusim), target_arch = "wasm32"))]
     unsafe {
         js_wake_ui();
     }
 
     #[cfg(any(
-        headless,
+        gpusim,
         target_os = "ios",
         target_os = "tvos",
         target_os = "windows",
@@ -94,7 +94,7 @@ pub(crate) fn wake_ui_event_loop() {
     crate::os::wake_ui_event_loop();
 }
 
-#[cfg(all(not(headless), target_arch = "wasm32"))]
+#[cfg(all(not(gpusim), target_arch = "wasm32"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn js_wake_ui();

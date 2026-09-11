@@ -1637,7 +1637,7 @@ impl CxDrawListPool {
         .detach();
     }
 
-    #[cfg(headless)]
+    #[cfg(gpusim)]
     pub fn retirement_diagnostics<P: Send + 'static>(&self) -> String {
         let batches = self
             .4
@@ -1975,7 +1975,7 @@ pub struct CxDrawItem {
     /// a tile sheet needs without re-recording or re-uploading anything;
     /// the backends draw one call per range. Empty: every instance.
     /// Per backend: Metal draws one `drawIndexedPrimitives … baseInstance`
-    /// per range; the headless raster submits the ranged instances; OpenGL,
+    /// per range; the gpusim raster submits the ranged instances; OpenGL,
     /// D3D11, WebGL and Vulkan draw the whole item (ranges ignored: more
     /// work, the same pixels).
     pub instance_ranges: Vec<std::ops::Range<u32>>,
@@ -2636,7 +2636,7 @@ impl CxDrawItems {
     /// Binding changes backend residency/uniform stamps, never instance
     /// dirtiness or child topology. Upload/recording mutations use IndexMut.
     #[cfg(all(
-        not(headless),
+        not(gpusim),
         any(target_os = "macos", target_os = "ios", target_os = "tvos")
     ))]
     pub(crate) fn binding_mut(&mut self, index: usize) -> &mut CxDrawItem {
@@ -3545,15 +3545,15 @@ mod retained_sub_list_tests {
         drop(reused);
         let pool = cx.task_pool();
         for frame in 0..100 {
-            #[cfg(headless)]
+            #[cfg(gpusim)]
             let pending = {
-                let serial = cx.headless_simulated_submit();
-                cx.headless_simulated_complete_with_storage(serial, |id, item| {
+                let serial = cx.gpusim_simulated_submit();
+                cx.gpusim_simulated_complete_with_storage(serial, |id, item| {
                     backend_slots.remove(&(id, item))
                 });
                 cx.draw_lists.has_pending_instance_retirements()
             };
-            #[cfg(not(headless))]
+            #[cfg(not(gpusim))]
             let pending = cx
                 .draw_lists
                 .retire_free_items_with_ids(&pool, frame, |id, item, _| {

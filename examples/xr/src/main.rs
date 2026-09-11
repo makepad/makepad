@@ -1164,15 +1164,15 @@ impl App {
             })
             .unwrap_or_else(|| "waiting".to_string());
         let mut gamepad_count = 0usize;
-        // The headless platform backend has no game input implementation.
-        #[cfg(not(headless))]
+        // The gpusim platform backend has no game input implementation.
+        #[cfg(not(gpusim))]
         for state in cx.game_input_states() {
             let GameInputState::Gamepad(_gamepad) = state else {
                 continue;
             };
             gamepad_count += 1;
         }
-        #[cfg(headless)]
+        #[cfg(gpusim)]
         {
             gamepad_count += 0;
         }
