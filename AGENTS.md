@@ -128,10 +128,10 @@ use current source for API signatures and working examples.
   `MAKEPAD=headless` suites are for logic and data-structure tests only
   (layout, budgets, orderings, parsers); a headless raster gate never
   stands in for a GPU proof and is never used to diagnose a rendering bug.
-  On macOS a hidden window (`MAKEPAD_HIDE_WINDOWS=1`) does not present
-  frames: it proves shader compilation (`[E] Metal shader` count) and log
-  behaviour, not pictures. For a pixel proof launch the instance visible,
-  unfocused, small, off to the side, and close it with `/gq`.
+  The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
+  on the native backend is the normal pixel-proof rig; `/g` forces a present
+  (about 2 s per grab on a hidden window). Only rest/settle timing proofs
+  need a window that presents on its own. Close it with `/gq`.
 
 ## App ownership, focus, and screenshots
 
