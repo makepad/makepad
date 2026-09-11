@@ -97,6 +97,9 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    /// Shared-instance publications (cleanup DL-1 freeze): the registry that
+    /// mints ids, charges bytes and hands out receipts over the frame serials.
+    pub publications: crate::shared_instances::Publications,
     pub uniform_buffers: CxUniformBufferPool,
     pub geometries: CxGeometryPool,
 
@@ -812,6 +815,7 @@ impl Cx {
         let crate_manifests = script_vm.code.crate_manifests.clone();
         let script_mod_overrides = script_vm.code.script_mod_overrides.clone();
 
+        let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
             font_set: crate::font_policy::FontSet::target_default(),
@@ -840,6 +844,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            publications,
             uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),

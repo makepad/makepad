@@ -47,6 +47,7 @@ pub mod video_file;
 mod draw_list;
 pub mod retained_instances;
 pub mod recording_buffer;
+pub mod shared_instances;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
@@ -152,6 +153,11 @@ pub use {
             LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{immediate_payload_hash, CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
+        shared_instances::{
+            upload_pacing, FrameLease, FrameLeases, PublicationAccounting, PublicationIds, Publications,
+            PublishBackpressure, PublishError, PublishHints, PublishReceipt, ReceiptPhase, SharedInstances,
+            UploadObservation, WeakSharedInstances,
+        },
         draw_matrix::DrawMatrix,
         draw_pass::{
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,

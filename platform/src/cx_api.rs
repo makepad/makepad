@@ -2587,6 +2587,44 @@ impl Cx {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Publish an immutable block of instance data (stride `slots`) as a
+    /// shared publication. The block is charged against the device envelope
+    /// and refused with `PublishError::NoRoom` when it does not fit; the
+    /// receipt starts `Pending` and the backend marks it ready once the
+    /// backing copy landed. Draw items reference `(block, first, count)`.
+    pub fn publish_instances(
+        &self,
+        slots: usize,
+        data: std::sync::Arc<[f32]>,
+        hints: crate::shared_instances::PublishHints,
+    ) -> Result<crate::shared_instances::SharedInstances, crate::shared_instances::PublishError> {
+        self.publications.publish(slots, data, hints)
+    }
+
+    /// The context's publication totals: charged, pending retirement, the
+    /// derived envelope and the live count.
+    pub fn publication_accounting(&self) -> crate::shared_instances::PublicationAccounting {
+        self.publications.accounting()
+    }
+
+    /// The producer's pacing input for this frame: room under the envelope
+    /// plus the backend's last copy observation, against the time the caller
+    /// still has in the frame.
+    pub fn publish_backpressure(
+        &self,
+        frame_remaining_ns: u64,
+        observed: crate::shared_instances::UploadObservation,
+    ) -> crate::shared_instances::PublishBackpressure {
+        self.publications.backpressure(frame_remaining_ns, observed)
+    }
+
+    /// Set the publication envelope from the machine's numbers
+    /// (`retained_instances::retained_device_envelope`), once the backend
+    /// knows them. Zero (unknown) refuses nothing.
+    pub fn set_publication_envelope(&self, bytes: usize) {
+        self.publications.set_envelope(bytes);
+    }
+
     /// Last observed completed prefix, without polling the backend. Progress
     /// timers use `frame_completion_serial` to refresh this nonblocking snapshot.
     pub fn frame_completed_serial(&self) -> u64 {
