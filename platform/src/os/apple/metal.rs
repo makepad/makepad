@@ -278,6 +278,9 @@ impl Cx {
         let requests = self.pending_instance_uploads(root);
         // the working-set membership serves uploads, eviction and retirement:
         // a camera-only paint with none owed skips the walk over every list
+        // (a fresh or reused slot is demanded from its allocation,
+        // `CxDrawLists::reset_allocated`, so the skipped walk never leaves it
+        // off-demand)
         if !requests.is_empty()
             || self.draw_lists.1.allocations.reclaim_needed()
             || self.draw_lists.has_pending_instance_retirements()
@@ -1276,7 +1279,10 @@ impl Cx {
                     unsafe { msg_send![color_attachments, objectAtIndexedSubscript: index as u64] };
 
                 let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
-                let size = dpi_factor * pass_rect.size;
+                // the pass rect is an integral texel count divided by the
+                // pass DPI: the product rounds, never truncates (a texel
+                // short of the sheet a tile cache asked for)
+                let size = (dpi_factor * pass_rect.size).round();
                 cxtexture.update_render_target(metal_cx, size.x as usize, size.y as usize);
 
                 let is_initial = cxtexture.take_initial();
@@ -1331,7 +1337,7 @@ impl Cx {
         // attach depth texture
         if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
-            let size = dpi_factor * pass_rect.size;
+            let size = (dpi_factor * pass_rect.size).round();
             cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
             let is_initial = cxtexture.take_initial();
 
