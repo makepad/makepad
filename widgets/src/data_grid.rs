@@ -279,6 +279,16 @@ pub enum DataGridAction {
         row: usize,
         col: usize,
     },
+    /// A heading was pressed and the sort moved on. `ascending` is
+    /// `None` when the column has cycled back to unsorted.
+    ///
+    /// The grid does NOT reorder anything: the rows belong to the host,
+    /// which fills cells on demand and is the only thing that can put
+    /// them in a different order. This says what the person asked for.
+    SortChanged {
+        col: usize,
+        ascending: Option<bool>,
+    },
     HeaderClicked {
         col: usize,
         display_col: usize,
@@ -474,6 +484,19 @@ pub struct DataGrid {
     allow_row_resize: bool,
     #[live(false)]
     allow_col_reorder: bool,
+    /// Pressing a column heading cycles that column's sort. Off by
+    /// default: a grid whose headings do something when pressed has to
+    /// mean it, and most of them are read-only tables.
+    #[live(false)]
+    pub sortable: bool,
+    /// Columns that refuse to sort even when the grid does — a column of
+    /// thumbnails, a row of controls, anything with no order to be in.
+    ///
+    /// Set from the host, not the markup: the DSL can only carry lists of
+    /// strings, and which column has no order to be in is something the
+    /// side that owns the rows knows anyway.
+    #[rust]
+    unsortable_cols: Vec<usize>,
     #[live(24.0)]
     min_col_width: f64,
     #[live(14.0)]
@@ -713,6 +736,16 @@ impl DataGrid {
 
     pub fn set_col_labels(&mut self, labels: Vec<String>) {
         self.col_labels = labels;
+    }
+
+    /// Columns that will not sort, whatever `sortable` says.
+    pub fn set_unsortable_cols(&mut self, cols: Vec<usize>) {
+        self.unsortable_cols = cols;
+    }
+
+    /// The column being sorted and which way, or nothing.
+    pub fn sort(&self) -> Option<(usize, bool)> {
+        self.sort_indicator
     }
 
     pub fn set_sort_indicator(&mut self, sort: Option<(usize, bool)>) {
@@ -1151,12 +1184,27 @@ impl DataGrid {
                 };
                 self.draw_cell.draw_abs(cx, rect);
                 let data_col = self.display_to_data(display_col);
-                let mut label = self.col_label(data_col);
-                if let Some((sort_col, asc)) = self.sort_indicator {
-                    if sort_col == data_col {
-                        label.push_str(if asc { " ▲" } else { " ▼" });
-                    }
-                }
+                let label = self.col_label(data_col);
+                // A column that CAN be sorted says so before it is. Without
+                // it there is nothing on screen to tell a sortable heading
+                // from a plain one, and the only way to find out is to press
+                // every heading in the row.
+                //
+                // Drawn at the right edge in its own pass rather than stuck
+                // on the end of the label: appended, it drags the heading
+                // off centre and the marks land in a different place in
+                // every column.
+                let can_sort = self.sortable && !self.unsortable_cols.contains(&data_col);
+                let mark = match self.sort_indicator {
+                    Some((c, asc)) if c == data_col => Some((if asc { "▲" } else { "▼" }, false)),
+                    // The filled pair, not the hollow one: the hollow
+                    // triangles are only in faces this chain does not carry
+                    // and rendered as tofu, so an unsorted column is the
+                    // same marks worn lighter. Two means either way from
+                    // here; one means this way.
+                    _ if can_sort => Some(("▲▼", true)),
+                    _ => None,
+                };
                 if w >= 15.0 {
                     let cell = GridCell {
                         row: 0,
@@ -1165,6 +1213,9 @@ impl DataGrid {
                         rect,
                     };
                     self.header_text(cx, &cell, &label);
+                    if let Some((mark, faded)) = mark {
+                        self.header_mark(cx, &cell, mark, faded);
+                    }
                 }
             }
             cx.pop_clip_rect();
@@ -1231,6 +1282,30 @@ impl DataGrid {
         if overflow {
             cx.pop_clip_rect();
         }
+    }
+
+    /// The sort marks, against the right edge of a heading. Faded while
+    /// the column is only sortable, full once it is sorted, so the row
+    /// reads as one lit column among several offers.
+    fn header_mark(&mut self, cx: &mut Cx2d, cell: &GridCell, mark: &str, faded: bool) {
+        let rest = self.draw_text.color;
+        self.draw_text.color = if faded {
+            Vec4f { w: rest.w * 0.45, ..rest }
+        } else {
+            rest
+        };
+        let laidout = self
+            .draw_text
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), mark);
+        let mw = laidout.size_in_lpxs.width as f64;
+        let mh = laidout.size_in_lpxs.height as f64;
+        // Clear of the resize grab zone as well as of the padding: the
+        // marks are the part of a heading people aim at, and the last few
+        // points of a column belong to the edge drag.
+        let x = cell.rect.pos.x + cell.rect.size.x - Self::RESIZE_MARGIN - self.cell_pad_x - mw;
+        let y = cell.rect.pos.y + (cell.rect.size.y - mh) * 0.5;
+        self.draw_text.draw_abs(cx, dvec2(x, y), mark);
+        self.draw_text.color = rest;
     }
 
     fn draw_interact_overlay(&mut self, cx: &mut Cx2d) {
@@ -1996,6 +2071,26 @@ impl Widget for DataGrid {
                         }
                         self.emit_selection_changed(cx);
                         let col = self.display_to_data(display_col);
+                        // Unsorted, then up, then down, then unsorted
+                        // again. The third press has to be able to get
+                        // back to the order the data arrived in, which a
+                        // two-state toggle can never do.
+                        if self.sortable && !self.unsortable_cols.contains(&col) {
+                            let next = match self.sort_indicator {
+                                Some((c, true)) if c == col => Some((col, false)),
+                                Some((c, false)) if c == col => None,
+                                _ => Some((col, true)),
+                            };
+                            self.sort_indicator = next;
+                            self.redraw(cx);
+                            cx.widget_action(
+                                uid,
+                                DataGridAction::SortChanged {
+                                    col,
+                                    ascending: next.map(|(_, asc)| asc),
+                                },
+                            );
+                        }
                         cx.widget_action(
                             uid,
                             DataGridAction::HeaderClicked {
@@ -2051,6 +2146,32 @@ impl DataGridRef {
     pub fn set_col_width(&self, display_col: usize, width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_col_width(display_col, width);
+        }
+    }
+
+    /// The sort a heading press just asked for, if it changed this pass.
+    /// `Some((col, None))` means that column went back to unsorted.
+    ///
+    /// Every action from this grid is looked at, not just the first: one
+    /// press on a heading raises the selection change, the sort and the
+    /// header click, in that order, and asking only for the first one
+    /// hands back the selection and reports no sort at all.
+    pub fn sort_changed(&self, actions: &Actions) -> Option<(usize, Option<bool>)> {
+        actions
+            .filter_widget_actions_cast::<DataGridAction>(self.widget_uid())
+            .find_map(|a| match a {
+                DataGridAction::SortChanged { col, ascending } => Some((col, ascending)),
+                _ => None,
+            })
+    }
+
+    pub fn sort(&self) -> Option<(usize, bool)> {
+        self.borrow().and_then(|inner| inner.sort())
+    }
+
+    pub fn set_unsortable_cols(&self, cols: Vec<usize>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_unsortable_cols(cols);
         }
     }
 

@@ -1,0 +1,3315 @@
+{
+ "components": [
+  {
+   "component": "Accordion",
+   "aka": [
+    "collapsible sections",
+    "expander",
+    "disclosure panel",
+    "fold panel",
+    "expand and collapse",
+    "collapsible headings"
+   ],
+   "does": [
+    "collapse a section",
+    "expand a section",
+    "how many may be open at once",
+    "one open at a time",
+    "folding leaves the room empty",
+    "crowded out sections come back",
+    "last open one cannot be folded",
+    "open when the pointer rests",
+    "hover dwell delay",
+    "start a section closed",
+    "reports which section changed",
+    "which sections are showing",
+    "animated open and close",
+    "fold arrow mark",
+    "header over a body"
+   ]
+  },
+  {
+   "component": "AdaptiveView",
+   "aka": [
+    "responsive container",
+    "breakpoint switcher",
+    "layout variant",
+    "screen size switch",
+    "mobile or desktop layout",
+    "device layout",
+    "responsive wrapper",
+    "container query",
+    "variant swapper"
+   ],
+   "does": [
+    "switch layout on width",
+    "responsive",
+    "respond to window resize",
+    "screen width check",
+    "parent size check",
+    "mobile layout",
+    "desktop layout",
+    "custom selector",
+    "named variants",
+    "keep hidden variant state",
+    "one variant shown at a time"
+   ]
+  },
+  {
+   "component": "Alert",
+   "aka": [
+    "banner",
+    "callout",
+    "notice",
+    "inline message",
+    "message bar",
+    "info box",
+    "warning box"
+   ],
+   "does": [
+    "dismissible",
+    "close cross",
+    "fold away",
+    "reopen",
+    "severity colour",
+    "severity color",
+    "warning state",
+    "success state",
+    "error state",
+    "full width strip",
+    "text reflow",
+    "remember dismissal",
+    "accent bar",
+    "intent icon"
+   ]
+  },
+  {
+   "component": "AlignScroll",
+   "aka": [
+    "content too big"
+   ],
+   "does": [
+    "overflowing content",
+    "oversized child",
+    "content larger than parent",
+    "centres when it fits"
+   ]
+  },
+  {
+   "component": "AnimatedImageGif",
+   "aka": [
+    "moving picture",
+    "looping picture",
+    "flipbook",
+    "frame animation"
+   ],
+   "does": [
+    "play",
+    "pause",
+    "autoplay",
+    "loop playback",
+    "loop count",
+    "frame delays",
+    "decode bytes",
+    "load from data",
+    "gpu texture upload",
+    "finished event",
+    "current frame",
+    "hold first frame"
+   ]
+  },
+  {
+   "component": "AnnotatedScrollBar",
+   "aka": [
+    "minimap",
+    "scroll map",
+    "gutter marks",
+    "diff markers",
+    "overview ruler",
+    "fading edges"
+   ],
+   "does": [
+    "coloured ticks along the track",
+    "a map of the whole document",
+    "marks at a share of the way down",
+    "two marks in one row collapse",
+    "warn error and change marks",
+    "set the marks from a program",
+    "reports where the handle went",
+    "told how much content there is",
+    "fades an edge when content runs past it",
+    "each edge decides for itself",
+    "the fade comes up over a ramp",
+    "an axis that cannot move never fades",
+    "turn any of the four fades off",
+    "content cut off looks cut off"
+   ]
+  },
+  {
+   "component": "Avatar",
+   "aka": [
+    "profile picture",
+    "user photo",
+    "initials circle",
+    "person plate",
+    "face pile",
+    "profile bubble"
+   ],
+   "does": [
+    "picture then initials then a person mark",
+    "initials from the first and last word",
+    "one letter only on small plates",
+    "colour worked out from the name",
+    "same person the same colour everywhere",
+    "case and spacing folded before hashing",
+    "presence has a shape as well as a colour",
+    "online away busy offline unknown",
+    "the dot rides the rim on a circle",
+    "overlapping row of people",
+    "counts the ones there was no room for",
+    "the cap counts as a plate",
+    "ring the colour of what it sits on",
+    "square or round plate",
+    "answers no press of its own"
+   ]
+  },
+  {
+   "component": "Badge",
+   "aka": [
+    "notification dot",
+    "unread count",
+    "notification bubble",
+    "status dot",
+    "marker pin",
+    "count on a button"
+   ],
+   "does": [
+    "count overflow cap",
+    "99 plus",
+    "dot only mark",
+    "corner anchor",
+    "hides at zero",
+    "intent colours",
+    "intent colors",
+    "filled ghost outline tint",
+    "size ladder",
+    "status shapes",
+    "pulsing ring",
+    "label and value pill",
+    "clickable pin",
+    "dimmed when disabled"
+   ]
+  },
+  {
+   "component": "Breadcrumb",
+   "aka": [
+    "trail",
+    "path bar",
+    "folder path",
+    "you are here",
+    "hierarchy path",
+    "ancestor trail",
+    "breadcrumbs"
+   ],
+   "does": [
+    "shows where you are",
+    "steps back to the top",
+    "clickable ancestors",
+    "jump to a parent folder",
+    "ellipsis when it does not fit",
+    "folds the middle",
+    "keeps the last item",
+    "keeps the root while it fits",
+    "separator character",
+    "gap between items",
+    "reports which was picked",
+    "current item clickable"
+   ]
+  },
+  {
+   "component": "Button",
+   "aka": [
+    "cta",
+    "call to action",
+    "icon button",
+    "hamburger menu",
+    "close cross",
+    "primary action"
+   ],
+   "does": [
+    "click to run something",
+    "long press on mobile",
+    "reports press and release",
+    "carries the modifier keys",
+    "loading spinner blocks presses",
+    "leading and trailing icons",
+    "description line under the label",
+    "copies text to the clipboard",
+    "shows copied for a moment",
+    "morphs bars into a cross",
+    "sizes from extra small to extra large",
+    "danger and outline faces",
+    "dashed outline"
+   ]
+  },
+  {
+   "component": "ButtonGroup",
+   "aka": [
+    "segmented control",
+    "joined buttons",
+    "connected buttons",
+    "toggle group",
+    "split button",
+    "menu button"
+   ],
+   "does": [
+    "collapses the inner corners",
+    "spaced or connected",
+    "runs across or down a column",
+    "one question with a fixed set of answers",
+    "remembers the current answer",
+    "a pill glides to the selection",
+    "equal width segments",
+    "several answers on at once",
+    "arrow keys walk the row",
+    "one tab stop for the whole row",
+    "reports the chosen index",
+    "intent colours",
+    "intent colors",
+    "offers more choices in a menu",
+    "holds any button in the library"
+   ]
+  },
+  {
+   "component": "Calendar",
+   "aka": [
+    "month grid",
+    "day grid",
+    "wall planner",
+    "booking days",
+    "seven columns of days",
+    "month view"
+   ],
+   "does": [
+    "weekday headings over six rows",
+    "days either side drawn dim",
+    "always six rows so nothing jumps",
+    "choose one day",
+    "toggle several days",
+    "anchor a span then finish it",
+    "a half made span previews under the pointer",
+    "span ends come out earliest first",
+    "escape puts a half made span down",
+    "reads no clock until today is given",
+    "earliest and latest bounds",
+    "weekends closed by a bitmask",
+    "a rule of the host's own for closed days",
+    "arrows walk into the next month",
+    "twelve cells for months and years"
+   ]
+  },
+  {
+   "component": "Card",
+   "aka": [
+    "tile",
+    "product tile",
+    "content box",
+    "raised surface",
+    "media tile",
+    "panel with a picture"
+   ],
+   "does": [
+    "raised filled or outlined",
+    "a rung of the elevation ladder",
+    "hover lifts it one rung",
+    "presses back down under the finger",
+    "the whole surface as a target",
+    "picture band against the bare edge",
+    "the band rounds its own top corners",
+    "padding belongs to the words not the picture",
+    "header body and footer slots",
+    "buttons in the footer take their own press",
+    "colours come from the theme tokens",
+    "only the raised one casts a shadow",
+    "no scrolling inside it"
+   ]
+  },
+  {
+   "component": "Carousel",
+   "aka": [
+    "slideshow",
+    "image strip",
+    "gallery strip",
+    "swipe deck",
+    "banner rotator",
+    "coverflow"
+   ],
+   "does": [
+    "settles on whole items",
+    "several on show at once",
+    "neighbours peeking at the edges",
+    "arrows at the sides",
+    "dots underneath count the stops",
+    "dots dropped when they will not fit",
+    "a flick glides to a stop",
+    "position held in items not pixels",
+    "survives a resize",
+    "sideways wheel moves one notch",
+    "the vertical wheel is left to the page",
+    "press a half cut item to bring it in",
+    "home and end are the first and last item",
+    "reports the leading stop while moving",
+    "never advances by itself"
+   ]
+  },
+  {
+   "component": "Charts",
+   "aka": [
+    "graph",
+    "plot",
+    "line graph",
+    "bar graph",
+    "scatter plot",
+    "candlestick",
+    "sparkline",
+    "trend tile",
+    "price graph",
+    "ohlc"
+   ],
+   "does": [
+    "plot a series",
+    "draw candles",
+    "bars and dots",
+    "filled area under a line",
+    "grid lines",
+    "axis labels",
+    "drag to pan",
+    "wheel to zoom",
+    "fit the viewport to the values",
+    "open high low close",
+    "up and down colours",
+    "up and down colors",
+    "dashboard tile",
+    "graph in a table cell",
+    "fabricates sample values when unfed",
+    "fixed seed sample series"
+   ]
+  },
+  {
+   "component": "ChatBubble",
+   "aka": [
+    "message bubble",
+    "speech balloon",
+    "conversation row",
+    "instant messaging thread",
+    "sms thread",
+    "messenger list"
+   ],
+   "does": [
+    "yours on one side theirs on the other",
+    "runs of messages from one sender",
+    "only the first of a run shows a name",
+    "corners tighten along a run",
+    "a long silence breaks a run",
+    "a change of day breaks a run",
+    "day separator between them",
+    "delivery mark on the ones you sent",
+    "three dots while nothing has come yet",
+    "a caret follows the last glyph",
+    "the streaming flag drives the window",
+    "an initials disc or a picture in the slot",
+    "column reserved down the whole run",
+    "one message per line of markup"
+   ]
+  },
+  {
+   "component": "CheckBox",
+   "aka": [
+    "toggle",
+    "toggles",
+    "switch",
+    "switches",
+    "tick box",
+    "tickbox",
+    "on off switch"
+   ],
+   "does": [
+    "tick",
+    "tick mark",
+    "on off",
+    "indeterminate",
+    "tri state",
+    "mixed state",
+    "select all",
+    "draggable knob",
+    "knob drag",
+    "error state",
+    "label before",
+    "per state label"
+   ]
+  },
+  {
+   "component": "Chip",
+   "aka": [
+    "tag",
+    "tags",
+    "pill",
+    "pills",
+    "filter pill",
+    "recipient pill"
+   ],
+   "does": [
+    "removable",
+    "remove cross",
+    "clear all",
+    "selectable",
+    "keyboard arrows",
+    "wrapping row",
+    "colour role",
+    "color role"
+   ]
+  },
+  {
+   "component": "CodeBlock",
+   "aka": [
+    "snippet",
+    "pre tag",
+    "listing",
+    "terminal transcript",
+    "fenced sample",
+    "monospaced box"
+   ],
+   "does": [
+    "line numbers in a gutter",
+    "the gutter can be turned off",
+    "numbers are drawn not copied",
+    "a copy control in the header",
+    "shows copied for a moment",
+    "the language named in the header",
+    "a band behind the lines worth looking at",
+    "highlight lines by a range",
+    "prompt marks before command lines",
+    "counts from a first line number",
+    "tabs expanded for drawing",
+    "tabs handed back untouched",
+    "a long line is cut off not wrapped",
+    "no syntax colouring",
+    "return or space presses the control"
+   ]
+  },
+  {
+   "component": "CodeView",
+   "aka": [
+    "syntax highlighting",
+    "source snippet",
+    "monospace block",
+    "read only editor"
+   ],
+   "does": [
+    "read only by default",
+    "no gutter",
+    "takes exactly the room its lines need",
+    "word wrap off for code",
+    "long lines scroll sideways",
+    "word wrap can be turned on",
+    "editing can be handed back",
+    "raises changed on a keystroke",
+    "set the contents from a string",
+    "sits inline in a page"
+   ]
+  },
+  {
+   "component": "ColorField",
+   "aka": [
+    "hex box",
+    "colour written down",
+    "paste a swatch",
+    "brand value box",
+    "rgb text entry"
+   ],
+   "does": [
+    "reads hex and the rgb function form",
+    "takes the three digit short form",
+    "takes eight digits with alpha",
+    "writes back in one notation",
+    "alpha off by default",
+    "keeps the alpha it already had",
+    "a swatch beside the text",
+    "rewrites itself from what is held",
+    "leaving it is the same as pressing return",
+    "refuses text it cannot read",
+    "paste from a brand sheet"
+   ]
+  },
+  {
+   "component": "ColorPicker",
+   "aka": [
+    "colour chooser",
+    "hue ring",
+    "saturation and value square",
+    "swatch popover",
+    "palette grid",
+    "alpha strip"
+   ],
+   "does": [
+    "hue saturation and value held rather than rgb",
+    "grey and black keep their hue",
+    "a ring with the square in its hole",
+    "transparency along a strip",
+    "rows of numbers",
+    "recent colours from this session",
+    "stands inline on a page",
+    "opens over the page from a swatch",
+    "flips above near the bottom",
+    "escape puts the old colour back",
+    "a press outside commits",
+    "changed while it moves and ended once",
+    "a strip of cells reports which was hit"
+   ]
+  },
+  {
+   "component": "Colour",
+   "aka": [
+    "color",
+    "colors",
+    "palette",
+    "swatches",
+    "theme colors",
+    "theme colours",
+    "accent colors"
+   ],
+   "does": [
+    "primary secondary tertiary",
+    "success warning error",
+    "surface ladder",
+    "outline tokens",
+    "scrim",
+    "inverse pair",
+    "presence dots",
+    "hex values",
+    "reads the live theme"
+   ]
+  },
+  {
+   "component": "ColumnPicker",
+   "aka": [
+    "miller columns",
+    "cascading lists",
+    "drill down panes",
+    "two list mover",
+    "shuttle control",
+    "finder style panes"
+   ],
+   "does": [
+    "one pane per level",
+    "choosing fills the pane to its right",
+    "choosing again throws away what was to the right",
+    "a leaf opens nothing",
+    "an angle quote marks a row with children",
+    "walks as a grid with the arrows",
+    "one tab stop for the whole thing",
+    "boxes that cascade down a tree",
+    "a branch reads its state out of its leaves",
+    "chosen leaves stand as chips",
+    "chips are the removal path",
+    "move rows between two lists",
+    "move all moves only what the search shows",
+    "rows held in their own order on both sides",
+    "a double click sends a row across"
+   ]
+  },
+  {
+   "component": "ComboBox",
+   "aka": [
+    "autocomplete",
+    "auto complete",
+    "type ahead",
+    "typeahead",
+    "searchable select",
+    "editable dropdown"
+   ],
+   "does": [
+    "type to filter",
+    "filter items",
+    "highlight match",
+    "commit on enter",
+    "arrow keys",
+    "escape reverts",
+    "revert on blur",
+    "no matches",
+    "scrolling list",
+    "popup list",
+    "closed set",
+    "click outside closes",
+    "flips above"
+   ]
+  },
+  {
+   "component": "CommandPalette",
+   "aka": [
+    "quick open",
+    "fuzzy finder",
+    "go to anything",
+    "action launcher",
+    "command bar",
+    "run box"
+   ],
+   "does": [
+    "a search over what the app can run",
+    "subsequence matching on the letters",
+    "the best alignment is marked",
+    "word starts and runs score higher",
+    "a change of case counts as a word start",
+    "ranked inside groups and the groups ranked too",
+    "a group with nothing left loses its heading",
+    "key caps drawn beside each row",
+    "up and down wrap",
+    "the page keys move a windowful",
+    "enter runs the row under the cursor",
+    "escape reports a dismissal",
+    "opens with an empty query",
+    "windows to a row budget with no scrollbar",
+    "takes no room in the layout"
+   ]
+  },
+  {
+   "component": "CornerCapView",
+   "aka": [
+    "fake rounded corners",
+    "corner caps",
+    "corner patches",
+    "cheap rounded corners",
+    "round a video",
+    "round a chart",
+    "corner overlay",
+    "negative rounded corners",
+    "rounded corners without a texture"
+   ],
+   "does": [
+    "round the corners of content the library cannot round",
+    "rounded corners with no render target",
+    "paint the surrounding colour over the corners",
+    "round a surface that redraws every frame",
+    "top corners only",
+    "per corner radius",
+    "square one corner",
+    "corner radius clamped to the box",
+    "cheaper than a cached rounded view",
+    "does not clip its children",
+    "claims no hits",
+    "cap colour must match what is behind"
+   ]
+  },
+  {
+   "component": "Coverage",
+   "aka": [
+    "widget list",
+    "catalogue index",
+    "catalog index",
+    "inventory",
+    "audit",
+    "what is missing",
+    "index of widgets"
+   ],
+   "does": [
+    "lists every declaration",
+    "widget type",
+    "derives from",
+    "style ladder rung",
+    "has a story",
+    "family grouping",
+    "summary count",
+    "logged count",
+    "flat and gradient rungs"
+   ]
+  },
+  {
+   "component": "DataGrid",
+   "aka": [
+    "spreadsheet",
+    "table",
+    "cells"
+   ],
+   "does": [
+    "virtualised rows",
+    "virtualized rows",
+    "a million rows",
+    "resize a column",
+    "resize a row",
+    "reorder columns",
+    "drag a column header",
+    "select a cell",
+    "rectangular selection",
+    "select a whole row",
+    "select a whole column",
+    "keyboard navigation",
+    "shift to extend a selection",
+    "column headers",
+    "row numbers",
+    "sort indicator arrow"
+   ]
+  },
+  {
+   "component": "DatePicker",
+   "aka": [
+    "day chooser",
+    "birthday box",
+    "booking dates",
+    "from and to boxes",
+    "iso day entry",
+    "day month year box"
+   ],
+   "does": [
+    "type a day into a box",
+    "a typo stays in the box",
+    "a mark appears beside unreadable text",
+    "reports holding no value",
+    "rewritten in its own shape on leaving",
+    "yyyy mm dd or any separator",
+    "the shape doubles as the placeholder",
+    "leading zeros may be left out when typing",
+    "a short year is refused",
+    "only the trailing button opens the panel",
+    "the panel opens on the month already held",
+    "one press in the panel is the whole answer",
+    "two boxes for a start and an end",
+    "the two presses may be made backwards",
+    "the start never runs past the end"
+   ]
+  },
+  {
+   "component": "Dialog",
+   "aka": [
+    "dialogue",
+    "confirmation prompt",
+    "confirm box",
+    "alert window",
+    "message box",
+    "are you sure"
+   ],
+   "does": [
+    "blocks the page",
+    "dim the background",
+    "scrim",
+    "escape to close",
+    "return confirms",
+    "default answer",
+    "restore focus",
+    "destructive styling",
+    "pinned buttons",
+    "scrolling body",
+    "width sizes",
+    "full screen",
+    "confirmed or cancelled",
+    "confirmed or canceled"
+   ]
+  },
+  {
+   "component": "Divider",
+   "aka": [
+    "separator",
+    "rule",
+    "horizontal line",
+    "vertical line",
+    "hairline",
+    "section break",
+    "line between items"
+   ],
+   "does": [
+    "horizontal or vertical",
+    "label in the line",
+    "centre the label",
+    "center the label",
+    "label at the start or end",
+    "dashed",
+    "dotted",
+    "solid",
+    "line thickness",
+    "inset from the leading edge",
+    "inset both edges",
+    "subtle or strong",
+    "accent colour",
+    "accent color",
+    "stretches to its parent",
+    "separate list rows"
+   ]
+  },
+  {
+   "component": "Dock",
+   "aka": [
+    "tabbed panels",
+    "editor panels"
+   ],
+   "does": [
+    "drag a tab",
+    "move a tab between panels",
+    "reorder tabs",
+    "split a panel",
+    "drop preview",
+    "drag ghost",
+    "nested splits",
+    "collapse an empty panel",
+    "close a tab",
+    "drag and drop"
+   ]
+  },
+  {
+   "component": "Drawer",
+   "aka": [
+    "side panel",
+    "slide out panel",
+    "side sheet",
+    "bottom sheet",
+    "off canvas panel"
+   ],
+   "does": [
+    "slides in from an edge",
+    "edge selection",
+    "dim the background",
+    "scrim",
+    "escape to close",
+    "blocks the page",
+    "grab handle",
+    "snap points",
+    "drag to dismiss",
+    "peek height",
+    "half height",
+    "panel width",
+    "panel height",
+    "slide animation"
+   ]
+  },
+  {
+   "component": "DropControls",
+   "aka": [
+    "popover slider",
+    "popup slider",
+    "toolbar chip",
+    "popover toggles"
+   ],
+   "does": [
+    "opens below",
+    "flips above",
+    "escape closes",
+    "click outside closes",
+    "drag the value",
+    "percentage readout",
+    "value suffix",
+    "switch list",
+    "active count"
+   ]
+  },
+  {
+   "component": "DropDown",
+   "aka": [],
+   "does": [
+    "labels list",
+    "selected item",
+    "arrow keys",
+    "per item icons",
+    "icon only face",
+    "dimmed rows",
+    "opens over the selection",
+    "opens below",
+    "enum binding",
+    "corner arrow"
+   ]
+  },
+  {
+   "component": "Dropzone",
+   "aka": [
+    "file upload",
+    "drag files here",
+    "attach files",
+    "upload well",
+    "transfer list",
+    "picture well"
+   ],
+   "does": [
+    "files dragged onto the window",
+    "a path on the desktop and bytes in a browser",
+    "accepts a list of extensions",
+    "a whole family of media types",
+    "writes the rule out as a hint",
+    "idle accepting and refusing looks",
+    "the border thickens as well as changing colour",
+    "the pointer badge is set to match",
+    "several at once refused out loud",
+    "a press only reports browse",
+    "one row per file with a progress bar",
+    "state moved on by a stable handle",
+    "a note in place of the state word",
+    "the remove mark only reports",
+    "a long name is cut in the middle"
+   ]
+  },
+  {
+   "component": "Elevation",
+   "aka": [
+    "shadow",
+    "drop shadow",
+    "depth",
+    "lift",
+    "raised surface",
+    "shadow levels",
+    "card shadow"
+   ],
+   "does": [
+    "five levels",
+    "blur radius",
+    "vertical drop",
+    "shadow colour",
+    "shadow color",
+    "raised panels",
+    "how high it sits"
+   ]
+  },
+  {
+   "component": "EmptyState",
+   "aka": [
+    "nothing here yet",
+    "no results",
+    "blank slate",
+    "zero data screen",
+    "placeholder message",
+    "nothing to show"
+   ],
+   "does": [
+    "a mark a heading a line and two actions",
+    "a centred column",
+    "nothing yet so start something",
+    "no matches so ask for less",
+    "not allowed so ask someone",
+    "failed so try again",
+    "offline so wait",
+    "five presets differing only in words",
+    "the mark is a slot",
+    "a figure drawn out of circles and boxes",
+    "hide the figure and keep the words",
+    "the actions are slots the host reads",
+    "no face of its own",
+    "takes the colour of what it is dropped into"
+   ]
+  },
+  {
+   "component": "FabControls",
+   "aka": [
+    "property panel",
+    "number scrubber",
+    "drag number",
+    "colour swatch",
+    "color swatch",
+    "colour picker",
+    "color picker",
+    "property row"
+   ],
+   "does": [
+    "drag sideways",
+    "scrub a number",
+    "type a number",
+    "step per pixel",
+    "unit suffix",
+    "wrap around",
+    "fill bar",
+    "colour wheel",
+    "color wheel",
+    "hex entry",
+    "recent swatches",
+    "commit on release",
+    "fine drag",
+    "section header"
+   ]
+  },
+  {
+   "component": "FieldWell",
+   "aka": [
+    "input group",
+    "input wrapper",
+    "search box",
+    "search field",
+    "search well"
+   ],
+   "does": [
+    "leading icon",
+    "trailing label",
+    "leading slot",
+    "trailing slot",
+    "focus state",
+    "click anywhere focuses",
+    "magnifier",
+    "one disabled flag",
+    "text input wrapper"
+   ]
+  },
+  {
+   "component": "FileTree",
+   "aka": [
+    "file browser",
+    "directory browser",
+    "directory listing",
+    "folder hierarchy",
+    "nested folders",
+    "tree view"
+   ],
+   "does": [
+    "expand and collapse folders",
+    "indented rows",
+    "select a node",
+    "drag a node out",
+    "scroll to a node",
+    "reveal a node",
+    "version control status dots",
+    "new and modified marks",
+    "deleted mark",
+    "mixed folder mark",
+    "folder icons",
+    "alternating row shading"
+   ]
+  },
+  {
+   "component": "FloatingPanel",
+   "aka": [
+    "inspector",
+    "tool window",
+    "movable window",
+    "utility window"
+   ],
+   "does": [
+    "drag to move",
+    "resize by the corner",
+    "corner grip",
+    "close mark",
+    "minimum size",
+    "stays on screen",
+    "page stays interactive",
+    "no scrim",
+    "reports position",
+    "reports size",
+    "title bar"
+   ]
+  },
+  {
+   "component": "Form",
+   "aka": [
+    "validation",
+    "required fields",
+    "input rules",
+    "submit and check",
+    "sign up page",
+    "field errors"
+   ],
+   "does": [
+    "a refused submit moves the keyboard to the first wrong field",
+    "fields known by the path they bind to",
+    "rules that speak on change on blur or on submit",
+    "a rule with no moment written on it speaks at blur",
+    "nothing is said until a field has been touched",
+    "required and a minimum length",
+    "a maximum length",
+    "a numeric range between two ends",
+    "a mask of digits letters and any character",
+    "must equal another field",
+    "a message of your own after a bar",
+    "reset puts every input back to what it held",
+    "ask whether a submit would pass",
+    "disable every input at once"
+   ]
+  },
+  {
+   "component": "GlassControls",
+   "aka": [
+    "translucent button",
+    "transparent slider"
+   ],
+   "does": [
+    "refraction",
+    "refracts the background",
+    "lensing",
+    "sliding knob",
+    "filled variant",
+    "needs a background",
+    "overlay draw"
+   ]
+  },
+  {
+   "component": "GlassFloatingSurface",
+   "aka": [
+    "draggable window",
+    "movable panel",
+    "resizable sheet",
+    "frosted overlay",
+    "palette window",
+    "a sheet you can move and size"
+   ],
+   "does": [
+    "moved by its body",
+    "sized by its edges and corners",
+    "no title bar to grab",
+    "a grab band a few points wide",
+    "the frame claims a press before the contents",
+    "a press a button took does not move it",
+    "a press on what is behind it still moves it",
+    "smallest and largest size",
+    "dragging a near edge pins that edge",
+    "pulled back inside the window every draw",
+    "the scene behind is captured again every frame",
+    "sizing moving and placed reports",
+    "position is reported never stored"
+   ]
+  },
+  {
+   "component": "GlassPanel",
+   "aka": [
+    "frosted card",
+    "backdrop blur"
+   ],
+   "does": [
+    "background blur",
+    "scene blur",
+    "refraction",
+    "tint colour",
+    "tint color",
+    "border colour",
+    "border color",
+    "specular highlight",
+    "noise grain",
+    "corner radius",
+    "translucency",
+    "fallback colour",
+    "fallback color"
+   ]
+  },
+  {
+   "component": "GlassSurfaces",
+   "aka": [
+    "frosted backings",
+    "lens presets",
+    "blur presets",
+    "refracting backdrop"
+   ],
+   "does": [
+    "bends the background",
+    "lensing",
+    "gradient blur",
+    "rounded backing",
+    "button backing",
+    "chip backing",
+    "input backing",
+    "icon backing",
+    "toggle backing"
+   ]
+  },
+  {
+   "component": "Grid",
+   "aka": [
+    "columns and rows",
+    "card layout",
+    "cells",
+    "tracks",
+    "responsive columns"
+   ],
+   "does": [
+    "column tracks",
+    "row tracks",
+    "fractional share",
+    "percentage width",
+    "minimum and maximum",
+    "repeat columns",
+    "auto fit",
+    "auto fill",
+    "named areas",
+    "span cells",
+    "column gap",
+    "row gap",
+    "place by column and row",
+    "implicit rows",
+    "flow down columns"
+   ]
+  },
+  {
+   "component": "Html",
+   "aka": [
+    "markup",
+    "hypertext",
+    "rich text"
+   ],
+   "does": [
+    "bold and italic",
+    "underline and strikethrough",
+    "headings h1 to h6",
+    "bullet lists",
+    "numbered lists",
+    "tables with alignment",
+    "inline code spans",
+    "blockquote",
+    "subscript and superscript",
+    "collapsible details sections",
+    "expand and collapse a summary",
+    "line clamp with ellipsis",
+    "inline widgets in a run",
+    "emoji and entities",
+    "wrapping rows of mixed content"
+   ]
+  },
+  {
+   "component": "Icon",
+   "aka": [
+    "pictogram",
+    "symbol"
+   ],
+   "does": [
+    "tint colour",
+    "tint color",
+    "gradient fill",
+    "gradient direction",
+    "rotation angle",
+    "filled disc background",
+    "outlined ring",
+    "circle background",
+    "pixel size",
+    "two stop gradient"
+   ]
+  },
+  {
+   "component": "IconSet",
+   "aka": [
+    "glyph",
+    "font glyph",
+    "unicode symbol",
+    "font symbols"
+   ],
+   "does": [
+    "glyph rendering",
+    "unicode codepoint",
+    "tint glyphs"
+   ]
+  },
+  {
+   "component": "Image",
+   "aka": [
+    "picture",
+    "pictures",
+    "photo",
+    "photos",
+    "bitmap",
+    "png",
+    "jpeg",
+    "raster"
+   ],
+   "does": [
+    "stretch to fit",
+    "crop to fill",
+    "fit inside",
+    "cover the space",
+    "keep aspect ratio",
+    "load from file",
+    "load from url",
+    "async decode",
+    "load from bytes",
+    "decode png jpeg",
+    "webp and gif decoding"
+   ]
+  },
+  {
+   "component": "ImageBlend",
+   "aka": [
+    "crossfade",
+    "cross fade",
+    "dissolve",
+    "picture transition",
+    "photo transition",
+    "picture switcher",
+    "fade between photos",
+    "two picture fade"
+   ],
+   "does": [
+    "crossfade animation",
+    "switch between two",
+    "fade opacity",
+    "swap textures",
+    "load from file",
+    "load png",
+    "load jpeg",
+    "stacked pictures",
+    "toggle back and forth",
+    "keep aspect ratio",
+    "centre alignment",
+    "center alignment"
+   ]
+  },
+  {
+   "component": "KanbanBoard",
+   "aka": [
+    "task board",
+    "swim lanes",
+    "sticky note wall",
+    "work in progress columns",
+    "backlog to done",
+    "card columns"
+   ],
+   "does": [
+    "drag a note up its own column",
+    "drag it across to the next column",
+    "a marker shows the gap it would land in",
+    "a column may cap how many it holds",
+    "a full column refuses and says so",
+    "a full column still reorders its own",
+    "the widget moves its own notes",
+    "reports where it came from and where it went",
+    "escape drops the gesture",
+    "hold at an edge and the column crawls",
+    "the wheel scrolls the column under the pointer",
+    "a heading and a count per column",
+    "notes drawn from a template",
+    "state a height or it never paints"
+   ]
+  },
+  {
+   "component": "Kbd",
+   "aka": [
+    "key cap",
+    "keyboard shortcut",
+    "hotkey",
+    "chord",
+    "cheat sheet",
+    "keyboard help"
+   ],
+   "does": [
+    "one key drawn as a cap",
+    "a side under the face",
+    "pressed drops the face onto the side",
+    "the box keeps its size when a key goes down",
+    "a whole chord from one string",
+    "split on plus signs",
+    "the plus key written out",
+    "modifiers drawn in one order however they were typed",
+    "an unknown key printed as it was written",
+    "a separator between the caps",
+    "each build names the modifiers its own way",
+    "a list of chords and what they do",
+    "headings in the list",
+    "search by label or by the chord as written",
+    "a heading with nothing under it disappears"
+   ]
+  },
+  {
+   "component": "Label",
+   "aka": [
+    "caption",
+    "headline",
+    "static string",
+    "typography"
+   ],
+   "does": [
+    "truncate with an ellipsis",
+    "max lines",
+    "wrap to the width given",
+    "bold and italic variants",
+    "font size",
+    "line spacing",
+    "gradient fill",
+    "horizontal gradient",
+    "vertical gradient",
+    "custom pixel shader",
+    "colour the glyphs",
+    "color the glyphs",
+    "emoji and cjk",
+    "hover in and hover out",
+    "fit or fill width"
+   ]
+  },
+  {
+   "component": "Layout",
+   "aka": [
+    "sizing",
+    "alignment",
+    "spacing",
+    "flow direction"
+   ],
+   "does": [
+    "fill remaining space",
+    "fit content",
+    "minimum size",
+    "maximum size",
+    "weighted share",
+    "wrapping rows",
+    "centre children",
+    "center children",
+    "padding",
+    "margin",
+    "spacing between children",
+    "flow right",
+    "flow down",
+    "responsive width"
+   ]
+  },
+  {
+   "component": "LevelMeter",
+   "aka": [
+    "vu meter",
+    "peak meter",
+    "signal meter",
+    "load bar",
+    "utilisation bar",
+    "headroom meter",
+    "bar that falls",
+    "falling bar",
+    "live value bar",
+    "throughput bar",
+    "latency bar",
+    "temperature bar",
+    "capacity bar",
+    "peak hold bar",
+    "clip light",
+    "overload lamp",
+    "channel meter",
+    "level column",
+    "bar graph readout",
+    "gauge that drops"
+   ],
+   "does": [
+    "show a live value that goes down",
+    "rise instantly and fall slowly",
+    "hold the highest recent reading",
+    "high-water mark that decays",
+    "peak hold that follows the bar down",
+    "latch a lamp when a ceiling is passed",
+    "clear a latched lamp by pressing it",
+    "run the scale bottom to top",
+    "a column instead of a bar",
+    "lift the quiet end of the scale",
+    "draw a reading on a non-linear scale",
+    "stand at a fixed reading with nothing feeding it",
+    "stop repainting once it has settled",
+    "colour the loud end of the bar",
+    "rungs along the bar",
+    "dim a channel that is not live",
+    "print the measured value",
+    "ballistics without a widget"
+   ]
+  },
+  {
+   "component": "LinkLabel",
+   "aka": [
+    "hyperlink",
+    "clickable text",
+    "url",
+    "href",
+    "tappable text"
+   ],
+   "does": [
+    "opens a url when clicked",
+    "opens in place or in a new window",
+    "reports clicks presses and releases",
+    "carries the modifier keys of the click",
+    "an icon beside the words"
+   ]
+  },
+  {
+   "component": "ListItem",
+   "aka": [
+    "row",
+    "settings row",
+    "contact row",
+    "one two or three lines",
+    "leading and trailing slots",
+    "a row with a picture and a switch"
+   ],
+   "does": [
+    "the height comes from the shape",
+    "three shapes for the line counts",
+    "a rule measured to where the words start",
+    "full inset or under the words only",
+    "no rule at all",
+    "an empty leading slot does not indent",
+    "gaps only between things that are there",
+    "a switch in the trailing slot takes its own press",
+    "a decorative glyph answers nothing",
+    "selected is a flag the owner sets",
+    "does not scroll or recycle",
+    "no keyboard of its own"
+   ]
+  },
+  {
+   "component": "Lists",
+   "aka": [
+    "reorderable rows",
+    "drag handle rows"
+   ],
+   "does": [
+    "draw every row given",
+    "row templates",
+    "fetch an item by id",
+    "drag to reorder",
+    "drag handle",
+    "gripper",
+    "insertion indicator line",
+    "reorder event with from and to",
+    "escape cancels a drag",
+    "drag and drop"
+   ]
+  },
+  {
+   "component": "LogList",
+   "aka": [
+    "console",
+    "output pane",
+    "terminal pane",
+    "message log",
+    "event log",
+    "diagnostics panel",
+    "problems panel",
+    "trace view",
+    "live tail",
+    "stdout view"
+   ],
+   "does": [
+    "follow the newest line",
+    "stick to the bottom",
+    "tailing stops when you scroll up",
+    "how many arrived while you were away",
+    "severity per line",
+    "errors only",
+    "warnings and worse",
+    "filter the lines by text",
+    "a file and line number becomes a link",
+    "jump to where a message came from",
+    "how many lines are kept",
+    "the oldest lines are forgotten",
+    "show an application's own log",
+    "levels marked by colour and by word"
+   ]
+  },
+  {
+   "component": "Markdown",
+   "aka": [
+    "md",
+    "readme"
+   ],
+   "does": [
+    "headings",
+    "bullet lists",
+    "numbered lists",
+    "bold and italic",
+    "strikethrough",
+    "inline code",
+    "code blocks",
+    "blockquote",
+    "tables with column alignment",
+    "subscript and superscript",
+    "latex math",
+    "inline maths",
+    "display maths",
+    "emoji",
+    "syntax highlighted code blocks"
+   ]
+  },
+  {
+   "component": "Marquee",
+   "aka": [
+    "scrolling text",
+    "ticker",
+    "moving text"
+   ],
+   "does": [
+    "seamless loop",
+    "travels left",
+    "travels right",
+    "pause on hover",
+    "speed control",
+    "gap between copies",
+    "hold still",
+    "overflowing text",
+    "constant speed"
+   ]
+  },
+  {
+   "component": "Masonry",
+   "aka": [
+    "waterfall layout",
+    "staggered grid",
+    "packed columns",
+    "photo wall",
+    "brick layout",
+    "uneven tiles"
+   ],
+   "does": [
+    "each item keeps its own height",
+    "the next item goes to the shortest column",
+    "no ragged band along a row",
+    "a fixed number of columns",
+    "as many columns as fit a floor width",
+    "the columns share the width equally",
+    "one pass in order and nothing shuffled after",
+    "items may move past one another",
+    "adding at the end never rearranges the rest",
+    "falls back to a single column with no width to divide",
+    "hidden items leave no hole",
+    "items need a definite or fit height",
+    "does not scroll or virtualise"
+   ]
+  },
+  {
+   "component": "Media",
+   "aka": [
+    "picture with a placeholder",
+    "image with a fallback",
+    "broken image mark",
+    "aspect ratio box",
+    "thumbnail frame",
+    "figure and caption"
+   ],
+   "does": [
+    "a shape of its own before the bytes land",
+    "width over height fills the free axis",
+    "the page does not jump when it arrives",
+    "a placeholder while a source is on its way",
+    "a still mark when nothing is coming",
+    "both of those are slots to replace",
+    "a second source when the first fails",
+    "a redirect page counts as a failure",
+    "the header is read the moment bytes arrive",
+    "cover contain and fill",
+    "cover done in the shader",
+    "a caption underneath in the same column",
+    "it never retries or backs off"
+   ]
+  },
+  {
+   "component": "Menu",
+   "aka": [
+    "context menu",
+    "right click menu",
+    "flyout"
+   ],
+   "does": [
+    "right click to open",
+    "opens under a button",
+    "opens at the pointer",
+    "keyboard arrows walk the rows",
+    "escape closes",
+    "type a letter to jump",
+    "submenus",
+    "checkmarks",
+    "radio marks",
+    "section headings",
+    "disabled rows",
+    "destructive row",
+    "shortcut labels",
+    "click away dismiss",
+    "reports what was picked"
+   ]
+  },
+  {
+   "component": "Modal",
+   "aka": [
+    "lightbox",
+    "dim layer",
+    "backdrop",
+    "scrim layer",
+    "blocking popup"
+   ],
+   "does": [
+    "dim the window",
+    "escape to close",
+    "press outside to close",
+    "back gesture",
+    "blocks what is behind",
+    "takes no layout room",
+    "reports dismissal",
+    "cannot be dismissed",
+    "centre content",
+    "center content",
+    "draws over everything"
+   ]
+  },
+  {
+   "component": "Motion",
+   "aka": [
+    "animation",
+    "easing",
+    "transition",
+    "duration",
+    "timing",
+    "curves",
+    "tween",
+    "animations",
+    "ease curves"
+   ],
+   "does": [
+    "durations in seconds",
+    "short to extra long",
+    "seven easings",
+    "linear",
+    "spring",
+    "accelerate",
+    "decelerate",
+    "hover fade demo",
+    "sixteen durations",
+    "timing tokens",
+    "animator ease"
+   ]
+  },
+  {
+   "component": "MovingPanels",
+   "aka": [
+    "slide out"
+   ],
+   "does": [
+    "slides from an edge",
+    "drag up and down",
+    "reports the offset",
+    "initial offset",
+    "reset position",
+    "any side",
+    "sits over content"
+   ]
+  },
+  {
+   "component": "NavList",
+   "aka": [
+    "sidebar",
+    "side rail",
+    "destination picker",
+    "rail of destinations"
+   ],
+   "does": [
+    "exactly one highlighted",
+    "shows where you are",
+    "switch the panel beside it",
+    "arrow keys move the choice",
+    "home and end keys",
+    "one keyboard stop for the whole set",
+    "reports what was chosen",
+    "vertical or horizontal flow",
+    "radio style rows",
+    "custom row template",
+    "labels from a list"
+   ]
+  },
+  {
+   "component": "Nesting",
+   "aka": [
+    "stacked popups",
+    "popup inside a popup",
+    "menu inside a popover",
+    "lock stack",
+    "depth of popups"
+   ],
+   "does": [
+    "escape closes one level",
+    "pointer grab",
+    "blocks clicks underneath",
+    "sweep lock",
+    "scroll block",
+    "stack of owners",
+    "release returns control",
+    "one press one level",
+    "multiple levels deep"
+   ]
+  },
+  {
+   "component": "NumberField",
+   "aka": [
+    "quantity box",
+    "spin box",
+    "up and down arrows",
+    "numeric entry",
+    "counter box",
+    "amount input"
+   ],
+   "does": [
+    "type into it like a text box",
+    "arrows always shown and not only on hover",
+    "press for one step",
+    "hold and it repeats faster",
+    "drag the arrows for more or less",
+    "the wheel over it moves one step",
+    "shift takes ten at a time",
+    "lowest and highest bound",
+    "wraps at a bound or stops there",
+    "stopping is the default",
+    "parsed on return and on leaving",
+    "unreadable text is refused",
+    "the last good value comes back",
+    "a suffix may be left in or typed out"
+   ]
+  },
+  {
+   "component": "OverlayMessages",
+   "aka": [
+    "notification popup"
+   ],
+   "does": [
+    "point at a control",
+    "arrow triangle",
+    "place at a position",
+    "corner popup",
+    "full width banner",
+    "intent colours",
+    "intent colors",
+    "title and detail",
+    "stays until closed",
+    "flips to stay on screen"
+   ]
+  },
+  {
+   "component": "PageFlip",
+   "aka": [
+    "panel swapper",
+    "one at a time container"
+   ],
+   "does": [
+    "show one child at a time",
+    "switch by id",
+    "set the active one",
+    "named templates",
+    "only the active one draws",
+    "create children on demand",
+    "lazy creation",
+    "swap panels",
+    "update a hidden template"
+   ]
+  },
+  {
+   "component": "PageHeader",
+   "aka": [
+    "title block",
+    "hero heading",
+    "screen title",
+    "title with actions",
+    "trail and title",
+    "the top of a screen"
+   ],
+   "does": [
+    "a trail above the title",
+    "a title with a subtitle",
+    "a description line under it",
+    "actions beside the words not under them",
+    "an empty subtitle costs no room",
+    "three sizes of ink rather than one block",
+    "the trail and the actions are slots",
+    "the words wrap to what the actions left",
+    "the actions are laid out first",
+    "a transparent ground",
+    "takes the colour of the screen it is on"
+   ]
+  },
+  {
+   "component": "Pagination",
+   "aka": [
+    "pager",
+    "page numbers",
+    "prev next strip",
+    "page picker",
+    "numbered strip",
+    "results pages",
+    "go to page"
+   ],
+   "does": [
+    "numbered pages",
+    "previous and next arrows",
+    "jump to a page number",
+    "current page highlighted",
+    "fold extra pages into an ellipsis",
+    "neighbour pages around the current one",
+    "pinned pages at each end",
+    "hide the middle",
+    "clamps out of range numbers",
+    "reports the page asked for",
+    "turn the step arrows off",
+    "1 indexed pages"
+   ]
+  },
+  {
+   "component": "PieMenu",
+   "aka": [
+    "radial menu",
+    "wheel of choices",
+    "ring of actions",
+    "marking wheel",
+    "gesture ring",
+    "flick to choose"
+   ],
+   "does": [
+    "opens around the point it was raised at",
+    "a wedge is unbounded past the dead zone",
+    "direction alone picks one",
+    "release out along a wedge",
+    "release back in the middle cancels",
+    "escape or a press outside closes",
+    "the digits one to nine pick by position",
+    "no arrow keys on purpose",
+    "wedges drawn in a shader",
+    "angles clockwise from straight up",
+    "pinned so it stays up as a control",
+    "labels drawn at their measured width",
+    "no nested rings",
+    "it remembers nothing"
+   ]
+  },
+  {
+   "component": "Placeholder",
+   "aka": [
+    "skeleton",
+    "skeleton screen",
+    "skeleton loader",
+    "shimmer",
+    "loading shapes",
+    "grey blocks",
+    "gray blocks"
+   ],
+   "does": [
+    "shimmer sweep",
+    "pulse",
+    "wave",
+    "no animation",
+    "reduced motion",
+    "translucent",
+    "circle shape",
+    "text lines",
+    "paragraph lines",
+    "avatar stand-in",
+    "image stand-in",
+    "table rows",
+    "while loading",
+    "before data arrives",
+    "stands in for content"
+   ]
+  },
+  {
+   "component": "PlaybackBar",
+   "aka": [
+    "seek bar",
+    "scrubber",
+    "scrub bar",
+    "transport",
+    "transport bar",
+    "position slider",
+    "time slider",
+    "progress slider",
+    "player controls"
+   ],
+   "does": [
+    "seek",
+    "scrub",
+    "jump to a point",
+    "click to seek",
+    "drag the playhead",
+    "show elapsed time",
+    "show time remaining",
+    "count down",
+    "format a clock",
+    "mm:ss"
+   ]
+  },
+  {
+   "component": "Popover",
+   "aka": [
+    "flyout",
+    "hover card",
+    "toggletip",
+    "anchored panel"
+   ],
+   "does": [
+    "anchor to a control",
+    "placement sides",
+    "flip when no room",
+    "shift to stay on screen",
+    "arrow pointer",
+    "open on click",
+    "open on hover",
+    "dwell delay",
+    "opens at the pointer",
+    "secondary click",
+    "light dismiss",
+    "escape closes",
+    "tab cycles inside",
+    "match anchor width",
+    "confirm and cancel",
+    "danger styling"
+   ]
+  },
+  {
+   "component": "PortalList",
+   "aka": [
+    "virtual scroller",
+    "infinite scroll",
+    "news feed",
+    "thousands of rows",
+    "virtual list",
+    "virtualised list",
+    "virtualized list"
+   ],
+   "does": [
+    "only draws what is on screen",
+    "recycles row widgets",
+    "momentum scrolling",
+    "flick scrolling",
+    "rubber band bounce",
+    "smooth scroll to an item",
+    "jump to the end",
+    "auto tail to new content",
+    "drag to scroll",
+    "row templates",
+    "select and copy across rows",
+    "reached start and reached end events",
+    "scroll position",
+    "set the item range"
+   ]
+  },
+  {
+   "component": "Progress",
+   "aka": [
+    "progress bar",
+    "loading bar",
+    "percent bar",
+    "meter",
+    "gauge",
+    "activity rings",
+    "page load line",
+    "how far along"
+   ],
+   "does": [
+    "percentage readout",
+    "determinate",
+    "indeterminate",
+    "animates to value",
+    "stacked segments",
+    "ring sections",
+    "half ring arc",
+    "needle and zones",
+    "warning zone",
+    "critical zone",
+    "track thickness",
+    "stop indicator",
+    "nested rings",
+    "top of page hairline",
+    "raises completed"
+   ]
+  },
+  {
+   "component": "PropertyInspector",
+   "aka": [
+    "object panel",
+    "attributes panel",
+    "settings sidebar",
+    "reflection panel",
+    "value editor list",
+    "name and value rows"
+   ],
+   "does": [
+    "rows of a name and an editor",
+    "grouped under headings from the dotted name",
+    "shows only the leaf of a dotted name",
+    "fold a group away",
+    "a group keeps its count when folded",
+    "a hex value gets a swatch",
+    "a number gets a draggable field",
+    "true or false gets a box",
+    "a value with choices gets a menu",
+    "anything else gets a text field",
+    "read only rows are shown and not edited",
+    "text is the one channel in both directions",
+    "it reports and never writes",
+    "changed follows a gesture and committed ends it",
+    "a double click asks for a default"
+   ]
+  },
+  {
+   "component": "RadioButton",
+   "aka": [
+    "option button",
+    "single choice",
+    "pick one",
+    "exclusive choice"
+   ],
+   "does": [
+    "exclusive selection",
+    "mutually exclusive options",
+    "select one option",
+    "deselect the others",
+    "toggle off when independent",
+    "space or return to activate",
+    "label and icon together"
+   ]
+  },
+  {
+   "component": "RadioGroup",
+   "aka": [
+    "one of many",
+    "exclusive choice",
+    "option buttons",
+    "pick exactly one",
+    "either or",
+    "single answer set"
+   ],
+   "does": [
+    "exactly one answer between the children",
+    "one tab stop for the whole question",
+    "the arrows move the answer and not just the focus",
+    "both arrow pairs work whichever way it runs",
+    "home and end reach the answers that can be taken",
+    "wrap round from either end",
+    "the arrows step past a disabled answer",
+    "no answer at all when every answer is disabled",
+    "disabling the whole set and letting go again",
+    "reports the index when it moves",
+    "a second press on the current answer says nothing",
+    "reads back the label of the answer held",
+    "runs across or down"
+   ]
+  },
+  {
+   "component": "RangeSlider",
+   "aka": [
+    "dual slider",
+    "two handle slider",
+    "min max picker",
+    "price filter",
+    "span selector",
+    "double slider"
+   ],
+   "does": [
+    "two handles on one track",
+    "drag either end",
+    "drag the whole span at once",
+    "handles never cross",
+    "minimum and maximum",
+    "least gap between the ends",
+    "press bare track to jump",
+    "double tap to reset",
+    "arrow keys move a handle",
+    "home and end keys",
+    "stepped values",
+    "quantised values",
+    "quantized values",
+    "readout with a unit",
+    "decimal precision"
+   ]
+  },
+  {
+   "component": "Rating",
+   "aka": [
+    "stars",
+    "five stars",
+    "score marks",
+    "review score",
+    "vote out of five",
+    "hearts"
+   ],
+   "does": [
+    "a row of marks holding one number",
+    "hover previews the value a press would set",
+    "the preview is drawn in a quieter ink",
+    "the count beside the marks keeps the real value",
+    "pressing the mark it stands on clears it",
+    "clearing can be turned off",
+    "drag along the row on a touch screen",
+    "half marks",
+    "a part mark is the glyph cut down",
+    "the arrows move by one step",
+    "home is the bottom and end the top",
+    "the glyph is text so any face works",
+    "a read only row shows an odd fraction honestly",
+    "reports when the pointer leaves"
+   ]
+  },
+  {
+   "component": "RichTextEditor",
+   "aka": [
+    "wysiwyg",
+    "word processor",
+    "formatted document",
+    "marks over runs",
+    "prose editing",
+    "bold and italic in a box"
+   ],
+   "does": [
+    "blocks of paragraphs headings quotes and lists",
+    "runs that split and merge",
+    "two neighbouring runs never share their marks",
+    "underline and strikethrough",
+    "inline monospace",
+    "a link with a target",
+    "typing at the right hand edge of a link falls outside it",
+    "return splits a block",
+    "backspace takes a block's kind off first",
+    "undo and redo a run of keystrokes at once",
+    "words moved over with alt or control",
+    "the caret is drawn inside the flow",
+    "a small markup written back after every change",
+    "a read only twin that still selects",
+    "a press on a link reported as an action"
+   ]
+  },
+  {
+   "component": "Rotary",
+   "aka": [
+    "knob",
+    "knobs",
+    "dial",
+    "dials",
+    "circular slider",
+    "volume knob",
+    "pan knob"
+   ],
+   "does": [
+    "drag up and down to change",
+    "type a value in",
+    "double tap to reset",
+    "label tap resets to default",
+    "bipolar centre",
+    "bipolar center",
+    "fills from the middle",
+    "arc gap at the bottom",
+    "arc thickness",
+    "minimum and maximum",
+    "stepped values",
+    "logarithmic scale",
+    "mouse wheel",
+    "unit suffix",
+    "decimal precision"
+   ]
+  },
+  {
+   "component": "RotatedImage",
+   "aka": [
+    "turned picture",
+    "tilted picture",
+    "angled photo",
+    "picture at an angle"
+   ],
+   "does": [
+    "not available",
+    "unavailable",
+    "unimplemented"
+   ]
+  },
+  {
+   "component": "ScrollBar",
+   "aka": [
+    "kinetic scroller"
+   ],
+   "does": [
+    "drag the handle",
+    "mouse wheel",
+    "trackpad",
+    "flick",
+    "momentum",
+    "fling",
+    "rubber band",
+    "bounce at edges",
+    "minimum handle size",
+    "handle thickness",
+    "bring into view",
+    "smooth motion"
+   ]
+  },
+  {
+   "component": "Select",
+   "aka": [
+    "chooser",
+    "option list",
+    "multiple choice"
+   ],
+   "does": [
+    "shows one value and offers the rest",
+    "choose from a list of options",
+    "toggle several at once",
+    "check mark on chosen rows",
+    "stays open while toggling",
+    "counts how many are chosen",
+    "names them instead of counting",
+    "placeholder when nothing chosen",
+    "options as a list of words",
+    "reports the chosen index",
+    "list hangs below or at the pointer",
+    "restore a saved set",
+    "choose by name or by index"
+   ]
+  },
+  {
+   "component": "Shape",
+   "aka": [
+    "corner radius",
+    "rounded corners",
+    "border radius",
+    "pill",
+    "roundness",
+    "corners",
+    "radius scale"
+   ],
+   "does": [
+    "radius ladder",
+    "none to full pill",
+    "seven corner sizes",
+    "corner tokens",
+    "rounded panels"
+   ]
+  },
+  {
+   "component": "Size",
+   "aka": [
+    "icon size",
+    "control height",
+    "touch target",
+    "hairline"
+   ],
+   "does": [
+    "control heights",
+    "icon sizes",
+    "hairline widths",
+    "three heights",
+    "token lengths",
+    "bar per token",
+    "minimum tap area"
+   ]
+  },
+  {
+   "component": "Slider",
+   "aka": [
+    "fader",
+    "faders",
+    "trackbar",
+    "gain control"
+   ],
+   "does": [
+    "drag to change the value",
+    "type a value in",
+    "double tap to reset",
+    "label tap resets to default",
+    "minimum and maximum",
+    "stepped values",
+    "decimal precision",
+    "unit suffix",
+    "percent display scale",
+    "logarithmic taper",
+    "gain law taper",
+    "mouse wheel",
+    "vertical drag",
+    "fill from the centre",
+    "fill from the center"
+   ]
+  },
+  {
+   "component": "SlidesView",
+   "aka": [
+    "slideshow",
+    "presentation",
+    "slide deck",
+    "chapter slides",
+    "carousel"
+   ],
+   "does": [
+    "arrow keys move between slides",
+    "next and previous",
+    "animated sliding transition",
+    "one slide fills the space",
+    "reports which slide is showing",
+    "title and body slides",
+    "takes keyboard focus on press",
+    "step through a talk"
+   ]
+  },
+  {
+   "component": "Slug",
+   "aka": [
+    "large glyphs",
+    "big type",
+    "glyph rendering",
+    "font rendering"
+   ],
+   "does": [
+    "very large font sizes",
+    "render path comparison",
+    "msdf raster path",
+    "gradient labels at size",
+    "custom get_color shader",
+    "glyph shape probes",
+    "descenders and counters",
+    "theme colour source",
+    "theme color source",
+    "diagnostic probes",
+    "disappearing glyphs"
+   ]
+  },
+  {
+   "component": "Spacing",
+   "aka": [
+    "gap",
+    "gaps",
+    "whitespace"
+   ],
+   "does": [
+    "six steps",
+    "scale factor",
+    "bar per token",
+    "token lengths",
+    "gap sizes",
+    "ladder of gaps"
+   ]
+  },
+  {
+   "component": "Spinner",
+   "aka": [
+    "loading indicator",
+    "busy indicator",
+    "throbber",
+    "activity indicator",
+    "loader",
+    "loading wheel",
+    "loading overlay",
+    "saving indicator"
+   ],
+   "does": [
+    "indeterminate",
+    "turning arc",
+    "pulsing dots",
+    "rising bars",
+    "delayed appearance",
+    "never flashes",
+    "tick on success",
+    "cross on failure",
+    "auto reset",
+    "start finish fail",
+    "blocks the pointer",
+    "dims content",
+    "blurred glass",
+    "label beside it",
+    "retry button"
+   ]
+  },
+  {
+   "component": "Splash",
+   "aka": [
+    "sandbox",
+    "isolate",
+    "embedded script",
+    "plugin host",
+    "script runner",
+    "hot swappable page",
+    "downloaded panel"
+   ],
+   "does": [
+    "runs a script",
+    "separate virtual machine",
+    "compiled at runtime",
+    "network permission",
+    "storage quota",
+    "sandbox directory",
+    "host capabilities",
+    "call into the script",
+    "validate a body",
+    "isolated events",
+    "untrusted code",
+    "least privilege",
+    "embeds a plugin"
+   ]
+  },
+  {
+   "component": "SplitPane",
+   "aka": [
+    "resizable panes",
+    "sidebar divider",
+    "draggable gutter",
+    "two panel layout",
+    "sash",
+    "adjustable sidebar"
+   ],
+   "does": [
+    "two children and a bar between them",
+    "side by side or stacked",
+    "the least each side may be is a law",
+    "the floor holds for a drag and for the keyboard",
+    "folding is a state of its own",
+    "the ask and where the bar stands are two numbers",
+    "a squeeze never writes itself back",
+    "a narrow window puts the bar back afterwards",
+    "both floors miss by the same share",
+    "the bar is a focus stop",
+    "the arrows move it by a step",
+    "home and end are the clamps themselves",
+    "an arrow brings a folded side back",
+    "settled says the number to write down",
+    "moved reports every frame of a drag"
+   ]
+  },
+  {
+   "component": "Splitter",
+   "aka": [
+    "drag bar",
+    "gutter",
+    "resize handle",
+    "two panes",
+    "split view",
+    "split pane",
+    "resizable panes"
+   ],
+   "does": [
+    "drag to resize",
+    "side by side",
+    "stacked panes",
+    "keep a fraction",
+    "fixed from one edge",
+    "minimum pane size",
+    "fold a pane",
+    "collapse a pane",
+    "reopen a pane",
+    "reports its position",
+    "horizontal or vertical"
+   ]
+  },
+  {
+   "component": "StackNavigation",
+   "aka": [
+    "screen stack",
+    "push and pop screens",
+    "drill down",
+    "header with a back arrow"
+   ],
+   "does": [
+    "push a screen",
+    "pop back",
+    "pop to the root",
+    "slide in transition",
+    "animated push and pop",
+    "back button in the header",
+    "mouse back button pops",
+    "title in the header",
+    "set the title at runtime",
+    "one screen at a time",
+    "how deep it is",
+    "tells the incoming screen it is showing"
+   ]
+  },
+  {
+   "component": "State",
+   "aka": [
+    "interaction states",
+    "state layers",
+    "overlay tint"
+   ],
+   "does": [
+    "hover opacity",
+    "focus opacity",
+    "press opacity",
+    "drag opacity",
+    "two disabled strengths",
+    "scrim opacity",
+    "content over surface",
+    "opacity tokens",
+    "tint preview"
+   ]
+  },
+  {
+   "component": "Surfaces",
+   "aka": [
+    "auto height",
+    "animated height",
+    "smooth resize",
+    "self sizing wrapper"
+   ],
+   "does": [
+    "eases its height",
+    "exponential smoothing",
+    "first draw snaps",
+    "content driven height"
+   ]
+  },
+  {
+   "component": "Svg",
+   "aka": [
+    "vector drawing",
+    "artwork",
+    "drawing file"
+   ],
+   "does": [
+    "load a drawing from a resource",
+    "scale into a given size",
+    "fit to the drawing's own size",
+    "tint a drawing",
+    "recolour",
+    "recolor",
+    "keep the authored colours",
+    "keep the authored colors",
+    "animated drawing",
+    "asks for a frame every frame",
+    "turn the animation off",
+    "per vertex alpha kept"
+   ]
+  },
+  {
+   "component": "SvgSelect",
+   "aka": [
+    "clickable map",
+    "image map",
+    "floor plan picker",
+    "seating chart",
+    "region hit test",
+    "pick a country"
+   ],
+   "does": [
+    "a drawing that is the control",
+    "parts named by the id in the file",
+    "the id comes back when one is picked",
+    "a part with no id picks nothing",
+    "curves flattened into closed rings",
+    "a ray cast counts the edges it crosses",
+    "nonzero and even odd fill rules",
+    "a hole in a shape is not picked through",
+    "a region lit by rewriting its own fill",
+    "tessellated once per change and not per frame",
+    "one at a time or several held",
+    "a miss changes nothing",
+    "hover and chosen colours mixed in by weight",
+    "a tint per id for a quantity map",
+    "the arrows walk the regions in paint order"
+   ]
+  },
+  {
+   "component": "Table",
+   "aka": [
+    "rows and columns",
+    "spreadsheet look",
+    "data listing",
+    "records with headings",
+    "striped rows",
+    "bordered grid"
+   ],
+   "does": [
+    "headings over rows that are all present",
+    "a heading a width and an alignment in one string",
+    "a column with no width shares what is left",
+    "sharing on top of what its content needs",
+    "cells of text or of a widget",
+    "a widget cell built from a named template",
+    "pressing a heading cycles up down and off",
+    "the third press restores the given order",
+    "it moves the indicator and reports",
+    "the host reorders and hands the rows back",
+    "columns exempted from sorting",
+    "the heading band stays put while the body scrolls",
+    "no selection editing or resizing",
+    "striped bordered and compact dress"
+   ]
+  },
+  {
+   "component": "Tabs",
+   "aka": [
+    "tab strip",
+    "tab bar",
+    "tabbed panel"
+   ],
+   "does": [
+    "share the width",
+    "shrink as more are opened",
+    "maximum and minimum width",
+    "close mark on a tab",
+    "middle click to close",
+    "add a new one",
+    "reports what was chosen",
+    "reports what was closed",
+    "close mark shows on hover",
+    "close mark shows on the active one",
+    "active one matches the panel colour",
+    "active one matches the panel color",
+    "chooses the panel underneath",
+    "set the list at runtime"
+   ]
+  },
+  {
+   "component": "TagField",
+   "aka": [
+    "tags",
+    "chips input",
+    "keywords box",
+    "recipients box",
+    "labels entry",
+    "multi value box"
+   ],
+   "does": [
+    "a text box whose answer is a list",
+    "return commits everything in the box",
+    "a comma or a space commits what came before it",
+    "a pasted list becomes a list of entries",
+    "backspace on an empty box takes the last one back",
+    "a cross on a chip removes it",
+    "a duplicate is refused out loud",
+    "the border warns until the next keystroke",
+    "the refused text leaves the box",
+    "a cap on how many it will hold",
+    "case folded unless told to match it",
+    "reports the whole list after every move",
+    "added removed refused and cleared",
+    "chips drawn from a template"
+   ]
+  },
+  {
+   "component": "Text",
+   "aka": [
+    "type scale",
+    "body copy",
+    "font sizes",
+    "headings ladder",
+    "typography",
+    "small print"
+   ],
+   "does": [
+    "body size and the rungs either side",
+    "sizes come from theme tokens",
+    "retune the scale and every screen moves",
+    "bold at exactly the body size",
+    "emphasis as weight and not as size",
+    "a quieter colour for context",
+    "a monospaced face for an identifier",
+    "nothing drawn behind the code face",
+    "all of them measure to their ink",
+    "none of them wrap",
+    "stands in a row beside a button",
+    "copy that has to wrap belongs elsewhere",
+    "the heading rungs shown whole"
+   ]
+  },
+  {
+   "component": "TextFlow",
+   "aka": [
+    "paragraph",
+    "prose layout",
+    "styled run",
+    "typesetting",
+    "wrapping prose",
+    "rich text"
+   ],
+   "does": [
+    "wrap a long run",
+    "push and pop styles",
+    "bold and italic",
+    "underline and strikethrough",
+    "inline code",
+    "quote block",
+    "code block",
+    "inline links mid sentence",
+    "selection across style boundaries",
+    "drag to select",
+    "explicit line breaks",
+    "latex math",
+    "fractions and roots",
+    "superscripts",
+    "greek letters",
+    "maths font"
+   ]
+  },
+  {
+   "component": "TextInput",
+   "aka": [
+    "text field",
+    "text box",
+    "textbox",
+    "textarea",
+    "text area",
+    "entry field",
+    "edit field",
+    "password field",
+    "multiline field"
+   ],
+   "does": [
+    "type and edit words",
+    "placeholder when empty",
+    "read only mode",
+    "password masking",
+    "numbers only",
+    "multiline editing",
+    "horizontal scrolling when it overflows",
+    "select all",
+    "double click selects a word",
+    "copy cut and paste",
+    "undo and redo",
+    "blinking caret",
+    "move by word",
+    "grows to fit then scrolls",
+    "enter submits"
+   ]
+  },
+  {
+   "component": "TileList",
+   "aka": [
+    "tile grid",
+    "grid of thumbnails",
+    "gallery view",
+    "icon view",
+    "picker grid",
+    "virtualised grid",
+    "virtualized grid",
+    "item wall"
+   ],
+   "does": [
+    "lays items out n across",
+    "only draws the rows on screen",
+    "recycles rows and the tiles in them",
+    "one across is an ordinary row list",
+    "as many across as a floor width allows",
+    "the tiles share the row equally",
+    "reports each item with its row and column",
+    "turns a tile's action back into an item number",
+    "keeps the top item at the top when the count changes",
+    "scroll to an item",
+    "tiles need a definite or fit height",
+    "one tile template for the whole set"
+   ]
+  },
+  {
+   "component": "Timeline",
+   "aka": [
+    "history of events",
+    "activity feed",
+    "delivery progress",
+    "milestones",
+    "audit trail",
+    "steps down a page"
+   ],
+   "does": [
+    "events in the order they happened",
+    "a segment runs between the bullets",
+    "two bullets too close get no segment",
+    "a filled disc a hollow ring or a glyph",
+    "an unknown bullet word falls back to a disc",
+    "one event per string with bars between",
+    "a heading and a body under each",
+    "trailing leading or alternating sides",
+    "running down or across",
+    "each event takes an equal share across",
+    "marks how far things have got",
+    "counting from one so zero means nothing",
+    "the marked event is wider and accented",
+    "it formats no dates of its own"
+   ]
+  },
+  {
+   "component": "TimePicker",
+   "aka": [
+    "hour and minute",
+    "clock entry",
+    "am pm box",
+    "schedule an hour",
+    "when does it start",
+    "meeting hour"
+   ],
+   "does": [
+    "no date no zone and no clock reading",
+    "a box you type an hour into",
+    "columns of offered hours and minutes",
+    "nine or oh nine or nine thirty all parse",
+    "a dot or a colon between the parts",
+    "an am or pm mark after it",
+    "refuses what will not parse",
+    "the last good value comes back",
+    "up and down move the part under the caret",
+    "the part stays selected for the next press",
+    "the wheel moves the same part",
+    "offers counted from the lowest and not filtered",
+    "each hour has its own set of minutes",
+    "only hours that have an offer are listed",
+    "twelve hours changes what is offered not what is held"
+   ]
+  },
+  {
+   "component": "Tip",
+   "aka": [
+    "tooltip",
+    "hover text",
+    "hover label",
+    "hover hint",
+    "help bubble",
+    "balloon",
+    "hover popup"
+   ],
+   "does": [
+    "hover delay",
+    "dwell time",
+    "twelve placements",
+    "flips to fit",
+    "stays in window",
+    "arrow pointer",
+    "wrap width",
+    "shows on focus",
+    "escape dismisses",
+    "keyboard reachable",
+    "wraps a control",
+    "error colour",
+    "error color",
+    "instant follow",
+    "one overlay layer"
+   ]
+  },
+  {
+   "component": "Toast",
+   "aka": [
+    "snackbar",
+    "notification",
+    "transient message",
+    "flash message",
+    "toaster",
+    "temporary message",
+    "corner message",
+    "notification stack"
+   ],
+   "does": [
+    "auto dismiss",
+    "timed dismissal",
+    "pauses on hover",
+    "countdown hairline",
+    "stack limit",
+    "queue overflow",
+    "six corners",
+    "undo action",
+    "closable",
+    "never blocks input",
+    "replace by id",
+    "dismiss all",
+    "errors stay",
+    "slides in",
+    "second line body",
+    "raise from anywhere"
+   ]
+  },
+  {
+   "component": "Toolbar",
+   "aka": [
+    "app bar",
+    "top bar",
+    "action bar",
+    "title strip",
+    "button row",
+    "bottom bar"
+   ],
+   "does": [
+    "two fixed ends and a middle that takes what is left",
+    "leading centre and trailing slots",
+    "the middle is a deferred fill",
+    "the trailing actions always get their room",
+    "a title drawn only when the middle is empty",
+    "a floating slot past the actions",
+    "the same row at the top or at the bottom",
+    "a rule along one edge",
+    "raised changes its surface and casts no shadow",
+    "lift at one threshold and settle at a lower one",
+    "the host reports its own scroll offset",
+    "a slot takes a value and not a named child",
+    "it never collapses or folds what is in it"
+   ]
+  },
+  {
+   "component": "Tour",
+   "aka": [
+    "walkthrough",
+    "onboarding steps",
+    "coach marks",
+    "guided tips",
+    "product intro",
+    "first run guide"
+   ],
+   "does": [
+    "dims everything but one control",
+    "cuts a hole around the step's target",
+    "a card beside the hole",
+    "the card takes whichever side has room",
+    "targets named by a dotted id path",
+    "a target that is not there is stepped over",
+    "the count counts the steps that will be seen",
+    "scrolling ancestors bring a target into view",
+    "next back and skip on the card",
+    "return and the right arrow advance",
+    "escape leaves at any point",
+    "started stepped finished and skipped",
+    "it holds the pointer while it runs",
+    "it remembers nothing about having been shown"
+   ]
+  },
+  {
+   "component": "TreeView",
+   "aka": [
+    "folder outline",
+    "nested rows",
+    "expandable branches",
+    "hierarchy list",
+    "outline with fold marks",
+    "parent and child rows"
+   ],
+   "does": [
+    "rows that fold away",
+    "an indent guide down each level",
+    "a plus and a minus fold mark",
+    "fold state kept by id and not by index",
+    "a node that comes back keeps its fold",
+    "ticking a branch writes to its leaves",
+    "a branch reads its box out of its leaves",
+    "a mixed box for a part ticked branch",
+    "a press on a mixed box resolves to on",
+    "a branch selects itself and not its subtree",
+    "a row folded out of sight stays chosen",
+    "marks drawn as rectangles and circles",
+    "no dragging renaming or context menu",
+    "no scrolling of its own"
+   ]
+  },
+  {
+   "component": "Type",
+   "aka": [
+    "typography",
+    "font",
+    "fonts",
+    "text styles",
+    "type scale",
+    "headings",
+    "font sizes",
+    "text sizes"
+   ],
+   "does": [
+    "nine presets",
+    "title body label",
+    "three sizes each",
+    "base font size",
+    "scale follows the knob",
+    "sample sentence",
+    "text style tokens",
+    "heading sizes",
+    "body text size"
+   ]
+  },
+  {
+   "component": "ValueInput",
+   "aka": [
+    "number field",
+    "numeric field",
+    "spinbox",
+    "stepper",
+    "number box",
+    "drag a number",
+    "scrubbable number"
+   ],
+   "does": [
+    "scrub sideways to change it",
+    "click to type a number",
+    "arrows at each end step it",
+    "minimum and maximum bounds",
+    "step granularity",
+    "decimal places",
+    "suffix after the number",
+    "clamps out of bounds numbers",
+    "enter commits escape reverts",
+    "hover reveals the step arrows",
+    "reports every change",
+    "a host can push a number in"
+   ]
+  },
+  {
+   "component": "Vector",
+   "aka": [
+    "shapes",
+    "drawing",
+    "path drawing"
+   ],
+   "does": [
+    "rectangle",
+    "circle",
+    "ellipse",
+    "polygon",
+    "polyline",
+    "path d string",
+    "fill and stroke",
+    "stroke width",
+    "line cap and join",
+    "linear gradient",
+    "radial gradient",
+    "gradient stops",
+    "drop shadow",
+    "group transforms",
+    "rotate and scale",
+    "skew and translate"
+   ]
+  },
+  {
+   "component": "Video",
+   "aka": [
+    "movie",
+    "movies",
+    "clip player",
+    "film playback",
+    "camera preview",
+    "webcam view",
+    "stream player",
+    "mp4 player"
+   ],
+   "does": [
+    "play and pause",
+    "seek",
+    "scrub bar",
+    "volume",
+    "mute",
+    "loop playback",
+    "autoplay",
+    "playback speed",
+    "track selection",
+    "poster thumbnail",
+    "hardware decoding",
+    "yuv colour conversion",
+    "yuv color conversion",
+    "stream from url",
+    "camera capture"
+   ]
+  },
+  {
+   "component": "View",
+   "aka": [
+    "div"
+   ],
+   "does": [
+    "background colour",
+    "background color",
+    "clip children",
+    "cached drawing",
+    "border",
+    "show background"
+   ]
+  },
+  {
+   "component": "ViewShapes",
+   "aka": [
+    "rounded rectangle",
+    "circle",
+    "hexagon",
+    "gradient fill"
+   ],
+   "does": [
+    "rounded corners",
+    "round one pair of corners",
+    "gradient along an axis",
+    "drop shadow",
+    "horizontal rule",
+    "vertical rule",
+    "scroll one axis",
+    "scroll both axes",
+    "cache into a texture",
+    "property rows",
+    "level meter"
+   ]
+  },
+  {
+   "component": "Waveform",
+   "aka": [
+    "audio peaks lane",
+    "sound envelope display",
+    "audio scrubber",
+    "track overview bar",
+    "loop region editor",
+    "peak meter history"
+   ],
+   "does": [
+    "the peaks of a recording across a lane",
+    "lowest and highest sample per column",
+    "spans with a name and a meaning",
+    "points in time with a name and a meaning",
+    "a playhead over the picture",
+    "press the lane to move the playhead",
+    "drag a region edge to resize it",
+    "drag a marker to move it",
+    "click a marker without moving it",
+    "reports where a drag settled",
+    "quantize every drag to a step",
+    "one texture and one quad",
+    "peaks reduced to one texel a pixel",
+    "extremes kept so transients survive",
+    "peaks that cover part of the axis",
+    "names left out when they do not fit",
+    "the host owns the peak data",
+    "it does not decode audio",
+    "no zoom and no scrolling"
+   ]
+  },
+  {
+   "component": "Welcome",
+   "aka": [
+    "intro",
+    "introduction",
+    "start here",
+    "home page",
+    "getting started",
+    "landing",
+    "about"
+   ],
+   "does": [
+    "what this catalogue is",
+    "how to read it",
+    "gpu drawn widgets",
+    "live styling",
+    "no recompile",
+    "cross platform",
+    "runs on the web",
+    "green dot marks new",
+    "pick a story"
+   ]
+  },
+  {
+   "component": "WheelPicker",
+   "aka": [
+    "drum",
+    "roller",
+    "spinning columns",
+    "rolodex",
+    "reel of values",
+    "band across the middle"
+   ],
+   "does": [
+    "the row in the band is the value",
+    "no confirm step and never empty",
+    "a flick glides and lands on a row",
+    "press a moving column to stop it",
+    "tap a row to bring it into the band",
+    "one row per notch at most",
+    "each column its own list and its own value",
+    "a column that comes round",
+    "a fixed number of rows on screen",
+    "up and down move the lit column",
+    "left and right choose which column is lit",
+    "home and end are the ends of the list",
+    "reports while it is still moving",
+    "set a value with no spin to watch"
+   ]
+  },
+  {
+   "component": "WindowChrome",
+   "aka": [
+    "title bar",
+    "caption bar",
+    "menu bar",
+    "window buttons",
+    "caption buttons",
+    "app menu",
+    "minimise button",
+    "minimize button",
+    "maximise button",
+    "maximize button",
+    "window furniture"
+   ],
+   "does": [
+    "menus declared as data",
+    "keyboard shortcuts",
+    "shortcut glyphs beside the label",
+    "greyed out entries",
+    "grayed out entries",
+    "separator rules in a menu",
+    "reports the chosen id",
+    "drops open under its title",
+    "arrow keys walk the entries",
+    "enable and disable an entry",
+    "cmd maps to ctrl off mac",
+    "minimise maximise close glyphs",
+    "fullscreen glyph",
+    "xr mode glyph",
+    "recording lamp",
+    "glyphs drawn by a shader"
+   ]
+  }
+ ]
+}

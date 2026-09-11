@@ -74,7 +74,7 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "ValueInputOverview",
     added: "2025-05-06",
-    tags: &[],
+    tags: &["number", "numeric", "stepper", "spinbox", "scrub"],
     doc: "# ValueInput
 
 A small number with an arrow at each end. Drag across it to change the value, or click to type one.

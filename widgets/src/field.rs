@@ -272,10 +272,17 @@ impl Widget for FieldWell {
         self.draw_bg.disabled = if self.disabled { 1.0 } else { 0.0 };
 
         self.draw_bg.begin(cx, walk, self.layout);
+        // The trailing slot is reserved BEFORE the input is drawn. Every
+        // preset makes the input `width: Fill`, so drawn in order it takes
+        // the whole row and the unit, the clear mark or the stepper this
+        // slot exists for is laid out into nothing and never appears.
+        // Deferring is how the slider keeps a label beside a filling text
+        // box, and this is the same problem.
+        let trailing_walk = self.trailing.walk(cx.cx.cx);
+        let deferred = cx.defer_walk_turtle(trailing_walk);
         for (name, slot) in [
             (live_id!(leading), &mut self.leading),
             (live_id!(input), &mut self.input),
-            (live_id!(trailing), &mut self.trailing),
         ] {
             // The slots are drawn here rather than by a container, so nothing
             // else puts them in the tree: without this a host could not reach
@@ -285,6 +292,12 @@ impl Widget for FieldWell {
             let slot_walk = slot.walk(cx.cx.cx);
             let _ = slot.draw_walk(cx, scope, slot_walk);
         }
+        cx.widget_tree_insert_child(self.uid, live_id!(trailing), self.trailing.clone());
+        let trailing_walk = match deferred {
+            Some(mut dw) => dw.resolve(cx),
+            None => self.trailing.walk(cx.cx.cx),
+        };
+        let _ = self.trailing.draw_walk(cx, scope, trailing_walk);
         self.draw_bg.end(cx);
         DrawStep::done()
     }

@@ -41,7 +41,10 @@
 //! glass composites above anything its parent draws after it.
 
 use crate::{
-    button::*, gauss_view::GaussRoundedView, label::*, makepad_derive_widget::*,
+    button::*,
+    gauss_view::{arm_gauss_capture, GaussRoundedView},
+    label::*,
+    makepad_derive_widget::*,
     makepad_draw::*, view::View, widget::*,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -473,6 +476,43 @@ fn delayed_alpha(now: f64, shown_since: f64, delay_secs: f64, fade_secs: f64) ->
     } else {
         (t / fade_secs).clamp(0.0, 1.0)
     }
+}
+
+/// The loading overlay's alpha at `now`, and whether it is still moving.
+/// `from` is the alpha it flipped at, so a fade interrupted half way runs
+/// on from where it was rather than jumping.
+///
+/// A free function because the glass pane's announcement hangs on the exact
+/// step this first goes above zero, and that is worth being able to check
+/// without a window.
+fn overlay_alpha(
+    now: f64,
+    since: f64,
+    from: f64,
+    active: bool,
+    delay_secs: f64,
+    fade_secs: f64,
+) -> (f64, bool) {
+    let fade = fade_secs.max(0.0);
+    if active {
+        let t = now - since - delay_secs.max(0.0);
+        if t < 0.0 {
+            return (0.0, true);
+        }
+        let a = if fade <= 0.0 { 1.0 } else { (t / fade).clamp(0.0, 1.0) };
+        (a.max(from.min(1.0) * (1.0 - a)), a < 1.0)
+    } else {
+        let t = now - since;
+        let a = if fade <= 0.0 { 0.0 } else { from * (1.0 - (t / fade).clamp(0.0, 1.0)) };
+        (a, a > 0.0)
+    }
+}
+
+/// Whether the blur pane arrives on this step. It is drawn only while the
+/// alpha is above zero, so the step the alpha first crosses is the frame it
+/// first paints in - and the only frame worth announcing it for.
+fn glass_arrives(blur: bool, was: f64, now: f64) -> bool {
+    blur && was <= 0.0 && now > 0.0
 }
 
 /// HH:MM of the wall clock, shifted east of UTC by `offset_minutes`. The
@@ -1157,19 +1197,14 @@ impl LoadingOverlay {
 
     /// The scrim's alpha at `now`; whether it is still moving.
     fn alpha_at(&self, now: f64) -> (f64, bool) {
-        let fade = self.fade_secs.max(0.0);
-        if self.active {
-            let t = now - self.since - self.delay_secs.max(0.0);
-            if t < 0.0 {
-                return (0.0, true);
-            }
-            let a = if fade <= 0.0 { 1.0 } else { (t / fade).clamp(0.0, 1.0) };
-            (a.max(self.alpha_at_flip.min(1.0) * (1.0 - a)), a < 1.0)
-        } else {
-            let t = now - self.since;
-            let a = if fade <= 0.0 { 0.0 } else { self.alpha_at_flip * (1.0 - (t / fade).clamp(0.0, 1.0)) };
-            (a, a > 0.0)
-        }
+        overlay_alpha(
+            now,
+            self.since,
+            self.alpha_at_flip,
+            self.active,
+            self.delay_secs,
+            self.fade_secs,
+        )
     }
 
     fn push_text(&mut self, cx: &mut Cx) {
@@ -1220,8 +1255,24 @@ impl Widget for LoadingOverlay {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(ne) = self.next_frame.is_event(event) {
+            let was = self.alpha;
             let (alpha, moving) = self.alpha_at(ne.time);
             self.alpha = alpha;
+            if glass_arrives(self.blur, was, alpha) {
+                // The pane is about to paint for the first time, and this is
+                // the last moment at which saying so still counts: the
+                // window decides whether to capture the scene behind the
+                // glass before any widget draws, and next-frame events are
+                // delivered before that decision is taken.
+                //
+                // Saying it in `set_active` does not work. The arm is taken
+                // on the very next frame whether or not any glass drew, and
+                // `draw_walk` returns before it reaches the pane while the
+                // alpha is still zero - so with any delay set at all, the
+                // arm is spent tens of frames before the pane appears and
+                // the pop is exactly as it was.
+                arm_gauss_capture(cx);
+            }
             if moving {
                 self.next_frame = cx.new_next_frame();
             }
@@ -1297,6 +1348,31 @@ mod tests {
         assert!(mid > 0.0 && mid < 1.0, "{mid}");
         assert_eq!(m.at(5.3, 0.25), 1.0);
         assert!(!m.running);
+    }
+
+    /// Turned on at ten seconds with half a second of delay and a fifth of
+    /// a second of fade. The blur pane paints nothing until 10.5, so the
+    /// frame to announce it on is the first one past that - and there is
+    /// exactly one such frame, not one per frame of the fade.
+    #[test]
+    fn the_blur_pane_is_announced_on_the_frame_it_first_paints_in() {
+        let mut was = 0.0;
+        let mut announced = Vec::new();
+        for step in 0..90 {
+            let t = 10.0 + step as f64 / 60.0;
+            let (now, _) = overlay_alpha(t, 10.0, 0.0, true, 0.5, 0.2);
+            if glass_arrives(true, was, now) {
+                announced.push(t);
+            }
+            was = now;
+        }
+        assert_eq!(announced.len(), 1, "announced once, not on every frame of the fade");
+        assert!(
+            announced[0] >= 10.5,
+            "and not at {:.3}, while the delay was still being waited out",
+            announced[0]
+        );
+        assert!(!glass_arrives(false, 0.0, 1.0), "a plain scrim has no glass to announce");
     }
 
     #[test]

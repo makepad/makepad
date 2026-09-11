@@ -23,6 +23,11 @@ script_mod! {
     mod.stories.BadgeOverview = StoryPage{
         StoryHeading{text: "Dot, count and the overflow cap"}
         StoryNote{text: "A badge with nothing to say is a dot. A count shows its number up to max, then max+; a word shows the word."}
+        StoryHeading{text: "One badge, under the controls"}
+        StoryNote{text: "One badge; its count, cap, intent and appearance come from the controls."}
+        StoryRow{
+            subject := Badge{count: 5}
+        }
         StoryRow{
             Badge{}
             Badge{count: 1}
@@ -183,13 +188,6 @@ script_mod! {
             picked := Caption{text: "no marker clicked yet"}
         }
     }
-
-    mod.stories.BadgeBasic = StoryPage{
-        StoryNote{text: "One badge; its count, cap, intent and appearance come from the controls."}
-        StoryRow{
-            subject := Badge{count: 5}
-        }
-    }
 }
 
 fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -224,24 +222,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "BadgeOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Badge\n\nA badge says one fact about the thing it sits next to. Empty, it is a dot; with a `count` it shows the number, capped at `max` as `99+`; with a `text` it shows the word. `intent` picks the theme role it is coloured by, `appearance` how loudly (filled, ghost, outline, tint), `size` its rung on the ladder and `shape` its corners. `Badge` carries the theme's bevel stroke, `BadgeFlat` does not.\n\n`BadgeAnchor` wraps any widget and draws its badge on the overlay at a corner, so the wrapped widget keeps its size; it hides at a count of 0 unless the badge is a `dot` or a word. `StatusDot` gives every status a shape as well as a colour. `LabelValue` is a two-tone pill whose value half is coloured by the value's place between `min` and `max`. `Marker` is an anchor positioned by relative coordinates over content, numbered, raising `Clicked`.",
         subject: "count_badge",
-        feature: None,
-        controls: &[],
-        on_actions: Some(overview_actions),
-    },
-    Story {
-        key: "data-display/badge/basic",
-        category: "Data display",
-        component: "Badge",
-        also: &[],
-        name: "Basic",
-        dsl: "BadgeBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Badge\n\nOne badge under the controls: drive the count past the cap, move the cap, and change the intent and the appearance.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Count", target: "subject", kind: ControlKind::Number { prop: "count", min: 0., max: 150., step: 1., default: 5. } },
@@ -262,6 +245,6 @@ pub const STORIES: &[Story] = &[
             },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: None,
+        on_actions: Some(overview_actions),
     },
 ];

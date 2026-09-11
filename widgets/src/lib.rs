@@ -83,6 +83,8 @@ pub mod field;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
+pub mod number_field;
+pub mod range_slider;
 pub mod slider;
 pub mod text_input;
 pub mod drop_slider;
@@ -103,6 +105,8 @@ pub mod fold_header;
 pub mod glass_panel;
 pub mod loading_spinner;
 pub mod progress;
+pub mod playback_bar;
+pub mod level_meter;
 pub mod marquee;
 pub mod spinner;
 
@@ -110,9 +114,49 @@ pub mod bare_step;
 pub mod turtle_step;
 
 pub mod data_grid;
+pub mod calendar;
+pub mod date_picker;
+pub mod time_picker;
+pub mod rating;
+pub mod tags;
+pub mod radio_group;
+pub mod kbd;
+pub mod typography;
+pub mod tree;
+pub mod list_item;
+pub mod item_selection;
+pub mod avatar;
+pub mod card;
+pub mod media;
+pub mod table;
+pub mod empty_state;
+pub mod timeline;
+pub mod waveform;
+pub mod chat;
+pub mod code_block;
+pub mod carousel;
+pub mod upload;
+pub mod form;
+pub mod color;
+pub mod column_picker;
+pub mod command_palette;
+pub mod pie_menu;
+pub mod drag_number;
+pub mod chart_more;
+pub mod toolbar;
+pub mod masonry;
+pub mod tile_list;
+pub mod kanban;
+pub mod splitter_more;
+pub mod svg_select;
+pub mod rich_text;
+pub mod scroll_more;
+pub mod tour;
+pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
 pub mod text_flow;
+pub mod log_list;
 
 pub mod cached_widget;
 pub mod root;
@@ -163,6 +207,7 @@ pub mod flat_list;
 
 pub mod chart;
 pub mod perf_graph;
+pub mod corner_cap_view;
 pub mod screen_cap;
 
 // Commented out modules (not yet converted)
@@ -239,8 +284,48 @@ pub use crate::{
     popup_menu::*,
     popup_notification::*,
     data_grid::*,
+    calendar::*,
+    date_picker::*,
+    time_picker::*,
+    rating::*,
+    tags::*,
+    radio_group::*,
+    kbd::*,
+    typography::*,
+    tree::*,
+    list_item::*,
+    avatar::*,
+    card::*,
+    media::*,
+    table::*,
+    empty_state::*,
+    timeline::*,
+    waveform::*,
+    chat::*,
+    code_block::*,
+    carousel::*,
+    upload::*,
+    form::*,
+    color::*,
+    column_picker::*,
+    command_palette::*,
+    pie_menu::*,
+    drag_number::*,
+    chart_more::*,
+    toolbar::*,
+    masonry::*,
+    tile_list::*,
+    kanban::*,
+    splitter_more::*,
+    svg_select::*,
+    rich_text::*,
+    scroll_more::*,
+    tour::*,
+    wheel_picker::*,
     portal_list::*,
     progress::*,
+    playback_bar::*,
+    level_meter::*,
     reorder_list::*,
     radio_button::*,
     reflect::*,
@@ -252,6 +337,8 @@ pub use crate::{
     scroll_bars::ScrollBars,
     scroll_shadow::*,
     slide_panel::*,
+    number_field::*,
+    range_slider::*,
     slider::*,
     slides_view::*,
     marquee::*,
@@ -265,6 +352,7 @@ pub use crate::{
     tabs::*,
     tab_close_button::*,
     text_flow::*,
+    log_list::*,
 
     text_input::*,
     tooltip::*,
@@ -319,6 +407,8 @@ pub use crate::vector::*;
 
 pub use crate::chart::*;
 pub use crate::perf_graph::*;
+pub use crate::item_selection::*;
+pub use crate::corner_cap_view::*;
 pub use crate::screen_cap::*;
 
 pub use crate::video::*;
@@ -437,6 +527,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
+    crate::range_slider::script_mod(vm);
     crate::drop_slider::script_mod(vm);
     crate::drop_toggles::script_mod(vm);
     // The badge first: it owns the role palette and the intent names, and
@@ -449,6 +540,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
     crate::field::script_mod(vm);
+    crate::number_field::script_mod(vm);
 
     crate::splitter::script_mod(vm);
 
@@ -458,6 +550,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    crate::playback_bar::script_mod(vm);
+    crate::level_meter::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
@@ -479,8 +573,47 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::data_grid::script_mod(vm);
     crate::portal_list::script_mod(vm);
+    crate::calendar::script_mod(vm);
+    crate::date_picker::script_mod(vm);
+    crate::time_picker::script_mod(vm);
+    crate::rating::script_mod(vm);
+    crate::tags::script_mod(vm);
+    crate::radio_group::script_mod(vm);
+    crate::kbd::script_mod(vm);
+    crate::wheel_picker::script_mod(vm);
+    crate::typography::script_mod(vm);
+    crate::tree::script_mod(vm);
+    crate::list_item::script_mod(vm);
+    crate::avatar::script_mod(vm);
+    crate::card::script_mod(vm);
+    crate::media::script_mod(vm);
+    crate::table::script_mod(vm);
+    crate::empty_state::script_mod(vm);
+    crate::timeline::script_mod(vm);
+    crate::waveform::script_mod(vm);
+    crate::chat::script_mod(vm);
+    crate::code_block::script_mod(vm);
+    crate::carousel::script_mod(vm);
+    crate::upload::script_mod(vm);
+    crate::form::script_mod(vm);
+    crate::color::script_mod(vm);
+    crate::column_picker::script_mod(vm);
+    crate::command_palette::script_mod(vm);
+    crate::pie_menu::script_mod(vm);
+    crate::drag_number::script_mod(vm);
+    crate::tour::script_mod(vm);
+    crate::chart_more::script_mod(vm);
+    crate::toolbar::script_mod(vm);
+    crate::masonry::script_mod(vm);
+    crate::tile_list::script_mod(vm);
+    crate::kanban::script_mod(vm);
+    crate::splitter_more::script_mod(vm);
+    crate::scroll_more::script_mod(vm);
+    crate::svg_select::script_mod(vm);
+    crate::rich_text::script_mod(vm);
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
+    crate::log_list::script_mod(vm);
 
     crate::cached_widget::script_mod(vm);
     crate::root::script_mod(vm);
@@ -518,6 +651,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
     crate::perf_graph::script_mod(vm);
+    crate::corner_cap_view::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
     #[cfg(feature = "maps")]

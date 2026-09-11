@@ -1,6 +1,6 @@
 //! The reflection and theme surface for tools OUTSIDE this crate.
 //!
-//! The F12 overlay (`tweaker.rs`) reads a widget's live state, the `/** */`
+//! The Shift+F10 overlay (`tweaker.rs`) reads a widget's live state, the `/** */`
 //! annotations behind its properties and the theme's tokens, and edits a
 //! theme value with every draw buffer following. A catalogue app's Docs,
 //! Controls and Theme panels, a theme editor or a test harness need exactly

@@ -142,30 +142,56 @@ impl WidgetNode for StoryCanvas {
 }
 
 impl StoryCanvas {
-    /// Show the template with this name from the next draw on. Switching
-    /// stories forgets the previous story's edits and log.
+    /// Show the template with this name. Switching stories forgets the
+    /// previous story's edits and log.
     pub fn open(&mut self, cx: &mut Cx, dsl: &str) {
         if self.wanted.as_deref() != Some(dsl) {
             self.wanted = Some(dsl.to_string());
             self.chunks.clear();
             self.log.clear();
-            cx.widget_tree_mark_dirty(self.uid);
-            self.redraw(cx);
+            self.build(cx);
         }
     }
 
-    /// Drop the shown story so the next draw builds it afresh, forgetting
-    /// the edits made to it.
+    /// Drop the shown story and build it afresh, forgetting the edits
+    /// made to it.
     pub fn reset(&mut self, cx: &mut Cx) {
         self.chunks.clear();
         self.rebuild(cx);
     }
 
-    /// Drop the shown story so the next draw builds it afresh, keeping the
-    /// edits to re-apply.
+    /// Drop the shown story and build it afresh, keeping the edits to
+    /// re-apply.
     pub fn rebuild(&mut self, cx: &mut Cx) {
         self.shown = None;
+        self.build(cx);
+    }
+
+    /// Build the wanted story, NOW rather than on the next draw.
+    ///
+    /// It used to be built inside `draw_walk`, which is one line too
+    /// late for anything that has to announce itself before the frame
+    /// starts. A glass surface is the case: the window decides whether
+    /// to capture the scene behind the glass before any widget draws,
+    /// and its only evidence is which surfaces asked. Building the
+    /// story mid-draw meant the surface asked after the decision had
+    /// been taken, so its first painted frame showed either a flat
+    /// fallback slab or a photograph of the story before it, and then
+    /// a forced redraw of the whole catalogue snapped it into place.
+    /// That is the flicker; it is not the blur being slow.
+    ///
+    /// Every caller is at event time, so the script machine is free.
+    /// `draw_walk` keeps the same build behind its staleness check as a
+    /// net, for a `wanted` that arrives by some path this does not know
+    /// about.
+    fn build(&mut self, cx: &mut Cx) {
+        self.shown = None;
         cx.widget_tree_mark_dirty(self.uid);
+        if let Some(dsl) = self.wanted.clone() {
+            if let Some(page) = self.instantiate(cx, &dsl) {
+                self.shown = Some((dsl, page));
+            }
+        }
         self.redraw(cx);
     }
 
@@ -220,6 +246,12 @@ impl StoryCanvas {
     /// Drain the raised-action log.
     pub fn take_log(&mut self) -> Vec<String> {
         self.log.drain(..).collect()
+    }
+
+    /// The same build, reached from inside a draw. Named apart so a
+    /// reader can see which of the two paths they are on.
+    fn instantiate_in_draw(&mut self, cx: &mut Cx2d, dsl: &str) -> Option<WidgetRef> {
+        self.instantiate(cx, dsl)
     }
 
     fn instantiate(&mut self, cx: &mut Cx, dsl: &str) -> Option<WidgetRef> {
@@ -291,11 +323,15 @@ impl Widget for StoryCanvas {
             (None, Some(_)) => true,
             (None, None) => false,
         };
+        // The net under `build`. A story built here announces itself
+        // too late to be captured behind, so anything glass shows one
+        // wrong frame — see `build`. Every path this app takes builds
+        // at event time; this is for the one that does not.
         if stale {
             self.shown = None;
             cx.widget_tree_mark_dirty(self.uid);
             if let Some(dsl) = self.wanted.clone() {
-                if let Some(page) = self.instantiate(cx, &dsl) {
+                if let Some(page) = self.instantiate_in_draw(cx, &dsl) {
                     self.shown = Some((dsl, page));
                 }
             }

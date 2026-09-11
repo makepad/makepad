@@ -1,7 +1,7 @@
 //! The check box stories: the check box ladder, the toggles, a custom icon
 //! check box and a change counter, ported from the widget zoo.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 script_mod! {
@@ -9,7 +9,13 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.CheckBoxOverview = StoryPage{
+    mod.stories.CheckBoxOverview = StoryPage{        StoryHeading{text: "One checkbox, under the controls"}
+        StoryNote{text: "One checkbox and one toggle, driven from the controls."}
+        StoryRow{
+            subject := CheckBox{text: "Option"}
+            toggle := Toggle{text: "Switch"}
+        }
+
         H4{text: "Checkbox"}
         CheckBox{text: "CheckBox"}
 
@@ -93,14 +99,17 @@ pub const STORIES: &[Story] = &[Story {
     key: "inputs/checkbox/overview",
     category: "Inputs",
     component: "CheckBox",
-    also: &["CheckBoxCustom", "ToggleFlat"],
+    also: &["CheckBoxCustom", "Toggle", "ToggleFlat"],
     name: "Overview",
     dsl: "CheckBoxOverview",
     added: "2026-02-23",
-    tags: &["ported"],
+    tags: &["controls", "ported"],
     doc: "# CheckBox\n\nCheckboxes allow toggling options on/off.",
     subject: "",
     feature: None,
-    controls: &[],
+    controls: &[
+            Control { label: "Label", target: "subject", kind: ControlKind::Text { prop: "text", default: "Option" } },
+            Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
+        ],
     on_actions: Some(overview_actions),
 }];

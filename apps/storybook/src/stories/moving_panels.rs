@@ -12,7 +12,7 @@ script_mod! {
         StoryNote{text: "Two panels that move, for two different reasons. One is opened and closed by the application and animates itself in from an edge. The other is dragged by the person, and its position is a number the host can read at any moment."}
 
         StoryHeading{text: "A panel the app opens"}
-        StoryNote{text: "SlidePanel animates in from whichever side it is given. It answers open, close and toggle, and is_open says where it stands. It also offers is_animating, and that one does not work: see the note in the docs before you build on it."}
+        StoryNote{text: "SlidePanel animates in from whichever side it is given. It answers open, close and toggle; is_open says where it stands and is_animating says whether it has got there yet. The label below shows only the first, for a reason the docs explain."}
         StoryRow{
             open_left := Button{text: "open"}
             close_left := Button{text: "close"}
@@ -48,7 +48,7 @@ script_mod! {
         }
 
         StoryHeading{text: "A panel the person drags"}
-        StoryNote{text: "ExpandablePanel puts its panel over a background and lets you pull it up and down. It reports the offset as it moves, so a host can fade the background or snap it somewhere; nothing snaps on its own. initial_offset is how far down it starts."}
+        StoryNote{text: "ExpandablePanel puts its panel over a background and lets you pull it up and down. It reports the offset as it moves, so a host can fade the background or snap it somewhere; nothing snaps on its own. initial_offset is how far down it starts and how far up a drag may take it. The panel is the child named panel, and it is declared last because this is an overlay."}
         StoryRow{
             reset_panel := Button{text: "reset"}
             offset_state := Label{text: "offset 0"}
@@ -65,7 +65,7 @@ script_mod! {
                         draw_bg +: {color: theme.color_surface_container_lowest}
                         Label{text: "behind the panel" draw_text +: {color: theme.color_text_meta}}
                     }
-                    panel: RoundedView{
+                    panel := RoundedView{
                         width: Fill height: Fill
                         flow: Down
                         spacing: theme.space_1
@@ -91,12 +91,12 @@ fn moving_panels_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     if root.button(cx, ids!(toggle_left)).clicked(actions) {
         panel.toggle(cx);
     }
-    // is_open only. is_animating cannot be used here: it asks the animator
-    // whether a track with this id EXISTS rather than whether it is running,
-    // and the track outlives the animation - so once this panel has moved
-    // once, is_animating answers true for ever. Driven: the panel settles
-    // open (its rect stops changing) and closes again, and is_animating stays
-    // true throughout both.
+    // is_open only, and not because is_animating is broken - it is not. A
+    // story's action handler runs when there ARE actions, so it cannot watch
+    // a value that changes on a timer: the last time this runs during a slide
+    // is the click that started it, and the label would sit on whatever it
+    // said then. Showing "moving" here needs a widget that draws every frame,
+    // not a handler that waits to be called.
     let text = if panel.is_open(cx) { "open" } else { "closed" };
     let label = root.label(cx, ids!(slide_state));
     if label.text() != text {
@@ -130,13 +130,19 @@ Two panels that move, for two different reasons. Reaching for the wrong one is t
 
 It animates in from whichever `side` it is given and takes `open`, `close` and `toggle`. Use it for something the app decides to show: a settings drawer opened by a button, a bar that appears when a mode changes.
 
-`is_open` says where it stands, and works.
+It answers two questions. `is_open` says where it stands; `is_animating` says whether it has got there yet, which matters because **mid-slide it is neither open nor closed**.
 
-**`is_animating` does not, and this page is where I found that out.** It asks the animator whether a track with the panel's id *exists*, not whether that track is running — and the track outlives the animation. Driven on this page: open the panel, wait until its rectangle stops changing, and `is_animating` still answers true; close it again and it answers true after that too. Once a panel has moved once, it reports itself as moving for ever. A host that gates on it will wait for something that never happens, so read `is_open` and, if you need to know when the slide finished, time it yourself until this is fixed.
+**This page shows only the first, and the reason is about the page rather than the widget.** A story's action handler runs when there *are* actions. During a slide there are none — the click that started it is the last one — so a label driven from that handler sits on whatever it said at the moment of the press. Watching a value that changes on a clock needs something that draws every frame, not a handler waiting to be called.
+
+I had this page telling you `is_animating` was broken. It is not: driven with the animator instrumented, the track is created on the press, reports `true` while it runs, and is retired the frame it ends. What was stale was my label.
 
 ## ExpandablePanel — the person moves it
 
-Its `panel` sits over a background and is dragged up and down by hand. `initial_offset` is where it starts, `scrolled_at` reports the offset as it moves, `reset` puts it back and `get_current_offset` asks where it is.
+Its `panel` sits over a background and is dragged up and down by hand. `scrolled_at` reports the offset as it moves, `reset` puts it back and `get_current_offset` asks where it is.
+
+**The panel is a child you name `panel`, and it goes last.** The widget is an overlay, so the child written last is the one painted on top — the background first, the panel after it. The widget used to hold that slot open itself, which is why the panel came out invisible: a child declared on a preset is copied into every instance ahead of the instance's own children, so the panel was always the first child and always underneath the background it is meant to sit above.
+
+`initial_offset` is how far down the panel rests and the whole of the travel: pulled all the way up it meets the top of the area and stops there, and it does not go below where it started.
 
 **Nothing snaps and nothing settles by itself.** If you want it to spring to a detent, fade the background as it rises, or refuse to go past a point, that is your code reading `scrolled_at` — the widget hands you the number and takes no view about it. That is the opposite of the drawer's sheet detents, which do settle on their own.",
     subject: "sliding",

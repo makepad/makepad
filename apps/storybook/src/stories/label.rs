@@ -1,13 +1,18 @@
 //! The label stories: the label ladder, the typographic system, ellipsis truncation across scripts and a custom text shader, ported from the widget zoo.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.LabelOverview = StoryPage{
+    mod.stories.LabelOverview = StoryPage{        StoryHeading{text: "One label, under the controls"}
+        StoryNote{text: "One label; the controls change its text and size."}
+        StoryRow{
+            subject := Label{text: "Hello"}
+        }
+
         H4{text: "Standard"}
         Label{text: "Default single line text"}
 
@@ -201,10 +206,14 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "LabelOverview",
     added: "2026-04-06",
-    tags: &["ported"],
+    tags: &["controls", "ported"],
     doc: "# Label\n\nLabels display text content.",
     subject: "",
     feature: None,
-    controls: &[],
+    controls: &[
+            Control { label: "Text", target: "subject", kind: ControlKind::Text { prop: "text", default: "Hello" } },
+            Control { label: "Size", target: "subject", kind: ControlKind::Number { prop: "draw_text.text_style.font_size", min: 6., max: 48., step: 0.5, default: 10. } },
+            Control { label: "Colour", target: "subject", kind: ControlKind::Color { prop: "draw_text.color", default: 0xFFFFFFAA } },
+        ],
     on_actions: None,
 }];

@@ -480,6 +480,10 @@ pub enum DropPart {
     Center,
     TabBar,
     Tab,
+    /// The bar between two panels: the newcomer goes BETWEEN them
+    /// rather than inside either. `DropPosition::id` names the
+    /// splitter, not a tab container.
+    Bar,
 }
 
 /// DSL-parseable wrapper for DockItem::Splitter
@@ -650,6 +654,196 @@ pub struct DockCompactTabInfo {
     pub rect: Rect,
 }
 
+/// The share of a panel, along each of its edges, that splits it rather
+/// than joining it. A tenth on all four sides.
+const DROP_EDGE: f64 = 0.1;
+
+/// How close to the outside of the whole dock a drop has to be, in
+/// layout points, to lay a panel across everything rather than beside
+/// one member of it. A fixed distance, not a share: it is the same
+/// gesture whether the dock is a strip or a wall.
+const OUTER_EDGE: f64 = 24.0;
+
+/// Where the bar goes when a newcomer joins `stacked` panels that are
+/// already sharing this axis, so that all of them end up the same size.
+/// `first` is whether the newcomer takes the near side.
+///
+/// Two panels sharing a square top and bottom, and a third dropped
+/// under them: the newcomer takes a third and the pair keep two
+/// thirds, which they were already halving — so all three are thirds.
+/// Nothing here is final; every bar can still be dragged.
+fn equal_share(stacked: usize, first: bool) -> SplitterAlign {
+    let share = 1.0 / (stacked.max(1) as f64 + 1.0);
+    SplitterAlign::Weighted(if first { share } else { 1.0 - share })
+}
+
+/// What is left of a panel under its own tab bar.
+///
+/// A panel reports the rect of its own turtle, and that turtle was begun
+/// above the strip, so the rect includes it. The strip is a drop target
+/// of its own and is claimed first — which meant the top tenth measured
+/// from the whole rect fell entirely inside the strip, the top edge could
+/// never be reached, and a panel could only ever be split downwards.
+fn panel_body(whole: Rect, bar: Rect) -> Rect {
+    let below = (bar.pos.y + bar.size.y) - whole.pos.y;
+    if bar.size.y <= 0.0 || below <= 0.0 || below >= whole.size.y {
+        return whole;
+    }
+    Rect {
+        pos: Vec2d { x: whole.pos.x, y: whole.pos.y + below },
+        size: Vec2d { x: whole.size.x, y: whole.size.y - below },
+    }
+}
+
+/// How a splitter divides itself once a panel is put between its two
+/// children: where the splitter's own bar goes, where the new bar
+/// between the newcomer and its neighbour goes, and which side of the
+/// seam the newcomer is nested on.
+struct BetweenSplit {
+    outer: SplitterAlign,
+    inner: SplitterAlign,
+    /// True when the new pair is (near child, newcomer) rather than
+    /// (newcomer, far child).
+    near_side: bool,
+}
+
+/// Work out that division. `p` and `q` are how many panels the near
+/// and far children already hold along this axis; the newcomer is one
+/// more, so there are p + q + 1 of them to satisfy.
+///
+/// A bar the person pinned a fixed distance from one side is saying
+/// that pane's size is not up for negotiation. The newcomer is then
+/// nested on the other side and the pinned pane is left exactly where
+/// it is: equalising it would quietly turn a fixed sidebar into a
+/// proportional one, which is not what anybody asked for by dropping a
+/// panel somewhere else.
+fn between_split(align: SplitterAlign, p: usize, q: usize) -> BetweenSplit {
+    let (p, q) = (p.max(1), q.max(1));
+    match align {
+        SplitterAlign::FromA(px) => BetweenSplit {
+            outer: SplitterAlign::FromA(px),
+            inner: equal_share(q, true),
+            near_side: false,
+        },
+        SplitterAlign::FromB(px) => BetweenSplit {
+            outer: SplitterAlign::FromB(px),
+            inner: equal_share(p, false),
+            near_side: true,
+        },
+        // Both sides are shares, so every panel along this axis can
+        // have the same one. The near child keeps p of the p + q + 1;
+        // the far child keeps q + 1 and splits them so the newcomer
+        // gets exactly one. Two panels and a newcomer: a third each.
+        SplitterAlign::Weighted(_) => {
+            let total = (p + q + 1) as f64;
+            BetweenSplit {
+                outer: SplitterAlign::Weighted(p as f64 / total),
+                inner: equal_share(q, true),
+                near_side: false,
+            }
+        }
+    }
+}
+
+/// Where along the splitter the newcomer will end up, as an offset and
+/// a length. This is what the preview covers, so that what is shown
+/// during the drag is the slot the drop actually makes rather than the
+/// bar that was aimed at, which is somewhere else once the shares move.
+///
+/// The bars themselves take a few points out of the panes either side,
+/// which this ignores: it would make the preview exact and the
+/// arithmetic untestable, and every bar can be dragged afterwards.
+fn newcomer_slot(length: f64, align: SplitterAlign, p: usize, q: usize) -> (f64, f64) {
+    let (p, q) = (p.max(1) as f64, q.max(1) as f64);
+    match align {
+        SplitterAlign::Weighted(_) => {
+            let total = p + q + 1.0;
+            (length * p / total, length / total)
+        }
+        SplitterAlign::FromA(px) => {
+            let pinned = px.clamp(0.0, length);
+            (pinned, (length - pinned) / (q + 1.0))
+        }
+        SplitterAlign::FromB(px) => {
+            let room = length - px.clamp(0.0, length);
+            let len = room / (p + 1.0);
+            (room - len, len)
+        }
+    }
+}
+
+/// The half of `rect` an edge drop would take.
+fn edge_half(rect: Rect, part: DropPart) -> Rect {
+    let half_x = Vec2d { x: rect.size.x / 2.0, y: rect.size.y };
+    let half_y = Vec2d { x: rect.size.x, y: rect.size.y / 2.0 };
+    match part {
+        DropPart::Left => Rect { pos: rect.pos, size: half_x },
+        DropPart::Right => Rect {
+            pos: Vec2d { x: rect.pos.x + half_x.x, y: rect.pos.y },
+            size: half_x,
+        },
+        DropPart::Top => Rect { pos: rect.pos, size: half_y },
+        DropPart::Bottom => Rect {
+            pos: Vec2d { x: rect.pos.x, y: rect.pos.y + half_y.y },
+            size: half_y,
+        },
+        _ => rect,
+    }
+}
+
+/// Which edge of `rect` a point is nearest, if it is within `edge` of one
+/// of them. `edge` is a distance in points along each axis, so the caller
+/// decides whether the band is a share of the panel or a fixed margin.
+fn nearest_edge(rect: Rect, at: Vec2d, edge_x: f64, edge_y: f64) -> Option<DropPart> {
+    if !rect.contains(at) || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return None;
+    }
+    // Left and right before top and bottom, so a corner splits sideways.
+    // Whichever way round it went, one of the two would have to lose.
+    if at.x - rect.pos.x < edge_x {
+        return Some(DropPart::Left);
+    }
+    if rect.pos.x + rect.size.x - at.x < edge_x {
+        return Some(DropPart::Right);
+    }
+    if at.y - rect.pos.y < edge_y {
+        return Some(DropPart::Top);
+    }
+    if rect.pos.y + rect.size.y - at.y < edge_y {
+        return Some(DropPart::Bottom);
+    }
+    None
+}
+
+/// Where a drop lands in one panel's body, and the region a preview of it
+/// should cover. The four edges each split it; the middle joins it.
+fn drop_band(body: Rect, at: Vec2d) -> Option<(DropPart, Rect)> {
+    if !body.contains(at) || body.size.x <= 0.0 || body.size.y <= 0.0 {
+        return None;
+    }
+    match nearest_edge(body, at, body.size.x * DROP_EDGE, body.size.y * DROP_EDGE) {
+        Some(part) => Some((part, edge_half(body, part))),
+        None => Some((DropPart::Center, body)),
+    }
+}
+
+/// Where a drop lands against the outside of the whole dock. Only the
+/// four edges: the middle of the dock belongs to whichever panel is
+/// under it.
+///
+/// This is what lays a panel ACROSS a stack rather than inside one of
+/// its members. With two panels sharing a square top and bottom, a drop
+/// down the far left gives the newcomer the whole left half and leaves
+/// the other two stacked in the right half.
+fn outer_band(whole: Rect, at: Vec2d) -> Option<(DropPart, Rect)> {
+    // A dock too small to have an inside is all edge, and every drop in
+    // it would split the root. Leave those to the panel under the pointer.
+    if whole.size.x < OUTER_EDGE * 3.0 || whole.size.y < OUTER_EDGE * 3.0 {
+        return None;
+    }
+    let part = nearest_edge(whole, at, OUTER_EDGE, OUTER_EDGE)?;
+    Some((part, edge_half(whole, part)))
+}
 impl Dock {
     pub fn unique_id(&self, base: u64) -> LiveId {
         let mut id = LiveId(base);
@@ -831,97 +1025,137 @@ impl Dock {
         cx.end_turtle_with_area(&mut self.area);
     }
 
+    /// Where a drop at `abs` would land: which part of which container,
+    /// and the region to preview.
+    ///
+    /// Read in five passes. The answers overlap, and the order between
+    /// them IS the behaviour:
+    ///
+    /// 1. A tab. Dropping on one puts the newcomer beside it, and that
+    ///    has to be possible wherever the tab happens to be.
+    /// 2. The outside of the whole dock, which lays the newcomer across
+    ///    everything in it. This has to beat the tab bars, or the top
+    ///    edge is unreachable: the topmost panels' bars run along it, so
+    ///    a tab-bar pass in front of this one meant a drop could take
+    ///    the bottom half of the dock and never the top. Nothing is
+    ///    lost by it — dropping in the middle of a panel joins that
+    ///    panel just as its bar does.
+    /// 3. The bar between two panels, which puts the newcomer between
+    ///    them.
+    /// 4. The empty part of a tab bar, which joins that panel.
+    /// 5. The edges and middle of whichever panel is under the pointer,
+    ///    which splits or joins that one alone.
     fn find_drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
-            // Skip panels with hidden tab bars — they should not be drop targets.
-            if let Some(DockItem::Tabs {
-                hide_tab_bar: true, ..
-            }) = self.dock_items.get(tab_bar_id)
-            {
+            if self.hides_its_tab_bar(*tab_bar_id) {
                 continue;
             }
-            let rect = tab_bar.contents_rect;
             if let Some((tab_id, rect)) = tab_bar.tab_bar.is_over_tab(cx, abs) {
-                return Some(DropPosition {
-                    part: DropPart::Tab,
-                    id: tab_id,
-                    rect,
-                });
-            } else if let Some(rect) = tab_bar.tab_bar.is_over_tab_bar(cx, abs) {
-                return Some(DropPosition {
-                    part: DropPart::TabBar,
-                    id: *tab_bar_id,
-                    rect,
-                });
-            } else if rect.contains(abs) {
-                let top_left = rect.pos;
-                let bottom_right = rect.pos + rect.size;
-                if (abs.x - top_left.x) / rect.size.x < 0.1 {
-                    return Some(DropPosition {
-                        part: DropPart::Left,
-                        id: *tab_bar_id,
-                        rect: Rect {
-                            pos: rect.pos,
-                            size: Vec2d {
-                                x: rect.size.x / 2.0,
-                                y: rect.size.y,
-                            },
-                        },
-                    });
-                } else if (bottom_right.x - abs.x) / rect.size.x < 0.1 {
-                    return Some(DropPosition {
-                        part: DropPart::Right,
-                        id: *tab_bar_id,
-                        rect: Rect {
-                            pos: Vec2d {
-                                x: rect.pos.x + rect.size.x / 2.0,
-                                y: rect.pos.y,
-                            },
-                            size: Vec2d {
-                                x: rect.size.x / 2.0,
-                                y: rect.size.y,
-                            },
-                        },
-                    });
-                } else if (abs.y - top_left.y) / rect.size.y < 0.1 {
-                    return Some(DropPosition {
-                        part: DropPart::Top,
-                        id: *tab_bar_id,
-                        rect: Rect {
-                            pos: rect.pos,
-                            size: Vec2d {
-                                x: rect.size.x,
-                                y: rect.size.y / 2.0,
-                            },
-                        },
-                    });
-                } else if (bottom_right.y - abs.y) / rect.size.y < 0.1 {
-                    return Some(DropPosition {
-                        part: DropPart::Bottom,
-                        id: *tab_bar_id,
-                        rect: Rect {
-                            pos: Vec2d {
-                                x: rect.pos.x,
-                                y: rect.pos.y + rect.size.y / 2.0,
-                            },
-                            size: Vec2d {
-                                x: rect.size.x,
-                                y: rect.size.y / 2.0,
-                            },
-                        },
-                    });
-                } else {
-                    return Some(DropPosition {
-                        part: DropPart::Center,
-                        id: *tab_bar_id,
-                        rect,
-                    });
-                }
+                return Some(DropPosition { part: DropPart::Tab, id: tab_id, rect });
+            }
+        }
+        if let Some((part, rect)) = outer_band(self.area.rect(cx), abs) {
+            return Some(DropPosition { part, id: id!(root), rect });
+        }
+        if let Some(split_id) = self.bar_under(cx, abs) {
+            if let Some(rect) = self.bar_slot(cx, split_id) {
+                return Some(DropPosition { part: DropPart::Bar, id: split_id, rect });
+            }
+        }
+        for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
+            if self.hides_its_tab_bar(*tab_bar_id) {
+                continue;
+            }
+            if let Some(rect) = tab_bar.tab_bar.is_over_tab_bar(cx, abs) {
+                return Some(DropPosition { part: DropPart::TabBar, id: *tab_bar_id, rect });
+            }
+        }
+        for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
+            if self.hides_its_tab_bar(*tab_bar_id) {
+                continue;
+            }
+            let body = panel_body(tab_bar.contents_rect, tab_bar.tab_bar.bar_rect(cx));
+            if let Some((part, rect)) = drop_band(body, abs) {
+                return Some(DropPosition { part, id: *tab_bar_id, rect });
             }
         }
         None
     }
 
+    /// The splitter whose bar is under this point.
+    ///
+    /// Where two bars meet at a T their slop laps over the corner, so
+    /// the nearer bar wins and the lower id settles the rest: a hash
+    /// map is no order to settle anything by, and a drop that lands
+    /// somewhere different each time is worse than one that is wrong.
+    fn bar_under(&self, cx: &Cx, abs: Vec2d) -> Option<LiveId> {
+        let mut best: Option<(f64, LiveId)> = None;
+        for (split_id, splitter) in self.splitters.iter() {
+            if !matches!(self.dock_items.get(split_id), Some(DockItem::Splitter { .. })) {
+                continue;
+            }
+            let band = splitter.bar_grab_rect(cx);
+            if band.size.x <= 0.0 || band.size.y <= 0.0 || !band.contains(abs) {
+                continue;
+            }
+            let across = match splitter.axis() {
+                SplitterAxis::Horizontal => (abs.x - band.center().x).abs(),
+                SplitterAxis::Vertical => (abs.y - band.center().y).abs(),
+            };
+            let better = match best {
+                None => true,
+                Some((near, id)) => across < near || (across == near && split_id.0 < id.0),
+            };
+            if better {
+                best = Some((across, *split_id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// The slot a panel dropped on this splitter's bar would take, for
+    /// the preview to cover. The ground the two panes stand on, cut
+    /// where the newcomer's share falls.
+    fn bar_slot(&self, cx: &Cx, split_id: LiveId) -> Option<Rect> {
+        let splitter = self.splitters.get(&split_id)?;
+        let DockItem::Splitter { axis, align, a, b } = self.dock_items.get(&split_id)? else {
+            return None;
+        };
+        // The unclipped rects, because every other pass here measures
+        // in layout space and a preview in a different frame would be
+        // wrong by the scroll with nothing on screen to say so.
+        let ground = splitter.area_a().rect(cx).hull(splitter.area_b().rect(cx));
+        if ground.size.x <= 0.0 || ground.size.y <= 0.0 {
+            return None;
+        }
+        let p = Self::axis_leaves(&self.dock_items, *a, *axis);
+        let q = Self::axis_leaves(&self.dock_items, *b, *axis);
+        Some(match axis {
+            SplitterAxis::Horizontal => {
+                let (offset, len) = newcomer_slot(ground.size.x, *align, p, q);
+                Rect {
+                    pos: Vec2d { x: ground.pos.x + offset, y: ground.pos.y },
+                    size: Vec2d { x: len, y: ground.size.y },
+                }
+            }
+            SplitterAxis::Vertical => {
+                let (offset, len) = newcomer_slot(ground.size.y, *align, p, q);
+                Rect {
+                    pos: Vec2d { x: ground.pos.x, y: ground.pos.y + offset },
+                    size: Vec2d { x: ground.size.x, y: len },
+                }
+            }
+        })
+    }
+
+    /// A panel with no tab bar showing is no drop target: there is nothing
+    /// to aim at and nothing to report having hit.
+    fn hides_its_tab_bar(&self, tabs_id: LiveId) -> bool {
+        matches!(
+            self.dock_items.get(&tabs_id),
+            Some(DockItem::Tabs { hide_tab_bar: true, .. })
+        )
+    }
     pub fn item(&self, entry_id: LiveId) -> Option<WidgetRef> {
         // `load_state_preserving_items` may keep a tab body resident while it
         // is absent from the current layout. Resident is not the same as
@@ -951,6 +1185,9 @@ impl Dock {
                 };
                 tabs.get(*selected).copied()
             }
+            // A seam names a splitter, and a splitter has no tab under
+            // the pointer to answer with.
+            DropPart::Bar => None,
         }
     }
 
@@ -1052,6 +1289,85 @@ impl Dock {
         Some(sibling_id)
     }
 
+    /// How many panels a container already stacks along this axis. A
+    /// splitter of the other axis counts as one, because along this one
+    /// it is a single band.
+    fn axis_leaves(
+        dock_items: &HashMap<LiveId, DockItem>,
+        id: LiveId,
+        axis: SplitterAxis,
+        ) -> usize {
+        Self::axis_leaves_within(dock_items, id, axis, 0)
+    }
+
+    fn axis_leaves_within(
+        dock_items: &HashMap<LiveId, DockItem>,
+        id: LiveId,
+        axis: SplitterAxis,
+        depth: usize,
+    ) -> usize {
+        // The tree this walks is built by this file and cannot loop, but
+        // it is also read back from saved layouts, so the walk is bounded
+        // rather than trusting.
+        if depth > 32 {
+            return 1;
+        }
+        match dock_items.get(&id) {
+            Some(DockItem::Splitter { axis: on, a, b, .. }) if *on == axis => {
+                Self::axis_leaves_within(dock_items, *a, axis, depth + 1)
+                    + Self::axis_leaves_within(dock_items, *b, axis, depth + 1)
+            }
+            _ => 1,
+        }
+    }
+
+    /// Put a panel between the two children of a splitter, so it lies
+    /// with them rather than inside either. The splitter keeps its own
+    /// id and its near child keeps its slot; the far side is pushed
+    /// down into a new splitter that holds the newcomer beside it.
+    fn insert_between_split_children_in_items(
+        dock_items: &mut HashMap<LiveId, DockItem>,
+        split_id: LiveId,
+        new_tabs_id: LiveId,
+        new_split_id: LiveId,
+    ) -> bool {
+        let Some(DockItem::Splitter { axis, align, a, b }) = dock_items.get(&split_id) else {
+            return false;
+        };
+        let (axis, align, a, b) = (*axis, *align, *a, *b);
+        if !matches!(dock_items.get(&new_tabs_id), Some(DockItem::Tabs { .. })) {
+            return false;
+        }
+        if new_tabs_id == split_id || new_tabs_id == a || new_tabs_id == b {
+            return false;
+        }
+        if new_split_id == split_id || dock_items.contains_key(&new_split_id) {
+            return false;
+        }
+        let p = Self::axis_leaves(dock_items, a, axis);
+        let q = Self::axis_leaves(dock_items, b, axis);
+        let plan = between_split(align, p, q);
+        let (inner_a, inner_b) = if plan.near_side {
+            (a, new_tabs_id)
+        } else {
+            (new_tabs_id, b)
+        };
+        let (outer_a, outer_b) = if plan.near_side {
+            (new_split_id, b)
+        } else {
+            (a, new_split_id)
+        };
+        dock_items.insert(
+            new_split_id,
+            DockItem::Splitter { axis, align: plan.inner, a: inner_a, b: inner_b },
+        );
+        dock_items.insert(
+            split_id,
+            DockItem::Splitter { axis, align: plan.outer, a: outer_a, b: outer_b },
+        );
+        true
+    }
+
     fn split_tabs_container_in_items(
         dock_items: &mut HashMap<LiveId, DockItem>,
         target_tabs_id: LiveId,
@@ -1066,7 +1382,14 @@ impl Dock {
         ) {
             return false;
         }
-        if !matches!(dock_items.get(&target_tabs_id), Some(DockItem::Tabs { .. })) {
+        // A splitter is a container too. Dropping against the outside
+        // of the dock aims at the root, which is a splitter as soon as
+        // there is more than one panel, and refusing it there is what
+        // stopped a panel being laid across a stack.
+        if !matches!(
+            dock_items.get(&target_tabs_id),
+            Some(DockItem::Tabs { .. }) | Some(DockItem::Splitter { .. })
+        ) {
             return false;
         }
         if new_tabs_id == target_tabs_id
@@ -1104,33 +1427,21 @@ impl Dock {
         };
 
         let split_id = if target_tabs_id == root { root } else { new_split_id };
-        let split = match part {
-            DropPart::Left => DockItem::Splitter {
-                axis: SplitterAxis::Horizontal,
-                align: SplitterAlign::Weighted(0.5),
-                a: new_tabs_id,
-                b: target_child_id,
-            },
-            DropPart::Right => DockItem::Splitter {
-                axis: SplitterAxis::Horizontal,
-                align: SplitterAlign::Weighted(0.5),
-                a: target_child_id,
-                b: new_tabs_id,
-            },
-            DropPart::Top => DockItem::Splitter {
-                axis: SplitterAxis::Vertical,
-                align: SplitterAlign::Weighted(0.5),
-                a: new_tabs_id,
-                b: target_child_id,
-            },
-            DropPart::Bottom => DockItem::Splitter {
-                axis: SplitterAxis::Vertical,
-                align: SplitterAlign::Weighted(0.5),
-                a: target_child_id,
-                b: new_tabs_id,
-            },
-            _ => unreachable!(),
+        let axis = match part {
+            DropPart::Left | DropPart::Right => SplitterAxis::Horizontal,
+            _ => SplitterAxis::Vertical,
         };
+        let first = matches!(part, DropPart::Left | DropPart::Top);
+        let align = equal_share(
+            Self::axis_leaves(dock_items, target_child_id, axis),
+            first,
+        );
+        let (a, b) = if first {
+            (new_tabs_id, target_child_id)
+        } else {
+            (target_child_id, new_tabs_id)
+        };
+        let split = DockItem::Splitter { axis, align, a, b };
         dock_items.insert(split_id, split);
         true
     }
@@ -1172,11 +1483,12 @@ impl Dock {
         dock_items: &HashMap<LiveId, DockItem>,
         tabs_id: LiveId,
     ) -> Option<LiveId> {
-        if matches!(dock_items.get(&tabs_id), Some(DockItem::Tabs { .. })) {
+        // Splitters count as well as tab containers: an outer drop aims
+        // at the root, and the root is a splitter as soon as the dock
+        // holds more than one panel.
+        if dock_items.contains_key(&tabs_id) {
             Some(tabs_id)
-        } else if tabs_id != id!(root)
-            && matches!(dock_items.get(&id!(root)), Some(DockItem::Tabs { .. }))
-        {
+        } else if tabs_id != id!(root) && dock_items.contains_key(&id!(root)) {
             Some(id!(root))
         } else {
             None
@@ -1432,6 +1744,9 @@ impl Dock {
         if let Some(mut pos) = self.find_drop_position(cx, abs) {
             self.needs_save = true;
             match pos.part {
+                DropPart::Bar => {
+                    return self.drop_between(cx, pos.id, item, is_move);
+                }
                 DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom => {
                     if is_move {
                         if self.check_drop_is_noop(item, pos.id) {
@@ -1442,7 +1757,10 @@ impl Dock {
                             return false;
                         };
                         pos.id = remapped_id;
-                    } else if !matches!(self.dock_items.get(&pos.id), Some(DockItem::Tabs { .. })) {
+                    } else if !matches!(
+                        self.dock_items.get(&pos.id),
+                        Some(DockItem::Tabs { .. }) | Some(DockItem::Splitter { .. })
+                    ) {
                         return false;
                     }
                     let new_tabs = self.next_internal_id();
@@ -1500,6 +1818,131 @@ impl Dock {
             }
         }
         false
+    }
+
+    /// Put a tab between the two panels a splitter divides.
+    ///
+    /// The order here is the whole of the care. A tab has to leave
+    /// where it is before it can go anywhere else, and leaving can heal
+    /// a splitter away: the panel it empties takes its parent with it,
+    /// and when that parent is the root it takes the root's OTHER child
+    /// instead, which may be exactly the splitter that was aimed at. So
+    /// the target is looked up again after the tab has gone, and if
+    /// there is no seam left the tab is put back. A tab that no panel
+    /// lists cannot be dragged back, cannot be selected and cannot be
+    /// reopened, and the layout is saved in that state.
+    fn drop_between(&mut self, cx: &mut Cx, split_id: LiveId, item: LiveId, is_move: bool) -> bool {
+        let mut split_id = split_id;
+        let came_from = self.find_tab_bar_of_tab(item);
+        if is_move {
+            if self.between_drop_is_noop(item, split_id) {
+                return false;
+            }
+            self.close_tab(cx, item, true);
+            match self.remap_drop_tabs_after_move(split_id) {
+                Some(remapped) => split_id = remapped,
+                None => {
+                    self.restore_tab(cx, came_from, item);
+                    return false;
+                }
+            }
+        }
+        if !matches!(self.dock_items.get(&split_id), Some(DockItem::Splitter { .. })) {
+            if is_move {
+                self.restore_tab(cx, came_from, item);
+            }
+            return false;
+        }
+        let new_tabs = self.next_internal_id();
+        let new_split = self.next_internal_id();
+        self.dock_items.insert(
+            new_tabs,
+            DockItem::Tabs { tabs: vec![item], closable: true, hide_tab_bar: false, selected: 0 },
+        );
+        if !Self::insert_between_split_children_in_items(
+            &mut self.dock_items,
+            split_id,
+            new_tabs,
+            new_split,
+        ) {
+            self.dock_items.remove(&new_tabs);
+            if is_move {
+                self.restore_tab(cx, came_from, item);
+            }
+            return false;
+        }
+        self.redraw_split(cx, split_id);
+        true
+    }
+
+    /// Whether moving this tab onto this seam would change nothing. It
+    /// would not if the tab is the only one in a panel the seam already
+    /// divides: the same panels in the same order, under new ids and
+    /// with the bar shoved back to the middle.
+    fn between_drop_is_noop(&self, item: LiveId, split_id: LiveId) -> bool {
+        let Some(DockItem::Splitter { a, b, .. }) = self.dock_items.get(&split_id) else {
+            return false;
+        };
+        let Some((tabs_id, _)) = self.find_tab_bar_of_tab(item) else {
+            return false;
+        };
+        if tabs_id != *a && tabs_id != *b {
+            return false;
+        }
+        matches!(
+            self.dock_items.get(&tabs_id),
+            Some(DockItem::Tabs { tabs, .. }) if tabs.len() == 1
+        )
+    }
+
+    /// Put a tab back after a drop gave up part way through.
+    ///
+    /// Where it came from is tried first. If that panel went with it,
+    /// any panel will do: somewhere the person can see it and move it
+    /// again is better than a tab nothing lists, which is gone for good
+    /// and gets saved that way.
+    fn restore_tab(&mut self, cx: &mut Cx, came_from: Option<(LiveId, usize)>, item: LiveId) {
+        if let Some((tabs_id, at)) = came_from {
+            if let Some(DockItem::Tabs { tabs, selected, .. }) = self.dock_items.get_mut(&tabs_id) {
+                let at = at.min(tabs.len());
+                tabs.insert(at, item);
+                *selected = at;
+                self.area.redraw(cx);
+                return;
+            }
+        }
+        let anywhere = self
+            .dock_items
+            .iter()
+            .find(|(_, held)| matches!(held, DockItem::Tabs { .. }))
+            .map(|(id, _)| *id);
+        match anywhere {
+            Some(tabs_id) => {
+                self.push_tab_into_tabs(cx, tabs_id, item);
+            }
+            None => warning!("Dock: nowhere to put {:?} back", item),
+        }
+    }
+
+    /// Redraw a splitter whose division changed.
+    ///
+    /// Both children, not just the area: a pane that only changed SIZE
+    /// keeps its own draw list, and that list compares against the last
+    /// frame's measurement and decides it has nothing to do. This is the
+    /// same reason the splitter's own drag redraws its areas and their
+    /// children rather than trusting the parent.
+    fn redraw_split(&mut self, cx: &mut Cx, split_id: LiveId) {
+        if let Some(DockItem::Splitter { a, b, .. }) = self.dock_items.get(&split_id) {
+            let (a, b) = (*a, *b);
+            self.redraw_item(cx, a);
+            self.redraw_item(cx, b);
+        }
+        if let Some(splitter) = self.splitters.get(&split_id) {
+            let (area_a, area_b) = (splitter.area_a(), splitter.area_b());
+            cx.redraw_area_and_children(area_a);
+            cx.redraw_area_and_children(area_b);
+        }
+        self.area.redraw(cx);
     }
 
     fn drop_create(
@@ -2255,6 +2698,375 @@ impl DockRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { pos: Vec2d { x, y }, size: Vec2d { x: w, y: h } }
+    }
+
+    fn at(x: f64, y: f64) -> Vec2d {
+        Vec2d { x, y }
+    }
+
+    fn weight(align: SplitterAlign) -> f64 {
+        match align {
+            SplitterAlign::Weighted(w) => w,
+            _ => panic!("not a weighted split"),
+        }
+    }
+    fn pinned_from_a(align: SplitterAlign) -> f64 {
+        match align {
+            SplitterAlign::FromA(px) => px,
+            _ => panic!("not pinned to the near side"),
+        }
+    }
+
+    fn pinned_from_b(align: SplitterAlign) -> f64 {
+        match align {
+            SplitterAlign::FromB(px) => px,
+            _ => panic!("not pinned to the far side"),
+        }
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    /// A splitter of two tab containers, sharing the axis evenly.
+    fn two_panels(axis: SplitterAxis) -> (HashMap<LiveId, DockItem>, LiveId, LiveId, LiveId) {
+        let (near, far, root) = (LiveId(1), LiveId(2), id!(root));
+        let mut items = HashMap::new();
+        items.insert(near, DockItem::tabs(vec![LiveId(10)], 0, false));
+        items.insert(far, DockItem::tabs(vec![LiveId(11)], 0, false));
+        items.insert(root, DockItem::Splitter {
+            axis,
+            align: SplitterAlign::Weighted(0.5),
+            a: near,
+            b: far,
+        });
+        (items, near, far, root)
+    }
+
+    #[test]
+    fn a_panel_dropped_between_two_halves_makes_three_thirds() {
+        let (mut items, near, far, root) = two_panels(SplitterAxis::Vertical);
+        let (newcomer, new_split) = (LiveId(3), LiveId(4));
+        items.insert(newcomer, DockItem::tabs(vec![LiveId(12)], 0, false));
+        assert!(Dock::insert_between_split_children_in_items(
+            &mut items, root, newcomer, new_split,
+        ));
+        let Some(DockItem::Splitter { axis, align, a, b }) = items.get(&root) else {
+            panic!("the seam keeps its own id");
+        };
+        assert_eq!(*axis, SplitterAxis::Vertical);
+        assert!(close(weight(*align), 1.0 / 3.0));
+        assert_eq!((*a, *b), (near, new_split));
+        let Some(DockItem::Splitter { align, a, b, .. }) = items.get(&new_split) else {
+            panic!("the far side should have been pushed down");
+        };
+        // The near panel keeps a third; the other two halve the rest.
+        assert!(close(weight(*align), 0.5));
+        assert_eq!((*a, *b), (newcomer, far));
+    }
+
+    #[test]
+    fn everything_along_the_axis_keeps_an_equal_share() {
+        // The near side is already a stack of two, so the answer is not
+        // thirds: it is four panels, and the near pair keep half between
+        // them because they are two of the four.
+        let plan = between_split(SplitterAlign::Weighted(0.5), 2, 1);
+        assert!(close(weight(plan.outer), 0.5));
+        assert!(close(weight(plan.inner), 0.5));
+        assert!(!plan.near_side);
+        // And the other way round: one near, two far.
+        let plan = between_split(SplitterAlign::Weighted(0.5), 1, 2);
+        assert!(close(weight(plan.outer), 0.25));
+        assert!(close(weight(plan.inner), 1.0 / 3.0));
+    }
+
+    #[test]
+    fn a_pinned_pane_is_left_where_it_was_pinned() {
+        // A bar held a fixed distance from one side is a pane whose size
+        // somebody decided. Equalising it would turn a fixed sidebar into
+        // a proportional one, so the newcomer goes on the other side of
+        // the seam and the pinned pane does not move.
+        let plan = between_split(SplitterAlign::FromA(310.0), 1, 1);
+        assert_eq!(pinned_from_a(plan.outer), 310.0);
+        assert!(close(weight(plan.inner), 0.5));
+        assert!(!plan.near_side);
+
+        let plan = between_split(SplitterAlign::FromB(120.0), 2, 1);
+        assert_eq!(pinned_from_b(plan.outer), 120.0);
+        // The newcomer joins the two on the near side and all three
+        // share what the pinned pane left them.
+        assert!(close(weight(plan.inner), 2.0 / 3.0));
+        assert!(plan.near_side);
+    }
+
+    #[test]
+    fn the_preview_covers_the_slot_the_drop_would_make() {
+        // Not the bar that was aimed at: the bar moves.
+        let (offset, len) = newcomer_slot(900.0, SplitterAlign::Weighted(0.5), 1, 1);
+        assert!(close(offset, 300.0));
+        assert!(close(len, 300.0));
+        // Pinned near: the newcomer starts at the pin and takes half of
+        // what is left.
+        let (offset, len) = newcomer_slot(900.0, SplitterAlign::FromA(300.0), 1, 1);
+        assert!(close(offset, 300.0));
+        assert!(close(len, 300.0));
+        // Pinned far: the newcomer ends at the pin.
+        let (offset, len) = newcomer_slot(900.0, SplitterAlign::FromB(300.0), 1, 1);
+        assert!(close(offset, 300.0));
+        assert!(close(len, 300.0));
+    }
+
+    #[test]
+    fn a_pin_wider_than_the_splitter_leaves_no_negative_slot() {
+        let (offset, len) = newcomer_slot(200.0, SplitterAlign::FromA(900.0), 1, 1);
+        assert!(close(offset, 200.0));
+        assert!(close(len, 0.0));
+        let (offset, len) = newcomer_slot(200.0, SplitterAlign::FromB(900.0), 1, 1);
+        assert!(close(offset, 0.0));
+        assert!(close(len, 0.0));
+    }
+
+    #[test]
+    fn a_seam_drop_refuses_what_it_cannot_do() {
+        let (mut items, near, _far, root) = two_panels(SplitterAxis::Horizontal);
+        let newcomer = LiveId(3);
+        items.insert(newcomer, DockItem::tabs(vec![LiveId(12)], 0, false));
+        // Not a splitter.
+        assert!(!Dock::insert_between_split_children_in_items(
+            &mut items, near, newcomer, LiveId(4),
+        ));
+        // The newcomer is one of the two already.
+        assert!(!Dock::insert_between_split_children_in_items(
+            &mut items, root, near, LiveId(4),
+        ));
+        // The id for the new seam is taken.
+        assert!(!Dock::insert_between_split_children_in_items(
+            &mut items, root, newcomer, near,
+        ));
+        // Not a tab container.
+        assert!(!Dock::insert_between_split_children_in_items(
+            &mut items, root, LiveId(99), LiveId(4),
+        ));
+        // None of that touched anything.
+        let Some(DockItem::Splitter { align, .. }) = items.get(&root) else { panic!() };
+        assert!(close(weight(*align), 0.5));
+    }
+
+    #[test]
+    fn two_drops_on_the_same_seam_end_up_as_quarters() {
+        let (mut items, near, far, root) = two_panels(SplitterAxis::Vertical);
+        for (n, (newcomer, new_split)) in
+            [(LiveId(3), LiveId(4)), (LiveId(5), LiveId(6))].into_iter().enumerate()
+        {
+            items.insert(newcomer, DockItem::tabs(vec![LiveId(20 + n as u64)], 0, false));
+            assert!(Dock::insert_between_split_children_in_items(
+                &mut items, root, newcomer, new_split,
+            ));
+        }
+        // Four panels along one axis, so the first bar stands a quarter in.
+        let Some(DockItem::Splitter { align, .. }) = items.get(&root) else { panic!() };
+        assert!(close(weight(*align), 0.25));
+        assert_eq!(Dock::axis_leaves(&items, root, SplitterAxis::Vertical), 4);
+        let _ = (near, far);
+    }
+
+    #[test]
+    fn a_panels_body_starts_under_its_tab_bar() {
+        let body = panel_body(rect(0., 0., 300., 340.), rect(0., 0., 300., 34.));
+        assert_eq!(body, rect(0., 34., 300., 306.));
+    }
+
+    #[test]
+    fn a_panel_with_no_tab_bar_is_all_body() {
+        let whole = rect(10., 20., 300., 340.);
+        assert_eq!(panel_body(whole, rect(0., 0., 0., 0.)), whole);
+    }
+
+    #[test]
+    fn the_top_edge_can_be_reached_under_the_tab_bar() {
+        // Measured against the whole panel the top tenth is 34 points —
+        // exactly the strip — so every press meant for the top edge was a
+        // press on the tab bar, and the only vertical split anybody could
+        // make was downwards.
+        let whole = rect(0., 0., 300., 340.);
+        let body = panel_body(whole, rect(0., 0., 300., 34.));
+        let just_below_the_bar = at(150., 40.);
+        assert_eq!(drop_band(body, just_below_the_bar).unwrap().0, DropPart::Top);
+        assert_eq!(drop_band(whole, just_below_the_bar).unwrap().0, DropPart::Center);
+    }
+
+    #[test]
+    fn all_four_edges_of_a_panel_split_and_the_middle_joins() {
+        let body = rect(0., 0., 300., 300.);
+        assert_eq!(drop_band(body, at(5., 150.)).unwrap().0, DropPart::Left);
+        assert_eq!(drop_band(body, at(295., 150.)).unwrap().0, DropPart::Right);
+        assert_eq!(drop_band(body, at(150., 5.)).unwrap().0, DropPart::Top);
+        assert_eq!(drop_band(body, at(150., 295.)).unwrap().0, DropPart::Bottom);
+        assert_eq!(drop_band(body, at(150., 150.)).unwrap().0, DropPart::Center);
+        assert!(drop_band(body, at(400., 150.)).is_none());
+    }
+
+    #[test]
+    fn a_split_preview_covers_the_half_it_would_take() {
+        let body = rect(100., 200., 300., 400.);
+        assert_eq!(drop_band(body, at(110., 400.)).unwrap().1, rect(100., 200., 150., 400.));
+        assert_eq!(drop_band(body, at(390., 400.)).unwrap().1, rect(250., 200., 150., 400.));
+        assert_eq!(drop_band(body, at(250., 210.)).unwrap().1, rect(100., 200., 300., 200.));
+        assert_eq!(drop_band(body, at(250., 590.)).unwrap().1, rect(100., 400., 300., 200.));
+    }
+
+    #[test]
+    fn only_the_outside_of_the_dock_is_an_outer_drop() {
+        let whole = rect(0., 0., 800., 600.);
+        assert_eq!(outer_band(whole, at(4., 300.)).unwrap().0, DropPart::Left);
+        assert_eq!(outer_band(whole, at(796., 300.)).unwrap().0, DropPart::Right);
+        assert_eq!(outer_band(whole, at(400., 4.)).unwrap().0, DropPart::Top);
+        assert_eq!(outer_band(whole, at(400., 596.)).unwrap().0, DropPart::Bottom);
+        // Well inside, and on a panel edge that is nowhere near the
+        // outside: the panel under the pointer answers for it.
+        assert!(outer_band(whole, at(400., 300.)).is_none());
+        assert!(outer_band(whole, at(120., 300.)).is_none());
+    }
+
+    #[test]
+    fn an_outer_drop_previews_half_the_whole_dock() {
+        // Not half a panel: the point of it is that it lies across them.
+        let whole = rect(0., 0., 800., 600.);
+        assert_eq!(outer_band(whole, at(4., 300.)).unwrap().1, rect(0., 0., 400., 600.));
+        assert_eq!(outer_band(whole, at(400., 596.)).unwrap().1, rect(0., 300., 800., 300.));
+    }
+
+    #[test]
+    fn a_dock_too_small_to_have_an_inside_has_no_outer_band() {
+        assert!(outer_band(rect(0., 0., 60., 600.), at(4., 300.)).is_none());
+    }
+
+    #[test]
+    fn a_newcomer_beside_one_panel_halves_it() {
+        assert_eq!(weight(equal_share(1, true)), 0.5);
+        assert_eq!(weight(equal_share(1, false)), 0.5);
+    }
+
+    #[test]
+    fn a_newcomer_under_two_stacked_panels_makes_three_thirds() {
+        // The pair keep two thirds and are already halving it, so all
+        // three end up the same height.
+        assert!((weight(equal_share(2, false)) - 2.0 / 3.0).abs() < 1e-12);
+        assert!((weight(equal_share(2, true)) - 1.0 / 3.0).abs() < 1e-12);
+        assert!((weight(equal_share(3, true)) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_stack_is_counted_along_its_own_axis_only() {
+        let (top, bottom, root) = (LiveId(1), LiveId(2), id!(root));
+        let mut items = HashMap::new();
+        items.insert(top, DockItem::tabs(vec![LiveId(10)], 0, false));
+        items.insert(bottom, DockItem::tabs(vec![LiveId(11)], 0, false));
+        items.insert(root, DockItem::Splitter {
+            axis: SplitterAxis::Vertical,
+            align: SplitterAlign::Weighted(0.5),
+            a: top,
+            b: bottom,
+        });
+        // Two along the axis they share; across it the pair is one band,
+        // which is why a drop down the side gives a half and not a third.
+        assert_eq!(Dock::axis_leaves(&items, root, SplitterAxis::Vertical), 2);
+        assert_eq!(Dock::axis_leaves(&items, root, SplitterAxis::Horizontal), 1);
+        assert_eq!(Dock::axis_leaves(&items, top, SplitterAxis::Vertical), 1);
+    }
+
+    #[test]
+    fn a_panel_laid_across_a_stack_leaves_the_stack_stacked() {
+        // A over B, and a newcomer dropped down the left of everything.
+        let (top, bottom, root) = (LiveId(1), LiveId(2), id!(root));
+        let (newcomer, moved_root, new_split) = (LiveId(3), LiveId(4), LiveId(5));
+        let mut items = HashMap::new();
+        items.insert(top, DockItem::tabs(vec![LiveId(10)], 0, false));
+        items.insert(bottom, DockItem::tabs(vec![LiveId(11)], 0, false));
+        items.insert(newcomer, DockItem::tabs(vec![LiveId(12)], 0, false));
+        items.insert(root, DockItem::Splitter {
+            axis: SplitterAxis::Vertical,
+            align: SplitterAlign::Weighted(0.5),
+            a: top,
+            b: bottom,
+        });
+        assert!(Dock::split_tabs_container_in_items(
+            &mut items, root, newcomer, new_split, Some(moved_root), DropPart::Left,
+        ));
+        let Some(DockItem::Splitter { axis, align, a, b }) = items.get(&root) else {
+            panic!("the root should be the new split");
+        };
+        assert_eq!(*axis, SplitterAxis::Horizontal);
+        assert_eq!(weight(*align), 0.5);
+        assert_eq!(*a, newcomer);
+        assert_eq!(*b, moved_root);
+        // The pair that were sharing the square are still sharing what is
+        // left of it, top and bottom.
+        let Some(DockItem::Splitter { axis, a, b, .. }) = items.get(&moved_root) else {
+            panic!("the old root should have moved aside");
+        };
+        assert_eq!(*axis, SplitterAxis::Vertical);
+        assert_eq!((*a, *b), (top, bottom));
+    }
+
+    #[test]
+    fn a_panel_dropped_under_a_stack_joins_it_as_an_equal() {
+        let (top, bottom, root) = (LiveId(1), LiveId(2), id!(root));
+        let (newcomer, moved_root, new_split) = (LiveId(3), LiveId(4), LiveId(5));
+        let mut items = HashMap::new();
+        items.insert(top, DockItem::tabs(vec![LiveId(10)], 0, false));
+        items.insert(bottom, DockItem::tabs(vec![LiveId(11)], 0, false));
+        items.insert(newcomer, DockItem::tabs(vec![LiveId(12)], 0, false));
+        items.insert(root, DockItem::Splitter {
+            axis: SplitterAxis::Vertical,
+            align: SplitterAlign::Weighted(0.5),
+            a: top,
+            b: bottom,
+        });
+        assert!(Dock::split_tabs_container_in_items(
+            &mut items, root, newcomer, new_split, Some(moved_root), DropPart::Bottom,
+        ));
+        let Some(DockItem::Splitter { axis, align, a, b }) = items.get(&root) else {
+            panic!("the root should be the new split");
+        };
+        assert_eq!(*axis, SplitterAxis::Vertical);
+        assert!((weight(*align) - 2.0 / 3.0).abs() < 1e-12);
+        assert_eq!((*a, *b), (moved_root, newcomer));
+    }
+
+    #[test]
+    fn splitting_one_panel_of_a_stack_nests_inside_it() {
+        // The other reading of the same gesture: aimed at a panel rather
+        // than at the dock, only that panel is divided.
+        let (top, bottom, root) = (LiveId(1), LiveId(2), id!(root));
+        let (newcomer, new_split) = (LiveId(3), LiveId(5));
+        let mut items = HashMap::new();
+        items.insert(top, DockItem::tabs(vec![LiveId(10)], 0, false));
+        items.insert(bottom, DockItem::tabs(vec![LiveId(11)], 0, false));
+        items.insert(newcomer, DockItem::tabs(vec![LiveId(12)], 0, false));
+        items.insert(root, DockItem::Splitter {
+            axis: SplitterAxis::Vertical,
+            align: SplitterAlign::Weighted(0.5),
+            a: top,
+            b: bottom,
+        });
+        assert!(Dock::split_tabs_container_in_items(
+            &mut items, top, newcomer, new_split, None, DropPart::Right,
+        ));
+        let Some(DockItem::Splitter { a, b, .. }) = items.get(&root) else {
+            panic!("the root is still the stack");
+        };
+        assert_eq!((*a, *b), (new_split, bottom));
+        let Some(DockItem::Splitter { axis, align, a, b }) = items.get(&new_split) else {
+            panic!("the top panel should have become a split");
+        };
+        assert_eq!(*axis, SplitterAxis::Horizontal);
+        assert_eq!(weight(*align), 0.5);
+        assert_eq!((*a, *b), (top, newcomer));
+    }
 
     #[test]
     fn preserving_layout_keeps_absent_and_matching_tab_bodies() {

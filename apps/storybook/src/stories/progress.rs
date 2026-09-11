@@ -10,6 +10,11 @@ script_mod! {
 
     mod.stories.ProgressOverview = StoryPage{
         StoryNote{text: "Every shape of progress. The first bar advances a tenth per click; the rest are set values, an unknown one, the intents, labels, stacked segments, then rings, an arc, activity rings, gauges and the navigation line."}
+        StoryHeading{text: "One bar, under the controls"}
+        StoryNote{text: "One bar; its value, intent, thickness and label come from the controls."}
+        StoryRow{
+            subject := ProgressBar{width: 260. value: 0.35 show_percent: true}
+        }
 
         StoryHeading{text: "Determinate"}
         StoryRow{
@@ -114,13 +119,6 @@ script_mod! {
             nav_reset := Button{text: "Reset"}
         }
     }
-
-    mod.stories.ProgressBasic = StoryPage{
-        StoryNote{text: "One bar; its value, intent, thickness and label come from the controls."}
-        StoryRow{
-            subject := ProgressBar{width: 260. value: 0.35 show_percent: true}
-        }
-    }
 }
 
 fn progress_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -151,24 +149,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "ProgressOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Progress\n\nEvery widget that answers \"how far along is it\". They share one contract: `value` is a fraction 0..1 that eases into place over `theme.motion_medium_1`, only ever forward (a lower value snaps, a negative one is indeterminate), and `Completed` is raised when the value reaches the end.\n\n- `ProgressBarFlat` is the default; `ProgressBar` adds the inset bevel, `ProgressBarGradientX/Y` shade the fill. `show_percent` or `text` puts a label beside the bar; `segments` stacks sections; `draw_bg.gap` and `draw_bg.stop_indicator` are the track details.\n- `ProgressRingFlat`/`ProgressRing` fill clockwise from the top with the label in the middle; `sections` cuts the ring. `ProgressArc` is half a ring with the label inside. `ActivityRings` nests one ring per entry of `values`.\n- `Gauge` is a read-only dial with safe, warning and critical zones and a needle; `GaugeLinear` lays the same zones along a bar.\n- `NavigationProgress` is the hairline at the top of a page: `start`, `increment`, `complete`, `reset`.",
         subject: "bar",
-        feature: None,
-        controls: &[],
-        on_actions: Some(progress_actions),
-    },
-    Story {
-        key: "feedback/progress/basic",
-        category: "Feedback",
-        component: "Progress",
-        also: &[],
-        name: "Basic",
-        dsl: "ProgressBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# ProgressBar\n\nOne bar under the controls: the value, the intent (the theme's accent role the fill uses), the thickness of the track and whether the percentage is shown.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Value", target: "subject", kind: ControlKind::Number { prop: "value", min: 0., max: 1., step: 0.01, default: 0.35 } },
@@ -177,6 +160,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Percent label", target: "subject", kind: ControlKind::Bool { prop: "show_percent", default: true } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: None,
+        on_actions: Some(progress_actions),
     },
 ];

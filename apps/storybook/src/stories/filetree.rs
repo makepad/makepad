@@ -126,11 +126,11 @@ impl StoryFileTree {
                     // been drawn anywhere, which is how one of them came to
                     // be drawn fully transparent without anyone noticing.
                     let status = match file_node_id.0 % 5 {
-                        0 => GitStatusDotKind::None,
-                        1 => GitStatusDotKind::New,
-                        2 => GitStatusDotKind::Modified,
-                        3 => GitStatusDotKind::Deleted,
-                        _ => GitStatusDotKind::Mixed,
+                        0 => StatusDotKind::None,
+                        1 => StatusDotKind::New,
+                        2 => StatusDotKind::Modified,
+                        3 => StatusDotKind::Deleted,
+                        _ => StatusDotKind::Mixed,
                     };
                     file_tree.file_with_status(cx, file_node_id, &file_node.name, status);
                 }

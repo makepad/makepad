@@ -93,7 +93,8 @@ pub fn is_new(story: &Story, baseline: &str) -> bool {
 }
 
 /// The story a search query lands on: the first whose key, name, component,
-/// category or tags contain the query, case-insensitively.
+/// category, tags, the other widgets it draws, or any word written for it in
+/// `synonyms.json` contains the query, case-insensitively.
 pub fn matches(story: &Story, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -104,6 +105,15 @@ pub fn matches(story: &Story, query: &str) -> bool {
         || story.component.to_lowercase().contains(&q)
         || story.category.to_lowercase().contains(&q)
         || story.tags.iter().any(|t| t.to_lowercase().contains(&q))
+        // The other widgets the page draws. The segmented control lives on
+        // the button-group page and the chip group on the chip page, and
+        // searching for either by name was finding nothing at all: `also`
+        // was written down for the coverage count and never read here.
+        || story.also.iter().any(|a| a.to_lowercase().contains(&q))
+        // And what people call these things when they do not know what we
+        // call them.
+        || crate::synonyms::matches(story.component, &q)
+        || story.also.iter().any(|a| crate::synonyms::matches(a, &q))
 }
 
 pub fn is_iso_date(s: &str) -> bool {

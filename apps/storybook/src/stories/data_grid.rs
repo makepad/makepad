@@ -27,6 +27,9 @@ script_mod! {
                 // repository declares zero here for the same reason.
                 rows: 0
                 cols: 3
+                // On, so the page shows what a sortable heading looks like
+                // before it is sorted as well as after.
+                sortable: true
                 default_col_width: 150.0
                 default_row_height: 24.0
                 allow_col_reorder: true
@@ -61,6 +64,7 @@ script_mod! {
 
         StoryHeading{text: "Three columns of people"}
         StoryNote{text: "Click a cell, shift-click another for a rectangle, click a row number for the row, a column header for the column. Arrow keys move and shift extends. Drag a column edge to resize it, and a column header to move it somewhere else."}
+        StoryNote{text: "Press a heading to sort by it: once for up, again for down, a third time back to the order the rows arrived in. The grid does not do this — it reports the press and this page reorders its own rows, which is the whole arrangement."}
         demo := mod.storybook.StoryDataGrid{}
     }
 }
@@ -80,10 +84,55 @@ const ROWS: &[[&str; 3]] = &[
     ["Karen", "Sparck Jones", "1935"],
 ];
 
+/// The rows in the order a sort put them, as indices into `ROWS`.
+/// Empty means the order they were written in.
+///
+/// Kept here rather than in the grid because the grid holds no data:
+/// it reports the heading press and the host does the sorting, which
+/// is what this page is demonstrating.
+fn sorted_order(col: usize, ascending: Option<bool>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..ROWS.len()).collect();
+    let Some(ascending) = ascending else {
+        return order;
+    };
+    // Stable, so the rows that tie stay in the order they came in,
+    // and a second column press does not shuffle them.
+    order.sort_by(|a, b| {
+        let (x, y) = (ROWS[*a][col], ROWS[*b][col]);
+        if ascending { x.cmp(y) } else { y.cmp(x) }
+    });
+    order
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct StoryDataGrid {
     #[deref]
     view: View,
+    /// Indices into `ROWS`. Empty until a heading is pressed.
+    #[rust]
+    order: Vec<usize>,
+}
+
+impl StoryDataGrid {
+    /// A heading was pressed. Returns what to say about it.
+    fn sort(&mut self, col: usize, ascending: Option<bool>) -> String {
+        self.order = match ascending {
+            Some(_) => sorted_order(col, ascending),
+            None => Vec::new(),
+        };
+        const NAMES: [&str; 3] = ["First", "Last", "Born"];
+        let name = NAMES.get(col).copied().unwrap_or("?");
+        match ascending {
+            Some(true) => format!("sorted by {name}, up"),
+            Some(false) => format!("sorted by {name}, down"),
+            None => "back to the order the rows arrived in".to_string(),
+        }
+    }
+
+    /// Which row of `ROWS` is drawn at this line of the grid.
+    fn row_at(&self, line: usize) -> usize {
+        self.order.get(line).copied().unwrap_or(line)
+    }
 }
 
 impl Widget for StoryDataGrid {
@@ -107,7 +156,12 @@ impl Widget for StoryDataGrid {
             while let Some(cell) = grid.next_cell(cx) {
                 // cell.col, never cell.display_col: the data index survives
                 // a column being dragged somewhere else.
-                grid.cell_text(cx, &cell, ROWS[cell.row][cell.col]);
+                //
+                // cell.row is a line of the grid, not a row of the data:
+                // sorting moves the data under the lines and leaves the
+                // lines where they are.
+                let row = self.row_at(cell.row);
+                grid.cell_text(cx, &cell, ROWS[row][cell.col]);
             }
         }
         DrawStep::done()
@@ -118,8 +172,21 @@ impl Widget for StoryDataGrid {
     }
 }
 
-fn data_grid_actions(cx: &mut Cx, root: &WidgetRef, _actions: &Actions) {
+fn data_grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let grid = root.data_grid(cx, ids!(demo.grid));
+    // The grid sorts nothing. It says which heading was pressed and
+    // which way it now points, and the rows move here.
+    if let Some((col, ascending)) = grid.sort_changed(actions) {
+        let host = root.widget(cx, ids!(demo));
+        let said = host
+            .borrow_mut::<StoryDataGrid>()
+            .map(|mut inner| inner.sort(col, ascending));
+        if let Some(said) = said {
+            host.redraw(cx);
+            root.label(cx, ids!(demo.reported)).set_text(cx, &said);
+            return;
+        }
+    }
     // Asked each pass rather than listened for: the selection moves under
     // the keyboard as well as the mouse, and a label that only heard about
     // clicks would fall behind the arrow keys.
@@ -163,7 +230,7 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 
 Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
 
-Yours, despite the name: **it does not sort** — it raises `HeaderClicked`, you sort your own data and call `set_sort_indicator`, which draws an arrow. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **It does not edit** — it raises `EditCell` and you host the input. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
+Yours, despite the name: **it does not sort the rows** — with `sortable: true` a heading press cycles unsorted, up, down and back, draws the mark and raises `SortChanged { col, ascending }`; the rows themselves are yours to reorder, because the grid never held them. This page keeps a list of indices and draws through it, which is all it takes. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **It does not edit** — it raises `EditCell` and you host the input. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
 
 ## Two things that will bite
 
@@ -179,3 +246,38 @@ Every surface it paints is a literal light-mode colour — `color_bg: #fafafa`, 
     controls: &[],
     on_actions: Some(data_grid_actions),
 }];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn up_and_down_are_reverses_of_each_other() {
+        let up = sorted_order(1, Some(true));
+        let mut down = sorted_order(1, Some(false));
+        down.reverse();
+        assert_eq!(up, down);
+    }
+
+    #[test]
+    fn unsorted_is_the_order_the_rows_arrived_in() {
+        assert_eq!(sorted_order(0, None), (0..ROWS.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sorting_by_a_column_orders_that_column() {
+        let order = sorted_order(1, Some(true));
+        let names: Vec<&str> = order.iter().map(|i| ROWS[*i][1]).collect();
+        let mut want = names.clone();
+        want.sort();
+        assert_eq!(names, want);
+        assert_eq!(names[0], "Allen");
+    }
+
+    #[test]
+    fn every_row_is_still_there_afterwards() {
+        let mut order = sorted_order(2, Some(false));
+        order.sort();
+        assert_eq!(order, (0..ROWS.len()).collect::<Vec<_>>());
+    }
+}

@@ -4,7 +4,7 @@
 //!
 //! Why this exists. The three theme files (`theme_desktop_dark.rs`,
 //! `theme_desktop_light.rs`, `theme_desktop_skeleton.rs`) are script objects
-//! that only the runtime reads. The F12 tweaker's theme tab and the catalogue
+//! that only the runtime reads. The Shift+F10 tweaker's theme tab and the catalogue
 //! app need a typed list to build their controls from, with a doc line and a
 //! range per token, and they need to know which theme lacks what (the
 //! skeleton has no contrast, tint or font-contrast knob). `THEME_TOKENS` is
@@ -259,7 +259,8 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     ease("motion_ease_emphasized_decelerate", "A strong ease out; a surface arriving with weight."),
     ease("motion_ease_emphasized_accelerate", "A strong ease in; a surface leaving with weight."),
     ease("motion_ease_linear", "No easing; progress and colour fades."),
-    ease("motion_ease_spring", "An exponential settle; drags and snaps."),
+    ease("motion_ease_spring", "Overshoots and settles; drags and snaps."),
+    ease("motion_ease_bounce", "Rebounds off the value without passing it; something landing."),
     // State layers.
     opacity("state_hover_opacity", "Opacity of the state layer under a hovered control."),
     opacity("state_focus_opacity", "Opacity of the state layer under a focused control."),

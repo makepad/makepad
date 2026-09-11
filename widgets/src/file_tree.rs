@@ -19,8 +19,8 @@ script_mod! {
         ..mod.draw.DrawText
     }
 
-    let GitStatusDotKind = set_type_default() do #(GitStatusDotKind::script_api(vm))
-    mod.widgets.GitStatusDotKind = GitStatusDotKind
+    let StatusDotKind = set_type_default() do #(StatusDotKind::script_api(vm))
+    mod.widgets.StatusDotKind = StatusDotKind
 
     set_type_default() do #(DrawIconQuad::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -48,7 +48,7 @@ script_mod! {
 
     set_type_default() do #(DrawStatusDotQuad::script_shader(vm)){
         ..mod.draw.DrawQuad
-        status_kind: instance(GitStatusDotKind.None)
+        status_kind: instance(StatusDotKind.None)
         color_new: #x58c26d
         color_modified: #FA0
         color_deleted: #xd86464
@@ -60,17 +60,17 @@ script_mod! {
         color_mixed: #x7a9cf0
         pixel: fn() {
             let dot_color = match self.status_kind {
-                GitStatusDotKind.New => self.color_new
-                GitStatusDotKind.Modified => self.color_modified
-                GitStatusDotKind.Deleted => self.color_deleted
-                GitStatusDotKind.Mixed => self.color_mixed
+                StatusDotKind.New => self.color_new
+                StatusDotKind.Modified => self.color_modified
+                StatusDotKind.Deleted => self.color_deleted
+                StatusDotKind.Mixed => self.color_mixed
                 _ => self.color_mixed
             }
             let dot_blend = match self.status_kind {
-                GitStatusDotKind.New => 1f
-                GitStatusDotKind.Modified => 1f
-                GitStatusDotKind.Deleted => 1f
-                GitStatusDotKind.Mixed => 1f
+                StatusDotKind.New => 1f
+                StatusDotKind.Modified => 1f
+                StatusDotKind.Deleted => 1f
+                StatusDotKind.Mixed => 1f
                 _ => 0f
             }
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -362,7 +362,7 @@ struct DrawStatusDotQuad {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    status_kind: GitStatusDotKind,
+    status_kind: StatusDotKind,
     #[live]
     color_new: Vec4,
     #[live]
@@ -375,7 +375,7 @@ struct DrawStatusDotQuad {
 
 #[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
 #[repr(u32)]
-pub enum GitStatusDotKind {
+pub enum StatusDotKind {
     #[pick]
     None = 0,
     New = 1,
@@ -389,7 +389,7 @@ pub enum GitStatusDotKind {
 /// a widget now, so the tree parks them here and `draw_walk` consumes them.
 pub struct FileTreeNodeDraw {
     pub name: String,
-    pub status_kind: GitStatusDotKind,
+    pub status_kind: StatusDotKind,
     pub is_even: f32,
     pub node_height: f64,
     pub depth: usize,
@@ -574,7 +574,7 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx2d,
         name: &str,
-        status_kind: GitStatusDotKind,
+        status_kind: StatusDotKind,
         is_even: f32,
         node_height: f64,
         depth: usize,
@@ -606,7 +606,7 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx2d,
         name: &str,
-        status_kind: GitStatusDotKind,
+        status_kind: StatusDotKind,
         is_even: f32,
         node_height: f64,
         depth: usize,
@@ -803,7 +803,7 @@ impl FileTree {
         cx: &mut Cx2d,
         node_id: LiveId,
         name: &str,
-        status_kind: GitStatusDotKind,
+        status_kind: StatusDotKind,
     ) -> Result<(), ()> {
         if self.reveal_node == Some(node_id) {
             self.reveal_node = None;
@@ -853,7 +853,7 @@ impl FileTree {
     }
 
     pub fn begin_folder(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) -> Result<(), ()> {
-        self.begin_folder_with_status(cx, node_id, name, GitStatusDotKind::None)
+        self.begin_folder_with_status(cx, node_id, name, StatusDotKind::None)
     }
 
     pub fn end_folder(&mut self) {
@@ -865,7 +865,7 @@ impl FileTree {
         cx: &mut Cx2d,
         node_id: LiveId,
         name: &str,
-        status_kind: GitStatusDotKind,
+        status_kind: StatusDotKind,
     ) {
         if self.reveal_node == Some(node_id) {
             self.reveal_node = None;
@@ -1012,7 +1012,7 @@ impl FileTree {
     }
 
     pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
-        self.file_with_status(cx, node_id, name, GitStatusDotKind::None);
+        self.file_with_status(cx, node_id, name, StatusDotKind::None);
     }
 
     pub fn forget(&mut self) {

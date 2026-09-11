@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub mod badge;
-pub mod basics;
 pub mod foundations;
 pub mod placeholder;
 pub mod button_more;
@@ -15,6 +14,8 @@ pub mod checkbox_more;
 pub mod alert;
 pub mod divider;
 pub mod progress;
+pub mod playback_bar;
+pub mod level_meter;
 pub mod spinner;
 pub mod button_group;
 pub mod chip;
@@ -30,8 +31,48 @@ pub mod tip;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
+pub mod combobox;
 pub mod dropdown;
 pub mod label;
+pub mod number_field;
+pub mod calendar;
+pub mod date_picker;
+pub mod time_picker;
+pub mod rating;
+pub mod tags;
+pub mod radio_group;
+pub mod kbd;
+pub mod wheel_picker;
+pub mod typography;
+pub mod tree;
+pub mod list_item;
+pub mod avatar;
+pub mod card;
+pub mod media;
+pub mod waveform;
+pub mod table;
+pub mod empty_state;
+pub mod timeline;
+pub mod chat;
+pub mod code_block;
+pub mod carousel;
+pub mod upload;
+pub mod form;
+pub mod color;
+pub mod column_picker;
+pub mod command_palette;
+pub mod pie_menu;
+pub mod drag_number;
+pub mod chart_more;
+pub mod toolbar;
+pub mod masonry;
+pub mod kanban;
+pub mod splitter_more;
+pub mod svg_select;
+pub mod rich_text;
+pub mod scroll_more;
+pub mod tour;
+pub mod range_slider;
 pub mod slider;
 pub mod textinput;
 pub mod radiobutton;
@@ -72,6 +113,7 @@ pub mod iconset;
 pub mod image;
 pub mod imageblend;
 pub mod rotatedimage;
+pub mod corner_cap_view;
 pub mod glasspanel;
 pub mod linklabel;
 pub mod markdown;
@@ -84,6 +126,8 @@ pub mod adaptiveview;
 pub mod slidesview;
 pub mod scrollbar;
 pub mod portallist;
+pub mod tile_list;
+pub mod log_list;
 pub mod filetree;
 pub mod rotary;
 pub mod video;
@@ -94,9 +138,49 @@ pub fn script_mod(vm: &mut ScriptVm) {
     foundations::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
+    combobox::script_mod(vm);
     dropdown::script_mod(vm);
     label::script_mod(vm);
     slider::script_mod(vm);
+    range_slider::script_mod(vm);
+    tour::script_mod(vm);
+    scroll_more::script_mod(vm);
+    rich_text::script_mod(vm);
+    svg_select::script_mod(vm);
+    splitter_more::script_mod(vm);
+    kanban::script_mod(vm);
+    masonry::script_mod(vm);
+    toolbar::script_mod(vm);
+    chart_more::script_mod(vm);
+    drag_number::script_mod(vm);
+    pie_menu::script_mod(vm);
+    command_palette::script_mod(vm);
+    column_picker::script_mod(vm);
+    color::script_mod(vm);
+    form::script_mod(vm);
+    upload::script_mod(vm);
+    carousel::script_mod(vm);
+    code_block::script_mod(vm);
+    chat::script_mod(vm);
+    timeline::script_mod(vm);
+    empty_state::script_mod(vm);
+    table::script_mod(vm);
+    media::script_mod(vm);
+    waveform::script_mod(vm);
+    card::script_mod(vm);
+    avatar::script_mod(vm);
+    list_item::script_mod(vm);
+    tree::script_mod(vm);
+    typography::script_mod(vm);
+    wheel_picker::script_mod(vm);
+    kbd::script_mod(vm);
+    radio_group::script_mod(vm);
+    tags::script_mod(vm);
+    rating::script_mod(vm);
+    time_picker::script_mod(vm);
+    date_picker::script_mod(vm);
+    calendar::script_mod(vm);
+    number_field::script_mod(vm);
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     view::script_mod(vm);
@@ -136,6 +220,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     image::script_mod(vm);
     imageblend::script_mod(vm);
     rotatedimage::script_mod(vm);
+    corner_cap_view::script_mod(vm);
     glasspanel::script_mod(vm);
     linklabel::script_mod(vm);
     markdown::script_mod(vm);
@@ -148,11 +233,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
     slidesview::script_mod(vm);
     scrollbar::script_mod(vm);
     portallist::script_mod(vm);
+    tile_list::script_mod(vm);
+    log_list::script_mod(vm);
     filetree::script_mod(vm);
     spinner::script_mod(vm);
     rotary::script_mod(vm);
     video::script_mod(vm);
-    basics::script_mod(vm);
     badge::script_mod(vm);
     placeholder::script_mod(vm);
     checkbox_more::script_mod(vm);
@@ -171,6 +257,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     alert::script_mod(vm);
     divider::script_mod(vm);
     progress::script_mod(vm);
+    playback_bar::script_mod(vm);
+    level_meter::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -180,9 +268,49 @@ pub fn tables() -> &'static [&'static [Story]] {
         foundations::STORIES,
         button::STORIES,
         checkbox::STORIES,
+        combobox::STORIES,
         dropdown::STORIES,
         label::STORIES,
         slider::STORIES,
+        range_slider::STORIES,
+        tour::STORIES,
+        scroll_more::STORIES,
+        rich_text::STORIES,
+        svg_select::STORIES,
+        splitter_more::STORIES,
+        kanban::STORIES,
+        masonry::STORIES,
+        toolbar::STORIES,
+        chart_more::STORIES,
+        drag_number::STORIES,
+        pie_menu::STORIES,
+        command_palette::STORIES,
+        column_picker::STORIES,
+        color::STORIES,
+        form::STORIES,
+        upload::STORIES,
+        carousel::STORIES,
+        code_block::STORIES,
+        chat::STORIES,
+        timeline::STORIES,
+        empty_state::STORIES,
+        table::STORIES,
+        media::STORIES,
+        waveform::STORIES,
+        card::STORIES,
+        avatar::STORIES,
+        list_item::STORIES,
+        tree::STORIES,
+        typography::STORIES,
+        wheel_picker::STORIES,
+        kbd::STORIES,
+        radio_group::STORIES,
+        tags::STORIES,
+        rating::STORIES,
+        time_picker::STORIES,
+        date_picker::STORIES,
+        calendar::STORIES,
+        number_field::STORIES,
         textinput::STORIES,
         radiobutton::STORIES,
         view::STORIES,
@@ -222,6 +350,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         image::STORIES,
         imageblend::STORIES,
         rotatedimage::STORIES,
+        corner_cap_view::STORIES,
         glasspanel::STORIES,
         linklabel::STORIES,
         markdown::STORIES,
@@ -234,11 +363,12 @@ pub fn tables() -> &'static [&'static [Story]] {
         slidesview::STORIES,
         scrollbar::STORIES,
         portallist::STORIES,
+        tile_list::STORIES,
+        log_list::STORIES,
         filetree::STORIES,
         spinner::STORIES,
         rotary::STORIES,
         video::STORIES,
-        basics::STORIES,
         badge::STORIES,
         placeholder::STORIES,
         checkbox_more::STORIES,
@@ -257,6 +387,8 @@ pub fn tables() -> &'static [&'static [Story]] {
         alert::STORIES,
         divider::STORIES,
         progress::STORIES,
+        playback_bar::STORIES,
+        level_meter::STORIES,
     ]
 }
 

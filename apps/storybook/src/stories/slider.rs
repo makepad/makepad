@@ -1,13 +1,18 @@
 //! The slider stories: every slider rung with its disabled, ranged, precise and stepped forms, ported from the widget zoo.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.SliderOverview = StoryPage{
+    mod.stories.SliderOverview = StoryPage{        StoryHeading{text: "One slider, under the controls"}
+        StoryNote{text: "One slider; its range and step come from the controls."}
+        StoryRow{
+            subject := Slider{width: 240. text: "Amount"}
+        }
+
         H4{text: "Slider"}
         Slider{text: "Default"}
         Slider{
@@ -218,11 +223,16 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "SliderOverview",
     added: "2026-02-16",
-    tags: &["ported"],
+    tags: &["controls", "ported"],
     doc: "# Slider\n\nSliders allow selecting numeric values.",
     subject: "",
     feature: None,
-    controls: &[],
+    controls: &[
+            Control { label: "Label", target: "subject", kind: ControlKind::Text { prop: "text", default: "Amount" } },
+            Control { label: "Maximum", target: "subject", kind: ControlKind::Number { prop: "max", min: 1., max: 1000., step: 1., default: 1. } },
+            Control { label: "Step", target: "subject", kind: ControlKind::Number { prop: "step", min: 0., max: 10., step: 0.1, default: 0. } },
+            Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
+        ],
     on_actions: None,
 }, Story {
     key: "inputs/slider/taper",

@@ -132,7 +132,7 @@ script_mod! {
     }
 }
 
-#[derive(Copy, Clone, Debug, Script, ScriptHook, Default, SerRon, DeRon)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Script, ScriptHook, Default, SerRon, DeRon)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAxis {
     #[pick]
@@ -583,6 +583,25 @@ impl Splitter {
 
     pub fn set_align(&mut self, align: SplitterAlign) {
         self.align = align;
+    }
+
+    /// The bar between the panes, widened by the slop a drag grabs it
+    /// with. Empty until it has drawn.
+    ///
+    /// The clipped rect, because this answers a question about a point
+    /// on screen and that is the frame `hits` works in. Six points of
+    /// painted bar is too thin to aim anything at, which is why the
+    /// drag has slop in the first place; whatever wants to know where
+    /// the bar IS wants the same answer.
+    pub fn bar_grab_rect(&self, cx: &Cx) -> Rect {
+        let area = self.draw_bg.area();
+        if !area.is_valid(cx) {
+            return Rect::default();
+        }
+        // axis_inset is symmetric and zero along the axis, so one call
+        // widens the strip across it and leaves its length alone.
+        let slop = self.margin();
+        area.clipped_rect(cx).add_margin(dvec2(slop.left, slop.top))
     }
 
     fn margin(&self) -> Inset {

@@ -1391,6 +1391,373 @@ script_mod! {
         }
     }
 
+    /** The panel knob: one dark disc with the value cut into a groove near its edge, drawn to stay legible at 24 pixels square. */
+    mod.widgets.RotaryKnob = mod.widgets.SliderMinimal{
+        // 44 across, 64 down: the knob is the 44 and the 20 left over is
+        // the legend row -- the same twenty pixels the rest of the family
+        // reserves for a one-line label, in SliderMinimal's `offset_y`
+        // uniform and RotaryFlat's `label_offset_px`. The shader
+        // takes the biggest circle the box holds and pins it to the
+        // bottom, so height over width IS the reserve; a caller who wants
+        // the compact form writes the two the same and leaves the text
+        // empty. The label row itself is font_size_p 10 by
+        // font_wdgt_line_spacing 1.2 plus space_1 3, which is 15 in ALL
+        // THREE themes -- the skeleton raises space_factor to 10 but then
+        // writes space_1 as a literal 3 and font_size_p as a literal 10,
+        // so nothing about that row moves. Twenty clears it everywhere.
+        width: 44.
+        height: 64.
+        axis: Vertical
+
+        // Written out although Layout's own default is already this,
+        // because draw_walk_slider only takes the deferred-walk branch --
+        // the branch that draws the label and the readout at all -- under
+        // Flow::Right{wrap: false}. RotaryFlat states it for the same
+        // reason. Nothing is logged if it is ever missed.
+        flow: Right
+
+        margin: theme.mspace_1
+        align: Align{x: 0., y: 0.}
+        label_align: Align{x: 0.5, y: 0.}
+
+        // The whole range in 160 points of travel, whatever the knob is
+        // drawn at. Left at the family default of 0 a drag divides by the
+        // control's own height, which is 95 on a stock Rotary and would be
+        // 24 here -- four percent of the range per pixel, on the size this
+        // is built for -- and there is no modifier to slow it: the
+        // Shift/Ctrl ladder lives on the wheel only. The wheel is not the
+        // answer either. Nothing marks a scroll consumed, so a knob that
+        // took the wheel inside a scrolling panel would move its value AND
+        // scroll the panel with the same gesture; `scroll_step` stays off,
+        // here as everywhere else in the library.
+        drag_travel: 160.
+
+        // SliderMinimal's `label_walk` is INHERITED, not replaced, and both
+        // of its sizes are load-bearing. Fill width is what makes
+        // cx.defer_walk_turtle hand the row back at all: without it neither
+        // the label nor the readout is drawn, and nothing says so. Fit
+        // height is what keeps `label_area` on the legend row -- Size's own
+        // default is Fill, so a replaced walk that does not say Fit gets a
+        // label turtle the height of the whole control, and the family's
+        // tap-the-label reset then fires anywhere on the face.
+
+        // No readout. Four digits do not fit beside a 24 pixel knob, and on
+        // a square one there is nowhere to put them: the label and the
+        // readout are drawn INSIDE the same quad the knob fills, so a
+        // readout with a size would land on the knob's own face. The field
+        // still takes key focus on a press, so a value can be typed --
+        // blind, which is the price. Give it a size back to see it. Merged
+        // rather than replaced, so `empty_text`, `is_numeric_only`,
+        // `is_read_only` and the hidden-background block survive; the
+        // shape is `editor +:` on CodeView's editor and `scroll_bar_y +:`
+        // on ScrollBars', both of them #[live] widget fields the base set
+        // with a fresh instance, exactly as this one is.
+        text_input +: {
+            width: 0.
+            height: 0.
+        }
+
+        /** The knob material: one dark disc, a groove carrying the value, and a needle. */
+        draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
+            hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: instance(0.0)
+            /** dragging mix 0..1 step 0.01 */
+            drag: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+
+            /** opening at the bottom of the groove in degrees 20..180 step 5 */
+            gap: uniform(90.)
+            /** groove thickness as a fraction of the knob's radius 0.04..0.3 step 0.01 */
+            ring_size: uniform(0.12)
+            /** how much of the face the needle covers, from the groove inward 0.1..1 step 0.05 */
+            pointer_length: uniform(0.55)
+            /** the bezel hairline in pixels; it does not scale with the knob 0..4 step 0.25 */
+            border_size: uniform(theme.beveling)
+
+            // WHAT IS BEHIND WHAT, because every number below depends on
+            // it. The ground is theme.color_bg_app -- window.rs:137 clears
+            // every window to it and a storybook page does not cover it:
+            // #4C4C4C dark, #D9D9D9 light, #DDDDDD skeleton. The only
+            // thing this widget puts ON that ground is the disc and the
+            // bezel stroked round it. Everything else -- the groove, the
+            // lit arc, the needle -- is drawn INSIDE the disc, so the
+            // material is their ground, in every theme, at every value.
+            //
+            // That is a geometry decision made by arithmetic. Float the
+            // groove outside the disc, as a ring with page showing between
+            // it and the face, and its ground becomes the page -- and in
+            // the dark theme the page is a mid grey that nothing dark can
+            // stand off: PURE BLACK on #4C4C4C is 2.44:1, so no dark
+            // groove reaches the 3:1 a boundary wants, while a light one
+            // has to reach #999999 before it does, which leaves under
+            // 2.9:1 above it for the lit arc to live in. One ground, and
+            // the numbers below are all there is to check.
+
+            // THE MATERIAL. theme.color_opaque_d_5 is the darkest opaque
+            // step every theme carries -- #171717, #353535, #3C3C3C, and
+            // the skeleton literal is held to the generator by the drift
+            // test in theme_tokens.rs. It does not step with state: one
+            // rung up that ladder, theme.color_opaque_d_2, is #454545
+            // against that #4C4C4C page, so a body that lifted under the
+            // hand dissolved into the panel at the moment it was being
+            // turned, and in the light themes it took the needle's own
+            // contrast down with it. Against the page the material reads
+            // 2.09:1, 8.69:1, 8.12:1.
+            color: uniform(theme.color_opaque_d_5)
+
+            // THE VALUE INK, for the lit arc and for the needle: two names
+            // on one token so a caller can pull them apart. Not an accent
+            // role -- theme.color_primary is a pale salmon in the dark
+            // theme and a dark brick in the light one, both picked to read
+            // on their own theme's PAGE, and both under 2:1 on this
+            // material. The top of the opaque-up ladder is defined off
+            // color_fg_app and is the brightest step every theme carries:
+            // #DEDEDE, #F6F6F6, #FCFCFC, at 13.3:1, 11.4:1 and 10.8:1 on
+            // the material, in every state, because the material never
+            // moves.
+            //
+            // It holds that one colour through hover, focus and drag: it
+            // is saying the value, and a lamp that also brightened under
+            // the pointer would be saying two things with one colour.
+            val_color: uniform(theme.color_opaque_u_6)
+            handle_color: uniform(theme.color_opaque_u_6)
+
+            // THE BEZEL, and it is the only element that meets the page.
+            // theme.color_inverse_surface is the one token whose whole job
+            // is to stand against the surface, and the only one that
+            // changes SIDES with the theme: #DEDEDE in the dark theme,
+            // #353535 and #3C3C3C in the light ones, which is 6.38:1,
+            // 8.69:1 and 8.12:1 against the page. In the light themes it
+            // resolves to the material itself, so there is no visible
+            // bezel there -- and none is wanted, the material already
+            // being 8:1 off its own page. In the dark theme it is the
+            // whole reason a 24-square knob has an edge at all, the
+            // material managing 2.09:1 there and nothing darker able to do
+            // better.
+            //
+            // Disabled it takes the material and goes away. That is read
+            // from `self.color` in the shader rather than written as a
+            // token here, so it follows a caller who re-colours the
+            // material instead of promising to and not doing it.
+            border_color: uniform(theme.color_inverse_surface)
+
+            // Inherited and not read by this shader: color_hover, _focus,
+            // _drag and _disabled and their border and val siblings; the
+            // whole _2 colour family; offset_y and handle_size. They still
+            // take uniform slots and still appear in the tweaker sidebar
+            // doing nothing. A RotaryKnobGradientY rung is where the _2
+            // family would earn its place.
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                // The knob is the biggest circle the box holds, pinned to
+                // the BOTTOM, so whatever height is left over is the legend
+                // row: draw_walk_slider stacks the label and the readout
+                // from the top. A square box is therefore all knob at any
+                // size, and a box wider than it is tall has no legend row
+                // at all. RotaryFlat instead reserves a fixed 20 pixels
+                // inside its own shader, which is why it only fits when the
+                // box is 20 taller than it is wide, and why at 24 square
+                // its dial's centre lands below the bottom edge.
+                let dia = min(self.rect_size.x, self.rect_size.y)
+                let radius = dia * 0.5
+                let center = vec2(self.rect_size.x * 0.5, self.rect_size.y - radius)
+
+                // Every thickness below is a fraction of the radius under a
+                // floor in pixels, and the fractions are chosen so that at
+                // 24 across -- the size this is built for -- every one of
+                // them is still the fraction: 0.6, 1.44, 1.08, 0.72, 0.547.
+                // The first floor to bite is the material either side of
+                // the groove, at 22.2 across; the rest follow at 21.9 (the
+                // needle's width), 20.8 (the groove), 20.0 (the clearance)
+                // and 16.7 (the needle's inset), and below that the drawing
+                // grows a shade heavier than proportion asks. Those
+                // crossovers are for the default groove: a caller who thins
+                // it meets its floor much sooner, and at ring_size 0.04 the
+                // groove draws its floor below about 62 across. The floors
+                // themselves are half a pixel and a pixel because that is
+                // where a stroke stops being a stroke and becomes a grey
+                // smear, not because anything about the drawing wants them.
+                // Only the bezel is absolute at every size, because a bezel
+                // is a hairline and scaling it would make it a second
+                // groove.
+                let clearance = /** clearance between the bezel and the box, as a fraction of the radius 0..0.15 step 0.01 */ 0.05
+                let bed = /** material either side of the groove, as a fraction of the radius 0..0.3 step 0.01 */ 0.09
+                let ring_gap = max(radius * bed, 1.)
+                let disc_r = radius - max(radius * clearance, 0.5) - self.border_size
+                let ring_w = max(radius * self.ring_size, /** thinnest the groove may draw, in pixels 0.5..3 step 0.25 */ 1.25)
+                let ring_r = disc_r - self.border_size - ring_gap - ring_w * 0.5
+                let field_r = ring_r - ring_w * 0.5 - ring_gap
+
+                // Sdf2d measures an arc from straight DOWN and turns
+                // clockwise, so half the gap either side of the bottom
+                // leaves the opening where a hand expects it and puts the
+                // two stops on the lower corners. At a gap of 0 both stops
+                // land on the SAME angle and the needle cannot tell the
+                // ends apart, which is why the annotation on `gap` starts
+                // at 20 rather than at 0.
+                let one_deg = PI / 180
+                let sweep = 2. * PI - self.gap * one_deg
+                let start = self.gap * one_deg * 0.5
+                let val_end = start + sweep * self.slide_pos
+                let origin_end = start + sweep * self.origin_pos
+
+                // Where the lit arc BEGINS: at the stop, or at the
+                // default's own angle when the slider asks for it, so a cut
+                // and a boost point opposite ways round the groove. Lifted
+                // from RotaryFlat so the two materials agree exactly on
+                // what arc_from_origin means.
+                let val_start = mix(start, min(origin_end, val_end), self.arc_origin)
+                let val_stop = mix(val_end, max(origin_end, val_end), self.arc_origin)
+
+                // THE THREE INKS, and the arithmetic that places them. The
+                // material is the ground for all of them.
+                //
+                //                     dark     light   skeleton
+                //   material         #171717   #353535   #3C3C3C
+                //   unlit track      #676767   #828282   #898989
+                //   value ink        #DEDEDE   #F6F6F6   #FCFCFC
+                //
+                //   track on material   3.17      3.19      3.15
+                //   ink on track        4.20      3.56      3.41
+                //   ink on material    13.33     11.35     10.75
+                //
+                // The track is not a token, it is a RULE: the material
+                // carried four tenths of the way to the ink. That is what
+                // holds both steps over 3:1 in three themes whose ladders
+                // are nothing like each other -- the light themes' opaque-up
+                // rungs are all bunched within 1.4:1 of white and could not
+                // have supplied the middle from a token. It also means the
+                // track follows a caller who re-colours either end, instead
+                // of being a fixed grey that suits only the default
+                // material.
+                let material = self.color
+                let live_ink = self.val_color
+                let track_mix = /** how far the unlit groove is carried from the material toward the ink 0.2..0.7 step 0.05 */ 0.4
+
+                // WHAT SAYS DEAD: the groove goes out, all of it. The ink
+                // falls to the material and the track is derived from the
+                // ink, so both ends of the groove land on the material and
+                // the knob becomes a plain disc. No live value can imitate
+                // that -- value 0 still shows a full track with a lit cap
+                // on the stop, and value 1 a fully lit groove. The needle
+                // stays, at the track's own brightness: 13.33 down to 3.17
+                // in the dark theme, 11.35 to 3.19 and 10.75 to 3.15 in the
+                // other two. A dead knob still points.
+                let ink = live_ink.mix(material, self.disabled)
+                let track = material.mix(ink, track_mix)
+                let needle = live_ink.mix(material.mix(live_ink, track_mix), self.disabled)
+                let bezel = self.border_color.mix(material, self.disabled)
+
+                // Hover, focus and drag are one thing here, and they are
+                // said by SIZE rather than by colour. One thing because the
+                // theme says so: three of the four bevel slots resolve to
+                // the same two colours in every theme in the tree, and the
+                // fourth is a key the skeleton does not define. Size
+                // because colour has nowhere left to go -- that bevel pair
+                // composited over this material steps 3.09:1 in the dark
+                // theme but only 1.85:1 and 1.48:1 in the light ones, so a
+                // colour step that reads in one theme is invisible in the
+                // other two. A handle that grows out of nothing is the
+                // family's own idiom (SliderMinimal's `handle_size`,
+                // RotaryFlat's hover-grown dot) and it is the same step in
+                // every theme, being no contrast at all. Here it is an
+                // ADDITION to a pointer that is always drawn rather than a
+                // substitute for one, which is what made it wrong on a knob
+                // when RotaryFlat does it alone.
+                let lifted = max(self.hover, max(self.focus, self.drag)) * (1. - self.disabled)
+
+                // The disc, and the bezel on the same shape: fill_keep
+                // hands the circle straight to the stroke, which lays the
+                // width EITHER SIDE of it -- half on the material, half on
+                // the page.
+                sdf.circle(center.x, center.y, disc_r)
+                sdf.fill_keep(material)
+                sdf.stroke(bezel, self.border_size)
+
+                // The unlit groove, whole.
+                sdf.arc_round_caps(
+                    center.x
+                    center.y
+                    ring_r
+                    start
+                    start + sweep
+                    ring_w
+                )
+
+                sdf.fill(track)
+
+                // The lit arc, at the same radius and the same thickness,
+                // so it fills the groove rather than sitting beside it.
+                //
+                // At rest the two angles are equal, and arc_round_caps with
+                // a zero half-angle takes the cap branch for every pixel:
+                // a single round cap sitting ON that angle. So a knob
+                // filling from the stop shows a lamp at the stop rather
+                // than nothing, and a bipolar one shows a lamp at its
+                // resting angle. THAT is the centre mark. Once the value
+                // moves off, one end of the arc is still at the resting
+                // angle, so home is drawn by the arc itself at every value
+                // and needs no mark of its own -- which is just as well,
+                // because a mark would have to be painted rather than cut
+                // (an SDF fill composites, it cannot erase) and at rest it
+                // would land on the very cap it exists to explain.
+                sdf.arc_round_caps(
+                    center.x
+                    center.y
+                    ring_r
+                    val_start
+                    val_stop
+                    ring_w
+                )
+
+                sdf.fill(ink)
+
+                // The direction the value points, and the convention the
+                // whole drawing shares: arc_round_caps rotates the pixel by
+                // -start_angle and reads its cap at (0, radius), which
+                // un-rotates through Math.rotate_2d to
+                // center + radius * (-sin, cos). So this vector lands the
+                // handle exactly on the arc's own end.
+                let dir = vec2(-sin(val_end), cos(val_end))
+
+                // The handle: nothing at rest, a dot as wide as the groove
+                // is thick once the control has the pointer or the key
+                // focus, sitting on the value's end of the arc and drawn
+                // after it so it reads as the arc's head. Radius AND alpha
+                // follow `lifted`, so at rest there is no sub-pixel speck
+                // left where a zero-radius circle would still be evaluated.
+                let handle_r = ring_w * /** handle size at full hover, as a multiple of the groove's thickness 0.5..2 step 0.1 */ 1.
+                sdf.circle(
+                    center.x + dir.x * ring_r
+                    center.y + dir.y * ring_r
+                    handle_r * lifted
+                )
+                sdf.fill(vec4(ink.rgb, ink.a * lifted))
+
+                // The needle, always drawn, and pointing at the VALUE's own
+                // angle rather than at either end of the arc.
+                let tip = field_r - max(radius * /** needle inset from the groove, as a fraction of the radius 0..0.2 step 0.01 */ 0.06, 0.5)
+                let heel = tip - tip * self.pointer_length
+                sdf.move_to(center.x + dir.x * heel, center.y + dir.y * heel)
+                sdf.line_to(center.x + dir.x * tip, center.y + dir.y * tip)
+
+                // Sdf2d strokes this width EITHER SIDE of the line, so the
+                // needle lands a shade under the groove's own thickness.
+                sdf.stroke(
+                    needle
+                    max(ring_w * /** needle width as a fraction of the groove's 0.1..1 step 0.02 */ 0.38, 0.5)
+                )
+
+                return sdf.result
+            }
+        }
+    }
+
 }
 
 /// Value delta for one scroll event: notch count (Windows wheels send 120
@@ -1414,6 +1781,25 @@ pub(crate) fn wheel_value_delta(
         (false, false) => 1.0,
     };
     (axis / 120.0) * scroll_step * ladder
+}
+
+/// The pointer distance that covers a slider's whole range: the travel the
+/// slider names, or the control's own extent along the drag axis when it
+/// names none.
+///
+/// The fallback is the expression the drag divided by before there was a
+/// number here, so a slider that names no travel behaves to the pixel as it
+/// always did. A zero or a negative named travel is not a travel -- a zero
+/// would divide into infinity and pin the value to a stop on the first pixel
+/// of movement, a negative would run the drag backwards -- so both fall back
+/// to it as well. Nothing here guards the fallback itself: a control drawn
+/// to nothing still divides by nothing, exactly as it always has.
+pub(crate) fn drag_span(drag_travel: f64, own: f64) -> f64 {
+    if drag_travel > 0.0 {
+        drag_travel
+    } else {
+        own
+    }
 }
 
 #[derive(Copy, Clone, Debug, Script, ScriptHook)]
@@ -1644,6 +2030,19 @@ pub struct Slider {
     #[live]
     scroll_step: f64,
 
+    /// How far the pointer must travel, in layout points, to cross the whole
+    /// range. 0.0 -- the default -- means the control's own extent along the
+    /// drag axis, which is what every slider did before there was a number
+    /// here: the taller the box, the finer the drag.
+    ///
+    /// That is fine for a control drawn 95 points tall and useless for one
+    /// drawn 24 square, where it puts four percent of the range in a pixel
+    /// and there is no modifier to slow it down -- the Shift/Ctrl ladder in
+    /// `wheel_value_delta` is on the wheel only. A control that names a
+    /// travel keeps that resolution at any size.
+    #[live]
+    drag_travel: f64,
+
     /// How the travel becomes the value. Linear, the plain map, unless
     /// the slider says otherwise.
     #[live(SliderTaper::Linear)]
@@ -1772,10 +2171,19 @@ impl Slider {
     }
 
     pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
-        let prev_value = self.value();
-        self.set_internal(v);
-        if v != prev_value {
+        // `set_internal` already answers the only question worth asking --
+        // whether the TRAVEL moved. Comparing the requested value against
+        // the old one instead said yes for a value that quantises or clamps
+        // onto the travel already in effect, and then repainted for nothing.
+        if self.set_internal(v) {
             self.update_text_input(cx);
+            // And draw the material again. `update_text_input` only dirties
+            // the readout's own area, which was the whole repaint a caller
+            // pushing a value in ever got -- so a slider whose readout is
+            // sized away, as a panel knob's is, got none at all and simply
+            // did not move on screen. `reset_to_default` just below has
+            // always done this; this one was missing it.
+            self.draw_bg.redraw(cx);
         }
     }
 
@@ -1964,7 +2372,17 @@ impl Widget for Slider {
                 // happened to BEGIN on the label ends as the drag it
                 // was. And reset before the EndSlide below, so that
                 // carries the new value rather than the old one.
-                if fe.was_tap() && self.label_area.rect(cx).contains(fe.abs_start) {
+                //
+                // The empty check is not a nicety. The label's turtle is
+                // walked whether or not there is text in it, so a slider
+                // with no `text:` still has a `label_area` across its top,
+                // and on a square knob that is half the face: a stationary
+                // click to focus it threw the value away. No text, no
+                // label, no reset.
+                if fe.was_tap()
+                    && !self.text.is_empty()
+                    && self.label_area.rect(cx).contains(fe.abs_start)
+                {
                     self.reset_to_default(cx);
                     cx.widget_action(uid, SliderAction::Reset(self.to_external()));
                 }
@@ -1979,14 +2397,14 @@ impl Widget for Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     if let DragAxis::Horizontal = self.axis {
-                        self.relative_value = (start_pos
-                            + rel.x / (fe.rect.size.x - self.draw_bg.label_size as f64))
-                            .max(0.0)
-                            .min(1.0);
+                        let span = drag_span(
+                            self.drag_travel,
+                            fe.rect.size.x - self.draw_bg.label_size as f64,
+                        );
+                        self.relative_value = (start_pos + rel.x / span).max(0.0).min(1.0);
                     } else {
-                        self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64)
-                            .max(0.0)
-                            .min(1.0);
+                        let span = drag_span(self.drag_travel, fe.rect.size.y);
+                        self.relative_value = (start_pos - rel.y / span).max(0.0).min(1.0);
                     }
                     self.set_internal(self.to_external());
                     self.draw_bg.redraw(cx);
@@ -2021,6 +2439,13 @@ impl Widget for Slider {
         if let Ok(v) = v.parse::<f64>() {
             self.set_internal(v);
             self.update_text_input(cx);
+            // The same repaint `set_value` was missing, for the same reason:
+            // this is the other door into the drawn value, and a readout
+            // sized to nothing swallows the only dirtying it did.
+            // Unconditional, because unlike `set_value` this one always
+            // re-normalises the readout -- a typed "5" on a 0..1 slider has
+            // to come back as "1.00" even when the travel did not move.
+            self.draw_bg.redraw(cx);
         }
     }
 }
@@ -2219,5 +2644,25 @@ mod wheel_tests {
     fn zero_step_disables() {
         let up = Vec2d { x: 0.0, y: -120.0 };
         assert_eq!(wheel_value_delta(up, &mods(true, true), 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    #[test]
+    fn a_named_travel_replaces_the_control_size() {
+        // No number -- the family default -- is the control's own extent,
+        // which is what the drag divided by before this existed. Every
+        // slider in the tree is on this line.
+        assert_eq!(drag_span(0.0, 95.0), 95.0);
+        assert_eq!(drag_span(0.0, 24.0), 24.0);
+        assert_eq!(drag_span(0.0, 0.0), 0.0);
+        // A number: that distance, whatever the control is drawn at.
+        assert_eq!(drag_span(160.0, 24.0), 160.0);
+        assert_eq!(drag_span(160.0, 300.0), 160.0);
+        // Neither zero nor a negative is a travel.
+        assert_eq!(drag_span(-10.0, 24.0), 24.0);
     }
 }

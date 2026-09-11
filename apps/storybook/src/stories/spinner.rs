@@ -10,6 +10,11 @@ script_mod! {
 
     mod.stories.SpinnerOverview = StoryPage{
         StoryNote{text: "The mark that says working. Three faces, the size ladder, a delayed one that never flashes for a quick load, the status spinner that ends in a tick or a cross, the saving indicator built from it, and the overlay that blocks a region while it loads."}
+        StoryHeading{text: "One spinner, under the controls"}
+        StoryNote{text: "One spinner; its face, size, delay, label and container come from the controls. Change the delay and press Reset to see it wait."}
+        StoryRow{
+            subject := SpinnerFlat{text: "Loading"}
+        }
 
         StoryHeading{text: "Faces"}
         StoryRow{
@@ -112,20 +117,6 @@ script_mod! {
         }
     }
 
-    mod.stories.SpinnerLoading = StoryPage{
-        StoryNote{text: "The older DSL-only view, unchanged: a ring with a turning gap, styled entirely through its shader."}
-        StoryHeading{text: "Default"}
-        StoryRow{
-            LoadingSpinner{}
-        }
-    }
-
-    mod.stories.SpinnerBasic = StoryPage{
-        StoryNote{text: "One spinner; its face, size, delay, label and container come from the controls. Change the delay and press Reset to see it wait."}
-        StoryRow{
-            subject := SpinnerFlat{text: "Loading"}
-        }
-    }
 }
 
 fn spinner_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
@@ -173,24 +164,9 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "SpinnerOverview",
         added: "2026-09-05",
-        tags: &["new"],
+        tags: &["controls", "new"],
         doc: "# Spinner\n\nThe mark that says \"working, no idea how long\". `SpinnerFlat` is a turning arc; `SpinnerDots` and `SpinnerBars` are the other faces, `SpinnerContained` puts a rounded container behind the arc. `size` is the side of the mark (12, 16, 24, 32, 48 make the xs..xl ladder), `text` a word beside it, and `delay_secs` keeps it invisible until a load has taken that long, so a quick one never flashes.\n\n`StatusSpinner` has an ending: `start`, `finish` and `fail` turn it, morph it into a tick or a cross, and after `auto_reset_secs` it goes quiet by itself, raising `Finished`, `Failed` and `Reset`.\n\n`SavingIndicator` is the status spinner with a label and a retry button: `saving` shows \"Saving\" only after `debounce_secs`, `saved` prints the clock, `failed` shows the retry button, which raises `Retry`.\n\n`LoadingOverlay` wraps content: while `active` it dims the content, claims every pointer event over it and centres a spinner on it, fading in after `delay_secs`; `blur` swaps the scrim for a glass pane.\n\n`LoadingSpinner`, the older DSL-only view, is unchanged.",
         subject: "status",
-        feature: None,
-        controls: &[],
-        on_actions: Some(spinner_actions),
-    },
-    Story {
-        key: "feedback/spinner/basic",
-        category: "Feedback",
-        component: "Spinner",
-        also: &[],
-        name: "Basic",
-        dsl: "SpinnerBasic",
-        added: "2026-09-05",
-        tags: &["new", "controls"],
-        doc: "# Spinner\n\nOne spinner under the controls: the face, the size of the mark, the delay before it shows, the word beside it and whether it sits in a container.",
-        subject: "subject",
         feature: None,
         controls: &[
             Control { label: "Face", target: "subject", kind: ControlKind::Choice { prop: "face", options: &["SpinnerFace.Arc", "SpinnerFace.Dots", "SpinnerFace.Bars"], default: 0 } },
@@ -200,23 +176,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Contained", target: "subject", kind: ControlKind::Bool { prop: "contained", default: false } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: None,
-    },
-    Story {
-        key: "feedback/spinner/loading",
-        category: "Feedback",
-        component: "Spinner",
-        also: &["LoadingSpinner"],
-        name: "Loading spinner",
-        dsl: "SpinnerLoading",
-        added: "2026-02-16",
-        tags: &["ported"],
-        doc: "# Loading spinner
-
-The older `LoadingSpinner`: a DSL-only view whose ring, gap and turning speed are shader properties. Several apps override those properties, so it stays exactly as it was; new work uses the spinner family instead.",
-        subject: "",
-        feature: None,
-        controls: &[],
-        on_actions: None,
+        on_actions: Some(spinner_actions),
     },
 ];

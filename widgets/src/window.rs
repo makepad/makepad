@@ -622,7 +622,24 @@ impl GaussStack {
         )
     }
 
-    fn begin_scene(&mut self, cx: &mut Cx2d) {
+    fn begin_scene(&mut self, cx: &mut Cx2d, clear: Vec4f) {
+        // The window paints its background by CLEARING to it, so nothing in
+        // any draw list puts that colour down. A scene cleared to transparent
+        // black therefore had black wherever the page showed, and a glass
+        // surface over plain page refracted black rather than page. Clearing
+        // the scene to the same colour the window clears to makes the capture
+        // look like the window - which is the whole premise of the sample.
+        //
+        // Only for an opaque window. The scene is composited over the window
+        // premultiplied, so a translucent clear would be laid down twice; a
+        // window that shows the desktop through itself keeps the transparent
+        // scene it always had.
+        let clear = if clear.w >= 1.0 { clear } else { vec4(0.0, 0.0, 0.0, 0.0) };
+        self.scene_pass.set_color_texture(
+            cx,
+            &self.scene_texture,
+            DrawPassClearColor::ClearWith(clear),
+        );
         cx.make_child_pass(&self.scene_pass);
         cx.begin_pass(&self.scene_pass, None);
         self.scene_draw_list.begin_always(cx);
@@ -1229,7 +1246,10 @@ impl Window {
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
         } else if self.use_gauss_capture {
-            self.gauss_stack.begin_scene(cx);
+            // The platform pass, not the live copy on ScriptDrawPass: a host
+            // that called set_window_clear_color wrote only the former.
+            let clear = cx.passes[self.pass.handle.draw_pass_id()].clear_color;
+            self.gauss_stack.begin_scene(cx, clear);
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
         } else if self.use_ssaa {
