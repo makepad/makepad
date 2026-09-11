@@ -8893,6 +8893,52 @@ fn resolve_clock_source(
 /// instantiation, and because every use here means this one.
 type ClockInbox = crate::midi_clock::ClockInbox<MidiPortId>;
 
+/// How long a finger has to stay on a deck's lock for the press to be a
+/// hold rather than a tap.
+const SYNC_HOLD_SECS: f64 = 0.3;
+
+/// What a press on a deck's lock asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncAsk {
+    /// Hand the lock over, or take it back.
+    Latch,
+    /// Match once and hand the deck straight back.
+    Once(SyncVerb),
+    /// Follow the room.
+    Ext,
+}
+
+/// The lock's gesture table.
+///
+/// `hold_gesture` is the operator's setting; `past_hold` says the finger
+/// has been down longer than [`SYNC_HOLD_SECS`] at the moment this is
+/// asked. The modifiers mean what they have always meant, with or without
+/// the gesture: they are the only way to ask for one half of the lock,
+/// and a surface without them is exactly who the gesture is for.
+fn sync_ask(
+    hold_gesture: bool,
+    past_hold: bool,
+    control: bool,
+    shift: bool,
+    alt: bool,
+) -> SyncAsk {
+    if alt {
+        return SyncAsk::Ext;
+    }
+    match (control, shift) {
+        (true, true) => SyncAsk::Once(SyncVerb::Match),
+        (true, false) => SyncAsk::Once(SyncVerb::Tempo),
+        (false, true) => SyncAsk::Once(SyncVerb::Phase),
+        // The plain press. Without the gesture it is the latch, as it has
+        // always been. With it, the finger says which: a tap matches once,
+        // and a finger that stays hands the lock over.
+        (false, false) => match (hold_gesture, past_hold) {
+            (false, _) | (true, true) => SyncAsk::Latch,
+            (true, false) => SyncAsk::Once(SyncVerb::Match),
+        },
+    }
+}
+
 /// The newest reading from a clock on the wire, stamped with its arrival.
 #[derive(Clone, Copy, Debug)]
 pub struct NetClock {
@@ -10214,6 +10260,18 @@ pub struct App {
     /// Follow a beat clock arriving on the wire.
     #[rust]
     clock_in: bool,
+    /// A plain press on a deck's lock is a gesture: tap to match once,
+    /// hold to hand the lock over. Off is what the button has always done.
+    #[rust]
+    sync_hold_gesture: bool,
+    /// When each deck's lock went down under a plain press, while the
+    /// gesture is on and the finger is still there.
+    #[rust]
+    sync_pressed_at: [Option<f64>; 2],
+    /// Whether that press has already handed the lock over, so the finger
+    /// staying does not do it again and the release does nothing.
+    #[rust]
+    sync_hold_acted: [bool; 2],
     /// The sender being followed and its tick count.
     #[rust]
     clock_inbox: ClockInbox,
@@ -19524,6 +19582,32 @@ p2 {}
         self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
+        // A finger still on a deck's lock past the hold: the lock goes
+        // over under it, rather than at the release, so the lamp answers
+        // the gesture while the finger is still there.
+        if self.sync_hold_gesture {
+            let now = cx.seconds_since_app_start();
+            for deck in [DeckId::A, DeckId::B] {
+                let index = deck.index();
+                let Some(at) = self.sync_pressed_at[index] else { continue };
+                if self.sync_hold_acted[index] || now - at < SYNC_HOLD_SECS {
+                    continue;
+                }
+                self.sync_hold_acted[index] = true;
+                let cmds = self.decks.toggle_sync(deck);
+                self.run_deck_cmds(cx, cmds);
+                self.sync_deck_controls(cx);
+                // A hold is a gesture with nothing to show for itself on a
+                // deck that was already the reference, so it says which way
+                // it went, the way the one-shots beside it do.
+                let name = if deck == DeckId::A { "A" } else { "B" };
+                let said = match self.decks.sync_mode(deck) {
+                    SyncMode::Off => format!("deck {name}: the lock is off"),
+                    _ => format!("deck {name} is locked"),
+                };
+                self.set_music_import_status(cx, &said);
+            }
+        }
         // Fresh playheads in hand, hold the sync group together: the
         // deck-to-deck lock is a continuous rate servo, not a one-shot.
         let cmds = self.decks.hold_deck_sync();
@@ -25915,6 +25999,7 @@ p2 {}
                 OverPlaying::Keep => 2,
             },
         );
+        store.set_bool("deck.sync_hold", self.sync_hold_gesture);
         store.set_bool("auto.pick", self.auto_pick);
         store.set_bool("auto.pick_exit", self.autopilot.pick_exit);
         store.set_bool("auto.pick_route", self.autopilot.pick_route);
@@ -25982,6 +26067,7 @@ p2 {}
             gain: store.bool("load_clears.gain", false),
             stems: store.bool("load_clears.stems", false),
         };
+        self.sync_hold_gesture = store.bool("deck.sync_hold", false);
         self.decks.over_playing = match store.usize("deck.over_playing", 0) {
             1 => OverPlaying::Stop,
             2 => OverPlaying::Keep,
@@ -26053,6 +26139,9 @@ p2 {}
             OverPlaying::Keep => 2,
         };
         self.ui.drop_down(cx, ids!(deck_over_playing)).set_selected_item(cx, over);
+        self.ui
+            .drop_down(cx, ids!(deck_sync_gesture))
+            .set_selected_item(cx, self.sync_hold_gesture as usize);
         self.sync_fader_routing_ui(cx);
         let body = self.autopilot.style() == AutoStyle::Body;
         self.ui
@@ -32626,6 +32715,22 @@ p2 {}
                 let cmds = self.decks.toggle_mute(deck);
                 self.run_deck_cmds(cx, cmds);
             }
+            // The gesture, when it is on: a plain press starts a clock,
+            // and the pump hands the lock over under the finger at
+            // `SYNC_HOLD_SECS`. Nothing happens here, because which
+            // gesture it is is not known yet.
+            if let Some(km) = refs.sync.pressed_modifiers(actions) {
+                let plain = !km.control && !km.shift && !km.alt;
+                if self.sync_hold_gesture && plain {
+                    self.sync_pressed_at[deck.index()] = Some(cx.seconds_since_app_start());
+                    self.sync_hold_acted[deck.index()] = false;
+                }
+            }
+            // A finger lifted outside the button reports Released and
+            // never Clicked: the press is over either way.
+            if refs.sync.released(actions) {
+                self.sync_pressed_at[deck.index()] = None;
+            }
             if let Some(km) = refs.sync.clicked_modifiers(actions) {
                 // SYNC is a plain toggle: lock to the group's master (or
                 // claim master with nothing to follow), press again to let
@@ -32637,13 +32742,23 @@ p2 {}
                 // All three are ONE-SHOTS — they match the decks and hand
                 // the deck straight back, so the button does not light and
                 // the servo does not follow.
-                let verb = match (km.control, km.shift) {
-                    (true, true) => Some(SyncVerb::Match),
-                    (true, false) => Some(SyncVerb::Tempo),
-                    (false, true) => Some(SyncVerb::Phase),
-                    (false, false) => None,
+                //
+                // Under the gesture a plain press has already been decided
+                // by how long the finger stayed: a hold handed the lock
+                // over in the pump, and this release has nothing left to
+                // do.
+                self.sync_pressed_at[deck.index()] = None;
+                let handed_over = std::mem::take(&mut self.sync_hold_acted[deck.index()]);
+                let plain = !km.control && !km.shift && !km.alt;
+                if handed_over && plain {
+                    continue;
+                }
+                let ask = sync_ask(self.sync_hold_gesture, false, km.control, km.shift, km.alt);
+                let verb = match ask {
+                    SyncAsk::Once(verb) => Some(verb),
+                    _ => None,
                 };
-                let cmds = if km.alt {
+                let cmds = if matches!(ask, SyncAsk::Ext) {
                     self.decks.toggle_ext_sync(deck)
                 } else if let Some(verb) = verb {
                     let cmds = self.decks.sync_verb(deck, verb);
@@ -35529,6 +35644,13 @@ impl MatchEvent for App {
             let lit = self.music_autoplay || self.deck_target == DeckTarget::Mix;
             self.paint_lit(cx, ids!(music_autoplay), lit);
         }
+        if let Some(index) = self.ui.drop_down(cx, ids!(deck_sync_gesture)).selected(actions) {
+            self.sync_hold_gesture = index == 1;
+            // A press in flight belongs to the rule it began under.
+            self.sync_pressed_at = [None; 2];
+            self.sync_hold_acted = [false; 2];
+            self.save_autopilot_settings();
+        }
         if let Some(index) = self.ui.drop_down(cx, ids!(deck_over_playing)).selected(actions) {
             self.decks.over_playing = match index {
                 1 => OverPlaying::Stop,
@@ -38053,6 +38175,31 @@ mod sync_tests {
     /// has reached, and the next beat where the sender's next tick is due.
     /// It expires rather than coasting -- a sender that stops without
     /// saying so must not keep the grid moving.
+    /// The lock's gesture table. Off, a plain press is the latch it has
+    /// always been; on, the finger says which of the lock's meanings it
+    /// asked for. The modifiers mean the same thing either way.
+    #[test]
+    fn the_locks_gesture_only_changes_what_a_plain_press_means() {
+        let plain = |hold, past| sync_ask(hold, past, false, false, false);
+        // Off: a press is the latch however long the finger stays.
+        assert_eq!(plain(false, false), SyncAsk::Latch);
+        assert_eq!(plain(false, true), SyncAsk::Latch);
+        // On: a tap matches once, a finger that stays hands the lock over.
+        assert_eq!(plain(true, false), SyncAsk::Once(SyncVerb::Match));
+        assert_eq!(plain(true, true), SyncAsk::Latch);
+        // The modifiers are untouched by the setting, and outrank the
+        // gesture: a held control is still the tempo alone.
+        for hold in [false, true] {
+            for past in [false, true] {
+                assert_eq!(sync_ask(hold, past, true, true, false), SyncAsk::Once(SyncVerb::Match));
+                assert_eq!(sync_ask(hold, past, true, false, false), SyncAsk::Once(SyncVerb::Tempo));
+                assert_eq!(sync_ask(hold, past, false, true, false), SyncAsk::Once(SyncVerb::Phase));
+                assert_eq!(sync_ask(hold, past, false, false, true), SyncAsk::Ext);
+                assert_eq!(sync_ask(hold, past, true, true, true), SyncAsk::Ext, "the room wins");
+            }
+        }
+    }
+
     #[test]
     fn a_clock_off_the_wire_becomes_a_beat_and_then_expires() {
         let at = Instant::now();

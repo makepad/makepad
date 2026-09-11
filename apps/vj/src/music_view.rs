@@ -3598,6 +3598,17 @@ script_mod! {
                                     height: 22
                                     labels: ["B left" "B thru" "B right"]
                                 }
+                                // What a plain press on a deck's LOCK means.
+                                // Tap locks is what it has always been. Hold
+                                // locks puts all four of the lock's meanings
+                                // on the button itself — a tap matches once,
+                                // a finger that stays hands the lock over —
+                                // for a surface with no modifier keys to
+                                // hold down.
+                                deck_sync_gesture := DropDown{
+                                    height: 22
+                                    labels: ["Tap locks" "Hold locks"]
+                                }
                                 // Latched, the deck a picked track lands on starts as
                                 // soon as its decode finishes — "select and it plays".
                                 // An EJECT turned a quarter turn: the bar leads,
