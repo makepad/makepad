@@ -101,7 +101,10 @@ script_mod! {
         floater := mod.widgets.glass.FloatingSurface{
             shown: true
             pos: vec2(470., 300.)
-            size: vec2(300., 200.)
+            // Wide and tall enough for the heading, both paragraphs and the
+            // button below them at this body size: a sheet that hides the
+            // control its prose points at is demonstrating nothing.
+            size: vec2(360., 340.)
             min_size: vec2(180., 120.)
             max_size: vec2(560., 460.)
             content +: {
@@ -188,7 +191,7 @@ A window with any glass on it renders its own body to a texture and builds a blu
             Control { label: "Colour split",  target: "subject", kind: ControlKind::Number { prop: "draw_bg.diffraction_strength", min: 0.,  max: 12.,  step: 0.2,   default: 4.4 } },
             Control { label: "Corner radius", target: "subject", kind: ControlKind::Number { prop: "draw_bg.corner_radius",        min: 0.,  max: 32.,  step: 0.5,   default: 10. } },
             Control { label: "Tint",          target: "subject", kind: ControlKind::Color  { prop: "draw_bg.tint_color",           default: 0xF8FBFFFF } },
-            Control { label: "Tint amount",   target: "subject", kind: ControlKind::Number { prop: "draw_bg.tint_alpha",           min: 0.,  max: 0.30, step: 0.002, default: 0.006 } },
+            Control { label: "Tint amount",   target: "subject", kind: ControlKind::Number { prop: "draw_bg.tint_alpha",           min: 0.,  max: 0.30, step: 0.002, default: 0.08 } },
             Control { label: "Border",        target: "subject", kind: ControlKind::Number { prop: "draw_bg.border_alpha",         min: 0.,  max: 1.,   step: 0.02,  default: 0.72 } },
             Control { label: "Border width",  target: "subject", kind: ControlKind::Number { prop: "draw_bg.border_width",         min: 0.,  max: 4.,   step: 0.25,  default: 1. } },
             Control { label: "Specular",      target: "subject", kind: ControlKind::Number { prop: "draw_bg.specular_strength",    min: 0.,  max: 1.,   step: 0.02,  default: 0.22 } },
@@ -250,7 +253,7 @@ The same reasoning is why coming up is not just a redraw. The window decides whe
             // `content` is one id segment, found by the same subtree search
             // that already reaches `inside` three levels deeper.
             Control { label: "Blur level",  target: "content", kind: ControlKind::Number { prop: "draw_bg.blur_level",   min: 0., max: 6.,   step: 0.1,   default: 5.2 } },
-            Control { label: "Tint amount", target: "content", kind: ControlKind::Number { prop: "draw_bg.tint_alpha",   min: 0., max: 0.30, step: 0.002, default: 0.006 } },
+            Control { label: "Tint amount", target: "content", kind: ControlKind::Number { prop: "draw_bg.tint_alpha",   min: 0., max: 0.30, step: 0.002, default: 0.08 } },
             Control { label: "Shadow",      target: "content", kind: ControlKind::Number { prop: "draw_bg.shadow_alpha", min: 0., max: 1.,   step: 0.05,  default: 1.0 } },
         ],
         on_actions: Some(glass_floating_surface_actions),

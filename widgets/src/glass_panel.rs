@@ -606,7 +606,10 @@ script_mod! {
             lensing_width: 20.0
             corner_radius: 10.0
             tint_color: #xf8fbff
-            tint_alpha: 0.006
+            // Settled by eye in all three themes: below this the panel reads
+            // as a smear of its ground rather than a surface on it; from
+            // about 0.15 it goes milky under white text.
+            tint_alpha: 0.08
             surface_alpha: 1.0
             border_alpha: 0.72
             border_width: 1.0
@@ -680,7 +683,9 @@ script_mod! {
     mod.widgets.glass.Card = mod.widgets.glass.Group{
         padding: 14
         draw_bg +: {
-            tint_alpha: 0.030
+            // A step above Panel's 0.08, as it was a step above Panel before:
+            // the card is the family's more solid member.
+            tint_alpha: 0.10
             lensing_effect: 0.34
         }
     }
