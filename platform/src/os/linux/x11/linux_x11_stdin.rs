@@ -477,6 +477,7 @@ impl Cx {
                             if window.gpu_window_id != Some(window_id)
                                 || (rect.size.x * dpi).max(1.0) as u32 > swapchain.alloc_width
                                 || (rect.size.y * dpi).max(1.0) as u32 > swapchain.alloc_height {
+                                crate::trace!("runview.blocked", "window geometry pass={:?} window={:?}/{:?} rect={:?} dpi={} alloc={}x{}", draw_pass_id, window.gpu_window_id, window_id, rect, dpi, swapchain.alloc_width, swapchain.alloc_height);
                                 // Keep paint_dirty set while the descriptor worker
                                 // imports a sufficiently large replacement.
                                 continue;

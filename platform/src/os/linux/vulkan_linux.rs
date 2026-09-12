@@ -4893,6 +4893,7 @@ impl CxVulkan {
             self.profile.note_composition_busy();
             return Ok(false);
         }
+        cx.textures.1.serials.complete(self.frame_serial_in_flight);
         self.profile.collect_pending(&self.device);
         let mut profile_sample = self.profile.begin_sample(
             cx,
@@ -5045,6 +5046,7 @@ impl CxVulkan {
         let command_buffers = [self.command_buffer];
         let profile_submit_start = profile_sample.is_some().then(Instant::now);
         self.submit_frame(&vk::SubmitInfo::default().command_buffers(&command_buffers))?;
+        self.publish_draw_submission(cx, &draw_stats);
         if let Some(mut sample) = profile_sample.take() {
             sample.encode_ms = profile_encode_ms;
             sample.submit_ms = profile_submit_start
@@ -5062,6 +5064,7 @@ impl CxVulkan {
                             format!("wait_for_fences(composition capture) failed: {e:?}")
                         })?;
                 }
+                cx.textures.1.serials.complete(self.frame_serial_in_flight);
                 self.profile.complete_after_fence(
                     &self.device,
                     profile_post_start

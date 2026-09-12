@@ -155,6 +155,7 @@ impl DrawListExt for DrawList {
         if cx.cx.draw_lists[draw_list_id].redraw_id != cx.cx.redraw_id {
             panic!("calling end on a view that didnt get begin called this redraw cycle");
         }
+        cx.cx.draw_lists[draw_list_id].draw_items.finish_recording();
     }
 
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {

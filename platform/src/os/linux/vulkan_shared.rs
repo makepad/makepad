@@ -62,6 +62,7 @@ pub(super) struct SharedState {
     retired: Vec<FrameLease>,
     waits: Vec<(vk::Semaphore, u64)>,
     signals: Vec<(vk::Semaphore, u64)>,
+    trace_last: Option<std::time::Instant>,
     #[cfg(linux_direct)]
     snapshots: Vec<(VulkanTextureKey, VulkanTextureKey, VulkanTextureResource)>,
     #[cfg(linux_direct)]
@@ -95,6 +96,29 @@ pub(super) fn device_supports_sharing(
 }
 
 impl CxVulkan {
+    pub(super) fn trace_shared_leases(&mut self, cx: &Cx) {
+        if !crate::makepad_error_log::trace_enabled("runview.leases") {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.desktop.shared.trace_last.is_some_and(|at| now.duration_since(at).as_secs_f64() < 1.0) {
+            return;
+        }
+        self.desktop.shared.trace_last = Some(now);
+        for (key, lease) in &self.desktop.shared.frames {
+            let mut bindings = Vec::new();
+            for (list_index, slot) in cx.draw_lists.0.pool.iter().enumerate() {
+                let list = &slot.item;
+                for (item_index, item) in list.draw_items.buffer.iter().enumerate() {
+                    if item.kind.draw_call().is_some_and(|call| call.texture_slots.iter().flatten().any(|t| t.texture_id() == key.0)) {
+                        bindings.push(format!("list={list_index} debug={} free={} item={item_index}/{}", list.debug_id, cx.draw_lists.is_slot_freed(list_index), list.draw_items.len()));
+                    }
+                }
+            }
+            crate::trace!("runview.leases", "alias={} source={:?} sequence={} acquired={} free={} bindings={:?}", key, lease.source.texture_id(), lease.sequence, lease.acquired, cx.textures.0.is_free(key.0.0), bindings);
+        }
+    }
+
     pub(crate) fn import_shared_image(
         &mut self,
         texture: &Texture,
@@ -199,6 +223,9 @@ impl CxVulkan {
         let loader = ash::khr::timeline_semaphore::Device::new(&self.instance, &self.device);
         let value = unsafe { loader.get_semaphore_counter_value(shared.semaphore) }
             .map_err(|e| format!("poll shared image availability: {e:?}"))?;
+        if value < shared.next_write {
+            crate::trace!("runview.blocked", "image={:?} timeline={} required={}", texture, value, shared.next_write);
+        }
         Ok(value >= shared.next_write)
     }
 

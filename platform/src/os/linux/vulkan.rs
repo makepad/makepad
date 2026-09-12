@@ -153,6 +153,7 @@ struct FrameResources {
 
 #[cfg(target_os = "android")]
 struct VulkanXrInFlightFrame {
+    serial: u64,
     frame_resources: FrameResources,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
@@ -220,9 +221,11 @@ struct VulkanDrawPacket {
     alpha_blend: bool,
     backface_culling: bool,
     instances: Vec<f32>,
+    instance_ranges: Vec<std::ops::Range<u32>>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
     scope_uniforms: Vec<f32>,
+    custom_uniforms: Vec<(u32, Vec<u8>)>,
     uniform_bindings: Vec<(LiveId, usize)>,
     dyn_uniform_binding: u32,
     scope_uniform_binding: Option<usize>,
@@ -347,6 +350,7 @@ pub(crate) struct OpenXrVulkanRepaintStats {
 
 #[derive(Default)]
 struct VulkanDrawStats {
+    consumed: Vec<(DrawListId, usize)>,
     draw_items: usize,
     draw_calls: usize,
     packets_recorded: usize,
@@ -515,6 +519,8 @@ impl CxVulkan {
     }
 
     fn prune_stale_geometry_resources(&mut self, cx: &Cx) {
+        #[cfg(target_os = "linux")]
+        self.trace_shared_leases(cx);
         let stale_keys = self
             .geometries
             .keys()
@@ -1323,6 +1329,7 @@ impl CxVulkan {
                 }
             };
             frames.push(VulkanXrInFlightFrame {
+                serial: 0,
                 frame_resources: FrameResources::default(),
                 command_buffer,
                 fence,
@@ -1500,6 +1507,7 @@ impl CxVulkan {
             let mut frame = std::mem::replace(
                 &mut self.xr_in_flight_frames[index],
                 VulkanXrInFlightFrame {
+                    serial: 0,
                     frame_resources: FrameResources::default(),
                     command_buffer: vk::CommandBuffer::null(),
                     fence: vk::Fence::null(),
@@ -2583,6 +2591,7 @@ impl CxVulkan {
             let frame = std::mem::replace(
                 &mut self.xr_in_flight_frames[frame_index],
                 VulkanXrInFlightFrame {
+                    serial: 0,
                     frame_resources: FrameResources::default(),
                     command_buffer: vk::CommandBuffer::null(),
                     fence: vk::Fence::null(),
@@ -2601,6 +2610,8 @@ impl CxVulkan {
                 self.xr_in_flight_frames[frame_index] = frame;
                 return Err(err);
             }
+            cx.textures.1.serials.complete(frame.serial);
+            std::mem::swap(&mut self.frame_serial_in_flight, &mut frame.serial);
             std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
             std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
             std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
@@ -2757,11 +2768,13 @@ impl CxVulkan {
                     )
                     .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
             }
+            self.publish_draw_submission(cx, &draw_stats);
             stats.submit_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
             Ok(())
         })();
 
         if let Some((frame_index, mut frame)) = xr_frame {
+            std::mem::swap(&mut self.frame_serial_in_flight, &mut frame.serial);
             std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
             std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
             std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
@@ -3161,10 +3174,7 @@ impl CxVulkan {
             .signal_semaphores(&signal_semaphores);
 
         self.submit_frame(&submit_info)?;
-        // The frame serial IS the repaint id here (the receipts and the
-        // items' consumed serials are stamped with it above); one writer.
-        cx.textures.1.serials.submitted.store(cx.repaint_id, std::sync::atomic::Ordering::Release);
-        self.frame_serial_in_flight = cx.repaint_id;
+        self.publish_draw_submission(cx, &draw_stats);
         self.acquired_image_pending = false;
 
         let swapchains = [self.swapchain];
@@ -3229,7 +3239,7 @@ impl CxVulkan {
 
         crate::trace!("gpu.present", "present time={:.6}", crate::cx_api::CxOsApi::seconds_since_app_start(cx));
         cx.passes[draw_pass_id].paint_dirty = false;
-        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        // The bake transaction's paint receipt, after all selected ranges.
         cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(true)
     }
@@ -3547,6 +3557,7 @@ impl CxVulkan {
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences(offscreen) failed: {e:?}"))?;
         }
+        cx.textures.1.serials.complete(self.frame_serial_in_flight);
         #[cfg(target_os = "linux")]
         let profile_prewait_ms = profile_cpu_start
             .map(|start| start.elapsed().as_secs_f64() * 1000.0)
@@ -3577,6 +3588,21 @@ impl CxVulkan {
         if let Some(texture_id) = depth_target {
             self.ensure_pass_depth_target(cx, texture_id, target_width, target_height)?;
         }
+
+        // Fixed-size targets can be smaller than the pass's pixel-rounded
+        // rectangle (the tile-progress pass deliberately uses one texel).
+        // Vulkan requires the framebuffer and render area to fit every
+        // attachment. Keep the viewport's projection, and clip to storage.
+        let mut framebuffer_width = target_width as u32;
+        let mut framebuffer_height = target_height as u32;
+        for texture_id in color_targets.iter().map(|target| target.0).chain(depth_target) {
+            let resource = &self.textures[&Self::texture_key(texture_id)];
+            framebuffer_width = framebuffer_width.min(resource.width);
+            framebuffer_height = framebuffer_height.min(resource.height);
+        }
+        crate::trace!("gpu.pass", "offscreen pass={:?} list={:?} target={}x{} framebuffer={}x{} colors={:?}",
+            draw_pass_id, draw_list_id, target_width, target_height, framebuffer_width, framebuffer_height,
+            color_targets.iter().map(|target| target.0).collect::<Vec<_>>());
 
         unsafe {
             self.device
@@ -3794,8 +3820,8 @@ impl CxVulkan {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&framebuffer_attachments)
-            .width(target_width as u32)
-            .height(target_height as u32)
+            .width(framebuffer_width)
+            .height(framebuffer_height)
             .layers(1);
         let framebuffer = unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
             .map_err(|e| format!("create_framebuffer(offscreen) failed: {e:?}"))?;
@@ -3810,8 +3836,8 @@ impl CxVulkan {
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
-                            width: target_width as u32,
-                            height: target_height as u32,
+                            width: framebuffer_width,
+                            height: framebuffer_height,
                         },
                     })
                     .clear_values(&clear_values),
@@ -3904,6 +3930,7 @@ impl CxVulkan {
         #[cfg(target_os = "linux")]
         let profile_submit_start = profile_sample.is_some().then(Instant::now);
         self.submit_frame(&vk::SubmitInfo::default().command_buffers(&command_buffers))?;
+        self.publish_draw_submission(cx, &draw_stats);
         #[cfg(target_os = "linux")]
         if let Some(mut sample) = profile_sample.take() {
             sample.encode_ms = profile_encode_ms;
@@ -3919,6 +3946,7 @@ impl CxVulkan {
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences(offscreen submit) failed: {e:?}"))?;
         }
+        cx.textures.1.serials.complete(self.frame_serial_in_flight);
         #[cfg(target_os = "linux")]
         self.profile.complete_after_fence(
             &self.device,
@@ -4926,6 +4954,33 @@ impl CxVulkan {
                 .map_err(|e| format!("reset dummy depth command buffer: {e:?}"))?;
         }
         Ok(())
+    }
+
+    /// Publish consumption only after the command buffer was submitted.
+    /// Several passes can share one repaint id; each queue submission needs
+    /// its own serial so completing a tile bake cannot complete a later pass.
+    fn publish_draw_submission(&mut self, cx: &mut Cx, draws: &VulkanDrawStats) {
+        let serial = cx.textures.1.serials.submit();
+        self.frame_serial_in_flight = serial;
+        for &(list, index) in &draws.consumed {
+            let item = &mut cx.draw_lists[list].draw_items[index];
+            let Some(call) = item.kind.draw_call_mut() else { continue };
+            item.instance_upload_pending = false;
+            item.retained_gpu_evicted = false;
+            item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+            item.resident_schema = item.retained_schema;
+            item.consumed_instance_id = item.retained_instance_id;
+            item.consumed_schema = item.resident_schema;
+            item.consumed_serial = serial;
+            item.consumed_uniforms_gen = call.uniforms_gen;
+            call.instance_dirty = false;
+            call.uniforms_dirty = false;
+            if let Some((block, _)) = item.shared.as_ref() {
+                let receipt = block.receipt();
+                receipt.mark_encoded(serial);
+                receipt.mark_submitted(serial, call.uniforms_gen);
+            }
+        }
     }
 
     fn submit_frame(&mut self, info: &vk::SubmitInfo<'_>) -> Result<(), String> {
@@ -6080,63 +6135,46 @@ impl CxVulkan {
                     draw_stats.skipped_no_instance_slots += 1;
                     continue;
                 }
-                // The fallback draw of a shared-instance block (contract §10):
-                // this backend has no per-publication backing yet, so an
-                // attached item copies `data()[range]` into this frame's ink —
-                // the item's ranges when it holds several, else its lease's
-                // slice — and draws it like frame ink. Before this an attached
-                // or adapter-retained item drew nothing on Vulkan.
+                // Keep original instance indices: the shader uses them to
+                // address sidecar/filter tables. Compacting selected ranges
+                // silently renumbers those lookups. Upload the backing prefix
+                // and select each range with Vulkan's firstInstance instead.
                 let slots = sh.mapping.instances.total_slots;
-                let instances = if let Some(block) = draw_item.retained_instances.as_ref() {
+                let (data, count, default_range) = if let Some(block) = draw_item.retained_instances.as_ref() {
                     let data = block.data();
                     let count = draw_item.retained_instance_count.min(data.len() / slots);
-                    if draw_item.instance_ranges.is_empty() {
-                        data[..count * slots].to_vec()
-                    } else {
-                        let mut ink = Vec::new();
-                        for range in &draw_item.instance_ranges {
-                            let start = (range.start as usize).min(count);
-                            let end = (range.end as usize).min(count);
-                            if end > start {
-                                ink.extend_from_slice(&data[start * slots..end * slots]);
-                            }
-                        }
-                        ink
-                    }
+                    (data, count, 0..count as u32)
                 } else if let Some((block, range)) = draw_item.shared.as_ref() {
-                    block.data()[range.start * slots..range.end * slots].to_vec()
+                    (block.data(), block.data().len() / slots, range.start as u32..range.end as u32)
                 } else if let Some(instances) = draw_item.instances.as_ref() {
-                    instances.to_vec()
+                    let count = instances.len() / slots;
+                    (instances.as_slice(), count, 0..count as u32)
                 } else {
                     draw_stats.skipped_no_instances_buffer += 1;
                     continue;
                 };
-                if instances.len() < slots {
+                if data.len() < slots {
                     draw_stats.skipped_instances_too_short += 1;
                     continue;
                 }
-                let instance_count = instances.len() / slots;
+                let requested = if draw_item.instance_ranges.is_empty() {
+                    std::slice::from_ref(&default_range)
+                } else {
+                    &draw_item.instance_ranges
+                };
+                let instance_ranges: Vec<_> = requested.iter().filter_map(|range| {
+                    let start = range.start.min(count as u32);
+                    let end = range.end.min(count as u32);
+                    (start < end).then_some(start..end)
+                }).collect();
+                let instance_count: u64 = instance_ranges.iter().map(|range| (range.end - range.start) as u64).sum();
                 if instance_count == 0 {
                     draw_stats.skipped_zero_instances += 1;
                     continue;
                 }
-                draw_stats.instances += instance_count as u64;
-                // Consumed like the other backends: the item's proofs read
-                // these, and a lease's receipt learns its draw.
-                draw_item.instance_upload_pending = false;
-                draw_item.retained_gpu_evicted = false;
-                draw_item.retained_instance_id =
-                    draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                draw_item.resident_schema = draw_item.retained_schema;
-                draw_item.consumed_instance_id = draw_item.retained_instance_id;
-                draw_item.consumed_schema = draw_item.resident_schema;
-                draw_item.consumed_serial = cx.repaint_id;
-                draw_item.consumed_uniforms_gen = uniforms_gen;
-                if let Some((block, _)) = draw_item.shared.as_ref() {
-                    let receipt = block.receipt();
-                    receipt.mark_encoded(cx.repaint_id);
-                    receipt.mark_submitted(cx.repaint_id, uniforms_gen);
-                }
+                draw_stats.instances += instance_count;
+                let uploaded_count = instance_ranges.iter().map(|range| range.end as usize).max().unwrap();
+                let instances = data[..uploaded_count * slots].to_vec();
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {
@@ -6150,8 +6188,6 @@ impl CxVulkan {
 
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
-                draw_call.instance_dirty = false;
-                draw_call.uniforms_dirty = false;
                 let texture_ids = (0..sh.mapping.textures.len())
                     .map(|i| {
                         draw_call.texture_slots[i]
@@ -6179,6 +6215,7 @@ impl CxVulkan {
                     alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     instances,
+                    instance_ranges,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
                         .mapping
@@ -6187,6 +6224,16 @@ impl CxVulkan {
                         .min(draw_call.dyn_uniforms.len())]
                         .to_vec(),
                     scope_uniforms: sh.mapping.scope_uniforms_buf.clone(),
+                    // Custom uniform blocks are part of the shader's layout
+                    // too: CodeView supplies its per-file and font tables here.
+                    // Preserve their raw bytes, including integer fields.
+                    custom_uniforms: sh.mapping.uniform_buffers.iter().enumerate().map(|(slot, input)| {
+                        let mut data = draw_call.uniform_buffer_slots[slot].as_ref()
+                            .map(|buffer| cx.uniform_buffers[buffer.uniform_buffer_id()].data.clone())
+                            .unwrap_or_default();
+                        data.resize(data.len().max(input.size).max(16), 0);
+                        (input.buffer_index as u32, data)
+                    }).collect(),
                     uniform_bindings: sh.mapping.uniform_buffer_bindings.bindings.clone(),
                     dyn_uniform_binding: vk_shader.dyn_uniform_binding,
                     scope_uniform_binding: sh
@@ -6243,7 +6290,7 @@ impl CxVulkan {
                 .as_slice()
                 .to_vec();
 
-            self.record_draw_packet(
+            if self.record_draw_packet(
                 cx,
                 &packet,
                 render_pass_key,
@@ -6253,8 +6300,10 @@ impl CxVulkan {
                 &pass_uniforms,
                 &draw_list_uniforms,
                 xr_depth_view,
-            )?;
-            draw_stats.packets_recorded += 1;
+            )? {
+                draw_stats.consumed.push((draw_list_id, draw_item_id));
+                draw_stats.packets_recorded += 1;
+            }
         }
         Ok(())
     }
@@ -6270,7 +6319,7 @@ impl CxVulkan {
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.ensure_pipeline(
             cx,
             packet.shader_index,
@@ -6309,6 +6358,8 @@ impl CxVulkan {
             )
         };
 
+        crate::trace!("gpu.packet", "shader={} textures={:?} ranges={:?}",
+            packet.shader_index, packet.texture_ids, packet.instance_ranges);
         let sh = &cx.draw_shaders.shaders[packet.shader_index];
         let os_shader_id = sh
             .os_shader_id
@@ -6323,20 +6374,26 @@ impl CxVulkan {
         let geometry_stride = Self::layout_stride_bytes(&sh.mapping.geometries) as u64;
         let instance_stride = Self::layout_stride_bytes(&sh.mapping.instances) as u64;
         if geometry_stride == 0 || instance_stride == 0 {
-            return Ok(());
+            return Ok(false);
         }
         let instance_count = (packet.instances.len() as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
         if instance_count == 0 || index_count == 0 {
-            return Ok(());
+            return Ok(false);
         }
 
         struct UniformUpload<'a> {
             binding: u32,
-            src: &'a [f32],
+            src: &'a [u8],
             offset: vk::DeviceSize,
             size: vk::DeviceSize,
+        }
+
+        fn uniform_bytes(values: &[f32]) -> &[u8] {
+            // f32 has no padding, and the returned view shares the slice's
+            // lifetime. Do not numerically convert packed uniform words.
+            unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
         }
 
         let mut uniform_uploads: Vec<UniformUpload<'_>> = Vec::new();
@@ -6355,7 +6412,7 @@ impl CxVulkan {
             }
             uniform_uploads.push(UniformUpload {
                 binding: *binding_idx as u32,
-                src,
+                src: uniform_bytes(src),
                 offset: 0,
                 size: 0,
             });
@@ -6363,7 +6420,7 @@ impl CxVulkan {
         if !packet.dyn_uniforms.is_empty() {
             uniform_uploads.push(UniformUpload {
                 binding: packet.dyn_uniform_binding,
-                src: packet.dyn_uniforms.as_slice(),
+                src: uniform_bytes(&packet.dyn_uniforms),
                 offset: 0,
                 size: 0,
             });
@@ -6372,11 +6429,19 @@ impl CxVulkan {
             if !packet.scope_uniforms.is_empty() {
                 uniform_uploads.push(UniformUpload {
                     binding: scope_binding as u32,
-                    src: packet.scope_uniforms.as_slice(),
+                    src: uniform_bytes(&packet.scope_uniforms),
                     offset: 0,
                     size: 0,
                 });
             }
+        }
+        for (binding, data) in &packet.custom_uniforms {
+            uniform_uploads.push(UniformUpload {
+                binding: *binding,
+                src: data,
+                offset: 0,
+                size: 0,
+            });
         }
         uniform_uploads.sort_by_key(|uniform| uniform.binding);
         uniform_uploads.dedup_by_key(|uniform| uniform.binding);
@@ -6467,7 +6532,7 @@ impl CxVulkan {
                 .get(&Self::texture_key(*texture_id))
                 .or(fallback);
             let Some(resource) = resource else {
-                return Ok(());
+                return Ok(false);
             };
             let sampler_index = sh
                 .mapping
@@ -6598,11 +6663,16 @@ impl CxVulkan {
                 0,
                 index_type,
             );
-            self.device
-                .cmd_draw_indexed(self.command_buffer, index_count, instance_count, 0, 0, 0);
+            for range in &packet.instance_ranges {
+                let start = range.start.min(instance_count);
+                let end = range.end.min(instance_count);
+                if start < end {
+                    self.device.cmd_draw_indexed(self.command_buffer, index_count, end - start, 0, 0, start);
+                }
+            }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn ensure_pipeline(
@@ -6661,6 +6731,7 @@ impl CxVulkan {
         }
 
         let has_descriptors = !sh.mapping.uniform_buffer_bindings.bindings.is_empty()
+            || !sh.mapping.uniform_buffers.is_empty()
             || !sh.mapping.dyn_uniforms.inputs.is_empty()
             || !sh.mapping.scope_uniforms.inputs.is_empty()
             || !sh.mapping.textures.is_empty()
@@ -6670,6 +6741,9 @@ impl CxVulkan {
         let mut descriptor_bindings: Vec<(u32, vk::DescriptorType)> = Vec::new();
         for (_, idx) in &sh.mapping.uniform_buffer_bindings.bindings {
             descriptor_bindings.push((*idx as u32, vk::DescriptorType::UNIFORM_BUFFER));
+        }
+        for input in &sh.mapping.uniform_buffers {
+            descriptor_bindings.push((input.buffer_index as u32, vk::DescriptorType::UNIFORM_BUFFER));
         }
         if !sh.mapping.dyn_uniforms.inputs.is_empty() {
             descriptor_bindings.push((
