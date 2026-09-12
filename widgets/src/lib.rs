@@ -18,6 +18,8 @@ pub use makepad_draw::makepad_zune_png;
 // Core modules (used internally first)
 pub mod animator;
 pub mod font_policy;
+pub mod desktop_style;
+pub mod app_icon;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
@@ -65,6 +67,9 @@ pub mod alert;
 pub mod divider;
 pub mod desktop_button;
 pub mod gauss_view;
+pub mod gauss_chain;
+mod gauss_stack;
+pub mod backdrop;
 pub mod keyboard_view;
 pub mod nav_control;
 pub mod nav_list;
@@ -74,6 +79,7 @@ pub mod ai_slot;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
+pub mod cursor;
 pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
@@ -195,6 +201,7 @@ pub mod modal;
 pub mod page_flip;
 pub mod pagination;
 pub mod placeholder;
+pub mod hosted_view;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
@@ -282,6 +289,7 @@ pub use crate::{
     nav_list::*,
     page_flip::*,
     pagination::*,
+    hosted_view::*,
     popup_menu::*,
     popup_notification::*,
     data_grid::*,
@@ -472,6 +480,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
+    crate::desktop_style::apply_theme(vm);
     // make the prelude for our own widgets
     script_eval!(vm, {
         mod.prelude.widgets_internal = {
@@ -522,6 +531,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::screen_cap::script_mod(vm);
     // The AI slot before the window: its DSL names `AiChatSlot`.
     crate::ai_slot::script_mod(vm);
+    crate::app_icon::script_mod(vm);
+    crate::cursor::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);
@@ -639,6 +650,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::popup_notification::script_mod(vm);
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
+    crate::hosted_view::script_mod(vm);
     crate::file_tree::script_mod(vm);
     crate::flat_list::script_mod(vm);
     crate::slides_view::script_mod(vm);
@@ -715,6 +727,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     theme_mod(vm);
     makepad_platform::startup_trace("widgets: theme_mod done");
     widgets_mod(vm);
+    crate::desktop_style::apply_widgets(vm);
     makepad_platform::startup_trace("widgets: widgets_mod done");
 }
 

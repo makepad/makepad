@@ -2,7 +2,9 @@
 //! pins, never a guess about the chat model's authoring ability.
 use makepad_ai_hub::protocol::GenerateRequestJson;
 
-pub const CHARACTER_LLM_MODEL: &str = "qwen3.5-9b";
+/// The fleet selects an available text model. This is deliberately unpinned:
+/// a retired chat model must not disable the whole character pipeline.
+pub const CHARACTER_LLM_MODEL: &str = "";
 pub const CHARACTER_IMAGE_MODEL: &str = "flux1-dev";
 pub const CHARACTER_MATTE_MODEL: &str = "birefnet-hr";
 pub const CHARACTER_MESH_MODEL: &str = "trellis-2";

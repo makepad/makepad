@@ -4,8 +4,8 @@
 //! with the sandbox: attach whenever a real store answers (health probe,
 //! UDP beacon, the main store's server.lock), otherwise bring up the SAME
 //! server crate in-process — loopback only, no beacon, the ai-content
-//! library publisher riding along, rooted in the user's main library when
-//! one exists. `VJ_ASSET_EMBED` / `VJ_ASSET_ROOT` / `VJ_ASSET_PORT` steer
+//! library publisher riding along, rooted in the shared library even before
+//! the first catalog exists. `VJ_ASSET_EMBED` / `VJ_ASSET_ROOT` / `VJ_ASSET_PORT` steer
 //! it; an explicit `VJ_ASSET_SERVER` pin always means attach.
 
 use makepad_asset_client::SessionConfig;

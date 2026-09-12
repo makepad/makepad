@@ -92,7 +92,7 @@ fn score_view_keeps_textured_siblings_at_two_sizes() {
     .expect("headless fixture config");
     config
         .env
-        .insert("MAKEPAD_HEADLESS_DPI".to_string(), "1".to_string());
+        .insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
 
     run_with_config(config, |app: TestApp| {
         app.locator(Selector::id("status")).wait_text("1318x181");

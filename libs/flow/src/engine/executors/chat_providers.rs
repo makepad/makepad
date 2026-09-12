@@ -49,19 +49,21 @@ impl ProviderAdapter {
     fn provider(&mut self) -> &mut dyn ChatProvider {
         match self { Self::Fleet(p) => p, Self::OpenAi(p) => p, Self::Grok(p) => p, Self::Claude(p) => p, Self::Codex(p) => p, Self::GrokCli(p) => p }
     }
-    pub fn availability(&mut self) -> ProviderAvailability { self.provider().availability() }
+    pub fn availability(&mut self) -> ProviderAvailability { ProviderSession::availability(self) }
     pub fn begin(&mut self, system: &str, prompt: &str) -> Result<(), String> {
-        self.provider().begin_turn(&TurnInput { system: system.into(), messages: vec![ChatMessage { role: ChatRole::User, text: prompt.into() }], tools_enabled: false, dynamic_context: String::new() })
+        ProviderSession::begin(self, system, prompt)
     }
     pub fn poll(&mut self) -> Vec<ProviderEvent> { self.provider().poll() }
     pub fn cancel(&mut self) { self.provider().cancel() }
 }
 
 impl ProviderSession for ProviderAdapter {
-    fn begin(&mut self, system: &str, prompt: &str) -> Result<(), String> { self.begin(system, prompt) }
+    fn begin(&mut self, system: &str, prompt: &str) -> Result<(), String> {
+        self.provider().begin_turn(&TurnInput { system: system.into(), messages: vec![ChatMessage { role: ChatRole::User, text: prompt.into() }], tools_enabled: false, dynamic_context: String::new() })
+    }
     fn poll(&mut self) -> Vec<ProviderEvent> { self.poll() }
     fn cancel(&mut self) { self.cancel() }
-    fn availability(&mut self) -> ProviderAvailability { self.availability() }
+    fn availability(&mut self) -> ProviderAvailability { self.provider().availability() }
 }
 
 #[cfg(test)]

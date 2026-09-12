@@ -29,7 +29,7 @@ use crate::host;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool};
+use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 use makepad_widgets::Cx;
 
 use crate::hub::ClientId;
@@ -119,6 +119,15 @@ fn curated() -> Vec<AppDef> {
         AppDef::app("sheets", "Sheets", "makepad-sheets", "apps/sheets", "sheets", OrFocus),
         // The picture wall over a baked library (the SMBC archive by default).
         AppDef::app("photos", "Photos", "makepad-photos", "apps/photos", "photos", OrFocus),
+        AppDef::app("clock", "Clock", "makepad-clock", "apps/clock", "clock", OrFocus),
+        AppDef::app("weather", "Weather", "makepad-weather", "apps/weather", "weather", OrFocus),
+        // The ledger: accounts, imports and charts over its own database.
+        AppDef::app("finance", "Finance", "makepad-finance", "apps/finance", "finance", OrFocus),
+        AppDef::app("mail", "Mail", "makepad-mail", "apps/mail", "mail", OrFocus),
+        AppDef::app("notes", "Notes", "makepad-notes", "apps/notes", "notes", OrFocus),
+        AppDef::app("calendar", "Calendar", "makepad-calendar", "apps/calendar", "calendar", OrFocus),
+        AppDef::app("reminders", "Reminders", "makepad-reminders", "apps/reminders", "reminders", OrFocus),
+        AppDef::app("calculator", "Calculator", "makepad-calculator", "apps/calculator", "calculator", OrFocus),
         // Sewing patterns from a body measurement: camera, body model, PDF/SVG.
         AppDef::app("fabric", "Fabric", "makepad-fabric", "apps/fabric", "makepad-fabric", OrFocus),
         AppDef::app(
@@ -160,10 +169,16 @@ fn curated() -> Vec<AppDef> {
             "studio",
             "Studio",
             "makepad-studio",
-            "studio/desktop",
-            "makepad-studio",
+            "apps/studio",
+            "studio",
             OrFocus,
         ),
+        {
+            // Scope is an optional private checkout with its own workspace.
+            let mut scope = AppDef::app("scope", "Scope", "makepad-scope", "apps/scope", "scope", OrFocus);
+            scope.manifest = Some("apps/scope/Cargo.toml".to_string());
+            scope
+        },
     ]
 }
 
@@ -408,6 +423,9 @@ pub struct WarmStatus {
 #[derive(Debug)]
 pub struct WarmPool {
     enabled: bool,
+    /// Appearance in which browser pages were warmed. A loaded page may
+    /// choose its theme only once, so a media-query update is not sufficient.
+    browser_dark: Option<bool>,
     /// app id -> the warm clients of that app, oldest first.
     ready: HashMap<String, Vec<ClientId>>,
     /// app id -> when (platform seconds) its warm instances died unexpectedly, newest last.
@@ -415,8 +433,10 @@ pub struct WarmPool {
 }
 
 impl Default for WarmPool {
+    /// Before the build is read: the platform's capability alone. The
+    /// startup replaces it with `from_env(App::processes())`.
     fn default() -> Self {
-        Self::from_env()
+        Self::from_env(host::processes_available())
     }
 }
 
@@ -431,14 +451,16 @@ pub fn warm_enabled(no_warm: Option<&str>) -> bool {
 }
 
 impl WarmPool {
-    pub fn from_env() -> Self {
-        // A build without processes has nothing to keep warm.
-        Self::new(host::processes_available() && warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
+    /// `processes` is the host's answer (`App::processes`): a build without
+    /// processes has nothing to keep warm.
+    pub fn from_env(processes: bool) -> Self {
+        Self::new(processes && warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
     }
 
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
+            browser_dark: None,
             ready: HashMap::new(),
             crashes: HashMap::new(),
         }
@@ -465,6 +487,18 @@ impl WarmPool {
     /// How many instances of this app are currently held.
     pub fn held(&self, app: &str) -> usize {
         self.ready.get(app).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Retire only unused browsers on a light/dark change. Removing them
+    /// from the adoption pool is immediate; the host closes their processes
+    /// and refills after they exit. Deliberate retirement is not a crash.
+    pub fn set_browser_appearance(&mut self, dark: bool) -> Vec<ClientId> {
+        let previous = self.browser_dark.replace(dark);
+        if previous.is_some_and(|previous| previous != dark) {
+            self.ready.remove("browser").unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Every warm client, whatever the app — the shutdown / close-all
@@ -583,6 +617,9 @@ pub struct ClientSlot {
     /// Registry id of the app this client runs.
     pub app: String,
     pub title: String,
+    /// The app's own background (a module's `theme.color_bg_app`): what
+    /// the host clears the app's texture to, as the app's own window would.
+    pub ground: Option<makepad_widgets::Vec4f>,
     pub child: Option<Child>,
     task_pool: Option<TaskPool>,
     pub sender: Option<Sender<Vec<u8>>>,
@@ -641,6 +678,7 @@ impl ClientSlot {
             id,
             app: app.to_string(),
             title: title.to_string(),
+            ground: None,
             child: None,
             task_pool: None,
             sender: None,
@@ -717,13 +755,13 @@ pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &Ta
     let wait = CancellationToken::new();
     let submitted = pool.submit(Lane::Heavy, move || {
         let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-        if signal::alive(pid) {
+        if signal::alive(-pid) {
             signal::kill_group(pid, signal::SIGKILL);
         }
     });
     match submitted {
         Ok(task) => task.detach(),
-        Err(_) if signal::alive(pid) => signal::kill_group(pid, signal::SIGKILL),
+        Err(_) if signal::alive(-pid) => signal::kill_group(pid, signal::SIGKILL),
         Err(_) => {}
     }
 }
@@ -750,7 +788,7 @@ fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPoo
                 {
                     let wait = CancellationToken::new();
                     let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-                    if signal::alive(pid) {
+                    if signal::alive(-pid) {
                         signal::kill_group(pid, signal::SIGKILL);
                     }
                 }
@@ -821,13 +859,19 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// Read a child stream line by line into the log file and the UI channel.
 fn pump<R: std::io::Read + Send + 'static>(
-    pool: &TaskPool,
+    spawner: &ThreadSpawner,
     client: ClientId,
     stream: R,
     mut log: Option<std::fs::File>,
     lines: Sender<ClientLine>,
 ) {
-    let submitted = pool.submit(Lane::Heavy, move || {
+    // Each pipe lives for the child's entire lifetime. A blocking reader
+    // must not occupy a finite pool worker: enough open apps would starve
+    // new compile logs and even process cleanup.
+    let submitted = spawner.spawn_worker(ThreadOptions {
+        name: Some(format!("wm-client-{client}-output").into()),
+        ..Default::default()
+    }, move || {
         use std::io::{BufRead, BufReader, Write};
         let reader = BufReader::new(stream);
         for line in reader.lines() {
@@ -848,6 +892,24 @@ fn pump<R: std::io::Read + Send + 'static>(
     match submitted {
         Ok(task) => task.detach(),
         Err(error) => makepad_widgets::log!("wm: could not queue client output pump: {error}"),
+    }
+}
+
+/// Cargo output that changes the launch panel. Compiler diagnostics stay in
+/// the client log and do not overwrite a useful build stage with source text.
+pub fn cargo_progress(raw: &str) -> Option<(String, bool)> {
+    let raw = raw.trim();
+    if raw.starts_with("Blocking waiting for file lock") {
+        Some(("waiting for another build…".into(), false))
+    } else if raw.starts_with("Running ") || raw.starts_with("Finished ") {
+        Some(("launching…".into(), true))
+    } else if let Some(rest) = raw.strip_prefix("Compiling ") {
+        let package = rest.split(" (").next().unwrap_or(rest).trim();
+        Some((format!("compiling {package}…"), false))
+    } else if raw.starts_with("error:") || raw.starts_with("error[") {
+        Some(("build failed — see the app log".into(), false))
+    } else {
+        None
     }
 }
 
@@ -888,6 +950,7 @@ pub fn launch_argv(
 /// Spawn an app as a hub client.
 pub fn spawn_client(
     pool: &TaskPool,
+    spawner: &ThreadSpawner,
     app: &AppDef,
     id: ClientId,
     hub_port: u16,
@@ -926,6 +989,9 @@ pub fn spawn_client(
     // Cargo colors its output when it thinks a terminal is watching; the
     // pipe already turns that off, and this makes it certain.
     cmd.env("CARGO_TERM_COLOR", "never");
+    // The app owns any controls it embeds in its caption. Keep that content
+    // inside the tile; the WM still supplies the outer window decorations.
+    cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
     if let Some(cwd) = cwd {
         // The terminal's Omarchy behavior: open where the focused one is.
         cmd.arg("--cwd").arg(cwd);
@@ -942,7 +1008,7 @@ pub fn spawn_client(
         // its window rule alone, 0.985/0.96, reads as opaque).
         // "focused unfocused"; MAKEPAD_WM_TERM_OPACITY overrides.
         let opacity = std::env::var("MAKEPAD_WM_TERM_OPACITY")
-            .unwrap_or_else(|_| "0.88 0.84".to_string());
+            .unwrap_or_else(|_| "0.78 0.70".to_string());
         cmd.env("MAKEPAD_TERMINAL_OPACITY", opacity);
     }
     // Every Makepad app styles itself from the WM's theme.splash.
@@ -961,13 +1027,14 @@ pub fn spawn_client(
     let log_path = host::homeless_root().join(format!("wm-client-{}.log", id));
     let log = std::fs::File::create(&log_path).ok();
     if let Some(out) = child.stdout.take() {
-        pump(pool, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
+        pump(spawner, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
     }
     if let Some(err) = child.stderr.take() {
-        pump(pool, id, err, log, lines);
+        pump(spawner, id, err, log, lines);
     }
     Ok(ClientSlot {
         id,
+        ground: None,
         app: app.id.to_string(),
         title: String::new(),
         child: Some(child),
@@ -996,6 +1063,18 @@ pub fn spawn_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_progress_keeps_the_build_stage_readable() {
+        assert_eq!(cargo_progress("   Compiling makepad-photos v0.1.0 (/a/checkout)"), Some(("compiling makepad-photos v0.1.0…".into(), false)));
+        assert_eq!(cargo_progress("Blocking waiting for file lock on build directory"), Some(("waiting for another build…".into(), false)));
+        assert_eq!(cargo_progress("    Finished `release` profile in 2s"), Some(("launching…".into(), true)));
+        assert_eq!(cargo_progress("     Running `/a/checkout/target/release/photos`"), Some(("launching…".into(), true)));
+        assert!(cargo_progress("warning: unused variable").is_none());
+        assert!(cargo_progress(" --> /a/checkout/src/main.rs:2").is_none());
+        assert!(cargo_progress("app: first frame").is_none());
+        assert_eq!(cargo_progress("error[E0308]: type mismatch"), Some(("build failed — see the app log".into(), false)));
+    }
 
     #[test]
     fn children_are_always_release_never_debug() {
@@ -1078,6 +1157,14 @@ mod tests {
                 "Task Manager",
                 "Sheets",
                 "Photos",
+                "Clock",
+                "Weather",
+                "Finance",
+                "Mail",
+                "Notes",
+                "Calendar",
+                "Reminders",
+                "Calculator",
                 "Fabric",
                 "Score",
                 "Video Player",
@@ -1085,6 +1172,7 @@ mod tests {
                 "VJ",
                 "Fab",
                 "Studio",
+                "Scope",
             ]
             .map(str::to_string)
         );
@@ -1182,6 +1270,33 @@ mod tests {
             })
             .collect();
         (pool, status)
+    }
+
+    #[test]
+    fn appearance_retires_only_unused_browsers_and_never_counts_as_a_crash() {
+        let (mut pool,status)=pool_with("browser", &[40,41]);
+        pool.note_spawned("files",42);
+        assert!(pool.set_browser_appearance(true).is_empty());
+        assert_eq!(pool.adopt("browser",false,&status),Some(40));
+        assert!(pool.set_browser_appearance(true).is_empty());
+        assert_eq!(pool.set_browser_appearance(false),vec![41]);
+        assert_eq!(pool.adopt("browser",false,&status),None);
+        assert!(pool.holds(42));
+        // Reaping intentional retirements cannot charge the crash budget.
+        assert_eq!(pool.forget(41),None);
+        for dark in [true,false,true,false] {assert!(pool.set_browser_appearance(dark).is_empty());}
+        assert!(pool.wants("browser",0.0));
+        pool.note_spawned("browser",43);
+        assert!(pool.set_browser_appearance(false).is_empty());
+        assert!(pool.holds(43));
+    }
+
+    #[test]
+    fn appearance_changes_do_not_enable_a_disabled_pool() {
+        let mut pool=WarmPool::new(false);
+        pool.set_browser_appearance(true);
+        pool.set_browser_appearance(false);
+        assert!(!pool.wants("browser",0.0));
     }
 
     #[test]
@@ -1434,6 +1549,12 @@ mod tests {
         // Past the SIGTERM->SIGKILL escalation: nothing in the group is
         // still standing, wrapper or grandchild.
         let _ = child.wait();
+        // The wrapper can exit before the asynchronous escalation and before
+        // launchd reaps the orphan. Wait only in this test, never on the UI.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { kill(grandchild_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(
             unsafe { kill(grandchild_pid, 0) },
             -1,

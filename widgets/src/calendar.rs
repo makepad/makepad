@@ -326,7 +326,7 @@ pub fn seek(
 
 /// How many days may be chosen at once.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Script, ScriptHook)]
-pub enum CalendarMode {
+pub enum CalendarPickMode {
     /// One day. Choosing another puts the last one back.
     #[pick]
     #[default]
@@ -357,18 +357,18 @@ pub enum Picked {
 /// rather than two that drift.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DaySelection {
-    mode: CalendarMode,
+    mode: CalendarPickMode,
     days: Vec<CivilDate>,
     /// The first end of a range, while the second is still being chosen.
     anchor: Option<CivilDate>,
 }
 
 impl DaySelection {
-    pub fn new(mode: CalendarMode) -> Self {
+    pub fn new(mode: CalendarPickMode) -> Self {
         Self { mode, days: Vec::new(), anchor: None }
     }
 
-    pub fn mode(&self) -> CalendarMode {
+    pub fn mode(&self) -> CalendarPickMode {
         self.mode
     }
 
@@ -395,9 +395,9 @@ impl DaySelection {
         days.dedup();
         self.anchor = None;
         match self.mode {
-            CalendarMode::Single => days.truncate(1),
-            CalendarMode::Multiple => {}
-            CalendarMode::Range => {
+            CalendarPickMode::Single => days.truncate(1),
+            CalendarPickMode::Multiple => {}
+            CalendarPickMode::Range => {
                 if days.len() == 1 {
                     // One end given is a range half made, not a range: the
                     // next press finishes it rather than starting again.
@@ -420,7 +420,7 @@ impl DaySelection {
 
     /// The finished span, once both ends are chosen.
     pub fn span(&self) -> Option<(CivilDate, CivilDate)> {
-        if self.mode == CalendarMode::Range && self.days.len() == 2 {
+        if self.mode == CalendarPickMode::Range && self.days.len() == 2 {
             Some((self.days[0], self.days[1]))
         } else {
             None
@@ -431,7 +431,7 @@ impl DaySelection {
     /// pointer is. Showing the range a second press would make is the only
     /// way to tell which end is anchored.
     pub fn preview(&self, hover: Option<CivilDate>) -> Option<(CivilDate, CivilDate)> {
-        if let (CalendarMode::Range, Some(anchor), Some(at)) = (self.mode, self.anchor, hover) {
+        if let (CalendarPickMode::Range, Some(anchor), Some(at)) = (self.mode, self.anchor, hover) {
             return Some((anchor.min(at), anchor.max(at)));
         }
         self.span()
@@ -440,12 +440,12 @@ impl DaySelection {
     /// Press a day.
     pub fn pick(&mut self, date: CivilDate) -> Picked {
         match self.mode {
-            CalendarMode::Single => {
+            CalendarPickMode::Single => {
                 self.days = vec![date];
                 self.anchor = None;
                 Picked::Day(date)
             }
-            CalendarMode::Multiple => {
+            CalendarPickMode::Multiple => {
                 if let Some(at) = self.days.iter().position(|day| *day == date) {
                     self.days.remove(at);
                     Picked::Cleared(date)
@@ -455,7 +455,7 @@ impl DaySelection {
                     Picked::Day(date)
                 }
             }
-            CalendarMode::Range => match self.anchor.take() {
+            CalendarPickMode::Range => match self.anchor.take() {
                 None => {
                     self.anchor = Some(date);
                     self.days = vec![date];
@@ -519,7 +519,7 @@ pub type DayAllowed = Box<dyn Fn(CivilDate) -> bool>;
 
 /// What a calendar reports.
 #[derive(Clone, Debug, Default)]
-pub enum CalendarAction {
+pub enum CalendarPickAction {
     /// The day a press acted on. In `Multiple` this fires for a day taken
     /// out as well as one put in — it names the day that was pressed, not
     /// the state it ended in. Ask `selected_days` for the whole set.
@@ -538,7 +538,7 @@ script_mod! {
     use mod.prelude.widgets_internal.*
 
     /** How many days may be chosen at once. */
-    mod.widgets.CalendarMode = #(CalendarMode::script_api(vm))
+    mod.widgets.CalendarPickMode = #(CalendarPickMode::script_api(vm))
 
     use mod.widgets.*
 
@@ -667,7 +667,7 @@ script_mod! {
         margin: theme.mspace_1
 
         /** how many days may be chosen at once */
-        mode: CalendarMode.Single
+        mode: CalendarPickMode.Single
         /** the weekday a row starts on; 0 is Monday 0..6 step 1 */
         first_day: 0
         /** the year on show; 0 takes it from the selection, then from today 0..3000 step 1 */
@@ -754,7 +754,7 @@ script_mod! {
         margin: theme.mspace_1
 
         /** how many months may be chosen at once */
-        mode: CalendarMode.Single
+        mode: CalendarPickMode.Single
         /** the year on show; 0 takes it from the selection 0..3000 step 1 */
         year: 0
         /** the months chosen at the start, ISO dates separated by commas */
@@ -825,7 +825,7 @@ script_mod! {
         margin: theme.mspace_1
 
         /** how many years may be chosen at once */
-        mode: CalendarMode.Single
+        mode: CalendarPickMode.Single
         /** the year the page opens on; 0 takes it from the selection 0..3000 step 1 */
         year: 0
         /** the years chosen at the start, ISO dates separated by commas */
@@ -1014,7 +1014,7 @@ pub struct Calendar {
     animator: Animator,
 
     #[live]
-    pub mode: CalendarMode,
+    pub mode: CalendarPickMode,
     #[live]
     pub first_day: u32,
     #[live]
@@ -1185,7 +1185,7 @@ impl Calendar {
             self.view_month = date.month;
             cx.widget_action(
                 self.uid,
-                CalendarAction::MonthChanged(self.view_year, self.view_month),
+                CalendarPickAction::MonthChanged(self.view_year, self.view_month),
             );
         }
     }
@@ -1212,10 +1212,10 @@ impl Calendar {
         let uid = self.uid;
         match self.selection.pick(date) {
             Picked::Day(day) | Picked::Cleared(day) => {
-                cx.widget_action(uid, CalendarAction::Selected(day));
+                cx.widget_action(uid, CalendarPickAction::Selected(day));
             }
             Picked::Span(start, end) => {
-                cx.widget_action(uid, CalendarAction::RangeSelected(start, end));
+                cx.widget_action(uid, CalendarPickAction::RangeSelected(start, end));
             }
             Picked::Waiting(_) => {}
         }
@@ -1509,7 +1509,7 @@ impl Widget for Calendar {
                 // up there is otherwise no way to put it down.
                 if ke.key_code == KeyCode::Escape && self.selection.anchor().is_some() {
                     self.selection.clear();
-                    cx.widget_action(uid, CalendarAction::Selected(self.focus));
+                    cx.widget_action(uid, CalendarPickAction::Selected(self.focus));
                     self.redraw(cx);
                 }
             }
@@ -1567,7 +1567,7 @@ impl CalendarRef {
     pub fn selected(&self, actions: &Actions) -> Option<CivilDate> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::Selected(date) => Some(date),
+            CalendarPickAction::Selected(date) => Some(date),
             _ => None,
         }
     }
@@ -1576,7 +1576,7 @@ impl CalendarRef {
     pub fn range_selected(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::RangeSelected(start, end) => Some((start, end)),
+            CalendarPickAction::RangeSelected(start, end) => Some((start, end)),
             _ => None,
         }
     }
@@ -1585,7 +1585,7 @@ impl CalendarRef {
     pub fn month_changed(&self, actions: &Actions) -> Option<(i32, u32)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::MonthChanged(year, month) => Some((year, month)),
+            CalendarPickAction::MonthChanged(year, month) => Some((year, month)),
             _ => None,
         }
     }
@@ -1616,7 +1616,7 @@ pub struct MonthPicker {
     animator: Animator,
 
     #[live]
-    pub mode: CalendarMode,
+    pub mode: CalendarPickMode,
     #[live]
     pub year: u32,
     #[live]
@@ -1747,7 +1747,7 @@ impl MonthPicker {
         self.view_year += delta;
         cx.widget_action(
             self.uid,
-            CalendarAction::MonthChanged(self.view_year, self.focus as u32 % 12 + 1),
+            CalendarPickAction::MonthChanged(self.view_year, self.focus as u32 % 12 + 1),
         );
         self.redraw(cx);
     }
@@ -1761,10 +1761,10 @@ impl MonthPicker {
         let uid = self.uid;
         match self.selection.pick(date) {
             Picked::Day(day) | Picked::Cleared(day) => {
-                cx.widget_action(uid, CalendarAction::Selected(day));
+                cx.widget_action(uid, CalendarPickAction::Selected(day));
             }
             Picked::Span(start, end) => {
-                cx.widget_action(uid, CalendarAction::RangeSelected(start, end));
+                cx.widget_action(uid, CalendarPickAction::RangeSelected(start, end));
             }
             Picked::Waiting(_) => {}
         }
@@ -1780,7 +1780,7 @@ impl MonthPicker {
         let index = flat.rem_euclid(12) as usize;
         if year != self.view_year {
             self.view_year = year;
-            cx.widget_action(self.uid, CalendarAction::MonthChanged(self.view_year, index as u32 + 1));
+            cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.view_year, index as u32 + 1));
         }
         self.focus = index;
         self.redraw(cx);
@@ -2015,7 +2015,7 @@ impl MonthPickerRef {
     pub fn selected(&self, actions: &Actions) -> Option<CivilDate> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::Selected(date) => Some(date),
+            CalendarPickAction::Selected(date) => Some(date),
             _ => None,
         }
     }
@@ -2023,7 +2023,7 @@ impl MonthPickerRef {
     pub fn range_selected(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::RangeSelected(start, end) => Some((start, end)),
+            CalendarPickAction::RangeSelected(start, end) => Some((start, end)),
             _ => None,
         }
     }
@@ -2054,7 +2054,7 @@ pub struct YearPicker {
     animator: Animator,
 
     #[live]
-    pub mode: CalendarMode,
+    pub mode: CalendarPickMode,
     #[live]
     pub year: u32,
     #[live]
@@ -2161,7 +2161,7 @@ impl YearPicker {
 
     fn step_page(&mut self, cx: &mut Cx, delta: i32) {
         self.page += delta * 12;
-        cx.widget_action(self.uid, CalendarAction::MonthChanged(self.page, 1));
+        cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.page, 1));
         self.redraw(cx);
     }
 
@@ -2174,10 +2174,10 @@ impl YearPicker {
         let uid = self.uid;
         match self.selection.pick(date) {
             Picked::Day(day) | Picked::Cleared(day) => {
-                cx.widget_action(uid, CalendarAction::Selected(day));
+                cx.widget_action(uid, CalendarPickAction::Selected(day));
             }
             Picked::Span(start, end) => {
-                cx.widget_action(uid, CalendarAction::RangeSelected(start, end));
+                cx.widget_action(uid, CalendarPickAction::RangeSelected(start, end));
             }
             Picked::Waiting(_) => {}
         }
@@ -2189,7 +2189,7 @@ impl YearPicker {
         let page = year_page(flat as i32);
         if page != self.page {
             self.page = page;
-            cx.widget_action(self.uid, CalendarAction::MonthChanged(self.page, 1));
+            cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.page, 1));
         }
         self.focus = (flat as i32 - self.page).clamp(0, 11) as usize;
         self.redraw(cx);
@@ -2430,7 +2430,7 @@ impl YearPickerRef {
     pub fn selected(&self, actions: &Actions) -> Option<CivilDate> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::Selected(date) => Some(date),
+            CalendarPickAction::Selected(date) => Some(date),
             _ => None,
         }
     }
@@ -2438,7 +2438,7 @@ impl YearPickerRef {
     pub fn range_selected(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
-            CalendarAction::RangeSelected(start, end) => Some((start, end)),
+            CalendarPickAction::RangeSelected(start, end) => Some((start, end)),
             _ => None,
         }
     }
@@ -2632,7 +2632,7 @@ mod tests {
 
     #[test]
     fn single_selection_replaces_rather_than_grows() {
-        let mut sel = DaySelection::new(CalendarMode::Single);
+        let mut sel = DaySelection::new(CalendarPickMode::Single);
         assert_eq!(sel.pick(date(2026, 9, 3)), Picked::Day(date(2026, 9, 3)));
         assert_eq!(sel.pick(date(2026, 9, 7)), Picked::Day(date(2026, 9, 7)));
         assert_eq!(sel.days(), &[date(2026, 9, 7)]);
@@ -2640,7 +2640,7 @@ mod tests {
 
     #[test]
     fn multiple_selection_toggles_and_stays_in_order() {
-        let mut sel = DaySelection::new(CalendarMode::Multiple);
+        let mut sel = DaySelection::new(CalendarPickMode::Multiple);
         sel.pick(date(2026, 9, 7));
         sel.pick(date(2026, 9, 3));
         assert_eq!(sel.days(), &[date(2026, 9, 3), date(2026, 9, 7)]);
@@ -2650,7 +2650,7 @@ mod tests {
 
     #[test]
     fn a_range_takes_two_presses_and_reports_nothing_after_one() {
-        let mut sel = DaySelection::new(CalendarMode::Range);
+        let mut sel = DaySelection::new(CalendarPickMode::Range);
         assert_eq!(sel.pick(date(2026, 9, 10)), Picked::Waiting(date(2026, 9, 10)));
         assert_eq!(sel.span(), None, "half a range is not an answer");
         assert_eq!(
@@ -2664,7 +2664,7 @@ mod tests {
     /// earliest first, so a host never has to sort the two ends.
     #[test]
     fn a_range_chosen_backwards_still_comes_out_in_order() {
-        let mut sel = DaySelection::new(CalendarMode::Range);
+        let mut sel = DaySelection::new(CalendarPickMode::Range);
         sel.pick(date(2026, 9, 20));
         assert_eq!(
             sel.pick(date(2026, 9, 10)),
@@ -2674,7 +2674,7 @@ mod tests {
 
     #[test]
     fn a_third_press_starts_a_new_range() {
-        let mut sel = DaySelection::new(CalendarMode::Range);
+        let mut sel = DaySelection::new(CalendarPickMode::Range);
         sel.pick(date(2026, 9, 10));
         sel.pick(date(2026, 9, 20));
         assert_eq!(sel.pick(date(2026, 9, 25)), Picked::Waiting(date(2026, 9, 25)));
@@ -2683,7 +2683,7 @@ mod tests {
 
     #[test]
     fn a_half_made_range_previews_against_the_pointer() {
-        let mut sel = DaySelection::new(CalendarMode::Range);
+        let mut sel = DaySelection::new(CalendarPickMode::Range);
         sel.pick(date(2026, 9, 10));
         assert_eq!(
             sel.preview(Some(date(2026, 9, 4))),
@@ -2697,21 +2697,21 @@ mod tests {
     fn given_days_are_trimmed_to_what_the_mode_can_hold() {
         let days = [date(2026, 9, 20), date(2026, 9, 3), date(2026, 9, 10)];
 
-        let mut single = DaySelection::new(CalendarMode::Single);
+        let mut single = DaySelection::new(CalendarPickMode::Single);
         single.set_days(&days);
         assert_eq!(single.days(), &[date(2026, 9, 3)], "the earliest, and only it");
 
-        let mut many = DaySelection::new(CalendarMode::Multiple);
+        let mut many = DaySelection::new(CalendarPickMode::Multiple);
         many.set_days(&days);
         assert_eq!(many.days().len(), 3);
 
-        let mut range = DaySelection::new(CalendarMode::Range);
+        let mut range = DaySelection::new(CalendarPickMode::Range);
         range.set_days(&days);
         assert_eq!(range.days(), &[date(2026, 9, 3), date(2026, 9, 20)], "the two ends");
 
         // One day given to a range is a range half made, so the next press
         // finishes it rather than throwing it away.
-        let mut half = DaySelection::new(CalendarMode::Range);
+        let mut half = DaySelection::new(CalendarPickMode::Range);
         half.set_days(&[date(2026, 9, 3)]);
         assert_eq!(half.anchor(), Some(date(2026, 9, 3)));
         assert_eq!(

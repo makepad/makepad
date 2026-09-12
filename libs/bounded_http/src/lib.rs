@@ -27,6 +27,13 @@ pub const MAX_QUERY_PAIRS: usize = 16;
 /// Unconsumed Length-body remainder we are willing to drain to keep a
 /// connection alive; anything larger closes instead.
 pub const MAX_DRAIN_BYTES: u64 = 64 * 1024;
+/// Longest retained value of a tracked identity header (`Origin`, `Host`,
+/// `Content-Type`, `Accept`, `MCP-Protocol-Version`, `Mcp-Session-Id`).
+/// Longer values are a 431: a caller that needs them cannot use a
+/// truncated copy, and a caller that does not never sees them.
+pub const MAX_TRACKED_HEADER_BYTES: usize = 512;
+/// Longest retained `Authorization` value (a bearer credential plus scheme).
+pub const MAX_AUTHORIZATION_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -99,6 +106,17 @@ pub struct Head {
     pub query: Vec<(String, String)>,
     pub host: String,
     pub authorization: Option<String>,
+    /// `Origin`, retained verbatim (bounded) so a loopback service can
+    /// refuse browser-originated requests; absent for non-browser clients.
+    pub origin: Option<String>,
+    /// `Content-Type` as sent (bounded); routes decide what they accept.
+    pub content_type: Option<String>,
+    /// `Accept` as sent (bounded).
+    pub accept: Option<String>,
+    /// `MCP-Protocol-Version` as sent (bounded).
+    pub mcp_protocol_version: Option<String>,
+    /// `Mcp-Session-Id` as sent (bounded).
+    pub mcp_session_id: Option<String>,
     pub range: Option<String>,
     pub if_none_match: Option<String>,
     pub if_range: Option<String>,
@@ -768,6 +786,11 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
     // ---- headers ----
     let mut host: Option<String> = None;
     let mut authorization: Option<String> = None;
+    let mut origin: Option<String> = None;
+    let mut content_type: Option<String> = None;
+    let mut accept: Option<String> = None;
+    let mut mcp_protocol_version: Option<String> = None;
+    let mut mcp_session_id: Option<String> = None;
     let mut range: Option<String> = None;
     let mut if_none_match: Option<String> = None;
     let mut if_range: Option<String> = None;
@@ -806,9 +829,23 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
             .map_err(|_| (400, "malformed header name"))?
             .to_ascii_lowercase();
         let value = String::from_utf8(value_b.to_vec()).map_err(|_| (400, "header value charset"))?;
+        let bound = match name.as_str() {
+            "authorization" => Some(MAX_AUTHORIZATION_BYTES),
+            "host" | "origin" | "content-type" | "accept" | "mcp-protocol-version"
+            | "mcp-session-id" => Some(MAX_TRACKED_HEADER_BYTES),
+            _ => None,
+        };
+        if bound.is_some_and(|max| value.len() > max) {
+            return Err((431, "tracked header too large"));
+        }
         let slot = match name.as_str() {
             "host" => &mut host,
             "authorization" => &mut authorization,
+            "origin" => &mut origin,
+            "content-type" => &mut content_type,
+            "accept" => &mut accept,
+            "mcp-protocol-version" => &mut mcp_protocol_version,
+            "mcp-session-id" => &mut mcp_session_id,
             "range" => &mut range,
             "if-none-match" => &mut if_none_match,
             "if-range" => &mut if_range,
@@ -882,6 +919,11 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
         query,
         host,
         authorization,
+        origin,
+        content_type,
+        accept,
+        mcp_protocol_version,
+        mcp_session_id,
         range,
         if_none_match,
         if_range,
@@ -1066,6 +1108,33 @@ mod tests {
         );
         assert_eq!(
             head_of(b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 007\r\n\r\n").unwrap_err().0,
+            400
+        );
+    }
+
+    #[test]
+    fn retains_identity_headers_bounded() {
+        let h = head_of(
+            b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: http://127.0.0.1:1\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-06-18\r\nMcp-Session-Id: abc\r\nAuthorization: Bearer t\r\nContent-Length: 2\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(h.origin.as_deref(), Some("http://127.0.0.1:1"));
+        assert_eq!(h.content_type.as_deref(), Some("application/json"));
+        assert_eq!(h.accept.as_deref(), Some("application/json, text/event-stream"));
+        assert_eq!(h.mcp_protocol_version.as_deref(), Some("2025-06-18"));
+        assert_eq!(h.mcp_session_id.as_deref(), Some("abc"));
+        assert_eq!(h.authorization.as_deref(), Some("Bearer t"));
+        let plain = head_of(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert!(plain.origin.is_none() && plain.content_type.is_none() && plain.accept.is_none());
+        assert!(plain.mcp_protocol_version.is_none() && plain.mcp_session_id.is_none());
+        let long = "a".repeat(MAX_TRACKED_HEADER_BYTES + 1);
+        let raw = format!("GET / HTTP/1.1\r\nHost: x\r\nOrigin: {long}\r\n\r\n");
+        assert_eq!(head_of(raw.as_bytes()).unwrap_err().0, 431);
+        let auth = "b".repeat(MAX_AUTHORIZATION_BYTES + 1);
+        let raw = format!("GET / HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\n\r\n");
+        assert_eq!(head_of(raw.as_bytes()).unwrap_err().0, 431);
+        assert_eq!(
+            head_of(b"GET / HTTP/1.1\r\nHost: x\r\nOrigin: a\r\nOrigin: b\r\n\r\n").unwrap_err().0,
             400
         );
     }

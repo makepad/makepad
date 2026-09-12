@@ -44,9 +44,11 @@ impl Palette {
     }
 
     /// The WM palette when wm exported one, else Chrome dark.
-    pub fn current() -> Self {
+    pub fn current() -> Self { Self::from_palette(makepad_wm_theme::current()) }
+    pub fn for_vm(vm: &mut ScriptVm) -> Self { Self::from_palette(makepad_wm_theme::current_for_vm(vm)) }
+    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
         let fallback = Self::chrome_dark();
-        let Some(p) = makepad_wm_theme::current() else {
+        let Some(p) = palette else {
             return fallback;
         };
         Self {
@@ -117,6 +119,11 @@ impl Palette {
     /// page shows a black hole.
     pub fn page_background_argb(&self) -> u32 {
         parse_argb(&self.darker_background).unwrap_or(0xff20_2124)
+    }
+
+    pub fn is_dark(&self) -> bool {
+        let c = parse_hex(&self.background).unwrap_or(vec4(0.0, 0.0, 0.0, 1.0));
+        0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z < 0.5
     }
 
     /// The new-tab page: a data URL in the theme's colours, so a fresh tab

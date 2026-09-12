@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 makepad-flow = { path = "../../libs/flow", features = ["host"] }
+makepad-asset-client = { path = "../../libs/asset/client" }

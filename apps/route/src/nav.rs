@@ -9,7 +9,7 @@ use makepad_map_nav::nav::{NavSession, NavState};
 
 #[cfg(feature = "demo")]
 pub mod api;
-#[cfg(feature = "native")]
+#[cfg(not(feature = "demo"))]
 pub mod native;
 
 pub const SIM_SPEED_MULT: f64 = 6.0;

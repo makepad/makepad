@@ -625,6 +625,8 @@ impl ShellGallery {
                     self.redraw(cx);
                 }
                 ShellPanelAction::None => {}
+                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                ShellPanelAction::Wifi(_) | ShellPanelAction::System(_) => {}
             }
             match wa.cast::<ShellMenuAction>() {
                 ShellMenuAction::Activate(target) => {

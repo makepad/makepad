@@ -1323,15 +1323,16 @@ impl Api {
         self.upload_blob_with_digest(ns, bytes, local)
     }
 
-    /// Announce one in-memory LocalGen preview session. Mesh parts follow on
-    /// the data plane; none of these calls create a durable blob/revision.
+    /// Announce an empty in-memory preview immediately (`gen/csg/*` or
+    /// `gen/drafts/*`). Mesh parts follow on the data plane; no call here
+    /// creates a durable blob/revision. The server activity lease is 120s.
     pub fn open_model_preview(
         &self,
         alias: &AssetAlias,
         session: &str,
         program: &str,
     ) -> ClientResult<()> {
-        if !alias.as_str().starts_with("gen/csg/") {
+        if !alias.as_str().starts_with("gen/csg/") && !alias.as_str().starts_with("gen/drafts/") {
             return Err(ClientError::InvalidInput { what: "model preview alias" });
         }
         validate_preview_session(session)?;
@@ -1353,6 +1354,8 @@ impl Api {
         Ok(())
     }
 
+    /// A delta with no program, removals or renames is an event-free lease
+    /// heartbeat. Active producers should send one every 30s.
     pub fn update_model_preview(
         &self,
         session: &str,
@@ -1469,7 +1472,7 @@ impl Api {
             self.pool(),
         )?;
         let response = self.accept(response, &[200])?;
-        const MAX_PREVIEW_MESH_BYTES: u64 = 16 * 1024 * 1024;
+        const MAX_PREVIEW_MESH_BYTES: u64 = 256 * 1024 * 1024;
         if response.head().content_length > MAX_PREVIEW_MESH_BYTES {
             return Err(ClientError::OverBudget {
                 what: "model preview mesh",
@@ -1632,13 +1635,34 @@ impl Api {
         &self,
         items: &[PublishBatchWireItem],
     ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        self.publish_batch_inner(items, None)
+    }
+
+    /// Atomic alias-scoped publication. Every item has an explicit guard;
+    /// no fallback to the unguarded route is permitted on older servers.
+    pub fn publish_batch_guarded(
+        &self,
+        items: &[PublishBatchWireItem],
+        guards: &[crate::PublishExpectedHead],
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        if guards.len() != items.len() {
+            return Err(ClientError::InvalidInput { what: "publish guard count" });
+        }
+        self.publish_batch_inner(items, Some(guards))
+    }
+
+    fn publish_batch_inner(
+        &self,
+        items: &[PublishBatchWireItem],
+        guards: Option<&[crate::PublishExpectedHead]>,
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
         if items.is_empty() || items.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
             return Err(ClientError::InvalidInput { what: "publish batch size" });
         }
         let labels =
             |v: &[String]| Value::Arr(v.iter().map(|s| json::s(s.clone())).collect());
         let mut rows: Vec<Value> = Vec::with_capacity(items.len());
-        for item in items {
+        for (index, item) in items.iter().enumerate() {
             item.annotation.validate()?;
             let ann = &item.annotation;
             let mut ann_pairs: Vec<(&str, Value)> = vec![
@@ -1674,12 +1698,29 @@ impl Api {
             if let Some(alias) = &item.alias {
                 pairs.push(("alias", json::s(alias.as_str().to_string())));
             }
+            if let Some(guards) = guards {
+                use crate::PublishExpectedHead;
+                let guard = match guards[index] {
+                    PublishExpectedHead::Any => json::obj(vec![("state", json::s("any"))]),
+                    PublishExpectedHead::Absent => json::obj(vec![("state", json::s("absent"))]),
+                    PublishExpectedHead::Exact(target) => json::obj(vec![
+                        ("state", json::s("exact")),
+                        ("asset_id", json::s(target.asset_id.to_string())),
+                        ("revision", json::s(target.revision.to_string())),
+                    ]),
+                };
+                pairs.push(("expected_head", guard));
+            }
             rows.push(json::obj(pairs));
         }
         let body = json::obj(vec![("items", Value::Arr(rows))])
             .to_json()
             .into_bytes();
-        let path = wire::path_publish_batch();
+        let path = if guards.is_some() {
+            wire::path_publish_batch_guarded()
+        } else {
+            wire::path_publish_batch()
+        };
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
         let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
@@ -2743,7 +2784,7 @@ fn validate_preview_session(value: &str) -> ClientResult<()> {
 
 fn validate_preview_part(value: &str) -> ClientResult<()> {
     let valid = !value.is_empty()
-        && value.len() <= 24
+        && value.len() <= 32
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');

@@ -78,6 +78,7 @@ pub struct Cx {
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
     pub demo_time_repaint: bool,
+    pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
@@ -96,8 +97,11 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    /// Shared-instance publications (cleanup DL-1 freeze): the registry that
+    /// mints ids, charges bytes and hands out receipts over the frame serials.
+    pub publications: crate::shared_instances::Publications,
     pub uniform_buffers: CxUniformBufferPool,
-    pub(crate) geometries: CxGeometryPool,
+    pub geometries: CxGeometryPool,
 
     pub draw_shaders: CxDrawShaders,
 
@@ -174,6 +178,8 @@ pub struct Cx {
     /// so prefer `pending_script_reapply` whenever the change can be modeled
     /// as a shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+    /// Re-evaluate Splash definitions while preserving imperative widget state.
+    pub pending_style_reload: bool,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
@@ -451,10 +457,7 @@ fn memory_budget_from_physical_memory(
     policy: MemoryBudgetPolicy,
 ) -> usize {
     let budget = match policy {
-        MemoryBudgetPolicy::Desktop if physical_memory_bytes < LOW_MEMORY_DEVICE_BYTES => {
-            physical_memory_bytes / 4
-        }
-        MemoryBudgetPolicy::Desktop => DEFAULT_MEMORY_BUDGET_BYTES as u64,
+        MemoryBudgetPolicy::Desktop => physical_memory_bytes / 2,
         MemoryBudgetPolicy::Mobile => (physical_memory_bytes / 4).clamp(
             MIN_MOBILE_MEMORY_BUDGET_BYTES,
             MAX_MOBILE_MEMORY_BUDGET_BYTES,
@@ -651,11 +654,16 @@ impl Cx {
         next
     }
 
-    /// A conservative process-wide memory envelope for cache/batch budgets.
-    /// Native keeps a generous fixed ceiling; web reports the shared wasm
-    /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
-    pub fn memory_budget_bytes(&self) -> usize {
+    /// Process-wide memory envelope for cache/batch budgets.
+    /// Desktop native is half of physical RAM with no upper clamp; web reports
+    /// the shared wasm browser memory envelope through `ToWasmInit` before
+    /// `Event::Startup`.
+    pub fn memory_budget(&self) -> usize {
         self.memory_budget_bytes
+    }
+
+    pub fn memory_budget_bytes(&self) -> usize {
+        self.memory_budget()
     }
 
     pub(crate) fn initialize_memory_budget(&mut self) {
@@ -759,6 +767,7 @@ impl Cx {
     }
 
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
 
@@ -806,11 +815,13 @@ impl Cx {
         let crate_manifests = script_vm.code.crate_manifests.clone();
         let script_mod_overrides = script_vm.code.script_mod_overrides.clone();
 
+        let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
+            mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
             cpu_cores: crate::thread::available_parallelism().get(),
@@ -833,6 +844,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            publications,
             uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),
@@ -897,6 +909,7 @@ impl Cx {
 
             display_context: Default::default(),
             pending_script_reapply: false,
+            pending_style_reload: false,
             pending_live_edit_request: false,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
@@ -1027,18 +1040,18 @@ mod memory_budget_tests {
     }
 
     #[test]
-    fn low_memory_desktop_uses_one_quarter_of_physical_ram() {
-        assert_eq!(
-            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Desktop),
-            (1 * GIB) as usize
-        );
-    }
-
-    #[test]
-    fn desktop_at_threshold_keeps_the_default_budget() {
+    fn desktop_uses_half_of_physical_ram_with_no_upper_clamp() {
         assert_eq!(
             memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Desktop),
-            DEFAULT_MEMORY_BUDGET_BYTES
+            (4 * GIB) as usize
+        );
+        assert_eq!(
+            memory_budget_from_physical_memory(16 * GIB, MemoryBudgetPolicy::Desktop),
+            (8 * GIB) as usize
+        );
+        assert_eq!(
+            memory_budget_from_physical_memory(128 * GIB, MemoryBudgetPolicy::Desktop),
+            (64 * GIB) as usize
         );
     }
 

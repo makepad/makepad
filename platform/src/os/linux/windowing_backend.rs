@@ -64,7 +64,22 @@ pub enum WindowingProtocol {
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        #[cfg(use_vulkan)]
+        if is_stdin_loop_mode() {
+            let mut cx = cx.borrow_mut();
+            cx.in_makepad_studio = true;
+            cx.os_type = crate::cx::OsType::LinuxWindow(crate::cx::LinuxWindowParams { custom_window_chrome: false });
+            cx.os.vulkan = Some(super::vulkan::CxVulkan::new_offscreen()
+                .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}")));
+            cx.stdin_event_loop();
+            drop(cx.os.vulkan.take());
+            return;
+        }
         let protocol = detect_windowing_protocol();
+        #[cfg(use_vulkan)]
+        if protocol != WindowingProtocol::Wayland {
+            panic!("Linux Vulkan windowing requires Wayland; launch inside a Wayland session or build with MAKEPAD=linux_direct+vulkan for exclusive display access");
+        }
 
         // Show environment variables
         match std::env::var("WAYLAND_DISPLAY") {
@@ -163,6 +178,8 @@ pub struct CxOs {
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub opengl_cx: Option<OpenglCx>,
+    #[cfg(use_vulkan)]
+    pub(crate) vulkan: Option<super::vulkan::CxVulkan>,
     pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
     pub(crate) gstreamer: Option<LibGStreamer>,
 }

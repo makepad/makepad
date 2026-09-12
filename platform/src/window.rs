@@ -217,6 +217,7 @@ impl CxWindowPool {
     /// through — so an app that lays out at its own scale (a console that
     /// shrinks to fit a tile) still gets the host's pointer coordinates
     /// remapped into its points (`remap_dpi_override`).
+    #[cfg(any(test, not(linux_direct), use_vulkan))]
     pub(crate) fn stdin_apply_native_geom(
         &mut self,
         window_id: WindowId,

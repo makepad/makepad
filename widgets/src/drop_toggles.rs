@@ -39,7 +39,7 @@ use crate::{
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceRequest, Placement, Side},
+    overlay_place::{place_overlay, PlaceRequest, Placement, Side},
     widget::*,
 };
 
@@ -494,7 +494,7 @@ impl DropToggles {
         // first event after opening, before a draw has measured it — makes
         // both axes unbounded, so the panel simply hangs below until the
         // next draw, as it always did.
-        let placed = place(&PlaceRequest {
+        let placed = place_overlay(&PlaceRequest {
             anchor: chip,
             size,
             bounds: Rect {

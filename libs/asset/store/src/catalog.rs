@@ -35,6 +35,17 @@ use makepad_asset_data::{
     GameAlias, GameId, GameRevisionId, GameRevisionManifest,
 };
 
+/// Compare-and-swap on one alias, never an inferred global head for an asset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublishExpectedHead {
+    #[default]
+    Any,
+    /// No alias binding and no prior publication for the supplied asset ID.
+    Absent,
+    /// The alias must still name this exact asset and revision.
+    Exact(AssetRevisionRef),
+}
+
 pub const CATALOG_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS blobs(
     blob_id BLOB PRIMARY KEY,
@@ -914,6 +925,58 @@ impl<'a> Catalog<'a> {
             asset_id: AssetId::from_bytes(fixed16(&s.column_blob(0), "asset alias row")?),
             revision: AssetRevisionId::from_bytes(fixed32(&s.column_blob(1), "asset alias row")?),
         }))
+    }
+
+    /// Check inside the publication transaction before any alias, annotation
+    /// or search write. `true` means the requested target is already current
+    /// and published: a lost-success retry must be a complete no-op.
+    pub(crate) fn check_publish_head_in_tx(
+        &self,
+        alias: Option<&AssetAlias>,
+        target: &AssetRevisionRef,
+        expected: PublishExpectedHead,
+    ) -> ServerResult<bool> {
+        if expected == PublishExpectedHead::Any {
+            return Ok(false);
+        }
+        let alias = alias.ok_or(ServerError::InvalidInput {
+            what: "guarded publish requires alias",
+        })?;
+        if let PublishExpectedHead::Exact(previous) = expected {
+            if previous.asset_id != target.asset_id {
+                return Err(ServerError::Conflict { what: "publish expected asset identity" });
+            }
+        }
+        let current = self.resolve_asset_alias(alias)?;
+        if current.as_ref() == Some(target)
+            && self.asset_candidate_state(&target.asset_id, &target.revision)?
+                == Some(CandidateState::Published)
+        {
+            return Ok(true);
+        }
+        let matches = match expected {
+            PublishExpectedHead::Any => unreachable!(),
+            PublishExpectedHead::Exact(previous) => current == Some(previous),
+            PublishExpectedHead::Absent => {
+                if current.is_some() {
+                    false
+                } else {
+                    // No timestamp ordering, alias inference, or candidate
+                    // page limit: even an unaliased published revision counts.
+                    let mut stmt = self.db.prepare(
+                        "publish expected absent",
+                        "SELECT 1 FROM candidates WHERE kind='asset' AND owner_id=?1
+                         AND published_ms IS NOT NULL LIMIT 1",
+                    )?;
+                    stmt.bind_blob(1, target.asset_id.as_bytes())?;
+                    !stmt.step()?
+                }
+            }
+        };
+        if !matches {
+            return Err(ServerError::Conflict { what: "publish expected alias head" });
+        }
+        Ok(false)
     }
 
     // ---- games -------------------------------------------------------------

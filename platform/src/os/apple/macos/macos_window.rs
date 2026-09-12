@@ -43,6 +43,10 @@ pub struct MacosWindow {
     pub(crate) macos_config: MacosWindowConfig,
     pub(crate) visual_effect_view: ObjcId,
     pub(crate) last_mouse_pos: Vec2d,
+    /// The buttons this window delivered a down for and no up yet: a
+    /// buttonless `mouseMoved:` while one is held means the up was taken
+    /// by AppKit (see `release_lost_buttons`).
+    buttons_down: MouseButton,
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
@@ -95,6 +99,7 @@ impl MacosWindow {
                 close_event_deferred: false,
                 ime_rect: Rect::default(),
                 last_mouse_pos: Vec2d::default(),
+                buttons_down: MouseButton::empty(),
                 ime_active: false,
             }
         }
@@ -937,6 +942,7 @@ impl MacosWindow {
         self.touch_disqualified = true;
         activate_cocoa_window_on_pointer_down(self.window);
         let () = unsafe { msg_send![self.window, makeFirstResponder: self.view] };
+        self.buttons_down.insert(button);
         self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,
             modifiers,
@@ -962,6 +968,7 @@ impl MacosWindow {
                 }
             });
         }
+        self.buttons_down.remove(button);
         self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
@@ -969,6 +976,25 @@ impl MacosWindow {
             abs: self.last_mouse_pos,
             time: self.time_now(),
         }));
+    }
+
+    /// A buttonless `mouseMoved:` (AppKit sends `mouseDragged:` while a
+    /// button is held) while this window still counts a button down: the up
+    /// never reached the view — a full-screen transition, a Space switch or
+    /// a window drag took it — and the app kept its capture, panning on
+    /// every pointer motion (the phantom pan after a maximise). The lost up
+    /// is delivered before the move.
+    pub fn release_lost_buttons(&mut self, modifiers: KeyModifiers) {
+        if self.retired || self.buttons_down.is_empty() {
+            return;
+        }
+        for bit in 0..32 {
+            let button = MouseButton::from_bits_retain(1 << bit);
+            if self.buttons_down.contains(button) {
+                self.send_mouse_up(button, modifiers);
+            }
+        }
+        self.buttons_down = MouseButton::empty();
     }
 
     /// A raw trackpad touch began. `single` is whether exactly one finger is touching.

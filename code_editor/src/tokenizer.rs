@@ -6,7 +6,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
-    state: Vec<Option<(State, State)>>,
+    state: Vec<Option<((State, usize), (State, usize))>>,
 }
 
 impl Tokenizer {
@@ -39,30 +39,117 @@ impl Tokenizer {
     }
 
     pub fn update(&mut self, text: &Text, tokens: &mut [Vec<Token>]) {
+        self.update_cancellable(text, tokens, &|| false)
+            .expect("non-cancellable tokenizer");
+    }
+
+    /// The editor lexer as a library. Cancellation leaves completed line states
+    /// valid; calling this again resumes through the same incremental cache.
+    /// Multiline lexical state is preserved across every batch boundary.
+    pub fn update_cancellable(
+        &mut self,
+        text: &Text,
+        tokens: &mut [Vec<Token>],
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), TokenizeCancelled> {
         let mut state = State::default();
+        let mut attribute_depth = 0;
         for line in 0..text.as_lines().len() {
+            if line % TOKENIZE_BATCH_LINES == 0 && cancel() {
+                return Err(TokenizeCancelled);
+            }
             match self.state[line] {
-                Some((start_state, end_state)) if state == start_state => {
-                    state = end_state;
+                Some((start_state, end_state)) if (state, attribute_depth) == start_state => {
+                    (state, attribute_depth) = end_state;
                 }
                 _ => {
-                    let start_state = state;
+                    let start_state = (state, attribute_depth);
                     let mut new_tokens = Vec::new();
                     let mut cursor = Cursor::new(&text.as_lines()[line]);
                     loop {
+                        let start = cursor.index;
+                        let initial = matches!(state, State::Initial(_));
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
                         match token {
-                            Some(token) => new_tokens.push(token),
+                            Some(mut token) => {
+                                let source = &text.as_lines()[line][start..];
+                                if initial
+                                    && attribute_depth == 0
+                                    && (source.starts_with("#[") || source.starts_with("#!["))
+                                {
+                                    attribute_depth = 1;
+                                }
+                                if attribute_depth > 0 {
+                                    // Only lexical delimiters affect nesting: brackets in strings
+                                    // and comments cannot terminate a multiline attribute.
+                                    if token.kind == TokenKind::Delimiter {
+                                        match source.as_bytes()[0] {
+                                            b'[' => attribute_depth += 1,
+                                            b']' => {
+                                                attribute_depth -= 1;
+                                                if attribute_depth == 1 {
+                                                    attribute_depth = 0;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    token.kind = TokenKind::Attribute;
+                                }
+                                new_tokens.push(token);
+                            }
                             None => break,
                         }
                     }
-                    self.state[line] = Some((start_state, state));
+                    self.state[line] = Some((start_state, (state, attribute_depth)));
                     tokens[line] = new_tokens;
                 }
             }
         }
+        if cancel() {
+            return Err(TokenizeCancelled);
+        }
+        Ok(())
     }
+}
+
+pub const TOKENIZE_BATCH_LINES: usize = 32;
+
+/// Same canonical FNV-1a UTF-8 identity as PreparedDocument (including display
+/// row separators). Workers validate a request before publishing its geometry.
+pub fn code_source_digest(
+    text: &Text,
+    cancel: &impl Fn() -> bool,
+) -> Result<u64, TokenizeCancelled> {
+    let mut hash = 0xcbf29ce484222325u64;
+    for (index, line) in text.as_lines().iter().enumerate() {
+        if index % TOKENIZE_BATCH_LINES == 0 && cancel() {
+            return Err(TokenizeCancelled);
+        }
+        if index != 0 {
+            hash = (hash ^ 10).wrapping_mul(0x100000001b3);
+        }
+        for byte in line.bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(hash)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenizeCancelled;
+
+pub fn tokenize_cancellable(
+    text: &Text,
+    cancel: &impl Fn() -> bool,
+) -> Result<Vec<Vec<Token>>, TokenizeCancelled> {
+    if cancel() {
+        return Err(TokenizeCancelled);
+    }
+    let mut tokens = vec![Vec::new(); text.as_lines().len()];
+    Tokenizer::new(tokens.len()).update_cancellable(text, &mut tokens, cancel)?;
+    Ok(tokens)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -219,6 +306,9 @@ impl InitialState {
         while cursor.skip_if(|char| char.is_identifier_continue()) {}
         let end = cursor.index;
         let string = &cursor.string[start..end];
+        if cursor.peek(0) == '!' {
+            return (State::Initial(InitialState), TokenKind::Macro);
+        }
         (
             State::Initial(InitialState),
             match string {

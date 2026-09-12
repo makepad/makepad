@@ -21,11 +21,13 @@ use std::path::{Path, PathBuf};
 /// falls back to whatever test map was baked on this machine — same
 /// formats, one city instead of a province.
 const NAV_DATA_BASENAME: &str = "noord-holland";
+/// The test map's nav basename under the maps root: the layout
+/// `makepad_map_build::testmap::TestMapPaths::in_dir(root, "amsterdam")`
+/// bakes, spelled out here so reading it needs no baker.
+const TEST_MAP_BASENAME: &str = "amsterdam";
 const EUROPE_PLACES_PATH: &str = "europe-places.search";
 const EUROPE_SEARCHDB_PATH: &str = "europe.searchdb";
 const EUROPE_MAJOR_GRAPH_PATH: &str = "europe-major.graph";
-const CHARGERS_MBTILES_PATH: &str = "local/overlays/nl-chargers.mbtiles";
-const RADAR_CACHE_DIR: &str = "local/overlays/radar";
 
 pub struct NavData {
     pub nh_search: SearchIndex,
@@ -51,10 +53,7 @@ pub enum NavLoad {
 pub fn nav_basename(maps_root: &Path) -> Option<String> {
     for basename in [
         maps_root.join(NAV_DATA_BASENAME).to_string_lossy().into_owned(),
-        makepad_map_build::testmap::TestMapPaths::in_dir(maps_root, "amsterdam")
-            .nav_basename
-            .to_string_lossy()
-            .into_owned(),
+        maps_root.join(TEST_MAP_BASENAME).to_string_lossy().into_owned(),
     ] {
         if Path::new(&format!("{basename}.search")).is_file()
             && Path::new(&format!("{basename}.graph")).is_file()
@@ -65,7 +64,14 @@ pub fn nav_basename(maps_root: &Path) -> Option<String> {
     None
 }
 
-pub fn start_nav_load(pool: TaskPool, sender: ToUISender<NavLoad>, basename: String) {
+/// Load the nav artifacts at `basename` (and the charger layer at
+/// `chargers`, when it exists) on the heavy lane.
+pub fn start_nav_load(
+    pool: TaskPool,
+    sender: ToUISender<NavLoad>,
+    basename: String,
+    chargers: PathBuf,
+) {
     let rejected_sender = sender.clone();
     match pool.submit(Lane::Heavy, move || {
         let maps_root = Path::new(&basename)
@@ -105,7 +111,7 @@ pub fn start_nav_load(pool: TaskPool, sender: ToUISender<NavLoad>, basename: Str
                 .ok()
                 .and_then(|d| SearchIndex::deserialize(&d).ok())
         };
-        let chargers = LayerDb::open(Path::new(CHARGERS_MBTILES_PATH)).ok();
+        let chargers = LayerDb::open(&chargers).ok();
 
         let stats = format!(
             "nav ready in {:.1}s: {} docs, {} edges{}{}{}",
@@ -263,11 +269,13 @@ fn build_hires_now(
 /// decode the newest forecast file when it changes, ship both the raw grid
 /// (numeric weather_now sampling) and reprojected display frames to the UI.
 /// Also syncs the raw volumes of both radars and composites them into the
-/// hi-res "now" image.
+/// hi-res "now" image. Files land under `cache_dir`. The worker ends when
+/// the instance that started it is gone (its receiver dropped).
 pub fn start_radar_worker(
     spawner: ThreadSpawner,
     pool: TaskPool,
     sender: ToUISender<RadarData>,
+    cache_dir: PathBuf,
 ) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {
@@ -275,8 +283,8 @@ pub fn start_radar_worker(
             ..Default::default()
         },
         move || {
-        let sync = RadarSync::new(RadarConfig::new(RADAR_CACHE_DIR));
-        let (herwijnen_config, den_helder_config) = RadarConfig::volume_pair(RADAR_CACHE_DIR);
+        let sync = RadarSync::new(RadarConfig::new(cache_dir.clone()));
+        let (herwijnen_config, den_helder_config) = RadarConfig::volume_pair(cache_dir);
         let volume_syncs = (
             RadarSync::new(herwijnen_config),
             RadarSync::new(den_helder_config),
@@ -356,7 +364,7 @@ pub fn start_radar_worker(
             }
             if changed {
                 if let Some(current) = &current {
-                    let _ = sender.send(RadarData {
+                    let sent = sender.send(RadarData {
                         frames: current.frames.clone(),
                         stamp: current.stamp.clone(),
                         display_frames: current.display_frames.clone(),
@@ -364,6 +372,9 @@ pub fn start_radar_worker(
                         display_height: current.display_height,
                         now_hires: current.now_hires.clone(),
                     });
+                    if sent.is_err() {
+                        return;
+                    }
                 }
             }
             let _ = pacing.wait_until(Cx::monotonic_now() + 60.0);

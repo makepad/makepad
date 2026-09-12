@@ -1,5 +1,5 @@
 //! On-disk content library. Every accepted artifact is persisted under
-//! `local/ai_content_library/` (payload file + `index.json`) so the library
+//! `local/asset-library/` (payload file + `index.json`) so the library
 //! survives app restarts. Payloads remain on disk and are loaded on demand.
 
 use makepad_micro_serde::*;

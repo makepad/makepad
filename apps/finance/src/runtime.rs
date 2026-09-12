@@ -3,6 +3,7 @@
 use crate::date::{self, Day};
 use crate::model::{Id, Ledger};
 use makepad_widgets::{Actions, Cx};
+use std::path::Path;
 
 pub(crate) struct Start {
     pub today: Day,
@@ -30,7 +31,9 @@ mod imp;
 pub(crate) use imp::Backend;
 
 pub(crate) trait Runtime {
-    fn start(&mut self) -> Start;
+    /// `db_path` is a value the view was given (`Finance::set_db_path`),
+    /// meaningful only to the native backend; the demo backend ignores it.
+    fn start(&mut self, db_path: &Path) -> Start;
     fn has_import(&self) -> bool;
     fn pick_statement(&mut self, cx: &mut Cx);
     fn prepare_from_actions(

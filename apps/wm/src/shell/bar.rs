@@ -31,6 +31,8 @@ use super::{alpha, fade, ShellTokens};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarModule {
     Menu,
+    Style,
+    Appearance,
     Workspace(usize),
     /// `widgets/ActiveWindow.qml` — not in the stock `shell.json` center
     /// list, but our bar carries it right after the workspaces.
@@ -78,6 +80,8 @@ pub struct Indicator {
 /// it with fixtures. Nothing in here is sampled by the widget itself.
 #[derive(Clone, Debug, Default)]
 pub struct BarData {
+    pub style: crate::desktop::DesktopStyle,
+    pub dark: bool,
     pub workspaces: Vec<WorkspaceCell>,
     pub indicators: Vec<Indicator>,
     /// The focused window's title (`ActiveWindow.qml`).
@@ -113,6 +117,8 @@ impl BarData {
     /// The fixture the gallery (and `plugins/dev-gallery`) draws with.
     pub fn fixture() -> Self {
         Self {
+            style: Default::default(),
+            dark: false,
             workspaces: vec![
                 WorkspaceCell {
                     label: "1".into(),
@@ -345,7 +351,18 @@ pub fn sample_network() -> Option<bool> {
             .map(|s| s.trim().to_string())?;
         Some(run("ipconfig", &["getifaddr", &dev]).map(|s| !s.trim().is_empty()) == Some(true))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    {
+        // A default route in the kernel's table, read straight from procfs:
+        // no process, no daemon. Wired or wireless alike — the Wi-Fi
+        // dropdown says which.
+        let table = std::fs::read_to_string("/proc/net/route").ok()?;
+        Some(table.lines().skip(1).any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next().is_some() && fields.next() == Some("00000000")
+        }))
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", not(target_env = "ohos")))))]
     {
         None
     }
@@ -624,7 +641,21 @@ impl ShellBar {
             x += WS_WIDTH + WS_SPACING;
         }
         x += WS_TRAILING;
+        let style_label = format!("{}  ▾", self.data.style.label());
+        let style_width = self.d.measure(cx, false, tok.font.body, &style_label) + 18.0;
+        let style_rect = rect(x, r.pos.y, style_width, r.size.y);
+        self.d.label(cx, style_rect, false, tok.font.body, fg, super::ui::HAlign::Center, &style_label);
+        self.hits.push((BarModule::Style, style_rect));
+        x += style_width + 6.0;
 
+        if self.data.style.supports_dark() {
+            let label=if self.data.dark {"Dark"}else{"Light"};
+            let width=self.d.measure(cx,false,tok.font.body,label)+18.0;
+            let button=rect(x,r.pos.y,width,r.size.y);
+            self.d.label(cx,button,false,tok.font.body,fg,super::ui::HAlign::Center,label);
+            self.hits.push((BarModule::Appearance,button));
+            x+=width+6.0;
+        }
         // The active window's title: `min(280, implicitWidth) + controlPaddingX*2`,
         // `body` at α .85, elided right, with the full title in the tooltip.
         if let Some(title) = self.data.active_window.clone() {
@@ -764,6 +795,17 @@ impl ShellBar {
         let modules = self.right_modules();
         let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
+            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            if *module == BarModule::Power {
+                if let Some(battery) = self.data.battery {
+                    let label = format!("{}%{}", battery.percent, if battery.charging { " +" } else { "" });
+                    let width = self.d.measure(cx, false, tok.font.caption, &label) + 8.0;
+                    rx -= width;
+                    let label_rect = rect(rx, r.pos.y, width, r.size.y);
+                    self.d.label(cx, label_rect, false, tok.font.caption, fg, super::ui::HAlign::Center, &label);
+                    self.hits.push((*module, label_rect));
+                }
+            }
             rx -= slot;
             let cell = rect(rx, r.pos.y, slot, r.size.y);
             let mut color = if *available { fg } else { fade(fg, 0.45) };
@@ -807,7 +849,9 @@ impl ShellBar {
     /// The tooltip a module shows after 400ms of hover.
     fn tooltip_for(&self, module: BarModule) -> String {
         match module {
-            BarModule::Menu => "Omarchy menu".into(),
+            BarModule::Style => "Choose operating system style".into(),
+            BarModule::Appearance => "Toggle light / dark appearance".into(),
+            BarModule::Menu => "Applications".into(),
             BarModule::Workspace(i) => format!("Workspace {}", i + 1),
             BarModule::ActiveWindow => self
                 .data

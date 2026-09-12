@@ -349,6 +349,8 @@ impl IosApp {
             (*view_ctrl_obj).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", NO);
             // 0 = UIStatusBarStyleDefault (system-managed light/dark).
             (*view_ctrl_obj).set_ivar::<i64>("_preferredStatusBarStyle", 0);
+            // UIRectEdgeNone: the OS keeps every edge gesture until an app asks.
+            (*view_ctrl_obj).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", 0);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -672,17 +674,23 @@ impl IosApp {
         radius: Vec2d,
         force: f64,
     ) {
+        // The point's time is WHEN IT WAS LAST SEEN, not when the finger
+        // landed: a gesture's duration and release velocity are read from
+        // it, and a finger that keeps its landing time looks instantaneous
+        // however long it moved.
+        let time = self.time_now();
         if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid) {
             touch.state = state;
             touch.abs = abs;
             touch.radius = radius;
             touch.force = force;
+            touch.time = time;
         } else {
             self.touches.push(TouchPoint {
                 state,
                 abs,
                 uid,
-                time: self.time_now(),
+                time,
                 rotation_angle: 0.0,
                 force,
                 radius,
@@ -1353,6 +1361,28 @@ impl IosApp {
             unsafe {
                 (*vc).set_ivar::<i64>("_preferredStatusBarStyle", style);
                 let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+            }
+        }
+    }
+
+    /// The screen edges whose system gestures the OS should defer (a
+    /// `UIRectEdge` bit set): the view controller answers
+    /// `preferredScreenEdgesDeferringSystemGestures` with it, and UIKit is
+    /// told to ask again. Same borrow pattern as `set_fullscreen`.
+    pub fn set_deferred_system_gesture_edges(edges: u64) {
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(vc) = vc {
+            unsafe {
+                (*vc).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", edges);
+                let () = msg_send![vc, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
             }
         }
     }

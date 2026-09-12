@@ -63,6 +63,7 @@ pub const TEMPLATES: &[Template] = &[
     template!("sfx", "Audio"),
     template!("speech", "Audio"),
     template!("speech-to-text", "Audio"),
+    template!("image-to-pixal3d", "3D"),
     template!("expanded-prompt-to-mesh", "3D"),
     template!("expanded-prompt-to-world", "3D"),
     template!("image-to-mesh", "3D"),

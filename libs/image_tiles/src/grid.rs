@@ -60,12 +60,13 @@ script_mod! {
             let eff = max(want, vec2(1.0, 1.0))
             let cover = (want.x * want.y) / max(eff.x * eff.y, 0.000001)
             let size2 = eff / max(self.cam_scale, 0.000001)
-            let world_xy = self.tile_pos + (self.tile_size - size2) * 0.5 + self.geom.pos * size2
+            let world_xy = self.tile_pos + (self.tile_size - size2) * 0.5
             let scr = self.view_center + (world_xy - self.cam_pos) * self.cam_scale
             self.alpha_v = self.fade * cover
-            self.pos = self.geom.pos
-            self.world = self.draw_list.view_transform * vec4(scr.x, scr.y, self.draw_depth + self.draw_call.zbias, 1.)
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
+            // Follow DrawQuad's clipping and view-shift path even though the
+            // rectangle comes from our camera. Overscan cells must not paint
+            // over siblings such as the photo search field while zooming.
+            self.vertex_pos = self.clip_and_transform_vertex(scr, eff)
         }
 
         pixel: fn() {
@@ -335,6 +336,15 @@ pub enum TileGridAction {
     Opened { count: usize, error: Option<String> },
 }
 
+/// A host transition's placement of one picture over a rect of the view.
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    item: ItemId,
+    rect: Rect,
+    /// Set the camera there now (opening) or glide there (closing).
+    instant: bool,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct TileGrid {
     #[uid]
@@ -413,6 +423,18 @@ pub struct TileGrid {
     user_moved: bool,
     #[rust]
     resize_settle_at: Option<f64>,
+    #[rust]
+    resize_anchor: Option<PictureAnchor>,
+    /// A host presentation holds its subject steady until the person pans,
+    /// zooms or requests a different picture. `true` crops to cover a tile.
+    #[rust]
+    presentation_item: Option<(ItemId, bool)>,
+    #[rust]
+    presentation_pending: bool,
+    /// A host transition to apply on the next draw, once the view's rect
+    /// is the face's: the subject placed over a rect of the view.
+    #[rust]
+    placement: Option<Placement>,
 
     // ── uniform-only glide bookkeeping ──
     #[rust]
@@ -439,8 +461,41 @@ pub struct TileGrid {
     full_requested: HashSet<ItemId>,
     #[rust]
     page_failed: HashMap<PageKey, f64>,
+    /// Per shard, the finest page level the library ships (see
+    /// `Library::finest_page_level`), asked once and kept.
+    #[rust]
+    finest_shipped: HashMap<i64, Option<usize>>,
+    /// Whether the library ships single-picture pyramids, asked once.
+    #[rust]
+    has_pyramid: Option<bool>,
     #[rust]
     full_failed: HashMap<ItemId, f64>,
+}
+
+/// A viewport's centre expressed inside a picture, plus its zoom relative
+/// to fitting that picture. Packing coordinates can change on a resize.
+#[derive(Clone, Copy, Debug)]
+struct PictureAnchor {
+    item: ItemId,
+    uv: Vec2d,
+    zoom: f64,
+}
+
+fn picture_fit(view: Vec2d, size: Vec2f) -> f64 {
+    (view.x / size.x.max(0.01) as f64).min(view.y / size.y.max(0.01) as f64).max(0.01)
+}
+
+impl PictureAnchor {
+    fn capture(item: ItemId, pos: Vec2f, size: Vec2f, view: Vec2d, centre: Vec2d, scale: f64) -> Self {
+        Self { item,
+            uv: dvec2((centre.x-pos.x as f64)/size.x.max(0.01) as f64, (centre.y-pos.y as f64)/size.y.max(0.01) as f64),
+            zoom: scale / picture_fit(view, size),
+        }
+    }
+    fn camera(self, pos: Vec2f, size: Vec2f, view: Vec2d) -> (Vec2d, f64) {
+        (dvec2(pos.x as f64+self.uv.x*size.x as f64, pos.y as f64+self.uv.y*size.y as f64),
+         (self.zoom*picture_fit(view,size)).clamp(0.01,6000.0))
+    }
 }
 
 impl TileGrid {
@@ -463,6 +518,8 @@ impl TileGrid {
         self.full_requested.clear();
         self.page_failed.clear();
         self.full_failed.clear();
+        self.finest_shipped.clear();
+        self.has_pyramid = None;
         self.plan = None;
         self.packing = None;
         self.bounds = None;
@@ -517,6 +574,15 @@ impl TileGrid {
         self.visible.len()
     }
 
+    /// Keep a preferred picture when it survives the filter, otherwise use
+    /// the first match. A compact presentation must never frame a hidden cell.
+    pub fn visible_item(&self, preferred: Option<ItemId>) -> Option<(ItemId, String)> {
+        let index = self.visible.iter().copied().find(|&i| Some(self.items[i].id) == preferred)
+            .or_else(|| self.visible.first().copied())?;
+        let item = &self.items[index];
+        Some((item.id, item.title.to_string()))
+    }
+
     /// Filter and reorder the wall as the person types: the matches
     /// (best first) are packed afresh and every picture flies from where
     /// it is to where it goes; the others shrink away, and an empty query
@@ -526,6 +592,9 @@ impl TileGrid {
         if query == self.query {
             return;
         }
+        self.presentation_item=None;
+        self.presentation_pending=false;
+        self.resize_anchor=None;
         self.query = query.to_string();
         let words: Vec<(String, String)> = self.items.iter().map(|i| (i.title.to_string(), i.link.to_string())).collect();
         self.visible = order_for(&words, &self.query);
@@ -586,6 +655,133 @@ impl TileGrid {
     /// Glide the camera onto one picture so it fills most of the view.
     /// False when the id is not on the grid.
     pub fn show_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        self.presentation_item = None;
+        self.presentation_pending = false;
+        self.frame_item(cx, item, false)
+    }
+
+    /// Fill the viewport with one picture, cropping around its centre.
+    /// Uses the resident wall camera and its existing resolution/LOD path.
+    pub fn cover_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        self.frame_item(cx, item, true)
+    }
+
+    /// Apply a host face on the first draw at its actual size. The host's
+    /// compositor already animates the surface; this camera must not glide.
+    pub fn present_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) {
+        self.presentation_item = Some((item, cover));
+        self.presentation_pending = true;
+        self.placement = None;
+        self.resize_anchor = None;
+        self.resize_settle_at = None;
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The host opens this view over its tile: on the next draw the
+    /// picture covers `from` (a rect in the view's coordinates, where the
+    /// tile was) exactly as the tile face showed it, then glides to where
+    /// the full view rests it. No frame of it moves under the crossfade.
+    pub fn present_item_from(&mut self, cx: &mut Cx, item: ItemId, from: Rect) {
+        self.presentation_item = None;
+        self.presentation_pending = false;
+        self.placement = Some(Placement { item, rect: from, instant: true });
+        self.resize_anchor = None;
+        self.resize_settle_at = None;
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The host closes this view into its tile: the picture glides to
+    /// cover `to` (the tile's rect in the view's coordinates), so the tile
+    /// face takes over in place.
+    pub fn glide_item_to(&mut self, cx: &mut Cx, item: ItemId, to: Rect) {
+        self.presentation_item = None;
+        self.presentation_pending = false;
+        self.placement = Some(Placement { item, rect: to, instant: false });
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The camera that shows `item` covering `rect` of the view: the
+    /// cover scale of the rect, the item's centre on the rect's centre.
+    fn cover_camera(&self, item: ItemId, rect: Rect) -> Option<(Vec2d, f64)> {
+        let found = self.items.iter().find(|i| i.id == item)?;
+        let (pos, size) = (found.to_pos, found.to_size);
+        if rect.size.x < 1.0 || rect.size.y < 1.0 { return None; }
+        let scale = (rect.size.x * 1.01 / size.x.max(0.01) as f64).max(rect.size.y * 1.01 / size.y.max(0.01) as f64).clamp(self.min_scale, 6000.0);
+        let centre = Vec2d { x: (pos.x + size.x * 0.5) as f64, y: (pos.y + size.y * 0.5) as f64 };
+        let target = rect.pos + rect.size * 0.5;
+        let cam = centre - (target - self.view_center()) / scale;
+        Some((cam, scale))
+    }
+
+    fn settle_placement(&mut self, cx: &mut Cx) {
+        let Some(placement) = self.placement.take() else { return };
+        let Some((cam, scale)) = self.cover_camera(placement.item, placement.rect) else { return };
+        self.user_moved = true;
+        self.zoom_anchor = None;
+        if placement.instant {
+            // Where the tile showed it, now; the full view's rest from here.
+            self.frame_item(cx, placement.item, false);
+            self.cam_pos = cam;
+            self.cam_scale = scale;
+            self.cam_ready = true;
+        } else {
+            self.cam_pos_t = cam;
+            self.cam_scale_t = scale;
+        }
+        self.next_frame = cx.new_next_frame();
+        self.area.redraw(cx);
+    }
+
+    pub fn centred_item(&self) -> Option<(ItemId, String)> {
+        let i = self.centre_index()?;
+        Some((self.items[i].id, self.items[i].title.to_string()))
+    }
+
+    fn centre_index(&self) -> Option<usize> {
+        self.visible.iter().copied().min_by(|&a,&b| {
+            let distance = |i: usize| {
+                let item = &self.items[i];
+                let x = self.cam_pos.x.clamp(item.pos.x as f64, (item.pos.x+item.size.x) as f64);
+                let y = self.cam_pos.y.clamp(item.pos.y as f64, (item.pos.y+item.size.y) as f64);
+                (self.cam_pos-dvec2(x,y)).length()
+            };
+            distance(a).total_cmp(&distance(b))
+        })
+    }
+
+    fn capture_resize_anchor(&self) -> Option<PictureAnchor> {
+        if !self.user_moved || !self.cam_usable() {return None;}
+        let item = &self.items[self.centre_index()?];
+        Some(PictureAnchor::capture(item.id,item.pos,item.size,self.view_rect.size,self.cam_pos,self.cam_scale))
+    }
+
+    fn restore_resize_anchor(&mut self) {
+        let Some(anchor) = self.resize_anchor else {return;};
+        let Some(item) = self.items.iter().find(|i|i.id==anchor.item) else {return;};
+        let (pos,scale) = anchor.camera(item.to_pos,item.to_size,self.view_rect.size);
+        self.cam_pos=pos; self.cam_pos_t=pos;
+        self.cam_scale=scale; self.cam_scale_t=scale;
+        self.zoom_anchor=None;
+    }
+
+    fn settle_presentation(&mut self, cx: &mut Cx) {
+        if let Some((item,cover))=self.presentation_item {
+            self.frame_item(cx,item,cover);
+            self.cam_pos=self.cam_pos_t;
+            self.cam_scale=self.cam_scale_t;
+            self.snap();
+            self.presentation_pending=false;
+            self.resize_settle_at=None;
+        }
+    }
+
+    fn frame_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) -> bool {
         let Some(found) = self.items.iter().find(|i| i.id == item) else {
             return false;
         };
@@ -593,11 +789,12 @@ impl TileGrid {
         if self.view_rect.size.x < 1.0 || self.view_rect.size.y < 1.0 {
             return false;
         }
-        let fit_x = self.view_rect.size.x * 0.7 / size.x.max(0.01) as f64;
-        let fit_y = self.view_rect.size.y * 0.7 / size.y.max(0.01) as f64;
+        let fill = if cover {1.01} else {0.7};
+        let fit_x = self.view_rect.size.x * fill / size.x.max(0.01) as f64;
+        let fit_y = self.view_rect.size.y * fill / size.y.max(0.01) as f64;
         self.zoom_anchor = None;
         self.user_moved = true;
-        self.cam_scale_t = fit_x.min(fit_y).clamp(self.min_scale, 6000.0);
+        self.cam_scale_t = (if cover {fit_x.max(fit_y)} else {fit_x.min(fit_y)}).clamp(self.min_scale, 6000.0);
         self.cam_pos_t = Vec2d { x: (pos.x + size.x * 0.5) as f64, y: (pos.y + size.y * 0.5) as f64 };
         if !self.cam_ready {
             self.cam_pos = self.cam_pos_t;
@@ -842,15 +1039,21 @@ impl TileGrid {
             match event {
                 StoreEvent::Page { shard, level, planes } => self.on_page(cx, shard, level, planes),
                 StoreEvent::Full { item, px, finest, frame } => self.on_full(cx, item, px, finest, frame),
-                StoreEvent::PageFailed { shard, level } => {
+                StoreEvent::PageFailed { shard, level, reason } => {
                     let until = self.time() + RETRY_EMBARGO_SECS;
                     self.requested.remove(&(shard, level));
-                    self.page_failed.insert((shard, level), until);
+                    // One line per rest, never per retry: a page that keeps
+                    // failing says why once every `RETRY_EMBARGO_SECS`.
+                    if self.page_failed.insert((shard, level), until).is_none() {
+                        log!("image-tiles: page {shard}/L{level} did not decode: {reason}");
+                    }
                 }
-                StoreEvent::FullFailed { item } => {
+                StoreEvent::FullFailed { item, reason } => {
                     let until = self.time() + RETRY_EMBARGO_SECS;
                     self.full_requested.remove(&item);
-                    self.full_failed.insert(item, until);
+                    if self.full_failed.insert(item, until).is_none() {
+                        log!("image-tiles: picture {item} did not decode: {reason}");
+                    }
                 }
             }
         }
@@ -1029,7 +1232,10 @@ impl Widget for TileGrid {
                 if now >= at {
                     self.resize_settle_at = None;
                     self.relayout();
-                    if !self.user_moved {
+                    if self.resize_anchor.is_some() {
+                        self.restore_resize_anchor();
+                        self.resize_anchor=None;
+                    } else if !self.user_moved {
                         self.fit_camera();
                     }
                     self.area.redraw(cx);
@@ -1074,6 +1280,9 @@ impl Widget for TileGrid {
         }
         match event.hits(cx, self.area) {
             Hit::FingerScroll(fs) => {
+                self.presentation_item=None;
+                self.presentation_pending=false;
+                self.resize_anchor=None;
                 self.user_moved = true;
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.2 && self.cam_usable() {
                     self.zoom_anchor = None;
@@ -1094,6 +1303,9 @@ impl Widget for TileGrid {
                     let moved = moved || delta.length() > 3.0;
                     self.drag = Some((start, cam, moved));
                     if moved && self.cam_usable() {
+                        self.presentation_item=None;
+                        self.presentation_pending=false;
+                        self.resize_anchor=None;
                         self.user_moved = true;
                         self.zoom_anchor = None;
                         self.cam_pos_t = Vec2d { x: cam.x - delta.x / self.cam_scale_t, y: cam.y - delta.y / self.cam_scale_t };
@@ -1134,6 +1346,9 @@ impl Widget for TileGrid {
         let resized = !first
             && rect.size.x >= 1.0
             && (rect.size.x - self.view_rect.size.x).abs() + (rect.size.y - self.view_rect.size.y).abs() > 0.5;
+        if resized && self.resize_anchor.is_none() && self.presentation_item.is_none() {
+            self.resize_anchor=self.capture_resize_anchor();
+        }
         self.view_rect = rect;
         if resized {
             self.resize_settle_at = Some(self.time() + RESIZE_SETTLE_SECS);
@@ -1147,6 +1362,16 @@ impl Widget for TileGrid {
                 self.cam_pos = self.cam_pos_t;
                 self.cam_scale = self.cam_scale_t;
             }
+        }
+        if self.presentation_pending || (resized && self.presentation_item.is_some()) {
+            self.relayout();
+            self.settle_presentation(cx);
+        } else if resized {
+            self.restore_resize_anchor();
+        }
+        if self.placement.is_some() {
+            if resized || first { self.relayout(); }
+            self.settle_placement(cx);
         }
         self.frame += 1;
         if !self.cam_usable() || self.items.is_empty() {
@@ -1216,6 +1441,15 @@ impl Widget for TileGrid {
         let mut passes: Vec<Pass> = Vec::new();
         let mut shards: Vec<i64> = by_shard.keys().copied().collect();
         shards.sort_unstable();
+        // No finer than the library ships: a coarse-only bundle answers
+        // every zoom with its finest page, never with a missing file.
+        if let Some(store) = &self.store {
+            for &key in &shards {
+                if !self.finest_shipped.contains_key(&key) {
+                    self.finest_shipped.insert(key, store.library.finest_page_level(key));
+                }
+            }
+        }
         let inv = 1.0 / GRID as f32;
         for key in shards {
             let indices = by_shard.remove(&key).unwrap();
@@ -1223,7 +1457,8 @@ impl Widget for TileGrid {
                 .iter()
                 .map(|&i| self.items[i].size.x.max(self.items[i].size.y))
                 .fold(CELL_FILL, f32::max);
-            let desired = desired_for(side);
+            let floor = self.finest_shipped.get(&key).copied().flatten().unwrap_or(0);
+            let desired = desired_for(side).max(floor);
             let resident: Vec<usize> = (0..LEVELS).filter(|l| self.pages.contains_key(&(key, *l))).collect();
             if !self.pages.contains_key(&(key, desired)) {
                 // What this page would paint: every visible tile of the
@@ -1358,8 +1593,18 @@ impl Widget for TileGrid {
             })
             .map(|(_, v)| v)
             .collect();
+        // A library without a pyramid (a bundled coarse tail) answers every
+        // zoom with its pages: nothing to ask for, nothing to embargo.
+        let has_pyramid = match self.has_pyramid {
+            Some(has) => has,
+            None => {
+                let has = self.store.as_ref().is_some_and(|store| store.library.has_pyramid());
+                self.has_pyramid = Some(has);
+                has
+            }
+        };
         for (key, area, want) in affordable.into_iter().take(8) {
-            if embargoed(&mut self.full_failed, key, now) {
+            if !has_pyramid || embargoed(&mut self.full_failed, key, now) {
                 continue;
             }
             if let Some(store) = &mut self.store {
@@ -1411,6 +1656,25 @@ impl TileGridRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_preserves_the_picture_offset_and_relative_zoom_after_repacking() {
+        let portrait=dvec2(390.0,740.0);
+        let landscape=dvec2(1200.0,650.0);
+        let size=vec2f(2.0,3.0);
+        let old_pos=vec2f(12.0,50.0);
+        let old_centre=dvec2(12.5,52.1);
+        let anchor=PictureAnchor::capture(7,old_pos,size,portrait,old_centre,300.0);
+        let moved=vec2f(-25.0,7.0);
+        let (centre,scale)=anchor.camera(moved,size,landscape);
+        assert!((centre.x+24.5).abs()<1e-6);
+        assert!((centre.y-9.1).abs()<1e-6);
+        assert!((scale/picture_fit(landscape,size)-300.0/picture_fit(portrait,size)).abs()<1e-6);
+        let back=PictureAnchor::capture(7,moved,size,landscape,centre,scale);
+        let (centre,scale)=back.camera(old_pos,size,portrait);
+        assert!((centre-old_centre).length()<1e-6);
+        assert!((scale-300.0).abs()<1e-6);
+    }
 
     fn wall() -> Vec<(String, String)> {
         vec![

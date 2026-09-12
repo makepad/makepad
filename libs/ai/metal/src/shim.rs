@@ -18,7 +18,7 @@ pub fn is_available() -> bool {
 }
 
 use crate::gpu_types::GpuTensor;
-use makepad_ai_cuda::prof;
+use makepad_ai_loader::prof;
 
 fn prof_rec(cat: usize, start: std::time::Instant, f32_count: usize) {
     prof::record(cat, start, (f32_count * 4) as u64);
@@ -820,7 +820,7 @@ mod tests {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), makepad_ai_cuda_kernels))]
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
     use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
@@ -1524,7 +1524,10 @@ mod imp {
 // "not handled" so callers fall back to their CPU paths, matching the
 // old makepad-ggml stub semantics. See makepad-ai-cuda/build.rs for the
 // links-metadata handshake that drives the cfg.
-#[cfg(all(not(target_os = "macos"), not(makepad_ai_cuda_kernels)))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)
+)))]
 #[allow(unused_variables)]
 mod imp {
     pub(super) fn try_matmul_nn_f32(
@@ -1906,7 +1909,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use makepad_ai_cuda::quant::{
+    use makepad_ai_loader::quant::{
         block_elements, block_size, f32_to_f16, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
         GGML_TYPE_F32, GGML_TYPE_I32, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,

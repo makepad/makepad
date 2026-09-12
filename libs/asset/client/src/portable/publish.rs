@@ -326,6 +326,15 @@ impl PublishBundleFile {
     }
 }
 
+/// Alias-scoped compare-and-swap guard; it does not establish a global asset head.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublishExpectedHead {
+    #[default]
+    Any,
+    Absent,
+    Exact(AssetRevisionRef),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishBundle {
     pub namespace: String,
@@ -334,6 +343,7 @@ pub struct PublishBundle {
     pub description: String,
     pub alias: Option<AssetAlias>,
     pub asset_id: Option<AssetId>,
+    pub expected_head: PublishExpectedHead,
     pub files: Vec<PublishBundleFile>,
     pub thumbnail: PublishThumbnail,
     pub dependencies: Vec<AssetRevisionRef>,
@@ -364,6 +374,30 @@ pub struct PublishBundle {
 }
 
 impl PublishBundle {
+    /// Runtime GLB and a self-contained versioned source bundle for a static
+    /// editable Prop. Set asset_id, alias, expected_head and measured mesh
+    /// stats/bounds before publishing.
+    pub fn editable_model(
+        namespace: impl Into<String>,
+        title: impl Into<String>,
+        source_bundle: Vec<u8>,
+        render_glb: Vec<u8>,
+        thumbnail: PublishThumbnail,
+        rights: PublishRights,
+    ) -> Self {
+        Self::new(
+            namespace,
+            AssetKind::Prop,
+            title,
+            vec![
+                PublishBundleFile::bytes(FileRole::Source, MediaType::Bin, source_bundle, None),
+                PublishBundleFile::bytes(FileRole::RenderGlb, MediaType::Glb, render_glb, None),
+            ],
+            thumbnail,
+            rights,
+        )
+    }
+
     pub fn new(
         namespace: impl Into<String>,
         kind: AssetKind,
@@ -379,6 +413,7 @@ impl PublishBundle {
             description: String::new(),
             alias: None,
             asset_id: None,
+            expected_head: PublishExpectedHead::Any,
             files,
             thumbnail,
             dependencies: Vec::new(),

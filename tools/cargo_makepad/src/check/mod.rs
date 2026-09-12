@@ -81,13 +81,13 @@ fn check_crate(
         std::fs::read_to_string(&crate_dir.join("Cargo.toml")).expect("Cant find cargo.toml");
     let toml = makepad_toml_parser::parse_toml(&cargo_str).expect("Cant parse Cargo.toml");
     let platforms =
-        if let Some(Toml::Str(ver, _)) = toml.get("package.metadata.makepad-check-platform") {
+        if let Some(Toml::Str(ver, _)) = toml.get_path(&["package", "metadata", "makepad-check-platform"]) {
             ver.to_string()
         } else {
             "desktop,web,mobile".to_string()
         };
     let nightly_only =
-        if let Some(Toml::Bool(ver, _)) = toml.get("package.metadata.makepad-check-nightly-only") {
+        if let Some(Toml::Bool(ver, _)) = toml.get_path(&["package", "metadata", "makepad-check-nightly-only"]) {
             *ver
         } else {
             false

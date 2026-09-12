@@ -536,6 +536,13 @@ impl Geometry {
         bytes
     }
 
+    /// Borrow the retained CPU mesh for alternate render layouts. Buffers
+    /// may be empty after explicit CPU-buffer eviction; never reads the GPU.
+    pub fn cpu_buffers<'a>(&self, cx: &'a Cx) -> (&'a IndexData, &'a VertexData) {
+        let geometry = &cx.geometries[self.geometry_id()];
+        (&geometry.indices, &geometry.vertices)
+    }
+
     pub fn cpu_buffer_bytes(&self, cx: &Cx) -> usize {
         let cxgeom = &cx.geometries[self.geometry_id()];
         cxgeom
@@ -606,8 +613,11 @@ pub fn geometry_layout_matches_shader(
     false
 }
 
-/// Backends that have not yet implemented compact fetch (Vulkan / OpenGL /
-/// D3D11) log once and skip the draw.
+/// Backends that have not yet implemented typed geometry at all (D3D11:
+/// neither a byte layout with a signature nor u16 indices nor compact
+/// fetch) log once and skip the draw. Vulkan uploads typed geometry as-is;
+/// OpenGL uploads it but still lacks compact fetch, see
+/// [`geometry_backend_supports_compact`].
 #[allow(dead_code)]
 pub fn geometry_backend_supports_typed(
     geom: &mut CxGeometry,
@@ -622,6 +632,28 @@ pub fn geometry_backend_supports_typed(
         geom.logged_unsupported_typed = true;
         error!(
             "{}: compact vertex formats / u16 indices are not implemented; skipping draw",
+            backend
+        );
+    }
+    false
+}
+
+/// Backends that upload typed geometry (bytes, u16 indices) but whose
+/// vertex fetch cannot yet expand a compact (f16 / i16 / unorm8) shader
+/// layout log once and skip only those draws.
+#[allow(dead_code)]
+pub fn geometry_backend_supports_compact(
+    geom: &mut CxGeometry,
+    backend: &str,
+    shader_compact: bool,
+) -> bool {
+    if !shader_compact {
+        return true;
+    }
+    if !geom.logged_unsupported_typed {
+        geom.logged_unsupported_typed = true;
+        error!(
+            "{}: compact vertex formats are not implemented; skipping draw",
             backend
         );
     }

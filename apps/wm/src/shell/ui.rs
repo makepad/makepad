@@ -18,6 +18,8 @@
 //!    except the hyprland border gradient a theme may name.
 
 use makepad_widgets::*;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use super::system_slider::DrawSystemSlider;
 
 use super::{
     alpha, BarTokens, ControlTokens, CtrlState, FontTokens, MenuTokens, NotificationTokens,
@@ -544,6 +546,9 @@ pub enum HAlign {
 /// The kit — see the module note. One of these per surface widget.
 #[derive(Script, ScriptHook)]
 pub struct ShellDraw {
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[live]
+    system_slider: DrawSystemSlider,
     #[live]
     pub fill: DrawShellFill,
     #[live]
@@ -729,14 +734,18 @@ impl ShellDraw {
         if s.is_empty() {
             return;
         }
-        let w = self.measure(cx, bold, px, s);
+        let face = self.face(bold);
+        face.text_style.font_size = px_to_pt(px);
+        let run = face.layout(cx, 0.0, 0.0, None, false, Align::default(), s);
+        let w = run.size_in_lpxs.width as f64;
         let x = match align {
             HAlign::Left => r.pos.x,
             HAlign::Center => r.pos.x + (r.size.x - w) * 0.5,
             HAlign::Right => r.pos.x + r.size.x - w,
         };
-        let y = r.pos.y + (r.size.y - px * 1.2) * 0.5;
-        self.text_at(cx, dvec2(x.floor(), y.floor()), bold, px, color, s);
+        let y = r.pos.y + (r.size.y - run.size_in_lpxs.height as f64) * 0.5 + run.ink_center_offset_in_lpxs() as f64;
+        let dpi = cx.current_dpi_factor();
+        self.text_at(cx, dvec2((x*dpi).round()/dpi, (y*dpi).round()/dpi), bold, px, color, s);
     }
 
     /// As `label`, elided to the box first.
@@ -1033,6 +1042,17 @@ impl ShellDraw {
             0.0,
             2.0,
         );
+    }
+
+    /// The VJ horizontal fader: rounded track, accent fill, inset cap.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn system_slider(&mut self, cx: &mut Cx2d, r: Rect, tok: &ShellTokens, progress: f64, enabled: bool, hot: bool) {
+        self.system_slider.track_color = alpha(tok.popups.text, 0.18);
+        self.system_slider.fill_color = tok.bar.active;
+        self.system_slider.cap_color = tok.popups.text;
+        self.system_slider.progress = progress.clamp(0.0, 1.0) as f32;
+        self.system_slider.opacity = if !enabled { 0.28 } else if hot { 1.0 } else { 0.9 };
+        self.system_slider.draw_abs(cx, r);
     }
 
     /// `Ui/TextField.qml`: the control face plus the text (or the

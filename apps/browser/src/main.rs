@@ -636,13 +636,23 @@ impl AppMain for App {
         // The family theme bridge retints the stock widgets from the WM
         // theme; the chrome roles go into mod.browser_theme.
         makepad_wm_theme::apply(vm);
-        palette().apply(vm);
+        let palette=Palette::for_vm(vm);
+        PALETTE.with(|p|*p.borrow_mut()=Some(palette.clone()));
+        palette.apply(vm);
         chrome::script_mod(vm);
         webview::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event,Event::BackPressed{..}) {
+            let can_back=self.with_webview(cx,|_,view|view.active_info().can_go_back).unwrap_or(false);
+            if can_back && event.back_pressed() {self.with_webview(cx,|cx,view|view.go_back(cx));return;}
+        }
+        if let Event::WindowGeomChange(e)=event {
+            let narrow=e.new_geom.inner_size.x<620.0;
+            for path in [ids!(forward_btn),ids!(reload_btn),ids!(bookmark_btn)] {self.ui.widget(cx,path).set_visible(cx,!narrow);}
+        }
         // The window manager asked politely (SUPER+W): go now, ahead of the
         // kill that follows its grace. A warm-pool browser needs no waking —
         // CEF paints nothing until a tile presents it.

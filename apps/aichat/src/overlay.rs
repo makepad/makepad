@@ -25,10 +25,12 @@ script_mod! {
     mod.widgets.AiChatOverlay = set_type_default() do mod.widgets.AiChatOverlayBase{
         width: Fill
         height: Fill
+        flow: Down
         panel := AiChatPanel{
             width: Fill
             height: Fill
         }
+        studio_feedback := StudioAppFeedback{}
     }
 }
 

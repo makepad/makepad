@@ -1,0 +1,255 @@
+mod event_loop;
+mod jit;
+mod raster;
+mod shader;
+mod virtual_gpu;
+
+pub use crate::texture::{
+    ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, ReadbackTicket,
+    TextureReadback, TextureReadbackUsage, TEXTURE_READBACK_MAX_BYTES, TEXTURE_READBACK_MAX_REQUESTS,
+};
+
+use crate::os::shared_framebuf::PollTimers;
+use crate::{
+    audio::{AudioDeviceId, AudioInputFn, AudioOutputFn},
+    makepad_network::HttpRequest,
+    makepad_network::WebSocketMessage,
+    media_api::CxMediaApi,
+    midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
+    video::{VideoFormatId, VideoInputFn, VideoInputId},
+    Cx,
+};
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::time::Instant;
+
+pub(crate) fn wake_ui_event_loop() {
+    // Gpusim bounded loops do not sleep in an OS wait primitive.
+}
+
+#[derive(Default, Clone)]
+pub struct CxOsDrawList {}
+
+#[derive(Default, Clone)]
+pub struct CxOsDrawCall {
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct CxOsPass {}
+
+#[derive(Default, Clone)]
+pub struct CxOsGeometry {}
+
+#[derive(Default, Clone)]
+pub struct CxOsTexture {}
+
+#[derive(Default, Clone)]
+pub struct CxOsUniformBuffer {}
+
+#[derive(Default)]
+pub struct CxOsDrawShader {
+    pub source_hash: u64,
+    pub dylib_path: Option<PathBuf>,
+    pub load_error: Option<String>,
+    pub module: Option<jit::GpusimLoadedModule>,
+    pub shader_version: Option<u32>,
+    /// Total number of f32 slots in the varying buffer passed between vertex and fragment shaders.
+    pub varying_total_slots: usize,
+    /// Number of packed varying slots that come from dyn/rust instances.
+    /// These must be treated as flat (non-interpolated) in rasterization.
+    pub flat_varying_slots: usize,
+    /// True when fragment code uses screen-space derivatives (dFdx/dFdy).
+    pub uses_derivatives: bool,
+    /// RenderCx layout — queried once from the loaded module.
+    pub rcx_size: usize, // total byte size of RenderCx
+    pub rcx_vary_offset: usize, // byte offset of varying region (Group 1)
+    pub rcx_quad_mode_offset: usize, // byte offset of quad_mode field
+    pub rcx_frag_offset: usize, // byte offset of frag_fb0
+    pub rcx_discard_offset: usize, // byte offset of discard flag
+}
+
+pub struct CxOs {
+    pub(crate) stdin_timers: PollTimers,
+    pub(crate) start_time: Option<Instant>,
+    pub(crate) shader_jit: jit::GpusimShaderJit,
+    pub(crate) frame_dir: Option<PathBuf>,
+    pub(crate) no_draw: bool,
+    pub(crate) no_draw_initialized: bool,
+    pub(crate) bounded_started: bool,
+    pub(crate) draw_cycles: Option<usize>,
+    /// BGRA -> RGBAf32 conversions of sampled textures, kept ACROSS frames.
+    /// Rebuilding this per frame re-converted the whole glyph atlas on every
+    /// draw, which cost more than rasterising the window did. Entries carry a
+    /// signature and are redone when the texture reports pending updates.
+    pub(crate) texture_conversions: crate::os::gpusim::raster::TextureConversionCache,
+    /// Offscreen (render-to-texture) pass framebuffers, kept ACROSS frames:
+    /// a parent pass that repaints while its child stayed clean must still
+    /// sample the child's last contents, and reusing the buffers keeps a
+    /// window-sized 3D pass to one allocation instead of one per frame.
+    pub(crate) render_targets: crate::os::gpusim::raster::GpusimRenderTargets,
+    /// One framebuffer per window, kept across frames. Re-mapping tens of
+    /// megabytes of colour and depth every frame costs more in first-touch page
+    /// faults than the clear that follows it.
+    pub(crate) window_framebuffers:
+        std::collections::HashMap<usize, crate::os::gpusim::virtual_gpu::Framebuffer>,
+}
+
+impl Default for CxOs {
+    fn default() -> Self {
+        Self {
+            stdin_timers: Default::default(),
+            start_time: None,
+            shader_jit: Default::default(),
+            frame_dir: None,
+            no_draw: false,
+            no_draw_initialized: false,
+            bounded_started: false,
+            draw_cycles: None,
+            texture_conversions: Default::default(),
+            render_targets: Default::default(),
+            window_framebuffers: Default::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct OsMidiInput {}
+
+impl OsMidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        None
+    }
+}
+
+#[derive(Default)]
+pub struct OsMidiOutput {}
+
+impl OsMidiOutput {
+    pub fn send(&self, _port_id: Option<MidiPortId>, _data: MidiData) {}
+}
+
+pub struct OsWebSocket;
+
+impl OsWebSocket {
+    pub fn send_message(&mut self, _message: WebSocketMessage) -> Result<(), ()> {
+        Ok(())
+    }
+
+    pub fn close(&mut self) {}
+
+    pub fn open(
+        _socket_id: u64,
+        _request: HttpRequest,
+        rx_sender: Sender<WebSocketMessage>,
+    ) -> OsWebSocket {
+        let _ = rx_sender.send(WebSocketMessage::Opened);
+        OsWebSocket
+    }
+}
+
+impl CxMediaApi for Cx {
+    fn midi_input(&mut self) -> MidiInput {
+        MidiInput(Some(OsMidiInput::default()))
+    }
+
+    fn midi_output(&mut self) -> MidiOutput {
+        MidiOutput(Some(OsMidiOutput::default()))
+    }
+
+    fn midi_reset(&mut self) {}
+
+    fn use_midi_inputs(&mut self, _ports: &[MidiPortId]) {}
+
+    fn use_midi_outputs(&mut self, _ports: &[MidiPortId]) {}
+
+    fn use_audio_inputs(&mut self, _devices: &[AudioDeviceId]) {}
+
+    fn use_audio_outputs(&mut self, _devices: &[AudioDeviceId]) {}
+
+    fn audio_output_box_os(&mut self, _index: usize, _f: AudioOutputFn) {}
+
+    fn audio_input_box(&mut self, _index: usize, _f: AudioInputFn) {}
+
+    fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {}
+
+    fn use_video_input(&mut self, _devices: &[(VideoInputId, VideoFormatId)]) {}
+}
+
+impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        self.gpusim_capture_texture_readbacks(None);
+    }
+
+    pub(crate) fn gpusim_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        if self.textures.1.readbacks.slots.is_empty() { return; }
+        for work in self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft) {
+            debug_assert_ne!(work.ticket.0, 0);
+            let bytes = self.os.render_targets.read_color_raw_bgra8(work.texture_id)
+                .filter(|bytes| bytes.len() == work.width * work.height * 4 && bytes.len() <= work.reserved_bytes)
+                .ok_or(ReadbackError::NotRendered);
+            work.completion.finish(bytes);
+        }
+    }
+
+    /// No-op in gpusim mode; the real macOS backend raises the app's windows.
+    #[cfg(target_os = "macos")]
+    pub fn macos_activate_app(&mut self) {}
+
+    /// Render-target readback off the software raster's framebuffer store:
+    /// the raster is synchronous on this thread, so by the time a caller
+    /// asks, every pass that fed the target has fully rendered — no queue
+    /// to race. Returns packed BGRA8 (Metal's byte layout); `None` for a
+    /// target never rendered or already evicted.
+    pub fn debug_read_render_texture(
+        &mut self,
+        texture: &crate::texture::Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        self.os.render_targets.read_color_bgra8(texture.texture_id())
+    }
+
+    /// Renderer-owned texture capture (see the metal backend): not
+    /// implemented here — callers fall back to `debug_read_render_texture`.
+    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
+        false
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn take_render_texture_captures(
+        &mut self,
+    ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        Vec::new()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn share_texture_for_presentable_image(&mut self, _texture: &crate::Texture) -> u32 {
+        0
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn share_texture_for_presentable_image(&mut self, _texture: &crate::Texture) -> u64 {
+        0
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn share_texture_for_presentable_image(
+        &mut self,
+        _texture: &crate::Texture,
+    ) -> Option<crate::os::shared_framebuf::LinuxOwnedImage> {
+        None
+    }
+}

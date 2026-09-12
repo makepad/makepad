@@ -1,4 +1,5 @@
 pub use cursor::MouseCursor;
+pub use gpu::*;
 pub use keyboard::{
     CharOffset, FullTextState, ImeAction, ImeActionEvent, KeyCode, KeyEvent, TextInputEvent,
 };
@@ -8,6 +9,7 @@ pub use shared_framebuf::*;
 pub use studio::*;
 
 pub mod cursor;
+pub mod gpu;
 pub mod hub_protocol;
 pub mod keyboard;
 pub mod mouse;

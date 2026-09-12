@@ -85,9 +85,11 @@ script_mod! {
                     score_name := ScoreLabelDim{text: "Score"}
                     ScoreLabelMuted{text: "  ·  EDITOR"}
                 }
-                toolbar := SolidView{
+                toolbar := ScrollXView{
+                    show_bg: true
                     width: Fill
-                    height: score.toolbar_height
+                    height: Fit
+                    min_height: 44
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
@@ -127,6 +129,12 @@ script_mod! {
                 }
             }
 
+            phone_pages := View{
+                visible: false width: Fill height: Fit flow: Right{wrap: true} spacing: 6 padding: 6
+                phone_score := ScoreButton{text: "Score"}
+                phone_music := ScoreButton{text: "Music"}
+                phone_inspector := ScoreButton{text: "Inspector"}
+            }
             workspace := View{
                 width: Fill
                 height: Fill
@@ -424,7 +432,7 @@ script_mod! {
                     p_annotation_close := ScoreButtonFlat{text: "Done"}
                 }
             }
-            pianist_bottom := View{
+            pianist_bottom := ScrollXView{
                 width: Fill height: Fit flow: Right align: Align{x: 0.5 y: 0.5}
                 padding: Inset{left: 10 right: 10 top: 2 bottom: 13}
                 ScoreFloatingBar{
@@ -522,7 +530,7 @@ script_mod! {
                 visible: false width: Fill height: Fill flow: Down align: Align{x: 0.5 y: 0.5}
                 draw_bg +: {color: #x000000b4}
                 dialog_box := ScorePopup{
-                    width: 560
+                    width: Fill max_width: 560
                     // A dialog is modal; reading the score through it made the
                     // panel look like a rendering artefact rather than a panel.
                     draw_bg +: {color: #x1d1e1bff}
@@ -790,6 +798,7 @@ impl Widget for ScoreOverlay {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ScoreShell {
+    #[rust] phone_page: usize,
     #[deref]
     view: View,
     #[rust]
@@ -1624,6 +1633,9 @@ impl Widget for ScoreShell {
         ] {
             self.emit_button(cx, actions, path, ScoreAction::SetAnnotationTool(tool));
         }
+        for (page,path) in [ids!(phone_score),ids!(phone_music),ids!(phone_inspector)].iter().enumerate() {
+            if self.view.button(cx,*path).clicked(actions) {self.phone_page=page;self.view.redraw(cx);}
+        }
         if self.view.button(cx, ids!(pianist_annotate)).clicked(actions) {
             self.annotation_bar_open = !self.annotation_bar_open;
             cx.redraw_all();
@@ -1878,6 +1890,7 @@ impl Widget for ScoreShell {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.anchor_menus(cx);
+        let narrow=cx.peek_walk_turtle(walk).size.x<800.0;
         if let Some(state) = scope.data.get_mut::<ScoreAppState>() {
             let state: &mut ScoreAppState = state;
             if self.synced_dialog != state.ui.dialog {
@@ -1897,11 +1910,18 @@ impl Widget for ScoreShell {
             }
             let editor = state.ui.mode == ProductMode::Editor && state.ui.chrome_visible;
             self.view.view(cx, ids!(editor_top)).set_visible(cx, editor);
-            self.view.view(cx, ids!(left_panel)).set_visible(cx, editor);
+            self.view.view(cx, ids!(left_panel)).set_visible(cx, editor && (!narrow || self.phone_page==1));
+            self.view.widget(cx,ids!(canvas)).set_visible(cx,!editor || !narrow || self.phone_page==0);
+            self.view.view(cx,ids!(phone_pages)).set_visible(cx,editor && narrow);
+            for path in [ids!(left_panel),ids!(right_panel)] {
+                if let Some(mut panel)=self.view.view(cx,path).borrow_mut() {
+                    panel.walk.width=if narrow {Size::fill()}else{Size::Fixed(240.0)};
+                }
+            }
             // The music shelf lives in the sidebar, so it is drawn every frame
             // rather than only while a dialog is open.
             self.sync_library(cx, state);
-            self.view.view(cx, ids!(right_panel)).set_visible(cx, editor);
+            self.view.view(cx, ids!(right_panel)).set_visible(cx, editor && (!narrow || self.phone_page==2));
             self.view.view(cx, ids!(editor_transport)).set_visible(cx, editor);
             self.view.view(cx, ids!(status_bar)).set_visible(cx, editor);
             self.view

@@ -104,9 +104,10 @@ fn engine_pid(name: &str) -> Option<u32> {
 fn foreign_load(
     values: &[(String, u32, f64)],
     excluded: &BTreeSet<u32>,
-    previous: &mut Option<BTreeSet<String>>,
 ) -> Result<f64, &'static str> {
-    let mut names = BTreeSet::new();
+    if values.is_empty() {
+        return Err("gpu_counter_instances_missing");
+    }
     let mut load = 0.0;
     let mut invalid = false;
     for (name, status, value) in values {
@@ -114,19 +115,20 @@ fn foreign_load(
         if excluded.contains(&pid) {
             continue;
         }
-        names.insert(name.clone());
+        // PDH has already calculated the rate from its samples. VALID_DATA
+        // and NEW_DATA both mean a usable value, including an engine that
+        // appeared since our last read. An instance-set comparison falsely
+        // cancelled every queued generation when an idle GPU context changed.
+        // Missing/invalid rate samples still fail closed below; the native
+        // query retains its initial two-collection warmup and array checks.
         if (*status != 0 && *status != 1) || !value.is_finite() || *value < 0.0 {
             invalid = true;
         } else {
             load += value.min(100.0);
         }
     }
-    let changed = previous.as_ref() != Some(&names);
-    *previous = Some(names);
     if invalid {
         Err("gpu_counter_sample_unknown")
-    } else if changed {
-        Err("gpu_counter_warmup_or_churn")
     } else {
         Ok(load.min(100.0))
     }
@@ -319,7 +321,6 @@ mod native {
         query: Handle,
         counter: Handle,
         collected: bool,
-        previous: Option<BTreeSet<String>>,
         xinput_module: Handle,
         xinput: Option<XInputGetState>,
         controller_packets: [Option<u32>; 4],
@@ -330,7 +331,6 @@ mod native {
                 query: ptr::null_mut(),
                 counter: ptr::null_mut(),
                 collected: false,
-                previous: None,
                 xinput_module: ptr::null_mut(),
                 xinput: None,
                 controller_packets: [None; 4],
@@ -422,7 +422,6 @@ mod native {
             self.query = ptr::null_mut();
             self.counter = ptr::null_mut();
             self.collected = false;
-            self.previous = None;
         }
         fn gpu_load(&mut self) -> Result<f64, &'static str> {
             if self.query.is_null() {
@@ -454,7 +453,7 @@ mod native {
                 }
             };
             let excluded = process_exclusions()?;
-            foreign_load(&values, &excluded, &mut self.previous)
+            foreign_load(&values, &excluded)
         }
         fn counter_values(&self) -> Result<Vec<(String, u32, f64)>, &'static str> {
             let mut bytes = 0;
@@ -850,22 +849,53 @@ mod tests {
         )
     }
     #[test]
-    fn foreign_gpu_is_summed_self_excluded_and_churn_recovers() {
+    fn valid_foreign_gpu_churn_is_counted_without_false_probe_failure() {
         let excluded = BTreeSet::from([42]);
-        let mut previous = None;
         let values = vec![engine(42, 0, 100.0), engine(77, 0, 3.0), engine(88, 1, 3.0)];
-        assert!(foreign_load(&values, &excluded, &mut previous).is_err());
-        assert_eq!(foreign_load(&values, &excluded, &mut previous), Ok(6.0));
+        assert_eq!(foreign_load(&values, &excluded), Ok(6.0));
         let mut values = values;
         values.push(engine(42, 2, 100.0));
-        assert_eq!(foreign_load(&values, &excluded, &mut previous), Ok(6.0));
+        assert_eq!(foreign_load(&values, &excluded), Ok(6.0));
         values.push(engine(99, 0, 2.0));
-        assert!(foreign_load(&values, &excluded, &mut previous).is_err());
-        assert_eq!(foreign_load(&values, &excluded, &mut previous), Ok(8.0));
+        values.last_mut().unwrap().1 = 1; // PDH_CSTATUS_NEW_DATA is valid too.
+        assert_eq!(foreign_load(&values, &excluded), Ok(8.0));
+        values.remove(1);
+        assert_eq!(foreign_load(&values, &excluded), Ok(5.0));
+        values.push(engine(101, 0, 90.0));
+        assert_eq!(foreign_load(&values, &excluded), Ok(95.0));
+    }
+    #[test]
+    fn missing_or_invalid_foreign_gpu_samples_still_fail_closed() {
+        let excluded = BTreeSet::from([42]);
+        let mut values = vec![engine(42, 0, 100.0), engine(77, 0, 3.0)];
         values[1].2 = f64::NAN;
-        assert!(foreign_load(&values, &excluded, &mut previous).is_err());
+        assert!(foreign_load(&values, &excluded).is_err());
+        values[1].2 = -1.0;
+        assert!(foreign_load(&values, &excluded).is_err());
         values[1].2 = 3.0;
-        assert_eq!(foreign_load(&values, &excluded, &mut previous), Ok(8.0));
+        values[1].1 = 0xc0000bba; // PDH_CSTATUS_INVALID_DATA.
+        assert!(foreign_load(&values, &excluded).is_err());
+        assert!(foreign_load(&[], &excluded).is_err());
+        assert_eq!(foreign_load(&values[..1], &excluded), Ok(0.0));
+    }
+    #[test]
+    fn valid_engine_churn_keeps_jobs_admissible_but_real_load_and_unknown_data_interrupt() {
+        use super::super::{Config, Observation, Policy, GPU, GPU_ERROR, IDLE};
+        let mut policy = Policy::new(Config {enabled:true,supported:true,..Config::default()});
+        let mut observation = Observation {idle_seconds:Some(600),fullscreen:Ok(false),controller_active:Ok(false),foreign_gpu_percent:Ok(0.0),session_error:None};
+        for second in 0..=20 { policy.observe(second * 1000, &observation); }
+        // A succession of new, valid idle contexts must not reset quiet time
+        // or interrupt a sibling generation that has just left the queue.
+        for second in 21..25 {
+            observation.foreign_gpu_percent = foreign_load(&[engine(100 + second, 0, 1.0)], &BTreeSet::new());
+            assert_eq!(policy.observe(u64::from(second) * 1000, &observation).0, IDLE);
+        }
+        for second in 25..29 {
+            observation.foreign_gpu_percent = foreign_load(&[engine(100 + second, 0, 90.0)], &BTreeSet::new());
+            assert_eq!(policy.observe(u64::from(second) * 1000, &observation).0, if second == 28 {GPU} else {IDLE});
+        }
+        observation.foreign_gpu_percent = foreign_load(&[], &BTreeSet::new());
+        assert_eq!(policy.observe(29000, &observation).0, GPU_ERROR);
     }
     #[test]
     fn unknown_counter_instances_fail_closed() {
@@ -878,7 +908,6 @@ mod tests {
         assert!(foreign_load(
             &[("unexpected".into(), 0, 0.0)],
             &BTreeSet::new(),
-            &mut None
         )
         .is_err());
     }

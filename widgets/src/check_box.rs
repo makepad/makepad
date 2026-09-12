@@ -564,9 +564,11 @@ pub struct CheckBox {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[live(None)]
+    #[apply_state]
     pub active: Option<bool>,
 
     /// The state the box starts in; `active`, when given, wins over it.

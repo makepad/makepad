@@ -2,7 +2,8 @@
 //!
 //! One widget, hardcoded into [`crate::window::Window`] the way the tweaker
 //! and the nav control are, so every Makepad app can record itself without
-//! wiring anything up. Ctrl+F10 starts, Ctrl+F10 stops. While it records,
+//! wiring anything up. Ctrl+F10 starts at up to 60fps; Ctrl+Shift+F10 starts
+//! at 120fps. Either shortcut stops the current recording. While it records,
 //! a red dot sits in the top-right corner of the window (and therefore in
 //! the file — the indicator is drawn into the same pass the recorder reads
 //! back).
@@ -26,9 +27,11 @@
 //! ever touches the encoder. Files land in `local/screencap/`, one per
 //! recording, named for when it was taken.
 //!
-//! Video is constant-rate — 60fps by default, `max_fps` or
-//! `MAKEPAD_SCREENCAP_FPS` for 120 on a 120Hz display — with the frame index
-//! taken from the wall clock, and the audio position derived from that index —
+//! Video is constant-rate — 60fps by default, with `max_fps` or
+//! `MAKEPAD_SCREENCAP_FPS` able to lower that rate. Ctrl+Shift+F10 explicitly
+//! opts into 120fps (Studio feedback sessions reserve that shortcut for
+//! selecting feedback). The frame index is taken from the wall clock, and
+//! the audio position derived from that index —
 //! so an encoder that falls behind leaves a gap in both tracks rather than
 //! letting sound drift away from picture. A window that presents nothing is
 //! kept ticking by a pass repaint, which costs a re-present of the existing
@@ -53,7 +56,7 @@ use makepad_platform::thread::{CancellationToken, TaskHandle, ThreadOptions};
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -98,10 +101,14 @@ script_mod! {
 }
 
 /// Frames per second written to the file, and the ceiling on how often the
-/// window is read back. 60 matches the refresh a Makepad app is usually
-/// paced to, so a recording moves the way the app does; `max_fps` (or
-/// `MAKEPAD_SCREENCAP_FPS`) takes it to 120 on a 120Hz display.
+/// window is read back. Normal recording is capped at 60; holding Shift
+/// with the default Ctrl+F10 shortcut opts into 120 for that session only.
 const DEFAULT_FPS: u32 = 60;
+const HIGH_FPS: u32 = 120;
+const MANAGED_MAX_FPS: u32 = 15;
+const MANAGED_MAX_INSPECTION_PIXELS: u64 = 16_777_216;
+static MANAGED_RECORDINGS: AtomicUsize = AtomicUsize::new(0);
+static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Used only when the app never opened an output device, so the tap never
 /// reported a rate — the track is then silence at a plausible rate.
 const FALLBACK_AUDIO_RATE: u32 = 48_000;
@@ -112,9 +119,8 @@ const AUDIO_RATE_GRACE: Duration = Duration::from_millis(300);
 /// the oldest rather than grow without bound behind a realtime callback.
 const AUDIO_BACKLOG_SECONDS: usize = 4;
 
-/// The recording rate: the widget's `max_fps`, or `MAKEPAD_SCREENCAP_FPS` when
-/// it is set, so a display's real refresh (60, 120) can be matched without
-/// touching an app's DSL. Clamped to something an encoder can be asked for.
+/// The requested normal recording rate. The entry points cap this at 60
+/// (15 for managed evidence); the high-rate shortcut selects 120 directly.
 fn capture_fps(max_fps: f64) -> u32 {
     static ENV: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     let env = *ENV.get_or_init(|| {
@@ -156,8 +162,8 @@ pub struct ScreenCap {
     /// works while a text input has the caret.
     #[live(KeyCode::F10)]
     hotkey: KeyCode,
-    /// Whether the hotkey needs Shift held (false by default: Shift+F10 is
-    /// the design tweaker).
+    /// Whether the normal hotkey needs Shift held. With the default Ctrl
+    /// binding, adding Shift selects the high frame rate instead.
     #[live(false)]
     hotkey_shift: bool,
     /// Whether the hotkey needs Ctrl held. Ctrl+F10 by default, so the
@@ -170,7 +176,9 @@ pub struct ScreenCap {
     dot_margin: f64,
     #[live(60.0)]
     max_fps: f64,
-    /// Directory the mp4s land in, relative to the app's working directory.
+    /// Only a Studio-managed recording (an absolute directory handed over by
+    /// the flow) sets this. Every other recording, in every app of a repo,
+    /// lands in that repo's `local/screencap/` (see `repo_screencap_dir`).
     #[live]
     output_dir: String,
     #[rust]
@@ -191,6 +199,10 @@ pub struct ScreenCap {
     /// dot appearing and disappearing needs this separate, rare signal.
     #[rust]
     redraw_requested: bool,
+    #[rust]
+    managed: bool,
+    #[rust]
+    managed_checked: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -203,6 +215,32 @@ pub enum ScreenCapAction {
 }
 
 impl ScreenCap {
+    pub fn is_managed(&self) -> bool { self.managed }
+
+    pub fn managed_recordings_pending() -> bool {
+        MANAGED_RECORDINGS.load(Ordering::Acquire) != 0
+    }
+
+    /// Studio supplies an owned per-run directory. Environment lookup and
+    /// filename construction do no filesystem I/O; the encoder owns writes.
+    pub fn start_managed_once(&mut self, cx: &mut Cx) {
+        if self.managed_checked || self.window_id.is_none() { return; }
+        self.managed_checked = true;
+        let Some(directory) = std::env::var_os("MAKEPAD_STUDIO_RECORDING_DIR") else { return; };
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() || directory.as_os_str().len() > 4096 {
+            cx.widget_action(self.uid, ScreenCapAction::Failed("Studio recording directory must be absolute and at most 4096 bytes".into()));
+            return;
+        }
+        let Some(directory) = directory.to_str() else {
+            cx.widget_action(self.uid, ScreenCapAction::Failed("Studio recording directory must be UTF-8".into()));
+            return;
+        };
+        self.managed = true;
+        self.output_dir = directory.into();
+        self.start(cx);
+    }
+
     pub fn is_recording(&self) -> bool {
         self.session.as_ref().map(|s| !s.stopping).unwrap_or(false)
     }
@@ -235,34 +273,38 @@ impl ScreenCap {
     }
 
     pub fn toggle(&mut self, cx: &mut Cx) {
+        self.toggle_at_fps(cx, capture_fps(self.max_fps).min(DEFAULT_FPS));
+    }
+
+    fn toggle_at_fps(&mut self, cx: &mut Cx, fps: u32) {
+        // Studio owns the lifetime of automatic evidence. The manual shortcut
+        // remains unchanged for ordinary app launches without the managed env.
+        if self.managed { return; }
         if self.is_recording() {
             self.stop(cx);
         } else if self.session.is_none() {
-            self.start(cx);
+            self.start_at_fps(cx, fps);
         }
-        // While a file is still finalizing, F11 is a no-op rather than a
-        // second encoder racing the first one onto the same directory.
+        // While a file is still finalizing, either shortcut is a no-op;
+        // never race a second encoder onto the same directory.
     }
 
     pub fn start(&mut self, cx: &mut Cx) {
+        self.start_at_fps(cx, capture_fps(self.max_fps).min(DEFAULT_FPS));
+    }
+
+    fn start_at_fps(&mut self, cx: &mut Cx, fps: u32) {
         if self.session.is_some() {
             return;
         }
-        let dir = if self.output_dir.is_empty() {
-            PathBuf::from("local/screencap")
-        } else {
+        let dir = if self.managed && !self.output_dir.is_empty() {
             PathBuf::from(&self.output_dir)
+        } else {
+            repo_screencap_dir()
         };
-        let path = match unique_capture_path(&dir) {
-            Ok(path) => path,
-            Err(err) => {
-                error!("ScreenCap: cannot open {}: {}", dir.display(), err);
-                cx.widget_action(self.uid, ScreenCapAction::Failed(err));
-                return;
-            }
-        };
-        let fps = capture_fps(self.max_fps);
-        let session = Session::start(cx, path.clone(), self.window_id, fps);
+        let path = capture_path(&dir, self.window_id);
+        let fps = if self.managed { fps.min(MANAGED_MAX_FPS) } else { fps };
+        let session = Session::start(cx, path.clone(), self.window_id, fps, self.managed);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
         self.next_frame = cx.new_next_frame();
@@ -306,7 +348,7 @@ impl ScreenCap {
     /// `Window` can draw it last, over everything, without giving it a slot
     /// in the layout.
     pub fn draw_indicator(&mut self, cx: &mut Cx2d, rect: Rect) {
-        if !self.is_busy() {
+        if !self.is_busy() || self.managed {
             return;
         }
         let size = self.dot_size.max(4.0);
@@ -327,11 +369,20 @@ impl Widget for ScreenCap {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
             if ke.key_code == self.hotkey
-                && ke.modifiers.shift == self.hotkey_shift
                 && ke.modifiers.control == self.hotkey_ctrl
                 && !ke.is_repeat
             {
-                self.toggle(cx);
+                if ke.modifiers.shift == self.hotkey_shift {
+                    self.toggle(cx);
+                } else if !self.hotkey_shift
+                    && ke.modifiers.shift
+                    && ke.modifiers.control
+                    && !ke.modifiers.alt
+                    && !ke.modifiers.logo
+                    && !cx.global::<crate::ai_slot::AiSlotRequests>().feedback_enabled
+                {
+                    self.toggle_at_fps(cx, HIGH_FPS);
+                }
             }
         }
         if self.next_frame.is_event(event).is_some() {
@@ -367,7 +418,7 @@ struct CapturedFrame {
 #[derive(Default)]
 struct FrameSlot {
     /// Only the NEWEST presented frame is kept. The encoder samples on its own
-    /// 30Hz clock, so queueing every 120Hz present would just buy latency and
+    /// recording clock, so queueing every 120Hz present would just buy latency and
     /// tens of megabytes of backlog.
     pending: Option<CapturedFrame>,
     /// Buffer handed back by the encoder thread, reused by the capture
@@ -390,10 +441,6 @@ struct AudioQueue {
 struct Session {
     slot: Arc<(Mutex<FrameSlot>, Condvar)>,
     stop: Arc<AtomicBool>,
-    capture_id: u64,
-    /// `None` when every output tap was taken at start: the recording then
-    /// has picture and no sound, and said so in the log.
-    tap_id: Option<u64>,
     /// Cleared by the encoder thread on exit, so the UI can poll for the
     /// finalize without blocking on a join.
     running: Arc<AtomicBool>,
@@ -402,15 +449,26 @@ struct Session {
 }
 
 impl Session {
-    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32) -> Self {
+    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32, managed: bool) -> Self {
         let slot = Arc::new((Mutex::new(FrameSlot::default()), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let audio = Arc::new(Mutex::new(AudioQueue::default()));
         let running = Arc::new(AtomicBool::new(true));
 
-        let capture_slot = slot.clone();
-        let capture_stop = stop.clone();
-        let capture_id = add_screen_capture(
+        let thread_slot = slot.clone();
+        let thread_audio = audio.clone();
+        let thread_stop = stop.clone();
+        let thread_running = running.clone();
+        let pending = ManagedRecording::new(managed);
+        let join = cx
+            .thread_spawner()
+            .spawn_worker(
+                ThreadOptions { name: Some("makepad-screencap".into()), ..Default::default() },
+                move || {
+                    let _pending = pending;
+                    let capture_slot = thread_slot.clone();
+                    let capture_stop = thread_stop.clone();
+                    let capture_id = add_screen_capture(
             ScreenCaptureOptions {
                 window_id,
                 max_fps: fps as f64,
@@ -443,7 +501,7 @@ impl Session {
             },
         );
 
-        let tap_audio = audio.clone();
+        let tap_audio = thread_audio.clone();
         let tap_id = add_audio_output_tap(move |info, buffer| {
             let Ok(mut queue) = tap_audio.try_lock() else {
                 return;
@@ -463,16 +521,23 @@ impl Session {
             log!("ScreenCap: every audio tap is taken; recording without sound");
         }
 
-        let thread_slot = slot.clone();
-        let thread_audio = audio.clone();
-        let thread_stop = stop.clone();
-        let thread_running = running.clone();
-        let join = cx
-            .thread_spawner()
-            .spawn_worker(
-                ThreadOptions { name: Some("makepad-screencap".into()), ..Default::default() },
-                move || {
-                    let result = encode_loop(&path, thread_slot, thread_audio, thread_stop, fps);
+                    let attachments = CaptureAttachments { capture_id, tap_id };
+                    let mut info = RecordingInfo::default();
+                    let result = (|| {
+                        let parent = path.parent().ok_or("Capture has no output directory")?;
+                        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                        // Reserve only this generated name; never overwrite a
+                        // previous run if a filesystem/clock collision occurs.
+                        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+                            .map_err(|error| error.to_string())?;
+                        encode_loop(&path, thread_slot, thread_audio, thread_stop, fps, managed, window_id, &mut info)
+                    })();
+                    drop(attachments);
+                    if managed {
+                        if let Err(error) = write_managed_result(&path, window_id, fps, &info, false, Some(&result)) {
+                            error!("ScreenCap: capture evidence could not be saved: {}", error);
+                        }
+                    }
                     thread_running.store(false, Ordering::Release);
                     result.map(|_| path)
                 },
@@ -485,8 +550,6 @@ impl Session {
         Self {
             slot,
             stop,
-            capture_id,
-            tap_id,
             running,
             join,
             stopping: false,
@@ -500,19 +563,12 @@ impl Session {
             return;
         }
         self.stopping = true;
-        remove_screen_capture(self.capture_id);
-        // The tap is optional: a capture that could not get one still has
-        // to be stoppable, and asking to remove a tap that was never added
-        // is not a no-op it can be trusted with.
-        if let Some(tap_id) = self.tap_id {
-            remove_audio_output_tap(tap_id);
-        }
         self.stop.store(true, Ordering::Release);
         self.slot.1.notify_all();
     }
 
     fn is_finished(&self) -> bool {
-        self.stopping && !self.running.load(Ordering::Acquire)
+        !self.running.load(Ordering::Acquire) || self.join.as_ref().is_some_and(TaskHandle::is_finished)
     }
 
     /// Reap the encoder's result — never a blocking join, which
@@ -534,6 +590,34 @@ impl Session {
             },
             None => Some(Err("encoder thread could not be started".to_string())),
         }
+    }
+}
+
+/// `tap_id` is `None` when every output tap was taken at start: the
+/// recording then has picture and no sound, and said so in the log.
+struct CaptureAttachments { capture_id: u64, tap_id: Option<u64> }
+impl Drop for CaptureAttachments {
+    fn drop(&mut self) {
+        // Registry locks belong to the encoder worker, never the window/UI.
+        remove_screen_capture(self.capture_id);
+        // Asking to remove a tap that was never added is not a no-op it can
+        // be trusted with.
+        if let Some(tap_id) = self.tap_id {
+            remove_audio_output_tap(tap_id);
+        }
+    }
+}
+
+struct ManagedRecording(bool);
+impl ManagedRecording {
+    fn new(managed: bool) -> Self {
+        if managed { MANAGED_RECORDINGS.fetch_add(1, Ordering::AcqRel); }
+        Self(managed)
+    }
+}
+impl Drop for ManagedRecording {
+    fn drop(&mut self) {
+        if self.0 { MANAGED_RECORDINGS.fetch_sub(1, Ordering::AcqRel); }
     }
 }
 
@@ -572,21 +656,34 @@ fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32767.0) as i16
 }
 
-fn unique_capture_path(dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|err| format!("{}: {}", dir.display(), err))?;
-    let stamp = local_timestamp();
-    for attempt in 0..1000u32 {
-        let name = if attempt == 0 {
-            format!("screencap-{stamp}.mp4")
-        } else {
-            format!("screencap-{stamp}-{attempt}.mp4")
-        };
-        let path = dir.join(name);
-        if !path.exists() {
-            return Ok(path);
+/// `<repo>/local/screencap`, where `<repo>` is the nearest ancestor of the
+/// working directory that has a `.git` entry or a `local/` directory. Apps
+/// are launched from their crate directories as often as from the repo root;
+/// the recordings must not scatter with them. Falls back to the working
+/// directory itself when no repo is found.
+pub fn repo_screencap_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut dir = cwd.clone();
+    for _ in 0..8 {
+        if dir.join(".git").exists() || dir.join("local").is_dir() {
+            return dir.join("local").join("screencap");
+        }
+        if !dir.pop() {
+            break;
         }
     }
-    Err(format!("no free filename in {}", dir.display()))
+    cwd.join("local").join("screencap")
+}
+
+fn capture_path(dir: &Path, window: Option<usize>) -> PathBuf {
+    let app = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "app".into());
+    let stamp = local_timestamp();
+    let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    dir.join(format!("screencap-{app}-{stamp}-p{}-w{}-{nanos}-{sequence}.mp4", std::process::id(), window.unwrap_or(0)))
 }
 
 /// `YYYYmmdd-HHMMSS`, so the files sort by when they were taken. Local time
@@ -631,6 +728,9 @@ fn encode_loop(
     audio: Arc<Mutex<AudioQueue>>,
     stop: Arc<AtomicBool>,
     fps: u32,
+    save_final_frame: bool,
+    window_id: Option<usize>,
+    info: &mut RecordingInfo,
 ) -> Result<(), String> {
     let fps = fps.max(1);
     let wait = CancellationToken::new();
@@ -641,6 +741,10 @@ fn encode_loop(
     };
     let width = (first.width & !1).max(2);
     let height = (first.height & !1).max(2);
+    info.width = width;
+    info.height = height;
+    info.original_width = first.width;
+    info.original_height = first.height;
 
     // Let the audio device announce its rate before the AAC track is created.
     let grace_until = Cx::monotonic_now() + AUDIO_RATE_GRACE.as_secs_f64();
@@ -674,13 +778,17 @@ fn encode_loop(
         }),
         keyframe_only: false,
     };
+    log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, app audio AAC 128kbps",
+        width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0);
     let path_str = path.to_string_lossy().to_string();
     let mut encoder =
         VideoFileEncoder::new(&path_str, options).map_err(|err| format!("{path_str}: {err}"))?;
 
     let mut canvas = vec![0u8; width as usize * height as usize * 4];
     blit_into(&mut canvas, width, height, &first.rgba, first.width, first.height);
-    recycle(&slot, first.rgba);
+    // Retain only the latest original drawable for pixel-accurate inspection;
+    // the fixed MP4 canvas may have padding or scaling after a window resize.
+    let mut latest_frame = first;
 
     let start = Cx::monotonic_now();
     let mut frame_index: u64 = 0;
@@ -688,6 +796,7 @@ fn encode_loop(
     let mut encode_error: Option<String> = None;
     let mut encoded: u64 = 0;
     let mut push_time = 0.0;
+    let mut last_preview = 0.0;
 
     loop {
         // Video frame `frame_index` covers [n/fps, (n+1)/fps).
@@ -705,15 +814,41 @@ fn encode_loop(
             encode_error = Some(err);
             break;
         }
+        info.frames = encoded;
+        info.elapsed_ms = ((Cx::monotonic_now() - start).max(0.0) * 1000.0) as u64;
+        if save_final_frame && (!info.preview_written || Cx::monotonic_now() - last_preview >= 1.0) {
+            let published = (|| {
+                write_live_preview(path, width, height, &canvas)?;
+                info.preview_written = true;
+                info.current_written = write_inspection_frame(path, "current.png", &latest_frame)?;
+                info.current_width = latest_frame.width;
+                info.current_height = latest_frame.height;
+                info.frame_sequence = encoded;
+                write_managed_result(path, window_id, fps, info, true, None)
+            })();
+            if let Err(error) = published {
+                // Finalize an otherwise playable MP4 even if its evidence
+                // sidecar or image could not be published.
+                encode_error = Some(format!("publishing recording evidence: {error}"));
+                break;
+            }
+            last_preview = Cx::monotonic_now();
+        }
 
         // Sleep to the next tick, then take whatever the window presented
         // meanwhile. Nothing new = the screen did not change; the frame is
         // repeated so the file keeps real time.
         let deadline = start + tick_duration(frame_index + 1, fps).as_secs_f64();
+        // Take-frame returns immediately when a newer presentation is queued.
+        // Pace independently so a fast display cannot exceed the MP4 rate.
+        let _ = wait.wait_until(deadline);
         let next = take_frame(&slot, &stop, &wait, Some(deadline));
         if let Some(frame) = next {
+            info.original_width = frame.width;
+            info.original_height = frame.height;
             blit_into(&mut canvas, width, height, &frame.rgba, frame.width, frame.height);
-            recycle(&slot, frame.rgba);
+            let previous = std::mem::replace(&mut latest_frame, frame);
+            recycle(&slot, previous.rgba);
         } else if stopped(&stop) {
             break;
         }
@@ -749,22 +884,90 @@ fn encode_loop(
     encoder
         .finish()
         .map_err(|err| format!("finalizing {path_str}: {err}"))?;
+    if save_final_frame {
+        info.final_written = write_inspection_frame(path, "png", &latest_frame)?;
+        info.current_written = info.final_written;
+        info.current_width = latest_frame.width;
+        info.current_height = latest_frame.height;
+        info.frame_sequence = encoded;
+    }
     match encode_error {
         Some(err) => Err(err),
         None => Ok(()),
     }
 }
 
+#[derive(Default)]
+struct RecordingInfo {
+    width: u32,
+    height: u32,
+    original_width: u32,
+    original_height: u32,
+    frames: u64,
+    elapsed_ms: u64,
+    preview_written: bool,
+    current_written: bool,
+    current_width: u32,
+    current_height: u32,
+    frame_sequence: u64,
+    final_written: bool,
+}
+
+fn write_inspection_frame(path: &Path, extension: &str, frame: &CapturedFrame) -> Result<bool, String> {
+    let pixels = u64::from(frame.width) * u64::from(frame.height);
+    if pixels == 0 || pixels > MANAGED_MAX_INSPECTION_PIXELS {
+        return Ok(false);
+    }
+    let png = Cx::encode_rgba_as_png(frame.width, frame.height, &frame.rgba)?;
+    let temporary = path.with_extension(format!("{extension}.tmp"));
+    std::fs::write(&temporary, png).map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path.with_extension(extension)).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn write_live_preview(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    let scale = (640.0 / width.max(1) as f64).min(480.0 / height.max(1) as f64).min(1.0);
+    let preview_width = (width as f64 * scale).round().max(1.0) as u32;
+    let preview_height = (height as f64 * scale).round().max(1.0) as u32;
+    let mut preview = vec![0; preview_width as usize * preview_height as usize * 4];
+    blit_into(&mut preview, preview_width, preview_height, rgba, width, height);
+    let png = Cx::encode_rgba_as_png(preview_width, preview_height, &preview)?;
+    let temporary = path.with_extension("preview.png.tmp");
+    std::fs::write(&temporary, png).map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path.with_extension("preview.png")).map_err(|error| error.to_string())
+}
+
+fn write_managed_result(path: &Path, window: Option<usize>, fps: u32, info: &RecordingInfo, active: bool, result: Option<&Result<(), String>>) -> Result<(), String> {
+    use crate::makepad_micro_serde::SerJson;
+    let identity = |name| std::env::var(name).unwrap_or_default().serialize_json();
+    let video = path.to_string_lossy().to_string().serialize_json();
+    let final_frame = if info.final_written { path.with_extension("png").to_string_lossy().to_string().serialize_json() } else { "null".into() };
+    let preview = if info.final_written { final_frame.clone() } else if info.preview_written { path.with_extension("preview.png").to_string_lossy().to_string().serialize_json() } else { "null".into() };
+    let current_frame = if info.final_written { final_frame.clone() } else if info.current_written { path.with_extension("current.png").to_string_lossy().to_string().serialize_json() } else { "null".into() };
+    let inspection_error = if info.frames != 0 && !info.current_written {
+        "Original drawable exceeds the 16-megapixel inspection limit".to_owned().serialize_json()
+    } else { "null".into() };
+    let error = result.and_then(|result| result.as_ref().err()).map(|error| error.serialize_json()).unwrap_or_else(|| "null".into());
+    let complete = result.is_some_and(Result::is_ok);
+    let body = format!("{{\"kind\":\"studio_recording\",\"flow\":{},\"artifact\":{},\"run\":{},\"commit\":{},\"pid\":{},\"window\":{},\"fps\":{fps},\"width\":{},\"height\":{},\"original_width\":{},\"original_height\":{},\"frames\":{},\"elapsed_ms\":{},\"current_width\":{},\"current_height\":{},\"frame_sequence\":{},\"active\":{active},\"complete\":{complete},\"video\":{video},\"preview\":{preview},\"current_frame\":{current_frame},\"final_frame\":{final_frame},\"inspection_error\":{inspection_error},\"error\":{error}}}",
+        identity("MAKEPAD_STUDIO_FLOW_ID"), identity("MAKEPAD_STUDIO_ARTIFACT_ID"), identity("MAKEPAD_STUDIO_RUN_ID"), identity("MAKEPAD_STUDIO_REVISION"), std::process::id(), window.unwrap_or(0),
+        info.width, info.height, info.original_width, info.original_height, info.frames, info.elapsed_ms, info.current_width, info.current_height, info.frame_sequence);
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, body).map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path.with_extension("json")).map_err(|error| error.to_string())
+}
+
 fn tick_duration(index: u64, fps: u32) -> Duration {
     Duration::from_nanos(index * 1_000_000_000 / fps as u64)
 }
 
-/// ~0.1 bits per pixel per frame, which is a sane screen-content rate, held
-/// between 2 and 40 Mbps.
+/// A quarter bit per pixel per frame preserves fine text and map outlines
+/// during motion. Scale with both native resolution and capture rate;
+/// the previous 40 Mbps ceiling starved large high-refresh drawables.
 fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
     let pixels = width as u64 * height as u64;
-    let bps = pixels * fps as u64 / 12;
-    bps.clamp(2_000_000, 40_000_000) as u32
+    let bps = pixels * fps as u64 / 4;
+    bps.clamp(8_000_000, 160_000_000) as u32
 }
 
 fn stopped(stop: &AtomicBool) -> bool {
@@ -889,33 +1092,62 @@ fn push_audio_through(
     Ok(())
 }
 
-/// Copy `src` into the locked `width`x`height` canvas, cropping or letterboxing
-/// when the window was resized mid-recording. The alternative — refusing every
-/// frame after a resize — freezes the recording on a stray window drag.
+/// Center every frame on the recording's fixed canvas. Keep native pixels
+/// when they fit; proportionally shrink larger frames instead of cropping.
+/// Portrait and landscape changes therefore leave opaque black padding, with
+/// no stretch, clipped content, or pixels left from the previous dimensions.
+/// Runs only on the encoder worker.
 fn blit_into(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
+    canvas: &mut [u8], width: u32, height: u32,
+    src: &[u8], src_width: u32, src_height: u32,
 ) {
     if src_width == width && src_height == height && src.len() >= canvas.len() {
         canvas.copy_from_slice(&src[..canvas.len()]);
         return;
     }
-    canvas.fill(0);
-    let copy_w = width.min(src_width) as usize;
-    let copy_h = height.min(src_height) as usize;
+    for pixel in canvas.chunks_exact_mut(4) { pixel.copy_from_slice(&[0, 0, 0, 255]); }
+    if width == 0 || height == 0 || src_width == 0 || src_height == 0
+        || src.len() < src_width as usize * src_height as usize * 4
+        || canvas.len() < width as usize * height as usize * 4 { return; }
+    let scale = (width as f64 / src_width as f64)
+        .min(height as f64 / src_height as f64).min(1.0);
+    let fit_w = ((src_width as f64 * scale).round() as usize).clamp(1, width as usize);
+    let fit_h = ((src_height as f64 * scale).round() as usize).clamp(1, height as usize);
+    let left = (width as usize - fit_w) / 2;
+    let top = (height as usize - fit_h) / 2;
     let dst_stride = width as usize * 4;
     let src_stride = src_width as usize * 4;
-    for y in 0..copy_h {
-        let s = y * src_stride;
-        let d = y * dst_stride;
-        if s + copy_w * 4 > src.len() || d + copy_w * 4 > canvas.len() {
-            break;
+    if fit_w == src_width as usize && fit_h == src_height as usize {
+        // Desktop -> phone normally needs only a centered row copy.
+        for y in 0..fit_h {
+            let d = (top + y) * dst_stride + left * 4;
+            canvas[d..d + fit_w * 4].copy_from_slice(&src[y * src_stride..y * src_stride + fit_w * 4]);
         }
-        canvas[d..d + copy_w * 4].copy_from_slice(&src[s..s + copy_w * 4]);
+        return;
+    }
+    // Bilinear sampling avoids jagged type when a resized window is larger
+    // than the fixed movie. The center-to-center mapping preserves aspect.
+    for y in 0..fit_h {
+        let sy = ((y as f64 + 0.5) * src_height as f64 / fit_h as f64 - 0.5)
+            .clamp(0.0, (src_height - 1) as f64);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(src_height as usize - 1);
+        let fy = sy - y0 as f64;
+        for x in 0..fit_w {
+            let sx = ((x as f64 + 0.5) * src_width as f64 / fit_w as f64 - 0.5)
+                .clamp(0.0, (src_width - 1) as f64);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(src_width as usize - 1);
+            let fx = sx - x0 as f64;
+            let d = (top + y) * dst_stride + (left + x) * 4;
+            for c in 0..4 {
+                let a = src[y0 * src_stride + x0 * 4 + c] as f64;
+                let b = src[y0 * src_stride + x1 * 4 + c] as f64;
+                let c0 = src[y1 * src_stride + x0 * 4 + c] as f64;
+                let d0 = src[y1 * src_stride + x1 * 4 + c] as f64;
+                canvas[d + c] = ((a + (b - a) * fx) * (1.0 - fy) + (c0 + (d0 - c0) * fx) * fy).round() as u8;
+            }
+        }
     }
 }
 
@@ -944,28 +1176,42 @@ mod tests {
     }
 
     #[test]
-    fn blit_letterboxes_a_shrunken_window() {
-        let mut canvas = vec![9u8; 4 * 4 * 4];
-        let src = vec![7u8; 2 * 2 * 4];
-        blit_into(&mut canvas, 4, 4, &src, 2, 2);
-        assert_eq!(&canvas[0..8], &[7u8; 8]);
-        // Right half of row 0 is background, not stale canvas.
-        assert_eq!(&canvas[8..16], &[0u8; 8]);
+    fn blit_centers_portrait_then_landscape_without_stale_pixels() {
+        let black = [0, 0, 0, 255];
+        let white = [255, 255, 255, 255];
+        let mut canvas = vec![9; 10 * 6 * 4];
+        blit_into(&mut canvas, 10, 6, &white.repeat(4 * 6), 4, 6);
+        for y in 0..6 { for x in 0..10 {
+            assert_eq!(&canvas[(y * 10 + x) * 4..(y * 10 + x + 1) * 4],
+                if (3..7).contains(&x) { &white } else { &black });
+        }}
+        blit_into(&mut canvas, 10, 6, &white.repeat(6 * 4), 6, 4);
+        for y in 0..6 { for x in 0..10 {
+            assert_eq!(&canvas[(y * 10 + x) * 4..(y * 10 + x + 1) * 4],
+                if (2..8).contains(&x) && (1..5).contains(&y) { &white } else { &black });
+        }}
     }
 
     #[test]
-    fn blit_crops_a_grown_window() {
-        let mut canvas = vec![0u8; 2 * 2 * 4];
-        let src = vec![5u8; 4 * 4 * 4];
-        blit_into(&mut canvas, 2, 2, &src, 4, 4);
-        assert_eq!(canvas, vec![5u8; 2 * 2 * 4]);
+    fn blit_fits_a_larger_window_without_cropping_its_far_edge() {
+        let mut source = vec![0; 8 * 4 * 4];
+        for y in 0..4 { for x in 0..8 {
+            let pixel = if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+            source[(y * 8 + x) * 4..(y * 8 + x + 1) * 4].copy_from_slice(&pixel);
+        }}
+        let mut canvas = vec![9; 4 * 4 * 4];
+        blit_into(&mut canvas, 4, 4, &source, 8, 4);
+        assert_eq!(&canvas[..16], &[0, 0, 0, 255].repeat(4));
+        assert_eq!(&canvas[16..20], &[255, 0, 0, 255]);
+        assert_eq!(&canvas[28..32], &[0, 0, 255, 255]);
+        assert_eq!(&canvas[48..], &[0, 0, 0, 255].repeat(4));
     }
 
     #[test]
     fn bitrate_stays_in_band() {
-        assert_eq!(bitrate_for(64, 64, 30), 2_000_000);
-        assert_eq!(bitrate_for(7680, 4320, 60), 40_000_000);
-        assert_eq!(bitrate_for(2048, 1536, 30), 2048 * 1536 * 30 / 12);
+        assert_eq!(bitrate_for(64, 64, 30), 8_000_000);
+        assert_eq!(bitrate_for(7680, 4320, 60), 160_000_000);
+        assert_eq!(bitrate_for(2048, 1536, 30), 2048 * 1536 * 30 / 4);
     }
 
     #[test]

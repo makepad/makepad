@@ -1,0 +1,26 @@
+[Unit]
+Description=Makepad Vulkan window manager
+After=systemd-user-sessions.service makepad-provision.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/var/lib/makepad-provision/complete
+
+[Service]
+Type=simple
+User=arch
+PAMName=login
+WorkingDirectory=/home/arch/makepad
+Environment=HOME=/home/arch
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/makepad-wm-session
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

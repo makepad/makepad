@@ -1095,6 +1095,9 @@ impl WidgetRef {
     }
 
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let _phase = makepad_draw::makepad_platform::thread::ui_phase(
+            makepad_draw::makepad_platform::thread::UiPhase::WidgetDraw,
+        );
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             if cx.sploded_active() {
@@ -1115,6 +1118,9 @@ impl WidgetRef {
     }
 
     pub fn draw_walk_all(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
+        let _phase = makepad_draw::makepad_platform::thread::ui_phase(
+            makepad_draw::makepad_platform::thread::UiPhase::WidgetDraw,
+        );
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
             if cx.sploded_active() {

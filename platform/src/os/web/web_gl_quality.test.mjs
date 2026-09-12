@@ -471,7 +471,7 @@ test("GL limits are queried once and canvas MSAA is opt-in", () => {
 
 function render_target_subject({ float_extension = true } = {}) {
   let object_id = 0;
-  const calls = { framebuffers: 0, textures: 0, status: 0, images: 0 };
+  const calls = { framebuffers: 0, textures: 0, status: 0, images: 0, image_args: [] };
   const gl = {
     FRAMEBUFFER: 1,
     TEXTURE_2D: 2,
@@ -491,6 +491,7 @@ function render_target_subject({ float_extension = true } = {}) {
     TEXTURE_WRAP_S: 12,
     TEXTURE_WRAP_T: 13,
     CLAMP_TO_EDGE: 14,
+    R32F: 15, RGBA32F: 16, RGBA16F: 17, RED: 18, FLOAT: 19, HALF_FLOAT: 20,
     createFramebuffer() {
       calls.framebuffers += 1;
       return { id: ++object_id };
@@ -502,7 +503,7 @@ function render_target_subject({ float_extension = true } = {}) {
     bindFramebuffer() {},
     bindTexture() {},
     texParameteri() {},
-    texImage2D() { calls.images += 1; },
+    texImage2D(...args) { calls.images += 1; calls.image_args.push(args); },
     framebufferTexture2D() {},
     getError() { return this.NO_ERROR; },
     checkFramebufferStatus() {
@@ -548,10 +549,10 @@ function render_target_args(texture_id, width = 100, height = 100, format = 0) {
   };
 }
 
-test("R32F targets reject missing float support and any safety downscale before allocation", () => {
+for (const format of [1, 2, 3]) test(`float format ${format} rejects missing support and safety downscale before allocation`, () => {
   const missing = render_target_subject({ float_extension: false });
   missing.subject.textures[7] = { _render_target_valid: true };
-  missing.subject.FromWasmBeginRenderTexture(render_target_args(7, 100, 100, 1));
+  missing.subject.FromWasmBeginRenderTexture(render_target_args(7, 100, 100, format));
   assert.equal(missing.subject.render_target_rejected, true);
   assert.equal(missing.subject.textures[7]._render_target_valid, false);
   assert.equal(missing.calls.framebuffers, 0);
@@ -559,10 +560,22 @@ test("R32F targets reject missing float support and any safety downscale before 
 
   const oversized = render_target_subject();
   oversized.subject.webgl_limits = { max_width: 64, max_height: 64 };
-  oversized.subject.FromWasmBeginRenderTexture(render_target_args(8, 128, 64, 1));
+  oversized.subject.FromWasmBeginRenderTexture(render_target_args(8, 128, 64, format));
   assert.equal(oversized.subject.render_target_rejected, true);
   assert.equal(oversized.calls.framebuffers, 0);
   assert.equal(oversized.calls.textures, 0);
+});
+
+test("float targets preserve signed/HDR RGBA instead of silently allocating RGBA8", () => {
+  for (const format of [1,2,3]) {
+    const {subject,gl,calls}=render_target_subject();
+    subject.FromWasmBeginRenderTexture(render_target_args(1,32,600,format));
+    assert.equal(subject.render_target_rejected,false);
+    const args=calls.image_args[0];
+    assert.equal(args[2],[0,gl.R32F,gl.RGBA32F,gl.RGBA16F][format]);
+    assert.equal(args[6],format===1?gl.RED:gl.RGBA);
+    assert.equal(args[7],format===3?gl.HALF_FLOAT:gl.FLOAT);
+  }
 });
 
 test("changing same-sized framebuffer attachments rechecks completeness and invalidates failures", () => {

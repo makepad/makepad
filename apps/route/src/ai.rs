@@ -1,6 +1,7 @@
 //! Route's tools on the desktop assistant bus.
 
-use crate::{broker, App};
+use crate::broker;
+use crate::view::RouteView;
 use makepad_ai_services::wire::{Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult};
 use makepad_widgets::Cx;
 
@@ -89,8 +90,8 @@ fn answer_with(
     result(call, execute(&name, &call.args))
 }
 
-pub fn answer(cx: &mut Cx, app: &mut App, call: &ServiceCall) -> ToolResult {
-    answer_with(call, |name, args| app.execute_tool(cx, name, args))
+pub fn answer(cx: &mut Cx, view: &mut RouteView, call: &ServiceCall) -> ToolResult {
+    answer_with(call, |name, args| view.execute_tool(cx, name, args))
 }
 
 #[cfg(test)]

@@ -74,7 +74,9 @@ pub struct Colors {
     pub fg_dark: Vec4f,
 }
 
-pub fn colors() -> Colors {
+pub fn colors(cx: &mut Cx) -> Colors {
+    let palette=cx.with_vm(makepad_wm_theme::current_for_vm);
+    let hex_of=|key:&str| palette.as_ref().map(|p|p.hex(key,&hex_of(key))).unwrap_or_else(||hex_of(key));
     Colors {
         accent: rgba(&hex_of("accent")),
         red: rgba(&hex_of("red")),
@@ -90,6 +92,9 @@ pub fn colors() -> Colors {
 /// Call once, after `makepad_widgets::script_mod` and `makepad_wm_theme::apply`, and
 /// before this crate's own `script_mod`.
 pub fn install(vm: &mut ScriptVm) {
+    let styled=desktop_style::current_name(vm).is_some_and(|s|s!="omarchy");
+    let palette=makepad_wm_theme::current_for_vm(vm);
+    let hex_of=|key:&str| palette.as_ref().map(|p|p.hex(key,&hex_of(key))).unwrap_or_else(||hex_of(key));
     let mut code = String::from("mod.sheets = {\n");
     for (key, _) in KEYS {
         // `background` -> `bg` reads better at the use site.
@@ -107,6 +112,8 @@ pub fn install(vm: &mut ScriptVm) {
     // Translucent variants: a selection fill has to let the cell text through.
     code.push_str(&format!("    sel_fill: {}66\n", hex_of("selection")));
     code.push_str(&format!("    accent_ghost: {}44\n", hex_of("accent")));
+
+
     code.push_str("}\n");
 
     // `makepad_wm_theme::apply` only retints the stock widgets when the WM exported a
@@ -122,7 +129,7 @@ pub fn install(vm: &mut ScriptVm) {
     let accent = hex_of("accent");
     let selection = hex_of("selection");
     let muted = hex_of("muted");
-    code.push_str(&format!(
+    if !styled { code.push_str(&format!(
         "mod.theme.color_b = {bg_dark}\n\
          mod.theme.color_b_h = {bg_dark}00\n\
          mod.theme.color_w = {fg_bright}\n\
@@ -146,8 +153,8 @@ pub fn install(vm: &mut ScriptVm) {
          mod.theme.color_app_caption_bar = {bg_dark}\n\
          mod.theme.corner_radius = 0.0\n"
     ));
+    }
     code.push_str("true\n");
-
     let script_mod_id = ScriptMod {
         cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
         module_path: "sheets_theme".to_string(),
@@ -157,6 +164,7 @@ pub fn install(vm: &mut ScriptVm) {
         code,
         values: vec![],
     };
+
     vm.eval(script_mod_id);
     for e in vm.take_errors() {
         log!("sheets theme: {}", e);

@@ -408,13 +408,12 @@ script_mod! {
                 // past that the SDF used to degenerate into a rotated diamond
                 // (e.g. a 22px disc with r=11), instead of saturating at a circle.
                 let k = min(2. * r, min(size.x, size.y));
-                // The same interior term box_x and box_y already carry. Without
-                // it the inside of the shape sits at a constant -k, so a square
-                // corner (r = 0) leaves the whole interior at distance zero:
-                // fill() paints nothing and stroke() paints everything, and a
-                // square box drew as one flat slab of its border colour.
-                let q = abs(p - size.xy) - size.xy + vec2(k, k).xy;
-                self.dist = (min(max(q.x, q.y), 0.) + length(max(q, vec2(0., 0.))) - k) / self.scale_factor;
+                let q = abs(p - size.xy) - (size.xy - vec2(k, k).xy);
+                // A square still has a negative interior distance. Omitting this
+                // term made a zero-radius box all boundary: its stroke covered
+                // the entire face, instead of just its edges.
+                let bp = max(q, vec2(0., 0.));
+                self.dist = (min(max(q.x, q.y), 0.) + length(bp) - k) / self.scale_factor;
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
             }

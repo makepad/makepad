@@ -1,9 +1,19 @@
+//! Text clips like quads: per-instance clip ∩ list clip after the view transform.
+//!
+//! As in `DrawQuad::clip_and_transform_vertex`, `view_clip` is expressed in
+//! list coordinates (callers inverse-transform a screen clip), and applies
+//! after `view_shift`, before the matrix transform. All text vertex variants
+//! use that same intersection. Sampling uses the clipped vertex translated
+//! back by `view_shift`, relative to the original glyph rectangle; clipping
+//! crops glyphs without moving or stretching their atlas/curve coordinates.
+
 use {
     crate::{
         cx_2d::Cx2d,
         cx_draw::CxDraw,
         draw_list_2d::ManyInstances,
         makepad_platform::*,
+        makepad_platform::recording_buffer::RecordingBuffer,
         text::{
             color::Color,
             font::FontId,
@@ -138,7 +148,12 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
 
             vertex: fn() {
                 let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-                let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
+                let p_clipped = clamp(
+                    clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                    self.draw_list.view_clip.xy,
+                    self.draw_list.view_clip.zw
+                )
+                let p_sample = p_clipped - self.draw_list.view_shift
                 let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
                 let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
                 let content_rect_size = vec2(
@@ -146,8 +161,8 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
                     max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
                 )
                 self.pos = vec2(
-                    (p_clipped.x - content_rect_pos.x) / content_rect_size.x,
-                    (p_clipped.y - content_rect_pos.y) / content_rect_size.y
+                    (p_sample.x - content_rect_pos.x) / content_rect_size.x,
+                    (p_sample.y - content_rect_pos.y) / content_rect_size.y
                 )
                 self.world = self.draw_list.view_transform * vec4(
                     p_clipped.x,
@@ -583,8 +598,12 @@ script_mod! {
 
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
+            let p_clipped = clamp(
+                clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized = (p_clipped - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             self.pos = p_normalized
             self.t = mix(self.t_min, self.t_max, p_normalized.xy)
@@ -773,8 +792,12 @@ script_mod! {
             let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
 
             let p_raster = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped_raster = clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized_raster = (p_clipped_raster - self.rect_pos) / self.rect_size
+            let p_clipped_raster = clamp(
+                clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized_raster = (p_clipped_raster - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
             let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
@@ -791,10 +814,15 @@ script_mod! {
                 vec2(1.0, 0.0)
             }
             let dilated = self.slug_dilate(p_slug, self.geom.pos, jac, normal)
-            let p_clipped_slug = clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw)
+            let p_clipped_slug = clamp(
+                clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_sample_slug = p_clipped_slug - self.draw_list.view_shift
             let pos_slug = vec2(
-                dilated.x + (p_clipped_slug.x - dilated.z) * jac.x,
-                dilated.y + (p_clipped_slug.y - dilated.w) * jac.w
+                dilated.x + (p_sample_slug.x - dilated.z) * jac.x,
+                dilated.y + (p_sample_slug.y - dilated.w) * jac.w
             )
 
             self.pos = mix(p_normalized_raster, pos_slug, use_slug)
@@ -1259,8 +1287,12 @@ pub enum TextOverflow {
     Ellipsis,
 }
 
+#[derive(Default)]
+#[repr(align(16))]
+struct DrawTextInstanceAlign;
+
 #[derive(Script)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct DrawText {
     #[rust]
     pub many_instances: Option<ManyInstances>,
@@ -1336,6 +1368,15 @@ pub struct DrawText {
     /// Useful when drawing multiple text chunks that should be treated as one area.
     #[live]
     pub extend_area: bool,
+
+    // Align the instance payload, not just the whole struct. Otherwise
+    // DrawText can have trailing padding that derived shaders read as their
+    // first instance fields (for example a dropdown's focus and hover).
+    // Keep all alignment padding before DrawVars and its contiguous payload.
+    #[rust]
+    draw_vars_align: DrawTextInstanceAlign,
+    #[rust]
+    draw_vars_padding: [u8; (16 - std::mem::size_of::<DrawVars>() % 16) % 16],
 
     #[deref]
     pub draw_vars: DrawVars,
@@ -2068,12 +2109,24 @@ impl DrawText {
         glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
         color: Vec4f,
     ) {
+        self.draw_rasterized_glyphs_abs_with_storage(cx, glyphs, color, None);
+    }
+
+    pub fn draw_rasterized_glyphs_abs_with_storage(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
+        color: Vec4f,
+        storage: Option<&mut RecordingBuffer>,
+    ) {
         if glyphs.is_empty() {
             return;
         }
         // An already-open batch ran update_draw_vars when it began; running it
         // again per call dominates CPU when thousands of glyphs share a batch.
         if let Some(mut instances) = self.many_instances.take() {
+            Self::reserve_glyph_storage(&mut instances.instances,
+                glyphs.len() * self.draw_vars.as_slice().len(), storage);
             self.glyph_depth = self.draw_depth;
             self.color = color;
             for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
@@ -2094,6 +2147,9 @@ impl DrawText {
             return;
         };
 
+        Self::reserve_glyph_storage(&mut instances.instances,
+            glyphs.len() * self.draw_vars.as_slice().len(), storage);
+
         self.glyph_depth = self.draw_depth;
         self.color = color;
         for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
@@ -2107,6 +2163,19 @@ impl DrawText {
         }
 
         self.finish_many_instances(cx, instances);
+    }
+
+    fn reserve_glyph_storage(
+        instances: &mut RecordingBuffer,
+        additional: usize,
+        storage: Option<&mut RecordingBuffer>,
+    ) {
+        if instances.is_empty() {
+            if let Some(storage) = storage.filter(|storage| storage.capacity() >= additional) {
+                if instances.swap_storage(storage) { instances.clear(); }
+            }
+        }
+        instances.reserve(additional);
     }
 
     pub fn draw_rasterized_glyph_abs(
@@ -3086,7 +3155,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         row: &LaidoutRow,
-        out_instances: &mut Vec<f32>,
+        out_instances: &mut RecordingBuffer,
     ) {
         for glyph in &row.glyphs {
             self.draw_glyph(
@@ -3151,7 +3220,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         use crate::text::geom::Point;
         let glyph_origin = Point::new(
@@ -3189,7 +3258,7 @@ impl DrawText {
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: crate::text::slug_atlas::SlugGlyphInfo,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         let bounds_in_lpxs = TextRect::new(
             Point::new(
@@ -3237,7 +3306,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) -> bool {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         let should_use_slug = cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs);
@@ -3277,7 +3346,7 @@ impl DrawText {
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: RasterizedGlyph,
-        output: &mut Vec<f32>,
+        output: &mut RecordingBuffer,
     ) {
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
@@ -3446,6 +3515,7 @@ pub struct FontFamily {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
     handle: ScriptHandle,
+    resource_path: String,
     id: String,
     asc: f32,
     desc: f32,
@@ -3478,9 +3548,12 @@ impl FontFamily {
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
-                let font_data = cx.get_resource_font_bytes(member.handle);
+                let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
 
                 if let Some(data) = font_data {
+                    if std::env::var_os("MAKEPAD_TRACE_FONT_LOAD").is_some() {
+                        log!("font load: member={} path={} id={:?} bytes={}", member.id, member.resource_path, font_id, data.len());
+                    }
                     if let Some(family) = member.lazy {
                         log!("lazy font family loaded: {:?} ({})", family, member.id);
                     }
@@ -3559,11 +3632,11 @@ impl FontFamily {
                         .lazy
                         .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
                 })
-                .map(|member| member.handle)
+                .map(|member| member.resource_path.as_str())
                 .collect::<Vec<_>>()
         };
-        for handle in handles {
-            cx.load_script_resource(handle);
+        for path in handles {
+            cx.load_script_resource_by_path(path);
         }
         {
             let fonts_ref = fonts.borrow();
@@ -3597,15 +3670,15 @@ impl FontFamily {
                             text,
                             has_missing_glyph,
                         )
-                        .then_some(member.handle)
+                        .then_some(member.resource_path.as_str())
                 })
                 .collect::<Vec<_>>()
         };
         if handles.is_empty() {
             return;
         }
-        for handle in handles {
-            cx.load_script_resource(handle);
+        for path in handles {
+            cx.load_script_resource_by_path(path);
         }
 
         self.update_font_definitions(cx, &mut fonts.borrow_mut());
@@ -3625,7 +3698,7 @@ fn font_member_weight(member: &FontMemberDef) -> Option<f32> {
 
 fn font_member_font_id(member: &FontMemberDef) -> FontId {
     let mut hasher = DefaultHasher::new();
-    member.handle.index().hash(&mut hasher);
+    member.resource_path.hash(&mut hasher);
     member.asc.to_bits().hash(&mut hasher);
     member.desc.to_bits().hash(&mut hasher);
     member.weight.to_bits().hash(&mut hasher);
@@ -3671,8 +3744,6 @@ impl ScriptHook for FontFamily {
             return false;
         };
 
-        // Use the object index as the unique id
-        self.id = LiveId(obj.index() as u64);
         self.members.clear();
         let selected_set = vm.cx().font_set().as_str().to_string();
         let map = vm.bx.heap.map_ref(obj);
@@ -3692,8 +3763,15 @@ impl ScriptHook for FontFamily {
             let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
             let member = FontMember::script_from_value(vm, kv.value);
             if let Some(ref handle_ref) = member.res {
+                let heap_key = vm.bx.heap.heap_key();
+                let Some(resource_path) = vm.cx().script_data.resources
+                    .path_for_handle(heap_key, handle_ref.as_handle()) else {
+                    error!("Font resource is not registered in its owning script heap");
+                    continue;
+                };
                 self.members.push(FontMemberDef {
                     handle: handle_ref.as_handle(),
+                    resource_path,
                     id: kv
                         .key
                         .as_id()
@@ -3710,6 +3788,17 @@ impl ScriptHook for FontFamily {
                 });
             }
         }
+
+        // Object and handle indices are local to a script heap. Font caches
+        // belong to Cx, so identify the complete ordered family by its actual
+        // resources and metrics. Identical families can safely share a cache
+        // across isolates, while different ones can never alias by index.
+        let mut hasher = DefaultHasher::new();
+        for member in &self.members {
+            font_member_font_id(member).hash(&mut hasher);
+            (member.lazy.map(|v| v as u32)).hash(&mut hasher);
+        }
+        self.id = LiveId(hasher.finish());
 
         // Don't eagerly register fonts here. Font registration is deferred
         // to ensure_fonts_loaded() which is called at draw time.

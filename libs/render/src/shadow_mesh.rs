@@ -20,7 +20,7 @@
 //! [`SHADOW_NORMAL_BIAS`].
 
 use makepad_draw::*;
-use makepad_game_sim::{Shape, Terrain};
+use makepad_scene::{Shape, Terrain};
 
 use crate::shadow::{BASE_SHADOW_ALPHA, MAX_SHADOW_DROP};
 use crate::sun::SunLight;

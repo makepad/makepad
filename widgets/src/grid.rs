@@ -463,6 +463,7 @@ pub struct Grid {
     #[live]
     event_order: EventOrder,
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[rust]

@@ -1,5 +1,6 @@
 #![allow(clippy::result_unit_err)]
 
+use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use {
     crate::{
         cx_2d::Cx2d,
@@ -38,6 +39,28 @@ impl DrawListExt for DrawList {
             }*/
             let uniforms_gen = cx.next_uniform_gen();
             cx.draw_lists[draw_list_id].set_uniform_view_transform(mat, uniforms_gen);
+            if cx.draw_lists[draw_list_id]
+                .draw_items
+                .child_inventory()
+                .is_some()
+                && cx.draw_lists[draw_list_id].draw_item_reorder.is_none()
+            {
+                let len = cx.draw_lists[draw_list_id]
+                    .draw_items
+                    .child_inventory()
+                    .unwrap()
+                    .len();
+                for index in 0..len {
+                    let child = cx.draw_lists[draw_list_id]
+                        .draw_items
+                        .child_inventory()
+                        .unwrap()[index];
+                    if !cx.draw_lists.is_id_freed(child) {
+                        set_view_transform_recur(child, cx, mat);
+                    }
+                }
+                return;
+            }
             let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             for order_index in 0..draw_order_len {
                 let Some(draw_item_id) =
@@ -132,6 +155,7 @@ impl DrawListExt for DrawList {
         if cx.cx.draw_lists[draw_list_id].redraw_id != cx.cx.redraw_id {
             panic!("calling end on a view that didnt get begin called this redraw cycle");
         }
+        cx.cx.draw_lists[draw_list_id].draw_items.finish_recording();
     }
 
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {
@@ -428,6 +452,45 @@ impl<'a> CxDraw<'a> {
         })
     }
 
+    /// Bind immutable worker instances without copying them into a draw vector.
+    /// Re-recording the same resource changes uniforms but does not upload it.
+    pub fn add_retained_instances(
+        &mut self,
+        draw_vars: &DrawVars,
+        resource: &makepad_platform::retained_instances::RetainedInstances,
+    ) -> Area {
+        self.add_retained_instances_count(draw_vars, resource, resource.count())
+    }
+
+    /// Preserve a retained draw slot while its LOD is inactive (count zero).
+    /// Reactivation never copies or reallocates the publication's GPU prefix.
+    pub fn add_retained_instances_count(
+        &mut self,
+        draw_vars: &DrawVars,
+        resource: &makepad_platform::retained_instances::RetainedInstances,
+        count: usize,
+    ) -> Area {
+        assert!(count <= resource.count());
+        let draw_list_id = self.get_current_draw_list_id().unwrap();
+        let Some(item) = self.new_draw_call(draw_vars) else {
+            return Area::Empty;
+        };
+        let call = item.kind.draw_call_mut().unwrap();
+        assert_eq!(call.total_instance_slots, resource.slots());
+        call.instance_dirty = item.retained_instance_id != resource.id();
+        item.retained_upload_range = resource.upload_since(item.retained_instance_id);
+        item.retained_instances = Some(resource.clone());
+        item.retained_instance_count = count;
+        InstanceArea {
+            draw_list_id,
+            draw_item_id: item.draw_item_id,
+            instance_count: count,
+            instance_offset: 0,
+            redraw_id: item.redraw_id,
+        }
+        .into()
+    }
+
     pub fn end_many_instances(&mut self, many_instances: ManyInstances) -> Area {
         let mut ia = many_instances.instance_area;
         let draw_list = &mut self.draw_lists[ia.draw_list_id];
@@ -438,6 +501,9 @@ impl<'a> CxDraw<'a> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset)
             / draw_call.total_instance_slots;
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         ia.into()
     }
 
@@ -471,6 +537,9 @@ impl<'a> CxDraw<'a> {
             .as_mut()
             .unwrap()
             .extend_from_slice(data);
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         ia.into()
     }
 }
@@ -494,10 +563,15 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset)
             / draw_call.total_instance_slots;
+        let area = if draw_item.instances.as_ref().unwrap().refused() {
+            Area::Empty
+        } else {
+            ia.into()
+        };
         if let Some(aligned) = many_instances.aligned {
-            self.align_list[aligned] = AlignEntry::Area(ia.into());
+            self.align_list[aligned] = AlignEntry::Area(area);
         }
-        ia.into()
+        area
     }
 
     pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
@@ -532,6 +606,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .as_mut()
             .unwrap()
             .extend_from_slice(data);
+        if draw_item.instances.as_ref().unwrap().refused() {
+            return Area::Empty;
+        }
         self.align_list.push(AlignEntry::Area(ia));
         ia
     }
@@ -561,7 +638,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 pub struct ManyInstances {
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
-    pub instances: Vec<f32>,
+    pub instances: RecordingBuffer,
 }
 
 #[derive(Clone)]

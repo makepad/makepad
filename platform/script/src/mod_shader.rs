@@ -780,7 +780,7 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
                 // The Rust backend has no monolithic module emitter here (the
-                // headless runtime owns that); struct defs plus the compiled
+                // gpusim runtime owns that); struct defs plus the compiled
                 // function bodies cover everything expression codegen produces.
                 let mut out = String::new();
                 output.create_struct_defs(vm, &mut out);

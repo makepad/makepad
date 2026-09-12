@@ -19,12 +19,6 @@ indextts = []
 metal-precompile = []
 
 [dependencies]
-# THE CUDA store (Whisper's CUDA backend). Must NOT be target-specific: cargo
-# drops target-cfg deps when this crate is a path dep of another standalone
-# `[workspace]`, and the `links = "makepad_ai_cuda"` handshake
-# (DEP_MAKEPAD_AI_CUDA_KERNELS, read in build.rs) only arrives for an
-# unconditional dependency. On macOS/iOS the crate compiles to empty stubs.
-makepad-ai-cuda = { path = "../../cuda" }
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ai-sfx = { path = "../sfx" }
@@ -53,6 +47,13 @@ required-features = ["kokoro"]
 name = "tts_test"
 path = "src/bin/tts_test.rs"
 required-features = ["kokoro"]
+
+# THE CUDA store (Whisper's CUDA backend, whisper/cuda/backend.rs): Linux/
+# Windows-only, so a macOS/iOS build never compiles it. The
+# `links = "makepad_ai_cuda"` handshake (DEP_MAKEPAD_AI_CUDA_KERNELS, read in
+# build.rs) arrives exactly on the targets that have the dependency.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../../cuda" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 makepad-objc-sys = { path = "../../../objc-sys", version = "1.0.0" }

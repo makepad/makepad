@@ -1,5 +1,5 @@
 use crate::pod::ScriptPodTy;
-use crate::shader::{SamplerAddress, SamplerFilter, ShaderIoKind, ShaderOutput, TextureType};
+use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
@@ -425,6 +425,7 @@ impl ShaderOutput {
         }
 
         writeln!(out, "    uint vid : SV_VertexID;").ok();
+        // Portable instance_index(); retained buffers bind their complete prefix.
         writeln!(out, "    uint iid : SV_InstanceID;").ok();
         writeln!(out, "}};").ok();
     }
@@ -488,7 +489,7 @@ impl ShaderOutput {
                         TextureType::Texture3dArray => "Texture3D", // HLSL doesn't support 3D array textures
                         TextureType::TextureCube => "TextureCube",
                         TextureType::TextureCubeArray => "TextureCubeArray",
-                        TextureType::TextureDepth => "Texture2D",
+                        TextureType::TextureDepth => "Texture2D<float>",
                         TextureType::TextureDepthArray => "Texture2DArray",
                         TextureType::TextureVideo => "Texture2D", // Video textures are standard Texture2D on HLSL
                     };
@@ -506,20 +507,16 @@ impl ShaderOutput {
         }
 
         for (idx, sampler) in self.samplers.iter().enumerate() {
-            let filter = match sampler.filter {
-                SamplerFilter::Nearest => "MIN_MAG_MIP_POINT",
-                SamplerFilter::Linear => "MIN_MAG_MIP_LINEAR",
-            };
-            let address = match sampler.address {
-                SamplerAddress::Repeat => "Wrap",
-                SamplerAddress::ClampToEdge => "Clamp",
-                SamplerAddress::ClampToZero => "Border",
-                SamplerAddress::MirroredRepeat => "Mirror",
-            };
             writeln!(
                 out,
-                "SamplerState _s{} {{ Filter = {}; AddressU = {}; AddressV = {}; AddressW = {}; }};",
-                idx, filter, address, address, address
+                "{} _s{} : register(s{});",
+                if sampler.compare {
+                    "SamplerComparisonState"
+                } else {
+                    "SamplerState"
+                },
+                idx,
+                idx
             )
             .ok();
         }

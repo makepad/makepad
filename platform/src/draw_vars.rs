@@ -23,7 +23,10 @@ use crate::makepad_script::{
 };
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
-pub const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
+// Combined bindings, not the fragment-stage limit. Full rigid PBR uses
+// 16 fragment textures plus one vertex-only morph texture with GI enabled.
+// WebGL2 guarantees 16 per stage and at least 32 combined units.
+pub const DRAW_CALL_TEXTURE_SLOTS: usize = 17;
 pub const DRAW_CALL_UNIFORM_BUFFER_SLOTS: usize = 2;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
@@ -223,7 +226,12 @@ impl DrawVars {
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
@@ -246,7 +254,9 @@ impl DrawVars {
 
                 if any_updated {
                     draw_call.instance_dirty = true;
-                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                    if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
                 }
             }
         }
@@ -266,7 +276,12 @@ impl DrawVars {
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
                 let obj_map = heap.map_ref(io_self);
                 let mut any_updated = false;
 
@@ -283,7 +298,9 @@ impl DrawVars {
 
                 if any_updated {
                     draw_call.mark_uniforms_dirty(uniforms_gen);
-                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                    if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
                     self.area.redraw(cx);
                 }
             }
@@ -296,7 +313,12 @@ impl DrawVars {
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
 
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
@@ -317,7 +339,9 @@ impl DrawVars {
                     }
                 }
                 draw_call.instance_dirty = true;
-                cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
             }
         }
     }
@@ -328,7 +352,12 @@ impl DrawVars {
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
 
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
@@ -344,7 +373,9 @@ impl DrawVars {
                     }
                 }
                 draw_call.instance_dirty = true;
-                cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
             }
         }
     }
@@ -458,6 +489,14 @@ impl DrawVars {
         }
     }
 
+    /// The dyn-uniform block range `(offset, slots)` of one uniform of this
+    /// shader, for callers that patch a retained draw call in place.
+    pub fn uniform_range(&self, cx: &Cx, uniform: LiveId) -> Option<(usize, usize)> {
+        let draw_shader_id = self.draw_shader_id?;
+        let sh = &cx.draw_shaders[draw_shader_id.index];
+        sh.mapping.dyn_uniforms.inputs.iter().find(|input| input.id == uniform).map(|input| (input.offset, input.slots))
+    }
+
     /// Sets a uniform value and also updates the draw call on the area if valid.
     /// This is used to update uniforms after drawing has completed.
     pub fn set_uniform_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
@@ -479,13 +518,20 @@ impl DrawVars {
                     let uniforms_gen = cx.next_uniform_gen();
                     let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                    // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
 
                     for i in 0..slots {
                         draw_call.dyn_uniforms[offset + i] = value[i];
                     }
                     draw_call.mark_uniforms_dirty(uniforms_gen);
-                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                    if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
                 }
             }
         }
@@ -656,7 +702,12 @@ impl DrawVars {
                     let slots = input.slots.min(value.len());
                     let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-                    let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                    // A stale area: the item its instance points at has since become
+                // a sub-list or a text run. Nothing to write into; the next
+                // draw re-emits the call with the values this `DrawVars` holds.
+                let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+                    return;
+                };
 
                     let stride = sh.mapping.instances.total_slots;
                     let all_instances = draw_item.instances.as_mut().unwrap();
@@ -685,7 +736,9 @@ impl DrawVars {
                     }
 
                     draw_call.instance_dirty = true;
-                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
+                    if let Some(pass_id) = draw_list.draw_pass_id {
+                        cx.passes[pass_id].paint_dirty = true;
+                    }
                 }
             }
         }

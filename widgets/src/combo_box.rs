@@ -61,7 +61,7 @@ use crate::{
     drop_down::PopupAnchorTransform,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, span_inboard, PlaceRequest, Placement, Side},
+    overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement, Side},
     scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
     text_input::{TextInput, TextInputAction},
     widget::*,
@@ -563,7 +563,7 @@ pub fn layout_combo_popup(
         pos: dvec2(margin, margin),
         size: dvec2((pass.x - margin * 2.0).max(40.0), pass.y - margin * 2.0),
     };
-    let placed = place(&PlaceRequest {
+    let placed = place_overlay(&PlaceRequest {
         anchor: trigger,
         size: dvec2(content_w.max(40.0), capped_h),
         bounds,

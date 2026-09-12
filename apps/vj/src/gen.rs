@@ -1335,10 +1335,18 @@ impl GenModel {
     /// The operator's own prompt-box text is untouched.
     pub fn blast(&mut self, now_ms: u64) -> Vec<GenCmd> {
         let keep = self.prompt.clone();
+        // BLAST fires a burst of CONTINUOUS_IN_FLIGHT runs at once. When the
+        // operator typed a prompt, every run in the burst uses THAT prompt —
+        // the model seeds each run itself, so the burst is variations on what
+        // was asked for, not random subjects. Only an EMPTY box falls back to
+        // a random "surprise me" prompt per fire.
+        let surprise = one_line(&self.prompt).is_empty();
         let mut seed = now_ms ^ (self.next_tag.wrapping_mul(0x9e37_79b9));
         let mut cmds = Vec::new();
         for _ in 0..CONTINUOUS_IN_FLIGHT {
-            self.prompt = blast_prompt(&mut seed);
+            if surprise {
+                self.prompt = blast_prompt(&mut seed);
+            }
             let fired = self.generate(now_ms);
             if fired.is_empty() {
                 break; // rows full / profile refused — stop honestly

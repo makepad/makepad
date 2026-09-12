@@ -12,6 +12,10 @@ pub struct Text {
 }
 
 impl Text {
+    pub(crate) fn from_display_lines(lines: Vec<String>) -> Self {
+        Self { lines: if lines.is_empty() { vec![String::new()] } else { lines } }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

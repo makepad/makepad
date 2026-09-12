@@ -24,6 +24,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use makepad_network::blocking_http::{request_to_writer_no_redirect, Limits, Request};
 
 pub const INDEX_URL: &str = "https://cef-builds.spotifycdn.com/index.json";
 pub const BASE_URL: &str = "https://cef-builds.spotifycdn.com";
@@ -405,20 +408,82 @@ fn say(msg: &str) {
     println!("cargo:warning=cef: {msg}");
 }
 
-fn http_get(url: &str) -> Result<ureq::Body, String> {
-    let response = ureq::get(url).call().map_err(|e| format!("cef: GET {url}: {e}"))?;
-    Ok(response.into_body())
+fn http_get<W: Write>(
+    url: &str,
+    max_body_bytes: usize,
+    report_progress: bool,
+    mut open_output: impl FnMut() -> Result<W, String>,
+) -> Result<W, String> {
+    let mut current = url.to_string();
+    for _ in 0..8 {
+        if !current.starts_with("https://") {
+            return Err(format!("cef: HTTPS required for {current}"));
+        }
+        let mut request = Request::get(&current).limits(Limits {
+            max_body_bytes,
+            total_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        if report_progress {
+            let last = AtomicU64::new(0);
+            request = request.on_body_progress(move |loaded, total| {
+                let previous = last.load(Ordering::Relaxed);
+                if loaded.saturating_sub(previous) >= 50_000_000 {
+                    last.store(loaded, Ordering::Relaxed);
+                    say(&format!("{:.0} of {:.0} MB", loaded as f64 / 1e6, total.unwrap_or(max_body_bytes as u64) as f64 / 1e6));
+                }
+            });
+        }
+        // A redirect can carry a body. Start a fresh output for each hop,
+        // so neither its HTML nor a partial download contaminates the file.
+        let mut output = open_output()?;
+        let response = request_to_writer_no_redirect(request, &mut output)
+            .map_err(|e| format!("cef: GET {current}: {e}"))?;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            let location = response.header("location")
+                .ok_or_else(|| format!("cef: redirect from {current} has no Location"))?;
+            current = redirect_url(&current, location)?;
+            continue;
+        }
+        if response.status != 200 {
+            return Err(format!("cef: GET {current}: HTTP {}", response.status));
+        }
+        output.flush().map_err(|e| format!("cef: writing {url}: {e}"))?;
+        return Ok(output);
+    }
+    Err(format!("cef: too many redirects from {url}"))
+}
+
+fn redirect_url(current: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    if location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    if location.starts_with("//") {
+        return Ok(format!("https:{location}"));
+    }
+    if location.is_empty() || location.contains(':') {
+        return Err(format!("cef: invalid HTTPS redirect from {current}"));
+    }
+    let authority_end = current[8..].find('/').map(|i| i + 8).unwrap_or(current.len());
+    let origin = &current[..authority_end];
+    if location.starts_with('/') {
+        Ok(format!("{origin}{location}"))
+    } else {
+        let base = current[authority_end..].rsplit_once('/')
+            .map(|(base, _)| base).unwrap_or("");
+        Ok(format!("{origin}{base}/{location}"))
+    }
 }
 
 pub fn fetch_index() -> Result<String, String> {
-    let mut body = http_get(INDEX_URL)?;
-    let text = body.read_to_string().map_err(|e| format!("cef: reading {INDEX_URL}: {e}"))?;
-    Ok(text)
+    let bytes = http_get(INDEX_URL, 32 * 1024 * 1024, false, || Ok(Vec::new()))?;
+    String::from_utf8(bytes).map_err(|e| format!("cef: reading {INDEX_URL}: {e}"))
 }
 
 fn sha1_hex(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("cef: open {}: {e}", path.display()))?;
-    let mut hasher = sha1_smol::Sha1::new();
+    let mut hasher = makepad_network::digest::Sha1::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("cef: read {}: {e}", path.display()))?;
@@ -427,7 +492,7 @@ fn sha1_hex(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.digest().to_string())
+    Ok(hasher.finalise().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Download `archive` into `prebuilt_dir` (to a `.part` file, renamed when
@@ -450,24 +515,14 @@ fn download(archive: &Archive, prebuilt_dir: &Path) -> Result<PathBuf, String> {
         archive.size as f64 / 1e6
     ));
     let url = archive.url();
-    let mut body = http_get(&url)?;
-    let mut reader = body.as_reader();
-    let mut out = fs::File::create(&part).map_err(|e| format!("cef: create {}: {e}", part.display()))?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut done: u64 = 0;
-    let mut next_report: u64 = 50_000_000;
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("cef: download {url}: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n]).map_err(|e| format!("cef: write {}: {e}", part.display()))?;
-        done += n as u64;
-        if done >= next_report {
-            say(&format!("{:.0} of {:.0} MB", done as f64 / 1e6, archive.size as f64 / 1e6));
-            next_report += 50_000_000;
-        }
-    }
+    let max_bytes = usize::try_from(if archive.size > 0 { archive.size } else { 2 * 1024 * 1024 * 1024 })
+        .map_err(|_| "cef: archive exceeds this host's addressable size".to_string())?;
+    let out = http_get(&url, max_bytes, true, || {
+        fs::File::create(&part).map(std::io::BufWriter::new)
+            .map_err(|e| format!("cef: create {}: {e}", part.display()))
+    })?;
+    let done = out.get_ref().metadata()
+        .map_err(|e| format!("cef: stat {}: {e}", part.display()))?.len();
     drop(out);
     if archive.size > 0 && done != archive.size {
         return Err(format!("cef: {} is {done} bytes; the index says {}", archive.name, archive.size));

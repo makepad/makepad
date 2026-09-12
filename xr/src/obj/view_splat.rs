@@ -632,19 +632,20 @@ impl ViewSplat {
         decoded && self.gpu_scene.is_some()
     }
 
-    fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
+    fn resource_metadata_by_handle(cx: &mut Cx, heap_key: usize, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources
             .iter()
-            .find(|resource| resource.has_handle(handle))?;
+            .find(|resource| resource.has_handle(heap_key, handle))?;
         Some((PathBuf::from(&resource.abs_path), resource.is_error()))
     }
 
     fn resolve_resource(cx: &mut Cx, handle_ref: &ScriptHandleRef) -> ResourceResolve {
         let handle = handle_ref.as_handle();
+        let heap_key = handle_ref.heap_key();
 
-        if let Some(data) = cx.get_resource(handle) {
-            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+        if let Some(data) = cx.get_resource(heap_key, handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, heap_key, handle)
                 .map(|metadata| metadata.0)
                 .unwrap_or_else(|| PathBuf::from("resource"));
             return ResourceResolve::Ready {
@@ -654,10 +655,10 @@ impl ViewSplat {
             };
         }
 
-        cx.load_script_resource(handle);
+        cx.load_script_resource(heap_key, handle);
 
-        if let Some(data) = cx.get_resource(handle) {
-            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+        if let Some(data) = cx.get_resource(heap_key, handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, heap_key, handle)
                 .map(|metadata| metadata.0)
                 .unwrap_or_else(|| PathBuf::from("resource"));
             return ResourceResolve::Ready {
@@ -667,7 +668,7 @@ impl ViewSplat {
             };
         }
 
-        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, handle) {
+        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, heap_key, handle) {
             if is_error {
                 return ResourceResolve::Error { handle };
             }

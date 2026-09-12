@@ -1,10 +1,10 @@
+use crate::gauss_stack::{GaussStack, gauss_render_texture_y_flip_for_os};
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
 use crate::{
     desktop_button::DesktopButtonWidgetExt,
     gauss_view::{
         begin_window_gauss_frame, finish_window_gauss_frame, window_wants_gauss_capture,
-        GaussBlurSnapshot, GAUSS_VIEW_LEVELS,
     },
     label::*,
     makepad_derive_widget::*,
@@ -21,6 +21,7 @@ script_mod! {
     use mod.widgets.View
     use mod.widgets.SolidView
     use mod.widgets.Label
+    use mod.widgets.AppIcon
     use mod.widgets.DesktopButton
     use mod.widgets.DesktopButtonType
     use mod.widgets.KeyboardView
@@ -111,9 +112,12 @@ script_mod! {
         ..mod.draw.DrawQuad
         scene_texture: texture_2d(float)
         source_y_flip: uniform(0.0)
+        source_offset: uniform(vec2(0.0, 0.0))
+        source_scale: uniform(vec2(1.0, 1.0))
 
         pixel: fn() {
-            let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
+            let p = self.source_offset + self.pos * self.source_scale
+            let uv = vec2(p.x, mix(p.y, 1.0 - p.y, self.source_y_flip))
             return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
     }
@@ -152,8 +156,9 @@ script_mod! {
             // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
             height: Fit
             caption_label := View {
-                width: Fill height: Fill
+                width: Fill height: Fill flow: Right
                 align: Center
+                caption_icon := AppIcon{width: 16 height: 16 margin: Inset{right: 6}}
                 label := Label {text: "Makepad"}
             }
             voice_wave := VoiceWave {}
@@ -265,33 +270,8 @@ script_mod! {
         tweaker := Tweaker {}
 
         cursor: MouseCursor.Default
-        mouse_cursor_size: vec2(20 20)
-        draw_cursor +: {
-            border_size: uniform(1.5)
-            color: uniform(theme.color_cursor)
-            border_color: uniform(theme.color_cursor_border)
-
-            get_color: fn() {
-                return self.color
-            }
-
-            get_border_color: fn() {
-                return self.border_color
-            }
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, 1.0)
-                sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y * 0.5)
-                sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
-                sdf.close_path()
-                sdf.fill_keep(self.get_color())
-                if self.border_size > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_size)
-                }
-                return sdf.result
-            }
-        }
+        mouse_cursor_size: vec2(24 24)
+        draw_cursor: mod.widgets.DrawMouseCursor {}
         window +: {
             inner_size: vec2(1024 768)
         }
@@ -312,6 +292,10 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    #[rust]
+    caption_has_content: Option<bool>,
+    #[rust]
+    hosted_caption_content: Option<bool>,
     /// Whether this widget should create its native surface during initial
     /// construction. The stable window id and widget tree still exist when
     /// false, so the owner can explicitly create the surface later.
@@ -334,6 +318,10 @@ pub struct Window {
     /// window rather than whichever one presents first.
     #[live]
     screen_cap: ScreenCap,
+    #[rust]
+    managed_close_pending: bool,
+    #[rust]
+    managed_quit_pending: bool,
     #[live]
     window: ScriptWindowHandle,
     #[live]
@@ -430,6 +418,7 @@ impl ScriptHook for Window {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        self.caption_has_content = None;
         if !self.create_on_start && !self.initial_create_policy_applied {
             apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
             self.initial_create_policy_applied = true;
@@ -450,14 +439,6 @@ pub enum WindowAction {
     #[default]
     None,
 }
-
-const GAUSS_STACK_LEVELS: usize = GAUSS_VIEW_LEVELS;
-const GAUSS_SMOOTH_LEVEL_START: usize = 3;
-/// Deep mips are re-homed (tent-upsampled back) to this level's resolution before the glass
-/// samples them. Without this, blur level 5/6 samples a 1/64-res texture stretched over the
-/// window — the texel lattice and clamp-to-edge bands are clearly visible. With the floor at
-/// 1/8 res, no on-screen sample ever comes from a texture coarser than 8 device px per texel.
-const GAUSS_FLOOR_LEVEL: usize = 2;
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
@@ -503,282 +484,6 @@ fn supersample_factor() -> f64 {
             .unwrap_or(1.0)
             .clamp(1.0, 4.0)
     })
-}
-
-struct GaussSmoothStage {
-    pass: DrawPass,
-    draw_list: DrawList2d,
-    texture: Texture,
-}
-
-struct GaussStackLevel {
-    pass: DrawPass,
-    draw_list: DrawList2d,
-    texture: Texture,
-    // One tent-upsample per resolution doubling from this level's own size back up to the
-    // floor size; the last stage's texture is what the snapshot exposes. Empty for levels
-    // at or above the floor resolution.
-    smooth_stages: Vec<GaussSmoothStage>,
-}
-
-struct GaussStack {
-    scene_pass: DrawPass,
-    scene_draw_list: DrawList2d,
-    scene_texture: Texture,
-    _scene_depth_texture: Texture,
-    levels: Vec<GaussStackLevel>,
-}
-
-fn gauss_fast() -> bool {
-    thread_local! { static ON: bool = std::env::var_os("MAKEPAD_GAUSS_FAST").is_some(); }
-    ON.with(|v| *v)
-}
-
-fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
-    match os_type {
-        OsType::Android(_) => 1.0,
-        _ => 0.0,
-    }
-}
-
-impl GaussStack {
-    fn new(cx: &mut Cx) -> Self {
-        let scene_pass = DrawPass::new_with_name(cx, "gauss_scene");
-        let scene_draw_list = DrawList2d::new(cx);
-        let scene_texture = Self::new_render_texture(cx);
-        let scene_depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        scene_pass.set_color_texture(
-            cx,
-            &scene_texture,
-            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
-        );
-        scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        scene_pass.set_live_with_parent(cx, true);
-
-        let mut levels = Vec::with_capacity(GAUSS_STACK_LEVELS);
-        for index in 0..GAUSS_STACK_LEVELS {
-            let pass = DrawPass::new_with_name(cx, &format!("gauss_mip_{index}"));
-            pass.set_live_with_parent(cx, true);
-            let draw_list = DrawList2d::new(cx);
-            let texture = Self::new_render_texture(cx);
-            pass.set_color_texture(
-                cx,
-                &texture,
-                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
-            );
-            let stage_count = if index >= GAUSS_SMOOTH_LEVEL_START {
-                index - GAUSS_FLOOR_LEVEL
-            } else {
-                0
-            };
-            let mut smooth_stages = Vec::with_capacity(stage_count);
-            for stage in 0..stage_count {
-                let smooth_pass =
-                    DrawPass::new_with_name(cx, &format!("gauss_smooth_mip_{index}_{stage}"));
-                smooth_pass.set_live_with_parent(cx, true);
-                let smooth_draw_list = DrawList2d::new(cx);
-                let smooth_texture = Self::new_render_texture(cx);
-                smooth_pass.set_color_texture(
-                    cx,
-                    &smooth_texture,
-                    DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
-                );
-                smooth_stages.push(GaussSmoothStage {
-                    pass: smooth_pass,
-                    draw_list: smooth_draw_list,
-                    texture: smooth_texture,
-                });
-            }
-            levels.push(GaussStackLevel {
-                pass,
-                draw_list,
-                texture,
-                smooth_stages,
-            });
-        }
-
-        Self {
-            scene_pass,
-            scene_draw_list,
-            scene_texture,
-            _scene_depth_texture: scene_depth_texture,
-            levels,
-        }
-    }
-
-    fn new_render_texture(cx: &mut Cx) -> Texture {
-        Texture::new_with_format(
-            cx,
-            TextureFormat::RenderBGRAu8 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        )
-    }
-
-    fn begin_scene(&mut self, cx: &mut Cx2d, clear: Vec4f) {
-        // The window paints its background by CLEARING to it, so nothing in
-        // any draw list puts that colour down. A scene cleared to transparent
-        // black therefore had black wherever the page showed, and a glass
-        // surface over plain page refracted black rather than page. Clearing
-        // the scene to the same colour the window clears to makes the capture
-        // look like the window - which is the whole premise of the sample.
-        //
-        // Only for an opaque window. The scene is composited over the window
-        // premultiplied, so a translucent clear would be laid down twice; a
-        // window that shows the desktop through itself keeps the transparent
-        // scene it always had.
-        let clear = if clear.w >= 1.0 { clear } else { vec4(0.0, 0.0, 0.0, 0.0) };
-        self.scene_pass.set_color_texture(
-            cx,
-            &self.scene_texture,
-            DrawPassClearColor::ClearWith(clear),
-        );
-        cx.make_child_pass(&self.scene_pass);
-        cx.begin_pass(&self.scene_pass, None);
-        self.scene_draw_list.begin_always(cx);
-        let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, Layout::flow_down());
-    }
-
-    fn end_scene(&mut self, cx: &mut Cx2d) {
-        cx.end_pass_sized_turtle();
-        self.scene_draw_list.end(cx);
-        cx.end_pass(&self.scene_pass);
-    }
-
-    fn snapshot(&self, root_size: Vec2d, source_y_flip: f32, dpi_factor: f64) -> GaussBlurSnapshot {
-        GaussBlurSnapshot {
-            scene_texture: self.scene_texture.clone(),
-            mip_textures: self
-                .levels
-                .iter()
-                .map(|level| {
-                    if let Some(stage) = level.smooth_stages.last() {
-                        stage.texture.clone()
-                    } else {
-                        level.texture.clone()
-                    }
-                })
-                .collect(),
-            source_size: root_size,
-            source_y_flip,
-            dpi_factor,
-        }
-    }
-
-    fn level_size(root_size: Vec2d, dpi: f64, index: usize) -> Vec2d {
-        let min_logical_size = 1.0 / dpi.max(1.0);
-        let scale = (1usize << (index + 1)) as f64;
-        dvec2(
-            (root_size.x / scale).max(min_logical_size),
-            (root_size.y / scale).max(min_logical_size),
-        )
-    }
-
-    fn draw_mip_chain(
-        &mut self,
-        cx: &mut Cx2d,
-        downsample: &mut DrawGaussDownsample,
-        root_size: Vec2d,
-    ) {
-        let dpi = cx.current_dpi_factor();
-        let mut source_texture = self.scene_texture.clone();
-
-        for (index, level) in self.levels.iter_mut().enumerate() {
-            // MAKEPAD_GAUSS_FAST=1: probe rig — stop the chain early to
-            // measure how much of a frame the pass COUNT itself costs.
-            if gauss_fast() && index > 3 {
-                break;
-            }
-            let level_size = Self::level_size(root_size, dpi, index);
-
-            level.pass.set_size(cx, level_size);
-            cx.make_child_pass(&level.pass);
-            cx.begin_pass(&level.pass, Some(dpi));
-            level.draw_list.begin_always(cx);
-
-            let pass_size = cx.current_pass_size();
-            cx.begin_root_turtle(pass_size, Layout::flow_overlay());
-            downsample.draw_vars.set_texture(0, &source_texture);
-            downsample.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(0.0, 0.0),
-                    size: pass_size,
-                },
-            );
-            cx.end_pass_sized_turtle();
-
-            level.draw_list.end(cx);
-            cx.end_pass(&level.pass);
-            source_texture = level.texture.clone();
-        }
-    }
-
-    // Re-home each deep mip at the floor resolution: starting from the level's own raw mip,
-    // tent-upsample one resolution doubling at a time until the floor size is reached. The
-    // progressive doubling matters — a single stretch from 1/64 straight to 1/8 would keep the
-    // source's texel lattice; each doubling convolves another tent on top and gaussianizes it.
-    fn draw_high_blur_chain(
-        &mut self,
-        cx: &mut Cx2d,
-        upsample: &mut DrawGaussUpsample,
-        root_size: Vec2d,
-    ) {
-        if gauss_fast() {
-            return;
-        }
-        let dpi = cx.current_dpi_factor();
-        for index in GAUSS_SMOOTH_LEVEL_START..self.levels.len() {
-            let level = &mut self.levels[index];
-            let mut source_texture = level.texture.clone();
-            for (stage_index, stage) in level.smooth_stages.iter_mut().enumerate() {
-                let stage_size = Self::level_size(root_size, dpi, index - 1 - stage_index);
-                stage.pass.set_size(cx, stage_size);
-                cx.make_child_pass(&stage.pass);
-                cx.begin_pass(&stage.pass, Some(dpi));
-                stage.draw_list.begin_always(cx);
-
-                let pass_size = cx.current_pass_size();
-                cx.begin_root_turtle(pass_size, Layout::flow_overlay());
-                upsample.draw_vars.set_texture(0, &source_texture);
-                upsample.draw_abs(
-                    cx,
-                    Rect {
-                        pos: dvec2(0.0, 0.0),
-                        size: pass_size,
-                    },
-                );
-                cx.end_pass_sized_turtle();
-
-                stage.draw_list.end(cx);
-                cx.end_pass(&stage.pass);
-                source_texture = stage.texture.clone();
-            }
-        }
-    }
-
-    fn draw_scene(&mut self, cx: &mut Cx2d, scene: &mut DrawGaussScene, root_size: Vec2d) {
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
-        scene
-            .draw_vars
-            .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
-        scene.draw_vars.set_texture(0, &self.scene_texture);
-        scene.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(0.0, 0.0),
-                size: root_size,
-            },
-        );
-    }
 }
 
 /// Body target for the exploded z-layer view.
@@ -1016,11 +721,52 @@ impl SsaaStack {
 }
 
 impl Window {
+    fn caption_contains_app_content(&mut self, cx: &mut Cx) -> bool {
+        if let Some(content) = self.caption_has_content {
+            return content;
+        }
+        // Preserve the actual app widgets and their identities/handlers. A
+        // stock title-only caption does not need a second row inside a WM tile.
+        let label_content = self.view(cx, ids!(caption_label)).borrow().is_some_and(|view| {
+            view.children.iter().any(|(id, _)| !matches!(*id, id!(caption_icon) | id!(label)))
+        });
+        let bar_content = self.view(cx, ids!(caption_bar)).borrow().is_some_and(|view| {
+            view.children.iter().any(|(id, _)| !matches!(*id,
+                id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen)))
+        });
+        let content = label_content || bar_content;
+        self.caption_has_content = Some(content);
+        content
+    }
+
+    fn close_after_recording(&mut self, cx: &mut Cx) {
+        if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
+            self.managed_close_pending = true;
+            self.screen_cap.stop(cx);
+            self.view.redraw(cx);
+        } else {
+            self.window.handle.close(cx);
+        }
+    }
+
+    /// A compositor can own the recording shortcut without forwarding it to
+    /// embedded applications (which each have their own Window recorder).
+    pub fn toggle_recording(&mut self, cx: &mut Cx) {
+        self.screen_cap.set_window_id(self.window.window_id().id());
+        self.screen_cap.toggle(cx);
+        self.redraw(cx);
+    }
+
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
-        // Hosted inside studio: the studio chrome owns the window, never
-        // show our own caption bar (a DSL hot-reload re-runs this sync).
+        let has_content = self.caption_contains_app_content(cx);
         if cx.in_makepad_studio() {
-            self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+            // The WM allows app-owned caption controls as a toolbar inside
+            // its tile. Other hosts retain their existing caption policy.
+            let enabled = *self.hosted_caption_content.get_or_insert_with(|| {
+                std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1")
+            });
+            self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && enabled && has_content);
+            self.view(cx, ids!(windows_buttons)).set_visible(cx, false);
             return;
         }
         match cx.os_type() {
@@ -1030,22 +776,19 @@ impl Window {
                 self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
             }
             OsType::Macos => {
-                // In macOS fullscreen, the OS provides its own auto-hiding
-                // toolbar with traffic-light buttons, so hide our caption bar.
+                // Fullscreen supplies native traffic lights. Keep app controls
+                // as content, but omit a redundant title-only caption.
                 let is_fullscreen = self.window.handle.is_fullscreen(cx);
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && !is_fullscreen);
+                    .set_visible(cx, self.show_caption_bar && (!is_fullscreen || has_content));
             }
             OsType::LinuxWindow(params) => {
-                // Only show the caption bar if we're drawing our own window chrome
-                // (e.g. Wayland without server-side decorations). On X11 the WM
-                // provides native decorations, so we hide the in-app caption bar.
+                // With server-side decorations, app caption controls become
+                // a content toolbar; only the native window buttons disappear.
                 let custom_chrome = params.custom_window_chrome;
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && custom_chrome);
-                if custom_chrome {
-                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
-                }
+                    .set_visible(cx, self.show_caption_bar && (custom_chrome || has_content));
+                self.view(cx, ids!(windows_buttons)).set_visible(cx, custom_chrome);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -1077,8 +820,13 @@ impl Window {
     /// When the window is too narrow, the padding gracefully reduces to 0,
     /// transitioning to a left-aligned title.
     fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        // App toolbars own their layout, including padding supplied by a theme.
+        if self.caption_contains_app_content(cx) {
+            return;
+        }
         let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
-        let buttons_width = self.view(cx, ids!(windows_buttons)).area().rect(cx).size.x;
+        let buttons = self.view(cx, ids!(windows_buttons));
+        let buttons_width = if buttons.visible() { buttons.area().rect(cx).size.x } else { 0.0 };
 
         if bar_width <= 0.0 {
             return; // No area info yet (first frame)
@@ -1128,6 +876,10 @@ impl Window {
             }
             label.set_text(cx, &title);
         }
+        let name = if self.window.app_id.is_empty() {
+            cx.windows[self.window.handle.window_id()].create_app_id.clone()
+        } else { self.window.app_id.clone() };
+        if let Some(mut icon) = self.widget(cx, ids!(caption_label.caption_icon)).borrow_mut::<crate::app_icon::AppIcon>() { icon.set_name(cx, &name); }
         self.last_synced_title = Some(title);
     }
 
@@ -1201,6 +953,8 @@ impl Window {
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
         }
+        self.screen_cap.set_window_id(self.window.window_id().id());
+        self.screen_cap.start_managed_once(cx);
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {
@@ -1263,20 +1017,39 @@ impl Window {
         Redrawing::yes()
     }
 
+    /// Route the display cursor before a WM's menus or drag handlers consume
+    /// pointer events. Updating this overlay does not relayout the desktop.
+    pub fn handle_direct_mouse_cursor(&mut self, cx: &mut Cx, event: &Event) {
+        if !matches!(cx.os_type(), OsType::LinuxDirect) { return; }
+        if let Event::MouseMove(ev) = event {
+            if ev.window_id != self.window.window_id() || ev.abs == self.last_mouse_pos { return; }
+            self.last_mouse_pos = ev.abs;
+            let rect = Rect {
+                pos: ev.abs - crate::cursor::hotspot(cx.mouse_cursor(), self.mouse_cursor_size),
+                size: self.mouse_cursor_size,
+            };
+            if self.draw_cursor.draw_vars.area.is_valid(cx) {
+                self.draw_cursor.update_abs(cx, rect);
+            } else {
+                self.main_draw_list.redraw(cx);
+            }
+            trace!("input.cursor", "direct cursor position=({}, {}) shape={:?}", ev.abs.x, ev.abs.y, cx.mouse_cursor());
+        }
+    }
+
     pub fn end(&mut self, cx: &mut Cx2d) {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         //self.debug_view.draw(cx);
 
-        // lets draw our cursor
+        // Only the direct display owner draws a cursor, above every child.
         if let OsType::LinuxDirect = cx.os_type() {
+            let shape = cx.mouse_cursor();
+            self.draw_cursor.draw_vars.set_dyn_instance(cx, id!(shape), &[crate::cursor::shape_value(shape)]);
             self.cursor_draw_list.begin_overlay_last(cx);
-            self.draw_cursor.draw_abs(
-                cx,
-                Rect {
-                    pos: self.last_mouse_pos,
-                    size: self.mouse_cursor_size,
-                },
-            );
+            self.draw_cursor.draw_abs(cx, Rect {
+                pos: self.last_mouse_pos - crate::cursor::hotspot(shape, self.mouse_cursor_size),
+                size: self.mouse_cursor_size,
+            });
             self.cursor_draw_list.end(cx);
         }
 
@@ -1499,7 +1272,7 @@ impl WindowRef {
     /// button does — the app sees the ordinary window-close path.
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.window.handle.close(cx);
+            inner.close_after_recording(cx);
         }
     }
     /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
@@ -1563,6 +1336,22 @@ impl WindowRef {
 
 impl Widget for Window {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.handle_direct_mouse_cursor(cx, event);
+        crate::desktop_style::handle_event(cx, event);
+        if let Event::Custom(json) = event {
+            if let Some(keyboard) = makepad_platform::ime::HostedKeyboard::parse(json) {
+                if keyboard.dismiss { cx.text_ime_was_dismissed(); }
+                let time = cx.seconds_since_app_start();
+                let event = if keyboard.height > 0.0 {
+                    VirtualKeyboardEvent::WillShow { time, height: keyboard.height, duration: 0.22, ease: makepad_platform::event::Ease::OutCubic }
+                } else {
+                    VirtualKeyboardEvent::WillHide { time, height: 0.0, duration: 0.22, ease: makepad_platform::event::Ease::OutCubic }
+                };
+                self.view.handle_event(cx, &Event::VirtualKeyboard(event), scope);
+                self.view.redraw(cx);
+                return;
+            }
+        }
         if let Event::Draw(e) = event {
             let mut cx_draw = CxDraw::new(cx, e);
             let cx = &mut Cx2d::new(&mut cx_draw);
@@ -1590,6 +1379,26 @@ impl Widget for Window {
         // works while a text input holds the caret, and is told which window
         // it is recording so its capture sink follows THIS window.
         self.screen_cap.set_window_id(self.window.window_id().id());
+        if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
+            match event {
+                Event::QuitRequested(request) => {
+                    // If the app already owns asynchronous shutdown, leave
+                    // the final quit to it. Otherwise this Window resumes it
+                    // after every managed window's encoder has finished.
+                    self.managed_quit_pending |= !request.handled.get();
+                    request.handle();
+                    self.screen_cap.stop(cx);
+                }
+                Event::WindowCloseRequested(request)
+                    if request.window_id == self.window.window_id() && request.accept_close.get() => {
+                    request.accept_close.set(false);
+                    self.managed_close_pending = true;
+                    log!("[makepad-remote] user closed window {}; finalizing Studio recording", request.window_id.id());
+                    self.screen_cap.stop(cx);
+                }
+                _ => {}
+            }
+        }
         self.screen_cap.handle_event(cx, event, scope);
         if self.screen_cap.take_redraw_request() {
             // The REC dot appearing or disappearing is a change to the draw
@@ -1601,6 +1410,14 @@ impl Widget for Window {
             // an empty file. A pass repaint re-presents the existing draw lists
             // at frame rate without re-running the widget tree.
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
+        }
+        if self.managed_quit_pending && !ScreenCap::managed_recordings_pending() && !self.screen_cap.is_busy() {
+            self.managed_quit_pending = false;
+            self.managed_close_pending = false;
+            cx.quit();
+        } else if self.managed_close_pending && !self.screen_cap.is_busy() {
+            self.managed_close_pending = false;
+            self.window.handle.close(cx);
         }
         if self.demo_next_frame.is_event(event).is_some() {
             if self.demo {
@@ -1618,6 +1435,27 @@ impl Widget for Window {
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    // Preserve physical cursor position when effective DPI changes before the next mouse event.
+                    if matches!(cx.os_type(), OsType::LinuxDirect) {
+                        let old_dpi = ev.old_geom.dpi_factor;
+                        let new_dpi = ev.new_geom.dpi_factor;
+                        if old_dpi.is_finite()
+                            && new_dpi.is_finite()
+                            && old_dpi > 0.0
+                            && new_dpi > 0.0
+                            && old_dpi != new_dpi
+                        {
+                            self.last_mouse_pos *= old_dpi / new_dpi;
+                        }
+                        // Native pointer bounds follow the chosen mirror-source; the cached
+                        // cursor position must stay visible when the new source is smaller.
+                        let size = ev.new_geom.inner_size;
+                        if size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0 {
+                            self.last_mouse_pos.x = self.last_mouse_pos.x.clamp(0.0, size.x);
+                            self.last_mouse_pos.y = self.last_mouse_pos.y.clamp(0.0, size.y);
+                        }
+                        self.main_draw_list.redraw(cx);
+                    }
                     // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
                     // geometry cache so it is recomputed on the next hit-test.
                     self.drag_query_cache = None;
@@ -1625,7 +1463,8 @@ impl Widget for Window {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+                                    let content = self.caption_contains_app_content(cx);
+                                    self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && content);
                                 } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
                                     self.view(cx, ids!(caption_bar))
                                         .set_visible(cx, self.show_caption_bar);
@@ -1713,11 +1552,14 @@ impl Widget for Window {
                             // Caption there hands the press to the OS as a
                             // window drag and the panel never sees it — its
                             // filter field could not be focused at all.
+                            let content_toolbar = cx.in_makepad_studio()
+                                || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
+                                || (matches!(cx.os_type(), OsType::Macos) && self.window.handle.is_fullscreen(cx));
                             if crate::tweaker::panel_owns_pointer(dq.abs) {
                                 dq.response.set(WindowDragQueryResponse::Client);
-                            } else if buttons_rect.size != Vec2d::default()
+                            } else if content_toolbar || (buttons_rect.size != Vec2d::default()
                                 && buttons_rect.contains(dq.abs)
-                            {
+                            ) {
                                 dq.response.set(WindowDragQueryResponse::Client);
                             } else {
                                 dq.response.set(WindowDragQueryResponse::Caption);
@@ -1796,7 +1638,10 @@ impl Widget for Window {
                 .desktop_button(cx, ids!(windows_buttons.close))
                 .clicked(&actions)
             {
-                self.window.handle.close(cx);
+                if self.screen_cap.is_managed() {
+                    log!("[makepad-remote] user closed window {}; finalizing Studio recording", self.window.window_id().id());
+                }
+                self.close_after_recording(cx);
             }
         }
 
@@ -1804,19 +1649,7 @@ impl Widget for Window {
         //    CxDraw::reset_icon_atlas(cx);
         //}
 
-        if let Event::MouseMove(ev) = event {
-            if let OsType::LinuxDirect = cx.os_type() {
-                // ok move our mouse cursor
-                self.last_mouse_pos = ev.abs;
-                self.draw_cursor.update_abs(
-                    cx,
-                    Rect {
-                        pos: ev.abs,
-                        size: self.mouse_cursor_size,
-                    },
-                )
-            }
-        }
+
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

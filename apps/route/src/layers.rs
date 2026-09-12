@@ -26,6 +26,9 @@ pub struct LayerState {
     /// Tilt-shift blur over the map when tilted (gauss pyramid). On by default —
     /// it only becomes visible when the camera tilts (driving view).
     pub tilt_shift: bool,
+    /// The map's @cam readout — the command that recreates the view — a
+    /// dev switch, off unless the person turns it on.
+    pub debug_cam: bool,
     /// 0 light, 1 night, 2 circuit.
     pub theme: u32,
     /// Set by tools; the app applies + clears it after the tool run.
@@ -43,6 +46,7 @@ impl Default for LayerState {
             wind: false,
             terrain: false,
             tilt_shift: true,
+            debug_cam: false,
             theme: 0,
             dirty: false,
             wind_worker_started: false,
@@ -76,6 +80,10 @@ impl LayerState {
             "tiltshift" | "tilt_shift" | "tilt-shift" => {
                 self.tilt_shift = on;
                 Ok("tiltshift")
+            }
+            "readout" | "camreadout" | "debug_cam" => {
+                self.debug_cam = on;
+                Ok("readout")
             }
             _ => {
                 if let Some(layer_name) = self.overlays.set_named(&key, on) {
@@ -116,6 +124,9 @@ impl LayerState {
         if self.tilt_shift {
             on.push("tiltshift");
         }
+        if self.debug_cam {
+            on.push("readout");
+        }
         let theme = ["light", "night", "circuit"][self.theme.min(2) as usize];
         if on.is_empty() {
             format!("no layers active, theme {theme}")
@@ -125,8 +136,10 @@ impl LayerState {
     }
 }
 
-/// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 on disk.
-pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>) {
+/// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 under
+/// `cache_dir`. Ends when the instance that started it is gone (its
+/// receiver dropped).
+pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>, cache_dir: PathBuf) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {
             name: Some("route-wind".into()),
@@ -134,18 +147,21 @@ pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>)
         },
         move || {
         use makepad_geodata::wind::{WindSync, WIND_EAST, WIND_NORTH, WIND_SOUTH, WIND_WEST};
-        let sync = WindSync::new("local/overlays/wind");
+        let sync = WindSync::new(cache_dir);
         let pacing = CancellationToken::new();
         loop {
             let field = sync.sync().ok().flatten().or_else(|| sync.cached());
             if let Some(field) = field {
-                let _ = sender.send(WindUpdate {
+                let sent = sender.send(WindUpdate {
                     nx: field.nx,
                     ny: field.ny,
                     u: field.u,
                     v: field.v,
                     bbox: (WIND_WEST, WIND_SOUTH, WIND_EAST, WIND_NORTH),
                 });
+                if sent.is_err() {
+                    return;
+                }
             }
             let _ = pacing.wait_until(Cx::monotonic_now() + 300.0);
         }
@@ -153,5 +169,22 @@ pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>)
     match spawned {
         Ok(handle) => handle.detach(),
         Err(error) => log!("wind worker unavailable: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_camera_readout_is_a_named_switch_off_by_default() {
+        let mut layers = LayerState::default();
+        assert!(!layers.debug_cam);
+        assert!(!layers.summary().contains("readout"));
+        assert_eq!(layers.set_layer("readout", true), Ok("readout"));
+        assert!(layers.debug_cam && layers.dirty);
+        assert!(layers.summary().contains("readout"));
+        assert_eq!(layers.set_layer("camreadout", false), Ok("readout"));
+        assert!(!layers.debug_cam);
     }
 }

@@ -32,7 +32,7 @@
 //! autocast path without process-global precision state.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download,
+    gpu_add, gpu_attention_packed, gpu_attention_packed_flash2_d64, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download,
     gpu_gated_residual, gpu_gather_cols, gpu_group_norm_planar, gpu_layer_norm_mul_add,
     gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
@@ -652,11 +652,15 @@ fn decoder_vit_forward_group(
             .map_err(DiffusionError::model)?;
         let k = gpu_rope_half(&k, H3_VAE_HEADS, H3_VAE_ROT_HALF, &rope_cos, &rope_sin)
             .map_err(DiffusionError::model)?;
-        // head_dim 64 -> the composite (cublas + softmax) attention path.
-        // Per clip on row slices (see the module comment above): every clip
-        // sees the exact (S, 2048) call the sequential decoder made.
+        // Clips remain independent: concatenating their attention sequences
+        // would mix unrelated spatial tiles. Keep composite for numerical A/B.
+        let attention = if std::env::var("H3_VAE_ATTENTION").as_deref() == Ok("composite") {
+            gpu_attention_packed
+        } else {
+            gpu_attention_packed_flash2_d64
+        };
         let attn = if batch == 1 {
-            gpu_attention_packed(&q, &k, &v, H3_VAE_HEADS, scale)
+            attention(&q, &k, &v, H3_VAE_HEADS, scale)
                 .map_err(DiffusionError::model)?
         } else {
             let mut parts = Vec::with_capacity(batch);
@@ -668,7 +672,7 @@ fn decoder_vit_forward_group(
                 let v_clip =
                     gpu_slice_rows(&v, clip * seq, seq).map_err(DiffusionError::model)?;
                 parts.push(
-                    gpu_attention_packed(&q_clip, &k_clip, &v_clip, H3_VAE_HEADS, scale)
+                    attention(&q_clip, &k_clip, &v_clip, H3_VAE_HEADS, scale)
                         .map_err(DiffusionError::model)?,
                 );
             }

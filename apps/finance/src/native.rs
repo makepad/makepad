@@ -7,6 +7,7 @@ use crate::runtime::{ImportState, Runtime, Start};
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::*;
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 
 const PICK_STATEMENT: LiveId = live_id!(finance_pick_statement);
 
@@ -16,16 +17,15 @@ pub(crate) struct Backend {
 }
 
 impl Runtime for Backend {
-    fn start(&mut self) -> Start {
+    fn start(&mut self, db_path: &Path) -> Start {
         let today = date::today();
-        let path = std::path::PathBuf::from("local/finance/finance.db");
-        let mut db = match Db::open(&path) {
+        let mut db = match Db::open(db_path) {
             Ok(db) => db,
             Err(error) => {
                 return Start {
                     today,
                     ledger: Ledger::default(),
-                    status: format!("cannot open {}: {error}", path.display()),
+                    status: format!("cannot open {}: {error}", db_path.display()),
                 };
             }
         };
@@ -52,7 +52,7 @@ impl Runtime for Backend {
                 }
             }
             Ok(false) => {}
-            Err(error) => status = format!("cannot read {}: {error}", path.display()),
+            Err(error) => status = format!("cannot read {}: {error}", db_path.display()),
         }
         let ledger = match db.load() {
             Ok(ledger) => ledger,
@@ -253,6 +253,29 @@ mod tests {
         path.push(format!("finance-native-{name}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    /// A first run — a file that does not exist yet, under a directory
+    /// that does not exist yet — comes up with the generated household,
+    /// on a desktop and on a phone alike.
+    #[test]
+    fn an_empty_database_is_seeded_on_the_first_start() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("finance-first-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("finance").join("finance.db");
+        let mut backend = Backend::default();
+        let start = backend.start(&path);
+        assert!(path.is_file(), "the database file is created under a fresh directory");
+        assert!(start.status.starts_with("Demo file created"), "status: {}", start.status);
+        assert!(start.ledger.accounts.len() >= 4, "seeded accounts: {}", start.ledger.accounts.len());
+        assert!(start.ledger.transactions.len() > 100, "seeded transactions: {}", start.ledger.transactions.len());
+        // A second start finds the file populated and seeds nothing.
+        let mut again = Backend::default();
+        let second = again.start(&path);
+        assert!(second.status.is_empty(), "status: {}", second.status);
+        assert_eq!(second.ledger.accounts.len(), start.ledger.accounts.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assert_references_resolve(ledger: &Ledger) {

@@ -21,7 +21,7 @@
 //! exactly as they would be without the wrapper (the `Tip{}` idiom). The
 //! one child named `content` is lifted OUT of the view's child list after
 //! every apply and drawn on the popover's own overlay draw list instead,
-//! sized by its own layout, placed by [`crate::overlay_place::place`] against
+//! sized by its own layout, placed by [`crate::overlay_place::place_overlay`] against
 //! the anchor's final rect (captured on the event side, where positions are
 //! honest), and shifted into place as one unit. It is put back for the
 //! duration of each apply so a live edit updates the same instance in place
@@ -46,7 +46,7 @@ use crate::{
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{claim_escape, place, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{claim_escape, place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
     view::*,
     widget::*,
     widget_tree::CxWidgetExt,
@@ -1009,7 +1009,7 @@ impl Widget for Popover {
                 }
             };
             let gap = self.offset + if self.arrow { self.arrow_size } else { 0.0 };
-            let placed = place(&PlaceRequest {
+            let placed = place_overlay(&PlaceRequest {
                 anchor,
                 size: panel.size,
                 bounds: Rect {

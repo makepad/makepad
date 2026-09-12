@@ -178,7 +178,7 @@ pub fn span_inboard(start: f64, extent: f64, lo: f64, room: f64) -> f64 {
 /// Decide where a popup of `req.size` hangs off `req.anchor`: flip when it
 /// does not fit, shift it inboard, shrink it to the room. See the module
 /// doc for the rule.
-pub fn place(req: &PlaceRequest) -> Placed {
+pub fn place_overlay(req: &PlaceRequest) -> Placed {
     let anchor = req.anchor;
     let bounds = req.bounds;
     let gap = req.gap;
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn fits_below_and_stays_there() {
-        let p = place(&base());
+        let p = place_overlay(&base());
         assert_eq!(p.rect, r(200.0, 224.0, 60.0, 40.0));
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.arrow_at, dvec2(250.0, 224.0));
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn fits_exactly_and_still_stays() {
         // Room below is exactly the popup's height: 600 - (556 + 4) = 40.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 536.0, 100.0, 20.0),
             ..base()
         });
@@ -350,7 +350,7 @@ mod tests {
             (Placement::LEFT_END, r(136.0, 180.0, 60.0, 40.0), dvec2(196.0, 210.0)),
         ];
         for (placement, rect, arrow) in table {
-            let p = place(&PlaceRequest {
+            let p = place_overlay(&PlaceRequest {
                 placement,
                 ..base()
             });
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn flips_up_when_below_is_short_and_above_fits() {
         // Room below: 600 - (590 + 4) = 6; room above: 566.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 570.0, 100.0, 20.0),
             ..base()
         });
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn flips_left_when_right_is_short_and_left_fits() {
         // Room right: 800 - (780 + 4) = 16; room left: 696.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(700.0, 200.0, 80.0, 20.0),
             placement: Placement::RIGHT_START,
             ..base()
@@ -393,7 +393,7 @@ mod tests {
         // above 30 - 4 = 26. A 60-tall popup fits neither; below wins on
         // room and the popup is cut to 46 with its top edge still on the
         // anchor's bottom plus the gap.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 30.0, 100.0, 20.0),
             size: dvec2(60.0, 60.0),
             bounds: r(0.0, 0.0, 800.0, 100.0),
@@ -404,7 +404,7 @@ mod tests {
         // Anchor at y=46: room below 100 - 70 = 30, room above 42; the same
         // 60-tall popup flips and is cut to 42, its bottom edge on the
         // anchor's top minus the gap.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 46.0, 100.0, 20.0),
             size: dvec2(60.0, 60.0),
             bounds: r(0.0, 0.0, 800.0, 100.0),
@@ -420,14 +420,14 @@ mod tests {
         // Room below is pass - y - h - gap and room above is y - gap; they
         // tie when y = (pass - h) / 2. In a 100-tall window with a 20-tall
         // anchor that is y = 40: both rooms are 36, short of the 40 asked.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 40.0, 100.0, 20.0),
             bounds: r(0.0, 0.0, 800.0, 100.0),
             ..base()
         });
         assert_eq!(p.side, Side::Bottom, "{p:?}");
         assert_eq!(p.rect.size.y, 36.0);
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 40.0, 100.0, 20.0),
             bounds: r(0.0, 0.0, 800.0, 100.0),
             placement: Placement::TOP_START,
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn the_requested_side_wins_when_it_is_roomier_even_though_nothing_fits() {
         // Room below 376, room above 196, popup 1000 tall: no flip, 376 tall.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             size: dvec2(60.0, 1000.0),
             ..base()
         });
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn taller_than_the_window_flips_when_above_is_roomier() {
         // Anchor at y=500: room below 76, room above 496.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 500.0, 100.0, 20.0),
             size: dvec2(60.0, 1000.0),
             ..base()
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn no_room_on_either_side_gives_a_zero_height_not_a_negative_one() {
         // Anchor fills the whole window: both rooms are negative.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(0.0, 0.0, 800.0, 600.0),
             ..base()
         });
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn shifts_inboard_on_the_right_edge() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 200.0, 100.0, 20.0),
             ..base()
         });
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn shifts_inboard_on_the_left_edge() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(-30.0, 200.0, 100.0, 20.0),
             ..base()
         });
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn the_low_edge_wins_when_wider_than_the_bounds() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             bounds: r(10.0, 0.0, 50.0, 600.0),
             ..base()
         });
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn end_alignment_shifts_inboard_too() {
         // End puts the popup's right edge on the anchor's, at 870: past 800.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 200.0, 100.0, 20.0),
             placement: Placement::BOTTOM_END,
             ..base()
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn horizontal_sides_shift_along_y() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 590.0, 100.0, 20.0),
             placement: Placement::RIGHT_START,
             ..base()
@@ -529,13 +529,13 @@ mod tests {
     fn arrow_at_follows_the_anchor_centre_and_clamps_to_the_popup_edge() {
         // Shifted 30 to the left: the anchor's centre (820) is off the popup,
         // so the arrow sits at the popup's right corner.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 200.0, 100.0, 20.0),
             ..base()
         });
         assert_eq!(p.arrow_at, dvec2(800.0, 224.0));
         // A narrow anchor under a wide popup: the arrow is inside the edge.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(400.0, 200.0, 10.0, 20.0),
             size: dvec2(300.0, 40.0),
             placement: Placement::BOTTOM_CENTER,
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn an_unbounded_request_never_flips_shifts_or_shrinks() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             size: dvec2(60.0, 1000.0),
             bounds: Rect::default(),
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_negative_bounds_extent_is_unbounded_too() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             bounds: r(6.0, 6.0, -12.0, -12.0),
             ..base()
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn each_axis_is_bounded_on_its_own() {
         // Bounded in x only: the popup shifts inboard but does not flip.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             bounds: r(0.0, 0.0, 800.0, 0.0),
             ..base()
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.rect, r(740.0, 604.0, 60.0, 40.0));
         // Bounded in y only: it flips but keeps its x.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             bounds: r(0.0, 0.0, 0.0, 600.0),
             ..base()
@@ -592,13 +592,13 @@ mod tests {
     #[test]
     fn bounds_need_not_start_at_the_origin() {
         // A 6-point inset on every edge, like DropToggles keeps.
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(760.0, 200.0, 100.0, 20.0),
             bounds: r(6.0, 6.0, 788.0, 588.0),
             ..base()
         });
         assert_eq!(p.rect, r(734.0, 224.0, 60.0, 40.0));
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(-40.0, 200.0, 100.0, 20.0),
             bounds: r(6.0, 6.0, 788.0, 588.0),
             ..base()
@@ -610,18 +610,18 @@ mod tests {
 
     #[test]
     fn match_anchor_width_grows_to_the_anchor_and_never_shrinks() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             match_anchor_width: true,
             ..base()
         });
         assert_eq!(p.rect.size.x, 100.0);
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             size: dvec2(150.0, 40.0),
             match_anchor_width: true,
             ..base()
         });
         assert_eq!(p.rect.size.x, 150.0);
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             size: dvec2(0.0, 40.0),
             match_anchor_width: true,
             ..base()
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_matched_width_still_shrinks_to_the_bounds() {
-        let p = place(&PlaceRequest {
+        let p = place_overlay(&PlaceRequest {
             anchor: r(0.0, 200.0, 1000.0, 20.0),
             match_anchor_width: true,
             ..base()

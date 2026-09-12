@@ -11,7 +11,7 @@
 //!   is `<local-root>/server-id` so we never attach a random LAN peer,
 //! - `VJ_ASSET_TOKEN=mpat_…` — bearer token; then
 //!   `VJ_ASSET_ADMIN_TOKEN_FILE`, then that same root's `admin-token`,
-//!   then the legacy `~/.makepad-vj/asset-server.token`,
+//!   then `asset-server.token` beside the VJ's own data,
 //! - `VJ_ASSET_CACHE=<dir>` — the root for EVERYTHING the VJ owns, not
 //!   only the caches: marks, found loops, settings, the last-open surface
 //!   and the token all sit under it. Default is the checkout's
@@ -67,9 +67,9 @@ fn read_trimmed(path: &Path) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// A local Asset Server already running under asset-ui / ai-content.
+/// The shared Asset Server (or an explicit VJ_ASSET_ROOT).
 /// Token + listen come from the same catalog root so we never pair a
-/// leftover `~/.makepad-vj` token with a newer server.
+/// leftover app token with a newer server.
 #[cfg(not(target_arch = "wasm32"))]
 struct LocalAssetDb {
     endpoints: Option<ApiEndpoints>,
@@ -78,31 +78,19 @@ struct LocalAssetDb {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn attach_local_asset_db(home: &Path) -> Option<LocalAssetDb> {
-    // Checkout-local Asset UI first; leftover $HOME trees are a fallback
-    // for checkouts that never moved.
-    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/asset-ui/asset-server");
-    let mut roots = vec![checkout];
-    for leaf in [".makepad-asset-ai", ".makepad-ai-content"] {
-        roots.push(home.join(leaf).join("asset-server"));
+fn attach_local_asset_db() -> Option<LocalAssetDb> {
+    let root = std::env::var("VJ_ASSET_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| makepad_asset_client::paths::store_root());
+    let token = read_trimmed(&root.join("admin-token"));
+    let server_id = read_trimmed(&root.join("server-id")).and_then(|t| from_hex16(&t));
+    let endpoints = read_trimmed(&root.join("listen"))
+        .and_then(|t| parse_server_spec(t.lines().next().unwrap_or("")));
+    if token.is_none() && endpoints.is_none() && server_id.is_none() {
+        None
+    } else {
+        Some(LocalAssetDb { endpoints, server_id, token })
     }
-    for root in roots {
-        let token = read_trimmed(&root.join("admin-token"));
-        let server_id = read_trimmed(&root.join("server-id")).and_then(|t| from_hex16(&t));
-        let endpoints = read_trimmed(&root.join("listen"))
-            .and_then(|t| parse_server_spec(t.lines().next().unwrap_or("")));
-        if token.is_none() && endpoints.is_none() && server_id.is_none() {
-            continue;
-        }
-        if token.is_some() || endpoints.is_some() {
-            return Some(LocalAssetDb {
-                endpoints,
-                server_id,
-                token,
-            });
-        }
-    }
-    None
 }
 
 /// Where the VJ keeps everything it owns: caches, marks, settings, tokens.
@@ -131,11 +119,8 @@ pub fn data_root_from(chosen: Option<&str>) -> PathBuf {
 /// The VJ's session config from environment conventions.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn session_config_from_env() -> SessionConfig {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
     let cache_parent = data_root();
-    let local = attach_local_asset_db(&home);
+    let local = attach_local_asset_db();
 
     let mut config = SessionConfig::new(cache_parent.clone());
     // The catalog runtime carries EVERY small request the grids make:
