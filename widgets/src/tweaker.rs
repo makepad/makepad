@@ -3382,10 +3382,13 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
                         }
                         continue;
                     }
-                    // The live value already answered for this key as one
-                    // whole -- `cell: null` after it was cleared -- so the
-                    // source's fields under it are what WAS, not what is.
-                    if out.iter().any(|(existing, _, _)| *existing == name) {
+                    // The live value answered for this key with nothing --
+                    // `cell: null` after it was cleared -- so the source's
+                    // fields under it are what WAS, not what is. A live
+                    // object that dumped whole still gets its declared
+                    // inputs read out of the source (a draw layer's
+                    // `color`, `border_size`), which only live there.
+                    if out.iter().any(|(existing, text, _)| *existing == name && text == "null") {
                         continue;
                     }
                     let mut sub_keys = Vec::new();
