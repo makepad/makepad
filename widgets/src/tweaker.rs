@@ -3941,7 +3941,6 @@ enum StructKind {
     Vec4,
     Inset,
     Metrics,
-    SizeField,
     /// Recognized as structured but with no editor yet (a big nested
     /// struct like a full text_style): shown collapsed, never dumped.
     NoEditor,
@@ -4790,11 +4789,6 @@ fn parse_struct(value: &str) -> (StructKind, Vec<f64>) {
                     struct_num(v, "line_scale").unwrap_or(1.0),
                 ],
             );
-        }
-        if v.contains("min:") && v.contains("max:") {
-            // A Size: Fill carries a weight, Fit does not (a fixed number
-            // is a plain Num row, never a dump).
-            return (StructKind::SizeField, vec![if v.contains("weight:") { 1.0 } else { 0.0 }]);
         }
         return (StructKind::NoEditor, Vec::new());
     }
@@ -6813,8 +6807,6 @@ struct RowBinding {
     comp_vals: Vec<f64>,
     /// The uids of the component number fields, in component order.
     comp_uids: Vec<u64>,
-    /// The uids of a SizeField's Fill/Fit buttons ([fill, fit]).
-    mode_uids: Vec<u64>,
     /// Field uids of this row's top-section copy: (uid, is_swatch).
     alt_uids: Vec<(u64, bool)>,
     /// A shader-constant row: an annotated literal inside a draw layer's
@@ -8173,14 +8165,6 @@ impl Tweaker {
                     m1 := FabValueInput { width: 44 height: 18 }
                     m2 := FabValueInput { width: 44 height: 18 }
                 }
-                let SizeFieldRowT = View {
-                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                    sf_fill := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fill" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    sf_num := FabValueInput { width: 56 height: 18 }
-                }
                 let NoEditorRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
@@ -8324,7 +8308,6 @@ impl Tweaker {
                             VecRow := VecRowT {}
                             InsetRow := InsetRowT {}
                             MetricsRow := MetricsRowT {}
-                            SizeFieldRow := SizeFieldRowT {}
                             NoEditorRow := NoEditorRowT {}
                         }
                         }
@@ -8573,7 +8556,6 @@ impl Tweaker {
                         VecRow := VecRowT {}
                         InsetRow := InsetRowT {}
                         MetricsRow := MetricsRowT {}
-                        SizeFieldRow := SizeFieldRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
                         app_grip := View {
@@ -9791,7 +9773,6 @@ impl Tweaker {
                 struct_kind: StructKind::None,
                 comp_vals: Vec::new(),
                 comp_uids: Vec::new(),
-                mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
                 const_ref: None,
                 theme_match: None,
@@ -9900,7 +9881,6 @@ impl Tweaker {
                 struct_kind,
                 comp_vals,
                 comp_uids: Vec::new(),
-                mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
                 const_ref: None,
                 theme_match: None,
@@ -10000,7 +9980,6 @@ impl Tweaker {
                         struct_kind: StructKind::None,
                         comp_vals: Vec::new(),
                         comp_uids: Vec::new(),
-                        mode_uids: Vec::new(),
                         alt_uids: Vec::new(),
                         const_ref: Some(ConstRef { layer: layer.clone(), name, initial }),
                         theme_match: None,
@@ -11141,7 +11120,6 @@ impl Tweaker {
             // draw registers its fields, so the sets start empty per frame.
             for row in &mut self.rows {
                 row.comp_uids.clear();
-                row.mode_uids.clear();
                 row.alt_uids.clear();
             }
             while let Some(entry_id) = list.next_visible_item(cx) {
@@ -11170,7 +11148,6 @@ impl Tweaker {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
                         StructKind::Inset => live_id!(InsetRow),
                         StructKind::Metrics => live_id!(MetricsRow),
-                        StructKind::SizeField => live_id!(SizeFieldRow),
                         StructKind::NoEditor => live_id!(NoEditorRow),
                         StructKind::None => match self.rows[index].kind {
                             RowKind::Num => live_id!(NumRow),
@@ -11945,16 +11922,6 @@ impl Tweaker {
                                         }
                                     }
                                 }
-                                StructKind::SizeField => {
-                                    self.rows[index]
-                                        .mode_uids
-                                        .push(item.child(live_id!(sf_fill)).widget_uid().0);
-                                    self.rows[index]
-                                        .mode_uids
-                                        .push(item.child(live_id!(sf_fit)).widget_uid().0);
-                                    let f = item.child(live_id!(sf_num));
-                                    self.rows[index].comp_uids.push(f.widget_uid().0);
-                                }
                                 StructKind::NoEditor | StructKind::None => {}
                             }
                         } else {
@@ -12568,7 +12535,6 @@ impl Tweaker {
                 let key = ["descender", "line_gap", "line_scale"].get(comp)?;
                 Some(format!("{prop}.{key}: {}", fmt_f64(v)))
             }
-            StructKind::SizeField => Some(format!("{prop}: {}", fmt_f64(v))),
             StructKind::NoEditor | StructKind::None => None,
         }
     }
@@ -13351,20 +13317,6 @@ impl Tweaker {
                     }
                     FabValueInputAction::Ended(_) => edits.push(Edit::HoldOff),
                     _ => {}
-                }
-                continue;
-            }
-            // A SizeField's Fill / Fit button.
-            if let Some((index, is_fill)) = self.rows.iter().enumerate().find_map(|(i, b)| {
-                b.mode_uids
-                    .iter()
-                    .position(|u| *u == action_uid)
-                    .map(|p| (i, p % 2 == 0))
-            }) {
-                self.doc_row = Some(index);
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    let word = if is_fill { "Fill" } else { "Fit" };
-                    edits.push(Edit::Apply(format!("{}: {}", self.rows[index].prop, word)));
                 }
                 continue;
             }
