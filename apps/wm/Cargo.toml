@@ -8,6 +8,13 @@
 # swapchain (IOSurface / DXGI handle / DMA-BUF) with its child and forwards
 # input over the studio protocol.
 #
+# In-process mode (apps/wm-all, iOS and the web): the same desk hosts app
+# crates linked in as MODULES (libs/app_module), one splash isolate each,
+# drawn into the desk's own texture. This crate is a LIBRARY for that: the
+# `wm` binary here is the desktop build (src/main.rs), and an all-in-one
+# project links `makepad-wm` plus its app crates and sets the `WmBuild`
+# (src/build.rs). No app crate is a dependency of wm itself.
+#
 # Session mode (later, Linux only): the same layout/chrome/protocol with a
 # Wayland compositor display backend instead of a Makepad window. The
 # layout tree, keybindings, theming and client management are kept free of
@@ -18,6 +25,10 @@ name = "makepad-wm"
 version = "0.1.0"
 edition = "2021"
 default-run = "wm"
+
+[lib]
+name = "makepad_wm"
+path = "src/lib.rs"
 
 [[bin]]
 name = "wm"
@@ -31,23 +42,8 @@ makepad-wm-api = { path = "../../libs/wm_api" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
-# In-process hosting (aicontrol §3): the module contract, the palette applied
-# into each instance's isolate, and the modules this build links.
+# In-process hosting (aicontrol §3): the module contract and the palette
+# applied into each instance's isolate. Which modules a build links is the
+# binary's say (src/build.rs), never a feature of this crate.
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
-makepad-sheets = { path = "../sheets", default-features = false, optional = true }
-makepad-photos = { path = "../photos", default-features = false, optional = true }
-# The assistant as a module, seated in the pane in-process: the web build's
-# only chat, a desktop option. Without the engine feature: no model runtime,
-# NoModel and the tool console (the child process keeps the real models).
-makepad-aichat = { path = "../aichat", default-features = false, optional = true }
-
-[features]
-default = ["app-sheets", "app-photos", "app-aichat"]
-# Sheets linked in as a module (hosting is still Process unless switched).
-app-sheets = ["dep:makepad-sheets"]
-# Photos (the picture wall) linked in as a module, the same way.
-app-photos = ["dep:makepad-photos"]
-# The aichat module linked in (the pane seats it in-process where there are
-# no processes, or when `aichat` is switched to module hosting).
-app-aichat = ["dep:makepad-aichat"]

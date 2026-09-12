@@ -121,6 +121,13 @@ fn curated() -> Vec<AppDef> {
         AppDef::app("photos", "Photos", "makepad-photos", "apps/photos", "photos", OrFocus),
         AppDef::app("clock", "Clock", "makepad-clock", "apps/clock", "clock", OrFocus),
         AppDef::app("weather", "Weather", "makepad-weather", "apps/weather", "weather", OrFocus),
+        // The ledger: accounts, imports and charts over its own database.
+        AppDef::app("finance", "Finance", "makepad-finance", "apps/finance", "finance", OrFocus),
+        AppDef::app("mail", "Mail", "makepad-mail", "apps/mail", "mail", OrFocus),
+        AppDef::app("notes", "Notes", "makepad-notes", "apps/notes", "notes", OrFocus),
+        AppDef::app("calendar", "Calendar", "makepad-calendar", "apps/calendar", "calendar", OrFocus),
+        AppDef::app("reminders", "Reminders", "makepad-reminders", "apps/reminders", "reminders", OrFocus),
+        AppDef::app("calculator", "Calculator", "makepad-calculator", "apps/calculator", "calculator", OrFocus),
         // Sewing patterns from a body measurement: camera, body model, PDF/SVG.
         AppDef::app("fabric", "Fabric", "makepad-fabric", "apps/fabric", "makepad-fabric", OrFocus),
         AppDef::app(
@@ -420,8 +427,10 @@ pub struct WarmPool {
 }
 
 impl Default for WarmPool {
+    /// Before the build is read: the platform's capability alone. The
+    /// startup replaces it with `from_env(App::processes())`.
     fn default() -> Self {
-        Self::from_env()
+        Self::from_env(host::processes_available())
     }
 }
 
@@ -436,9 +445,10 @@ pub fn warm_enabled(no_warm: Option<&str>) -> bool {
 }
 
 impl WarmPool {
-    pub fn from_env() -> Self {
-        // A build without processes has nothing to keep warm.
-        Self::new(host::processes_available() && warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
+    /// `processes` is the host's answer (`App::processes`): a build without
+    /// processes has nothing to keep warm.
+    pub fn from_env(processes: bool) -> Self {
+        Self::new(processes && warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
     }
 
     pub fn new(enabled: bool) -> Self {
@@ -601,6 +611,9 @@ pub struct ClientSlot {
     /// Registry id of the app this client runs.
     pub app: String,
     pub title: String,
+    /// The app's own background (a module's `theme.color_bg_app`): what
+    /// the host clears the app's texture to, as the app's own window would.
+    pub ground: Option<makepad_widgets::Vec4f>,
     pub child: Option<Child>,
     task_pool: Option<TaskPool>,
     pub sender: Option<Sender<Vec<u8>>>,
@@ -659,6 +672,7 @@ impl ClientSlot {
             id,
             app: app.to_string(),
             title: title.to_string(),
+            ground: None,
             child: None,
             task_pool: None,
             sender: None,
@@ -1011,6 +1025,7 @@ pub fn spawn_client(
     }
     Ok(ClientSlot {
         id,
+        ground: None,
         app: app.id.to_string(),
         title: String::new(),
         child: Some(child),
@@ -1135,6 +1150,12 @@ mod tests {
                 "Photos",
                 "Clock",
                 "Weather",
+                "Finance",
+                "Mail",
+                "Notes",
+                "Calendar",
+                "Reminders",
+                "Calculator",
                 "Fabric",
                 "Score",
                 "Video Player",

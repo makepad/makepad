@@ -5,12 +5,17 @@
 //! The launch table (`clients::registry()`: package, directory, binary,
 //! launch policy — everything a PROCESS needs) stays where it is; this is
 //! the overlay keyed by the same ids: the linked `AppModule`, and the
-//! hosting each app gets. Desktop default is Process (decision 5): a
-//! linked module is still launched as a process unless
-//! `~/.makepad/wm/apps.splash` says otherwise (a settings file, never an
-//! environment variable) or a dev run passes `--module <id>`. The uber
-//! builds ignore the switch: everything is a module there.
+//! hosting each app gets. The linked modules come from the BUILD
+//! (`build.rs`): the desktop `wm` binary links none, the all-in-one links
+//! its app crates. Desktop default is Process (decision 5): a linked
+//! module is still launched as a process unless `~/.makepad/wm/apps.splash`
+//! says otherwise (a settings file, never an environment variable) or a
+//! dev run passes `--module <id>`. A build without processes — the web,
+//! iOS, or a desktop all-in-one with `modules_only` — ignores the switch:
+//! everything is a module there.
 
+use crate::build::WmBuild;
+use crate::clients::AppDef;
 use makepad_app_module::AppModule;
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,37 +26,62 @@ pub enum Hosting {
     Module,
 }
 
+/// What a menu may offer to launch: the linked modules, and — where this
+/// build hosts processes — every registry app this checkout can run.
+/// Handed to the shell surfaces (the launcher, the dock, the phone home
+/// page) so a build without processes never lists an app it cannot start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launchable {
+    pub linked: Vec<&'static str>,
+    pub processes: bool,
+}
+
+impl Default for Launchable {
+    /// The desktop before its build is read: processes where the platform
+    /// has them, nothing linked.
+    fn default() -> Self {
+        Launchable { linked: Vec::new(), processes: crate::host::processes_available() }
+    }
+}
+
+impl Launchable {
+    pub fn allows(&self, app: &AppDef) -> bool {
+        self.linked.contains(&app.id.as_str()) || (self.processes && app.is_available())
+    }
+}
+
 pub struct AppRegistry {
     modules: Vec<&'static dyn AppModule>,
     overrides: HashMap<String, Hosting>,
+    /// This build hosts processes (the platform can, and the build wants to).
+    processes: bool,
+    /// This build links the assistant's widget families (`WmBuild::assistant`).
+    assistant: bool,
 }
 
 impl Default for AppRegistry {
     fn default() -> Self {
-        AppRegistry { modules: linked_modules(), overrides: HashMap::new() }
+        AppRegistry {
+            modules: Vec::new(),
+            overrides: HashMap::new(),
+            processes: crate::host::processes_available(),
+            assistant: false,
+        }
     }
 }
 
-/// A linked module by id, without a registry: what the launcher asks.
-pub fn is_linked(id: &str) -> bool {
-    linked_modules().iter().any(|m| m.id() == id)
-}
-
-/// The modules this build links, one entry per `app-*` feature.
-fn linked_modules() -> Vec<&'static dyn AppModule> {
-    let mut out: Vec<&'static dyn AppModule> = Vec::new();
-    #[cfg(feature = "app-sheets")]
-    out.push(&makepad_sheets::SHEETS_MODULE);
-    #[cfg(feature = "app-photos")]
-    out.push(&makepad_photos::PHOTOS_MODULE);
-    out
-}
-
 impl AppRegistry {
-    /// The registry with the person's overrides: the settings file first,
-    /// then the command line's `--module <id>` flags on top.
-    pub fn load(settings: &Path, args: &[String]) -> Self {
-        let mut registry = Self::default();
+    /// The registry for a build, with the person's overrides: the settings
+    /// file first, then the command line's `--module <id>` flags on top.
+    /// `processes` is the host's answer (`App::processes`): the platform's
+    /// capability and the build's `modules_only` together.
+    pub fn load(settings: &Path, args: &[String], build: &WmBuild, processes: bool) -> Self {
+        let mut registry = AppRegistry {
+            modules: build.modules.clone(),
+            overrides: HashMap::new(),
+            processes,
+            assistant: build.assistant.is_some(),
+        };
         if let Ok(text) = std::fs::read_to_string(settings) {
             for (id, hosting) in Self::parse_overrides(&text) {
                 registry.overrides.insert(id, hosting);
@@ -76,12 +106,13 @@ impl AppRegistry {
         self.modules.iter().copied().find(|m| m.id() == id)
     }
 
-    /// How a launch of `id` is hosted. On a desktop: Module only when a
+    /// How a launch of `id` is hosted. With processes: Module only when a
     /// module is linked AND the person (or the dev flag) asked for it. In a
-    /// build without processes (the web): every linked module is a module,
-    /// and everything else is simply not there.
+    /// build without processes (the web, iOS, a modules-only desktop
+    /// build): every linked module is a module, and everything else is
+    /// simply not there.
     pub fn hosting(&self, id: &str) -> Hosting {
-        if !crate::host::processes_available() {
+        if !self.processes {
             return if self.module(id).is_some() { Hosting::Module } else { Hosting::Process };
         }
         match self.overrides.get(id) {
@@ -91,18 +122,20 @@ impl AppRegistry {
     }
 
     /// Whether the assistant is the aichat MODULE seated in the pane
-    /// in-process (feature `app-aichat`): always where there are no
-    /// processes; on a desktop only when `aichat` is switched to module
-    /// hosting, the child process being the default.
+    /// in-process: only when the build links it, and then always where
+    /// there are no processes; on a desktop only when `aichat` is switched
+    /// to module hosting, the child process being the default.
     pub fn pane_in_process(&self) -> bool {
-        if !cfg!(feature = "app-aichat") {
-            return false;
-        }
-        !crate::host::processes_available() || self.overrides.get("aichat") == Some(&Hosting::Module)
+        self.assistant && (!self.processes || self.overrides.get("aichat") == Some(&Hosting::Module))
     }
 
     pub fn linked_ids(&self) -> Vec<&'static str> {
         self.modules.iter().map(|m| m.id()).collect()
+    }
+
+    /// What the menus may offer (see [`Launchable`]).
+    pub fn launchable(&self) -> Launchable {
+        Launchable { linked: self.linked_ids(), processes: self.processes }
     }
 
     /// `~/.makepad/wm/apps.splash`: one `id: Module` or `id: Process` per
@@ -131,6 +164,39 @@ impl AppRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_app_module::*;
+    use makepad_widgets::*;
+
+    /// A module in name only: enough for the registry, never created.
+    struct Stub;
+    static STUB: Stub = Stub;
+    impl AppModule for Stub {
+        fn id(&self) -> &'static str {
+            "sheets"
+        }
+        fn label(&self) -> &'static str {
+            "Stub"
+        }
+        fn register(&self, _vm: &mut ScriptVm) {}
+        fn open_schema(&self) -> OpenSchema {
+            OpenSchema::new(1)
+        }
+        fn create(&self, _vm: &mut ScriptVm, _open: ValidatedOpen, _handles: InstanceHandles) -> InstanceParts {
+            unreachable!("the registry tests never create an instance")
+        }
+        fn capabilities(&self) -> &'static [&'static str] {
+            &[]
+        }
+    }
+
+    fn build(modules_only: bool, assistant: bool) -> WmBuild {
+        WmBuild {
+            modules: vec![&STUB],
+            modules_only,
+            assistant: if assistant { Some(|_vm: &mut ScriptVm| {}) } else { None },
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn overrides_parse_the_settings_shape_and_ignore_noise() {
@@ -143,16 +209,33 @@ mod tests {
 
     #[test]
     fn hosting_is_process_unless_a_linked_module_is_switched_on() {
-        let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &["--module".to_string(), "sheets".to_string(), "--module".to_string(), "files".to_string()]);
+        let flags = ["--module".to_string(), "sheets".to_string(), "--module".to_string(), "files".to_string()];
+        let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &flags, &build(false, false), true);
         // files has no linked module: the flag cannot make it one.
         assert_eq!(registry.hosting("files"), Hosting::Process);
         assert_eq!(registry.hosting("terminal"), Hosting::Process);
-        #[cfg(feature = "app-sheets")]
-        {
-            assert_eq!(registry.hosting("sheets"), Hosting::Module);
-            assert!(registry.linked_ids().contains(&"sheets"));
-            let plain = AppRegistry::default();
-            assert_eq!(plain.hosting("sheets"), Hosting::Process, "desktop default is a process");
-        }
+        assert_eq!(registry.hosting("sheets"), Hosting::Module);
+        assert!(registry.linked_ids().contains(&"sheets"));
+        assert!(!registry.pane_in_process(), "no assistant linked");
+        let plain = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &build(false, true), true);
+        assert_eq!(plain.hosting("sheets"), Hosting::Process, "desktop default is a process");
+        assert!(!plain.pane_in_process(), "the desktop's assistant is the child process unless switched");
+        assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true });
+    }
+
+    #[test]
+    fn without_processes_every_linked_module_is_a_module_and_nothing_else_launches() {
+        let all = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &build(true, true), false);
+        assert_eq!(all.hosting("sheets"), Hosting::Module);
+        assert_eq!(all.hosting("terminal"), Hosting::Process, "not linked: not startable, whatever the name says");
+        assert!(all.pane_in_process());
+        let launchable = all.launchable();
+        assert!(!launchable.processes);
+        let sheets = crate::clients::find_app("sheets").unwrap();
+        let terminal = crate::clients::find_app("terminal").unwrap();
+        assert!(launchable.allows(&sheets));
+        assert!(!launchable.allows(&terminal));
+        // The desktop's default launchable follows the platform alone.
+        assert_eq!(Launchable::default().processes, crate::host::processes_available());
     }
 }

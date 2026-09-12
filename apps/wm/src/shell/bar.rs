@@ -351,7 +351,18 @@ pub fn sample_network() -> Option<bool> {
             .map(|s| s.trim().to_string())?;
         Some(run("ipconfig", &["getifaddr", &dev]).map(|s| !s.trim().is_empty()) == Some(true))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    {
+        // A default route in the kernel's table, read straight from procfs:
+        // no process, no daemon. Wired or wireless alike — the Wi-Fi
+        // dropdown says which.
+        let table = std::fs::read_to_string("/proc/net/route").ok()?;
+        Some(table.lines().skip(1).any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next().is_some() && fields.next() == Some("00000000")
+        }))
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", not(target_env = "ohos")))))]
     {
         None
     }
@@ -784,6 +795,17 @@ impl ShellBar {
         let modules = self.right_modules();
         let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
+            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            if *module == BarModule::Power {
+                if let Some(battery) = self.data.battery {
+                    let label = format!("{}%{}", battery.percent, if battery.charging { " +" } else { "" });
+                    let width = self.d.measure(cx, false, tok.font.caption, &label) + 8.0;
+                    rx -= width;
+                    let label_rect = rect(rx, r.pos.y, width, r.size.y);
+                    self.d.label(cx, label_rect, false, tok.font.caption, fg, super::ui::HAlign::Center, &label);
+                    self.hits.push((*module, label_rect));
+                }
+            }
             rx -= slot;
             let cell = rect(rx, r.pos.y, slot, r.size.y);
             let mut color = if *available { fg } else { fade(fg, 0.45) };

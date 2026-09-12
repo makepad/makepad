@@ -25,6 +25,17 @@ pub fn is_tile_app(app: &str) -> bool {
     TILE_APPS.iter().any(|(id, _)| *id == app)
 }
 
+/// The tile apps THIS build can start (apps.rs `Launchable`): a build
+/// without a clock or a weather app lays out no tile for them, instead
+/// of a card that could never start.
+pub fn tile_apps(launchable: &crate::apps::Launchable) -> Vec<(&'static str, TileKind)> {
+    TILE_APPS
+        .iter()
+        .copied()
+        .filter(|(id, _)| crate::clients::find_app(id).is_some_and(|app| launchable.allows(&app)))
+        .collect()
+}
+
 /// Screen margin around the home content (iOS and Android both use 16pt).
 pub const HOME_MARGIN: f64 = 16.0;
 /// Gap between two tiles and between a tile and the favorites grid.
@@ -58,6 +69,14 @@ pub struct HomeLayout {
 /// dock. `top` is where content starts (below the status bar and, on
 /// Android, the big clock). Pure geometry, so both orientations are tested.
 pub fn home_layout(screen: Rect, top: f64, dock: Rect) -> HomeLayout {
+    home_layout_for(screen, top, dock, &TILE_APPS)
+}
+
+/// [`home_layout`] for the tile apps a build has (see [`tile_apps`]): the
+/// small tiles share the first row, a wide tile takes the row under them
+/// — the top row when there are no small ones — and the favorites start
+/// right under the last tile, or at `top` when there is none.
+pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'static str, TileKind)]) -> HomeLayout {
     let landscape = screen.size.x > screen.size.y;
     let m = HOME_MARGIN;
     let left = screen.pos.x + m;
@@ -68,27 +87,35 @@ pub fn home_layout(screen: Rect, top: f64, dock: Rect) -> HomeLayout {
         let w = ((width - TILE_GAP * 2.0) / 3.0).max(1.0);
         // Short enough that a row of favorites still fits above the dock.
         let h = (w * 0.56).min((dock.pos.y - top - 126.0).max(60.0)).max(1.0);
-        for (index, (app, kind)) in TILE_APPS.iter().enumerate() {
+        for (index, (app, kind)) in tile_apps.iter().enumerate() {
             let x = left + index as f64 * (w + TILE_GAP);
             tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(x, top), size: dvec2(w, h) } });
         }
-        tiles_bottom = top + h;
+        tiles_bottom = if tile_apps.is_empty() { top - TILE_GAP - 6.0 } else { top + h };
     } else {
         let s = ((width - TILE_GAP) / 2.0).max(1.0);
+        let smalls = tile_apps.iter().filter(|(_, kind)| *kind == TileKind::Small).count();
         let mut y = top;
-        for (index, (app, kind)) in TILE_APPS.iter().enumerate() {
+        let mut small = 0;
+        let mut rows = 0;
+        for (app, kind) in tile_apps.iter() {
             match kind {
                 TileKind::Small => {
-                    let x = left + index as f64 * (s + TILE_GAP);
+                    let x = left + small as f64 * (s + TILE_GAP);
+                    small += 1;
+                    rows = rows.max(1);
                     tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(x, y), size: dvec2(s, s) } });
                 }
                 TileKind::Wide => {
-                    y += s + TILE_GAP;
+                    if smalls > 0 {
+                        y += s + TILE_GAP;
+                    }
+                    rows += 1;
                     tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(left, y), size: dvec2(width, s) } });
                 }
             }
         }
-        tiles_bottom = y + s;
+        tiles_bottom = if rows == 0 { top - TILE_GAP - 6.0 } else { y + s };
     }
     let columns = if landscape { 7 } else { 4 };
     let fav_top = tiles_bottom + TILE_GAP + 6.0;
@@ -113,9 +140,9 @@ pub fn home_layout(screen: Rect, top: f64, dock: Rect) -> HomeLayout {
 /// fixed by app id (an app the table does not know lands in "Other"), so
 /// every launch target is reachable from exactly one card.
 pub const LIBRARY_GROUPS: [(&str, &[&str]); 5] = [
-    ("Utilities", &["clock", "weather", "terminal", "files", "task"]),
+    ("Utilities", &["clock", "weather", "calculator", "terminal", "files", "task"]),
     ("Creativity", &["photos", "mixer", "score", "vj", "fab", "fabric"]),
-    ("Productivity", &["sheets", "browser", "route", "studio"]),
+    ("Productivity", &["sheets", "finance", "mail", "notes", "calendar", "reminders", "browser", "route", "studio"]),
     ("Media", &["video", "image", "pdf"]),
     ("Other", &[]),
 ];
@@ -135,6 +162,182 @@ pub fn app_library_groups<'a>(apps: &[&'a str]) -> Vec<(&'static str, Vec<&'a st
     }
     out.retain(|(_, members)| !members.is_empty());
     out
+}
+
+/// A tile app whose compact face shows the SAME content as its full face
+/// (the picture wall: the tile is one picture of the wall): opening it is
+/// a location-accurate crossfade, never a zoom that stretches the tile's
+/// pixels. Clock and Weather show different content in each face and
+/// keep the zoom.
+pub fn crossfade_app(app: &str) -> bool {
+    app == "photos"
+}
+
+/// The dock holds at most this many icons.
+pub const DOCK_MAX: usize = 4;
+/// The dock's apps on a first run, left to right.
+pub const PINNED: [&str; 4] = ["browser", "files", "photos", "terminal"];
+
+/// One place an icon can sit on the home page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// The favorites grid, in reading order.
+    Icon(usize),
+    /// The dock, left to right.
+    Dock(usize),
+}
+
+/// The home page's icon order and the dock's members: what the person
+/// arranged (edit mode), kept in the WM's storage namespace as the
+/// `home.order` document. The default on first run is the shell's old
+/// rule: the launcher's order minus the pinned apps, the pinned apps in
+/// the dock.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HomeOrder {
+    pub icons: Vec<String>,
+    pub dock: Vec<String>,
+}
+
+impl HomeOrder {
+    /// The first-run order: `apps` in launcher order, the `pinned` ones
+    /// (that the build has) in the dock, everything else on the page.
+    pub fn default_for(apps: &[&str], pinned: &[&str]) -> Self {
+        let dock: Vec<String> = pinned.iter().filter(|id| apps.contains(id)).take(DOCK_MAX).map(|id| id.to_string()).collect();
+        let icons = apps.iter().filter(|id| !dock.iter().any(|d| d == *id)).map(|id| id.to_string()).collect();
+        HomeOrder { icons, dock }
+    }
+    /// The build's apps changed since the order was saved: an app that is
+    /// gone leaves, a new one lands at the end of the page, nothing is
+    /// listed twice.
+    pub fn reconcile(&mut self, apps: &[&str]) {
+        self.dock.retain(|id| apps.contains(&id.as_str()));
+        self.dock.truncate(DOCK_MAX);
+        self.icons.retain(|id| apps.contains(&id.as_str()) && !self.dock.contains(id));
+        let mut seen = Vec::new();
+        self.icons.retain(|id| if seen.contains(id) { false } else { seen.push(id.clone()); true });
+        for app in apps {
+            if !self.icons.iter().any(|id| id == app) && !self.dock.iter().any(|id| id == app) {
+                self.icons.push(app.to_string());
+            }
+        }
+    }
+    pub fn slot_of(&self, id: &str) -> Option<Slot> {
+        if let Some(i) = self.icons.iter().position(|x| x == id) { return Some(Slot::Icon(i)); }
+        self.dock.iter().position(|x| x == id).map(Slot::Dock)
+    }
+    pub fn at(&self, slot: Slot) -> Option<&str> {
+        match slot {
+            Slot::Icon(i) => self.icons.get(i).map(String::as_str),
+            Slot::Dock(i) => self.dock.get(i).map(String::as_str),
+        }
+    }
+    /// Move the icon at `from` to `to`, the others shifting aside: within
+    /// the page or the dock the icon takes the target index; page → dock
+    /// only while the dock has room (`DOCK_MAX`); dock → page always. True
+    /// when something moved.
+    pub fn move_to(&mut self, from: Slot, to: Slot) -> bool {
+        if from == to { return false; }
+        match (from, to) {
+            (Slot::Icon(a), Slot::Icon(b)) => {
+                if a >= self.icons.len() { return false; }
+                let id = self.icons.remove(a);
+                let b = b.min(self.icons.len());
+                self.icons.insert(b, id);
+                true
+            }
+            (Slot::Dock(a), Slot::Dock(b)) => {
+                if a >= self.dock.len() { return false; }
+                let id = self.dock.remove(a);
+                let b = b.min(self.dock.len());
+                self.dock.insert(b, id);
+                true
+            }
+            (Slot::Icon(a), Slot::Dock(b)) => {
+                if a >= self.icons.len() || self.dock.len() >= DOCK_MAX { return false; }
+                let id = self.icons.remove(a);
+                let b = b.min(self.dock.len());
+                self.dock.insert(b, id);
+                true
+            }
+            (Slot::Dock(a), Slot::Icon(b)) => {
+                if a >= self.dock.len() { return false; }
+                let id = self.dock.remove(a);
+                let b = b.min(self.icons.len());
+                self.icons.insert(b, id);
+                true
+            }
+        }
+    }
+    /// The `home.order` document: one line per icon, `icon <id>` for the
+    /// page, `dock <id>` for the dock, in order.
+    pub fn to_document(&self) -> Vec<u8> {
+        let mut out = String::new();
+        for id in &self.icons { out.push_str("icon "); out.push_str(id); out.push('\n'); }
+        for id in &self.dock { out.push_str("dock "); out.push_str(id); out.push('\n'); }
+        out.into_bytes()
+    }
+    /// A saved document; `None` when it is not one (the next save replaces it).
+    pub fn from_document(bytes: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let mut order = HomeOrder::default();
+        let mut any = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let (kind, id) = line.split_once(' ')?;
+            let id = id.trim();
+            if id.is_empty() { return None; }
+            match kind {
+                "icon" => order.icons.push(id.to_string()),
+                "dock" => order.dock.push(id.to_string()),
+                _ => return None,
+            }
+            any = true;
+        }
+        any.then_some(order)
+    }
+}
+
+/// The cell of favorite `index` in `layout`'s grid: the drawing and the
+/// edit-mode hit-testing share it.
+pub fn favorite_cell(layout: &HomeLayout, index: usize) -> Rect {
+    let cell = layout.favorites.size.x / layout.columns.max(1) as f64;
+    Rect {
+        pos: dvec2(
+            layout.favorites.pos.x + (index % layout.columns.max(1)) as f64 * cell,
+            layout.favorites.pos.y + (index / layout.columns.max(1)) as f64 * layout.row_height,
+        ),
+        size: dvec2(cell, layout.row_height),
+    }
+}
+
+/// The cell of dock icon `index` when the dock holds `count`.
+pub fn dock_cell(dock: Rect, count: usize, index: usize) -> Rect {
+    let cell = dock.size.x / count.max(1) as f64;
+    Rect { pos: dvec2(dock.pos.x + index as f64 * cell, dock.pos.y), size: dvec2(cell, dock.size.y) }
+}
+
+/// Where a dragged icon would land at `p`: the dock cell under it (a
+/// dragged page icon lands BETWEEN two dock icons, so the dock is cut
+/// into `count + 1` targets while it has room), else the favorites cell —
+/// a point past the last icon lands at the end.
+pub fn slot_at(layout: &HomeLayout, dock: Rect, icons: usize, dock_count: usize, dragging_from_page: bool, p: Vec2d) -> Option<Slot> {
+    let grown = Rect { pos: dock.pos - dvec2(0.0, 8.0), size: dock.size + dvec2(0.0, 16.0) };
+    if grown.contains(p) {
+        let targets = if dragging_from_page { dock_count + 1 } else { dock_count.max(1) };
+        let cell = dock.size.x / targets as f64;
+        let index = (((p.x - dock.pos.x) / cell).floor().max(0.0) as usize).min(targets.saturating_sub(1));
+        return Some(Slot::Dock(index));
+    }
+    if layout.row_height <= 0.0 || layout.columns == 0 { return None; }
+    let fav = layout.favorites;
+    if p.y < fav.pos.y - 8.0 || p.x < fav.pos.x || p.x > fav.pos.x + fav.size.x { return None; }
+    let rows = (icons + layout.columns - 1) / layout.columns;
+    if p.y > fav.pos.y + rows.max(1) as f64 * layout.row_height + 8.0 { return None; }
+    let cell = fav.size.x / layout.columns as f64;
+    let col = (((p.x - fav.pos.x) / cell).floor().max(0.0) as usize).min(layout.columns - 1);
+    let row = ((p.y - fav.pos.y) / layout.row_height).floor().max(0.0) as usize;
+    Some(Slot::Icon((row * layout.columns + col).min(icons.saturating_sub(1))))
 }
 
 /// The face the WM wants a tile client to show, mirrored from
@@ -372,7 +575,7 @@ pub fn placeholder_text(status: &str, connected: bool, gave_up: bool) -> (&'stat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mobile::{app_rect, phone_size};
+    use crate::mobile::{app_rect, phone_size, PhoneChrome};
     use crate::mobile_surface::PhoneSurface;
 
     fn screen(size: Vec2d) -> Rect {
@@ -387,7 +590,7 @@ mod tests {
     fn portrait_stacks_two_small_tiles_over_a_wide_one_and_leaves_favorites_room() {
         for style in [crate::desktop::DesktopStyle::Ios, crate::desktop::DesktopStyle::Android] {
             let screen = screen(phone_size(style));
-            let dock = PhoneSurface::home_dock(screen);
+            let dock = PhoneSurface::home_dock(screen, PhoneChrome::Simulated);
             let layout = home_layout(screen, screen.pos.y + 70.0, dock);
             assert!(!layout.landscape);
             let [clock, weather, photos] = [layout.tiles[0], layout.tiles[1], layout.tiles[2]];
@@ -408,10 +611,36 @@ mod tests {
     }
 
     #[test]
+    fn a_build_without_some_tile_apps_lays_out_only_the_tiles_it_has() {
+        let screen = screen(phone_size(crate::desktop::DesktopStyle::Ios));
+        let dock = PhoneSurface::home_dock(screen, PhoneChrome::Simulated);
+        let top = screen.pos.y + 70.0;
+        let all = home_layout(screen, top, dock);
+        // Only the wide tile: it takes the top row, favorites move up.
+        let photos = home_layout_for(screen, top, dock, &[("photos", TileKind::Wide)]);
+        assert_eq!(photos.tiles.len(), 1);
+        assert_eq!(photos.tiles[0].rect.pos.y, top);
+        assert_eq!(photos.tiles[0].rect.size, all.tiles[2].rect.size);
+        assert!(photos.favorites.pos.y < all.favorites.pos.y);
+        assert!(photos.capacity > all.capacity);
+        // No tiles at all: favorites start at the top.
+        let none = home_layout_for(screen, top, dock, &[]);
+        assert!(none.tiles.is_empty());
+        assert_eq!(none.favorites.pos.y, top);
+        // One small tile keeps its square and the wide one goes under it.
+        let two = home_layout_for(screen, top, dock, &[("clock", TileKind::Small), ("photos", TileKind::Wide)]);
+        assert_eq!(two.tiles[0].rect, all.tiles[0].rect);
+        assert_eq!(two.tiles[1].rect, all.tiles[2].rect);
+        // The build's tile apps follow what it can launch.
+        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false };
+        assert_eq!(tile_apps(&linked), vec![("photos", TileKind::Wide)]);
+    }
+
+    #[test]
     fn landscape_puts_three_tiles_across_and_keeps_the_dock_clear() {
         let size = phone_size(crate::desktop::DesktopStyle::Ios);
         let screen = screen(dvec2(size.y, size.x));
-        let dock = PhoneSurface::home_dock(screen);
+        let dock = PhoneSurface::home_dock(screen, PhoneChrome::Simulated);
         let layout = home_layout(screen, screen.pos.y + 44.0, dock);
         assert!(layout.landscape);
         assert_eq!(layout.columns, 7);
@@ -434,8 +663,8 @@ mod tests {
         let size = phone_size(crate::desktop::DesktopStyle::Android);
         for size in [size, dvec2(size.y, size.x)] {
             let screen = screen(size);
-            let app = app_rect(screen);
-            let layout = home_layout(screen, screen.pos.y + 70.0, PhoneSurface::home_dock(screen));
+            let app = app_rect(screen, PhoneChrome::Simulated);
+            let layout = home_layout(screen, screen.pos.y + 70.0, PhoneSurface::home_dock(screen, PhoneChrome::Simulated));
             for tile in layout.tiles {
                 assert!(tile.rect.size.x < app.size.x && tile.rect.size.y < app.size.y);
                 assert!(!same_size(tile.rect.size, app.size), "a tile frame is never mistaken for a window frame");
@@ -540,5 +769,72 @@ mod tests {
         assert_eq!(placeholder_text("", true, false).0, "Loading…");
         assert_eq!(placeholder_text("build failed — see the app log", false, false).0, "Could not build");
         assert_eq!(placeholder_text("anything", true, true).0, "Could not start");
+    }
+
+    #[test]
+    fn the_home_order_defaults_to_the_old_rule_and_moves_icons_with_the_dock_capped() {
+        let apps = ["browser", "files", "terminal", "sheets", "photos", "clock", "weather", "route", "finance"];
+        let mut order = HomeOrder::default_for(&apps, &["browser", "files", "photos", "terminal", "extra"]);
+        assert_eq!(order.dock, ["browser", "files", "photos", "terminal"]);
+        assert_eq!(order.icons, ["sheets", "clock", "weather", "route", "finance"]);
+        // Move Sheets to the end of the row: everyone shifts aside.
+        assert!(order.move_to(Slot::Icon(0), Slot::Icon(4)));
+        assert_eq!(order.icons, ["clock", "weather", "route", "finance", "sheets"]);
+        assert!(order.move_to(Slot::Icon(4), Slot::Icon(1)));
+        assert_eq!(order.icons, ["clock", "sheets", "weather", "route", "finance"]);
+        assert!(!order.move_to(Slot::Icon(1), Slot::Icon(1)), "the same slot is no move");
+        // A full dock takes nobody; make room and it does, between two.
+        assert!(!order.move_to(Slot::Icon(0), Slot::Dock(1)));
+        assert!(order.move_to(Slot::Dock(3), Slot::Icon(0)));
+        assert_eq!(order.icons[0], "terminal");
+        assert_eq!(order.dock.len(), 3);
+        assert!(order.move_to(Slot::Icon(1), Slot::Dock(1)));
+        assert_eq!(order.dock, ["browser", "clock", "files", "photos"]);
+        assert_eq!(order.slot_of("clock"), Some(Slot::Dock(1)));
+        assert_eq!(order.slot_of("terminal"), Some(Slot::Icon(0)));
+        assert_eq!(order.at(Slot::Dock(9)), None);
+        // Within the dock.
+        assert!(order.move_to(Slot::Dock(0), Slot::Dock(3)));
+        assert_eq!(order.dock, ["clock", "files", "photos", "browser"]);
+        // A build that lost an app and gained one.
+        order.reconcile(&["files", "photos", "browser", "sheets", "weather", "route", "finance", "mixer"]);
+        assert_eq!(order.dock, ["files", "photos", "browser"]);
+        assert_eq!(order.icons.last().map(String::as_str), Some("mixer"));
+        assert!(!order.icons.iter().any(|id| id == "clock" || id == "terminal"));
+    }
+
+    #[test]
+    fn the_home_order_round_trips_through_its_document() {
+        let order = HomeOrder { icons: vec!["sheets".into(), "route".into()], dock: vec!["files".into(), "photos".into()] };
+        let doc = order.to_document();
+        assert_eq!(std::str::from_utf8(&doc).unwrap(), "icon sheets\nicon route\ndock files\ndock photos\n");
+        assert_eq!(HomeOrder::from_document(&doc), Some(order.clone()));
+        assert_eq!(HomeOrder::from_document(b""), None, "nothing saved yet");
+        assert_eq!(HomeOrder::from_document(b"garbage"), None);
+        assert_eq!(HomeOrder::from_document(b"icon \n"), None);
+        assert_eq!(HomeOrder::from_document(b"\n icon sheets \n"), Some(HomeOrder { icons: vec!["sheets".into()], dock: vec![] }));
+    }
+
+    #[test]
+    fn dragged_icons_land_in_page_cells_or_between_dock_icons() {
+        let screen = screen(phone_size(crate::desktop::DesktopStyle::Ios));
+        let dock = PhoneSurface::home_dock(screen, PhoneChrome::Simulated);
+        let layout = home_layout(screen, screen.pos.y + 70.0, dock);
+        let cell = favorite_cell(&layout, 0);
+        assert_eq!(cell.pos, layout.favorites.pos);
+        assert_eq!(favorite_cell(&layout, layout.columns).pos.y, layout.favorites.pos.y + layout.row_height);
+        assert_eq!(favorite_cell(&layout, 1).pos.x, layout.favorites.pos.x + cell.size.x);
+        // Five icons on the page: the middle of the third cell is slot 2, past
+        // the fifth is the end, off the grid is nothing.
+        let centre = |r: Rect| r.pos + r.size * 0.5;
+        assert_eq!(slot_at(&layout, dock, 5, 4, true, centre(favorite_cell(&layout, 2))), Some(Slot::Icon(2)));
+        assert_eq!(slot_at(&layout, dock, 5, 4, true, centre(favorite_cell(&layout, 7))), Some(Slot::Icon(4)));
+        assert_eq!(slot_at(&layout, dock, 5, 4, true, dvec2(screen.pos.x + 30.0, layout.favorites.pos.y - 200.0)), None);
+        // The dock: four cells for its own icons, five targets for a newcomer.
+        let d2 = dock_cell(dock, 4, 2);
+        assert_eq!(d2.pos.x, dock.pos.x + dock.size.x * 0.5);
+        assert_eq!(slot_at(&layout, dock, 5, 4, false, centre(d2)), Some(Slot::Dock(2)));
+        assert_eq!(slot_at(&layout, dock, 5, 3, true, dvec2(dock.pos.x + dock.size.x - 1.0, centre(dock).y)), Some(Slot::Dock(3)));
+        assert_eq!(slot_at(&layout, dock, 5, 3, true, dvec2(dock.pos.x + 1.0, centre(dock).y)), Some(Slot::Dock(0)));
     }
 }

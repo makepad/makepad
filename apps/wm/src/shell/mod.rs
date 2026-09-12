@@ -29,10 +29,20 @@ pub mod notifications;
 pub mod osd;
 pub mod panels;
 pub mod ui;
+/// The Wi-Fi dropdown's iwd backend: Linux desktop only (not OpenHarmony);
+/// no other platform compiles or references it.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub mod wifi_linux;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub mod system_linux;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+mod system_slider;
 
 /// Register every shell widget. Called from `AppMain::script_mod` AFTER
 /// the theme has been evaluated (the DSL below reads `mod.wm_theme`).
 pub fn script_mod(vm: &mut ScriptVm) {
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    system_slider::script_mod(vm);
     ui::script_mod(vm);
     ai_pane::script_mod(vm);
     bar::script_mod(vm);

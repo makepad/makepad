@@ -1,5 +1,7 @@
 //! A whole-window texture pulled into its dock icon. No app layout or resize
 //! occurs during the warp; the same frozen surface is used for restoration.
+use makepad_widgets::gauss_view::CaptureGauss;
+use makepad_widgets::makepad_draw::overlay::{Overlay, OverlayScope};
 use makepad_widgets::*;
 
 script_mod! {
@@ -53,12 +55,23 @@ pub struct DrawDockWarp {
     y_flip: f32,
 }
 
+/// An app's frame in a texture of its own. Everything the app draws — its
+/// root, the lists it lifts with `begin_overlay_*` (popups, a blur layer),
+/// and the gauss pyramid those may ask for — records into THIS pass tree:
+/// the overlay root is the capture's for the duration of `begin`/`end`
+/// (never the window's overlay slot), and `request_window_gauss` inside
+/// resolves to a pyramid built from this very texture
+/// (`CaptureGauss`). A presenter composites the texture and nothing else.
 pub struct WindowFrame {
     pass: DrawPass,
     list: DrawList2d,
     texture: Texture,
     _depth: Texture,
     frozen: bool,
+    overlay: Overlay,
+    overlay_scope: Option<OverlayScope>,
+    gauss: CaptureGauss,
+    rect: Rect,
 }
 impl WindowFrame {
     pub fn new(cx: &mut Cx) -> Self {
@@ -92,6 +105,10 @@ impl WindowFrame {
             texture,
             _depth: depth,
             frozen: false,
+            overlay: Overlay { draw_list: DrawList::new(cx) },
+            overlay_scope: None,
+            gauss: CaptureGauss::new(cx),
+            rect: Rect::default(),
         }
     }
     pub fn frozen(&self) -> bool {
@@ -101,6 +118,11 @@ impl WindowFrame {
         self.pass.draw_pass_id()
     }
     pub fn texture(&self) -> &Texture { &self.texture }
+    /// The capture is going away: its gauss request state is keyed by the
+    /// pass slot, which the next capture may reuse.
+    pub fn forget(self, cx: &mut Cx) {
+        CaptureGauss::forget(cx, self.pass.draw_pass_id());
+    }
     pub fn begin(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.frozen = false;
         if std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some() {
@@ -114,11 +136,27 @@ impl WindowFrame {
         cx.begin_pass(&self.pass, Some(dpi));
         self.list.begin_always(cx);
         cx.begin_root_turtle(root_size, Layout::flow_overlay());
+        // From here every overlay the app lifts and every gauss it asks for
+        // is the capture's own.
+        self.rect = rect;
+        let pass = self.pass.draw_pass_id();
+        self.overlay_scope = Some(self.overlay.begin_nested_for_pass(cx, pass));
+        self.gauss.begin(cx, pass, rect.pos, rect.size, root_size);
     }
     pub fn end(&mut self, cx: &mut Cx2d) {
+        let pass = self.pass.draw_pass_id();
+        // The scene (when a pyramid was built) goes under the overlays,
+        // the overlays last — the window's own order.
+        let gauss_changed = self.gauss.end(cx, pass, self.rect);
+        if let Some(scope) = self.overlay_scope.take() {
+            self.overlay.end_nested(cx, scope);
+        }
         cx.end_pass_sized_turtle();
         self.list.end(cx);
         cx.end_pass(&self.pass);
+        if gauss_changed {
+            cx.repaint_pass_and_child_passes(pass);
+        }
         if std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some() {
             log!("warp: capture end");
         }

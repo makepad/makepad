@@ -81,6 +81,12 @@ impl ModuleHost {
         let handles = InstanceHandles { scope, storage, viewport: Viewport { size: viewport }, replies };
         let vm_id = cx.alloc_splash_vm_with_network(false);
         let parts = cx.with_script_vm_id_trusted(vm_id, |vm| {
+            // The isolate allocation strips `mod.res` — right for an
+            // untrusted mini-app, wrong for a trusted native module whose
+            // own widget families, and the desktop styles' fonts and icons
+            // (`crate_resource("self:...")` in the iOS and Android
+            // themes), load through it. Back in before anything evaluates.
+            makepad_widgets::makepad_platform::script::res::script_mod(vm);
             // The isolate came up with the stock theme; the WM's palette
             // retints it exactly as it retints a child process's.
             if let Some(sheet)=&self.style {
@@ -138,6 +144,10 @@ impl ModuleHost {
         self.instances.contains_key(&client)
     }
 
+    /// Every hosted instance.
+    pub fn instances(&self) -> impl Iterator<Item = &AppInstance> {
+        self.instances.values()
+    }
     pub fn get(&self, client: ClientId) -> Option<&AppInstance> {
         self.instances.get(&client)
     }
@@ -205,7 +215,16 @@ impl ModuleHost {
             return false;
         };
         if let Some(shutdown) = instance.shutdown.take() {
-            cx.with_script_vm_id_trusted(instance.vm_id, |vm| shutdown(vm));
+            // A shutdown that panics (an instance already broken — the
+            // reason it is being torn down) must not stop the teardown:
+            // the isolate is freed either way.
+            let vm_id = instance.vm_id;
+            let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm))
+            }));
+            if ended.is_err() {
+                error!("wm: module instance {}.{} panicked in shutdown; freeing its isolate anyway", instance.module.id(), instance.instance_no);
+            }
         }
         let vm_id = instance.vm_id;
         let label = format!("{}.{}", instance.module.id(), instance.instance_no);
@@ -217,28 +236,56 @@ impl ModuleHost {
     }
 }
 
-#[cfg(all(test, feature="app-sheets"))]
-mod style_tests {
-    use super::*;
+#[cfg(test)]
+mod tests {
+    use makepad_widgets::*;
+
+    /// `self:` inside a script module names the crate that module was
+    /// written in, wherever it evaluates: the shell's icons stay the WM's
+    /// in the main heap, and a widgets theme evaluated in a fresh isolate
+    /// registers the widgets crate's files — never apps/wm's — under that
+    /// isolate's own heap, resolvable by (heap, handle) alone.
     #[test]
-    fn module_restyle_updates_custom_roles_and_keeps_instance() {
-        let mut cx=Cx::new(Box::new(|_,_|{}));
-        cx.with_vm(makepad_widgets::script_mod);
-        let mut host=ModuleHost::default();
-        let module=&makepad_sheets::module::SHEETS_MODULE;
-        let open=module.open_schema().validate("{}", &[]).unwrap();
-        host.create(&mut cx,1,module,open,dvec2(900.0,700.0)).unwrap();
-        let uid=host.get(1).unwrap().root.widget_uid();
-        host.apply_style(&mut cx,&desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
-        let instance=host.get(1).unwrap();
-        assert_eq!(instance.root.widget_uid(),uid);
-        cx.with_script_vm_id_trusted(instance.vm_id,|vm| {
-            let palette=makepad_wm_theme::current_for_vm(vm).unwrap();
-            assert_eq!(palette.get("background"),Some("#ececec"));
-            let sheets=vm.module(id!(sheets));
-            assert_eq!(vm.bx.heap.value(sheets,id!(bg).into(),NoTrap).as_color(),Some(0xecececff));
-            assert!(vm.take_errors().is_empty());
+    fn self_resources_name_their_own_crate_in_the_host_and_in_an_isolate() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::shell::ui::script_mod(vm);
         });
-        host.teardown(&mut cx,1);
+        let main = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let wm_icon = "apps/wm/resources/icons/menu.svg".replace('/', std::path::MAIN_SEPARATOR_STR);
+        let (path, handle) = {
+            let resources = cx.script_data.resources.resources.borrow();
+            let res = resources.iter().find(|r| r.abs_path.ends_with(&wm_icon)).expect("the shell's menu glyph is registered");
+            let (_, handle) = res.handles.iter().copied().find(|(heap, _)| *heap == main).expect("by the main heap");
+            (res.abs_path.clone(), handle)
+        };
+        assert!(std::path::Path::new(&path).is_file(), "{path}");
+        assert_eq!(cx.get_resource_abs_path(main, handle).as_deref(), Some(path.as_str()));
+        // A fresh isolate: the widgets' iOS theme registers the widgets
+        // crate's own fonts and icons, none of them under apps/wm.
+        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let isolate = cx.with_script_vm_id_trusted(vm_id, |vm| {
+            makepad_widgets::makepad_platform::script::res::script_mod(vm);
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios));
+            vm.with_reload(makepad_widgets::widgets_mod);
+            vm.bx.heap.heap_key()
+        });
+        assert_ne!(isolate, main);
+        let resources = cx.script_data.resources.resources.borrow();
+        let isolate_paths: Vec<&str> = resources.iter().filter(|r| r.handles.iter().any(|(heap, _)| *heap == isolate)).map(|r| r.abs_path.as_str()).collect();
+        assert!(!isolate_paths.is_empty(), "the theme registered resources in the isolate");
+        assert!(isolate_paths.iter().all(|p| !p.contains(&"apps/wm/".replace('/', std::path::MAIN_SEPARATOR_STR))), "{isolate_paths:?}");
+        assert!(isolate_paths.iter().any(|p| p.contains(&"widgets/".replace('/', std::path::MAIN_SEPARATOR_STR))), "{isolate_paths:?}");
+        // The isolate's handle values overlap the main heap's; the pair keeps them apart.
+        for res in resources.iter() {
+            for (heap, handle) in &res.handles {
+                if *heap == isolate {
+                    if let Some(other) = cx.get_resource_abs_path(main, *handle) {
+                        assert!(other != res.abs_path || res.handles.contains(&(main, *handle)));
+                    }
+                }
+            }
+        }
     }
 }

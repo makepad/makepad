@@ -118,20 +118,22 @@ impl PhoneSurface {
         consumed
     }
 
+    /// `backdrop` is the compositor checkpoint the pill's glass samples (iOS
+    /// only; Android's drawer keeps a flat pill), `amplitude` the library's
+    /// arrival 0 → 1, which the lens follows instead of popping in.
     pub(super) fn draw_search(
         &mut self,
         cx: &mut Cx2d,
         state: &WmState,
         screen: Rect,
         ink: Vec4f,
+        backdrop: Option<GaussBlurSnapshot>,
+        amplitude: f32,
     ) -> Rect {
         let ios = state.style.target == DesktopStyle::Ios;
         let editing = state.phone.searching();
-        let top = if screen.size.x > screen.size.y {
-            24.0
-        } else {
-            42.0
-        };
+        // Under the status bar: the fake one, or the phone's real inset.
+        let top = state.phone.chrome.top_reserve(screen);
         let pill = rect(
             screen.pos.x + 20.0,
             screen.pos.y + top + 10.0,
@@ -161,7 +163,22 @@ impl PhoneSurface {
         } else {
             rgb(126, 94, 190)
         };
-        if state.phone.search_focused {
+        if ios && backdrop.is_some() {
+            // The material's pill profile; a focused pill wears the accent
+            // ring around it, the glass itself unchanged.
+            let dark = state.style.dark;
+            let profile = if state.accessibility.reduce_transparency {
+                GlassProfile::pill(dark).opaque(dark)
+            } else {
+                GlassProfile::pill(dark)
+            };
+            self.search_glass.apply_profile(cx, &profile);
+            self.search_glass.set_lens_amplitude(cx, if state.accessibility.reduce_motion { 1.0 } else { amplitude });
+            if state.phone.search_focused {
+                self.rounded(cx, rect(pill.pos.x - 1.5, pill.pos.y - 1.5, pill.size.x + 3.0, pill.size.y + 3.0), 13.5, alpha(accent, 0.65));
+            }
+            self.search_glass.draw_surface_with_backdrop(cx, pill, backdrop, 1.0);
+        } else if state.phone.search_focused {
             self.rounded(cx, pill, 14.0, alpha(accent, 0.65));
             self.rounded(
                 cx,

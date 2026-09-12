@@ -14,6 +14,7 @@
 //! wear, so the menu surface takes its colors from `shell.launcher` when it
 //! is opened on this provider and from `shell.menu` otherwise.
 
+use crate::apps::Launchable;
 use crate::clients;
 
 use super::menu::{MenuItem, MenuKind};
@@ -62,6 +63,7 @@ fn icon_for(id: &str) -> Option<Ico> {
         "photos" => Ico::Photo,
         "clock" => Ico::Calendar,
         "weather" => Ico::Brightness,
+        "finance" => Ico::Pulse,
         "fabric" => Ico::Shirt,
         "fab" => Ico::Refresh,
         "studio" => Ico::Moon,
@@ -70,17 +72,19 @@ fn icon_for(id: &str) -> Option<Ico> {
     })
 }
 
-/// The `apps` provider rows: every registry app whose binary exists, not
-/// hidden, in the CURATED registry order (the user's: browser/files/
-/// terminal first, then by rarity — a deliberate deviation from omarchy's
-/// alphabetical provider). The live filter never reorders.
-pub fn apps() -> Vec<MenuItem> {
+/// The `apps` provider rows: every registry app this build can start
+/// (see `Launchable`), not hidden, in the CURATED registry order (the
+/// user's: browser/files/terminal first, then by rarity — a deliberate
+/// deviation from omarchy's alphabetical provider). The live filter never
+/// reorders.
+pub fn apps(launchable: &Launchable) -> Vec<MenuItem> {
     let hides = hides();
     let items: Vec<MenuItem> = clients::registry()
         .iter()
-        // Launchable: a package this checkout can run, or a module this
-        // build links (the only kind the web build has).
-        .filter(|app| app.is_available() || crate::apps::is_linked(&app.id))
+        // Launchable: a package this checkout can run where processes
+        // exist, or a module this build links (the only kind a build
+        // without processes has).
+        .filter(|app| launchable.allows(app))
         .filter(|app| !is_hidden(&app.id, &hides))
         .map(|app| MenuItem {
             id: format!("apps.{}", app.id),
@@ -112,7 +116,7 @@ mod tests {
 
     #[test]
     fn the_apps_provider_keeps_the_curated_order() {
-        let items = apps();
+        let items = apps(&Launchable::default());
         // Rows appear in registry order (available subset preserves it).
         let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
         let registry_order: Vec<String> = clients::registry()
