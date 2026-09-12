@@ -606,8 +606,10 @@ script_primitive!(
     fn script_new(_vm: &mut ScriptVm) -> Self {
         Default::default()
     },
+    // `nil` is the empty id, so an id a script set can be taken back the
+    // way an Option is: `container_id: nil`.
     fn script_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
-        value.is_id()
+        value.is_id() || value.is_nil()
     },
     fn script_apply(
         &mut self,
@@ -616,7 +618,9 @@ script_primitive!(
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
-        if let Some(id) = value.as_id() {
+        if value.is_nil() {
+            *self = LiveId(0)
+        } else if let Some(id) = value.as_id() {
             *self = id
         }
     },
