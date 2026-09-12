@@ -29087,6 +29087,11 @@ p2 {}
                 state.stem_effective(2),
                 state.stem_effective(3),
             ],
+            eq_gain: [
+                state.eq_effective(0),
+                state.eq_effective(1),
+                state.eq_effective(2),
+            ],
             // Stamped by the widget when it takes the lane.
             stamp: 0.0,
             // Carried, not defaulted: `set_lane` REPLACES the lane, so a
@@ -29390,6 +29395,14 @@ p2 {}
                 state.stem_effective(2),
                 state.stem_effective(3),
             ];
+            // The lane draws the mix that will play, and the tone controls
+            // are part of that mix: same source as the knobs on screen,
+            // kills and solos already folded in.
+            let eq_gains: [f32; 3] = [
+                state.eq_effective(0),
+                state.eq_effective(1),
+                state.eq_effective(2),
+            ];
             let range_label = state.pitch_range.label();
             let ids = MusicDeckIds::for_deck(deck);
             let base = (index as u64) << 8;
@@ -29666,6 +29679,7 @@ p2 {}
                 scroll.set_loop_slots(cx, deck, &loop_slots);
                 scroll.set_found_loops(cx, deck, &found_loops);
                 scroll.set_stem_gain(cx, deck, stem_gains);
+                scroll.set_eq_gain(cx, deck, eq_gains);
             };
             if let Some(mut strip) =
                 self.music_refs.overviews[index].borrow_mut::<VjWaveOverview>()

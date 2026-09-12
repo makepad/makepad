@@ -171,6 +171,15 @@ fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
 /// The eye's gain on the drawn envelope, pushed every draw by both
 /// surfaces. Clamped here as well as at every way in: this is the last
 /// place before the GPU, and the shader has no range of its own.
+/// The three tone controls, as the lane draws with them.
+fn set_eq_gain_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, eq: [f32; 3]) {
+    lane.draw_vars.set_uniform(
+        cx,
+        live_id!(eq_gain),
+        &[eq[0].clamp(0.0, 1.0), eq[1].clamp(0.0, 1.0), eq[2].clamp(0.0, 1.0), 0.0],
+    );
+}
+
 fn set_wave_gain_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, gain: f32) {
     lane.draw_vars.set_uniform(
         cx,
@@ -709,6 +718,9 @@ script_mod! {
         // always drawn, which is what every surface that never sets it
         // goes on getting.
         wave_gain: uniform(1.0)
+        // The three tone controls, unity until a deck says otherwise. The
+        // strip never says otherwise: it is the reference picture.
+        eq_gain: uniform(#xffffff00)
         warn: uniform(0.0)
         color_warn: uniform(#xff3b30)
         // A loop drag's would-be landing, same encoding as `loop_span`.
@@ -849,6 +861,16 @@ script_mod! {
                 return bg
             }
             let t = self.tile_span(column)
+            // What the TONE CONTROLS have left of this column. The three
+            // band readings are already in this texture and were only ever
+            // used for colour; they are shares of one column, so the share
+            // of them the EQ lets through is the share of the column that
+            // is still being heard. Cutting the bass shortens a bass-heavy
+            // column and leaves a bright one where it was, which is the
+            // difference a broadband scale cannot show.
+            let bands = t.x + t.y + t.z
+            let kept = t.x * self.eq_gain.x + t.y * self.eq_gain.y + t.z * self.eq_gain.z
+            let eq_w = clamp(mix(1.0, kept / max(bands, 0.0001), step(0.004, bands)), 0.0, 1.0)
             // THE HEIGHT OF A COLUMN IS HOW LOUD THE TRACK IS THERE. The
             // level channel was normalized once, against the whole track,
             // when the tiles were built. A quiet intro draws short and a
@@ -861,7 +883,8 @@ script_mod! {
             // can be heard, and it is clamped before the envelope so a
             // lifted column saturates flat at the half-lane rather than
             // drawing outside it. At 1.0 this line is what it always was.
-            let level = clamp(t.w * self.wave_gain, 0.0, 1.0) * 0.78
+            let ungained = clamp(t.w * self.wave_gain, 0.0, 1.0) * 0.78
+            let level = ungained * eq_w
 
             // A column the separator has reached is coloured by WHAT it is;
             // one it has not is a single honest grey. Both are the same
@@ -929,6 +952,13 @@ script_mod! {
             // the whole thing scrolls, instead of crawling pixel to pixel.
             let y = abs(self.pos.y - 0.5) * 2.0
             let feather = 2.0 / max(self.rect_size.y, 2.0)
+            // The GHOST: where a knob has taken height away, the envelope
+            // that would have been drawn stands behind the live one. It is
+            // the only way to see what a cut is doing rather than only
+            // what is left, and it costs nothing when nothing is cut --
+            // with every knob up it is exactly under the live envelope and
+            // its own term is zero.
+            let in_ghost = 1.0 - smoothstep(ungained - feather, ungained + feather, y)
             let in0 = 1.0 - smoothstep(e0 - feather, e0 + feather, y)
             let in1 = 1.0 - smoothstep(e1 - feather, e1 + feather, y)
             let in2 = 1.0 - smoothstep(e2 - feather, e2 + feather, y)
@@ -958,7 +988,14 @@ script_mod! {
             let g = self.grid_at(column)
             let under = bg.mix(vec4(g.x, g.y, g.z, 1.0), g.w)
             let wave = vec4(lit.x * level, lit.y * level, lit.z * level, 1.0)
-            let body = under.mix(wave, cover)
+            // The ghost goes under the live envelope and is drawn in the
+            // column's own uncoloured tone: a silhouette says WHERE the
+            // wave was, and saying it in the stem colours would have it
+            // read as a second, quieter mix.
+            let ghost_only = clamp(in_ghost - cover, 0.0, 1.0)
+            let ghost = vec4(plain.x * level, plain.y * level, plain.z * level, 1.0)
+            let grounded = under.mix(ghost, ghost_only * 0.30)
+            let body = grounded.mix(wave, cover)
             // A whisper of the rulings survives on top, so the two decks
             // can be read against each other through a loud passage.
             let ruled = body.mix(vec4(g.x, g.y, g.z, 1.0), g.w * 0.30)
@@ -5541,6 +5578,45 @@ pub fn column_height(tile: [u8; 4]) -> f32 {
     column_height_at(tile, WAVE_GAIN_DEFAULT as f32)
 }
 
+/// Below this a column has no band reading worth dividing, and the tone
+/// controls are told nothing about it. The shader's own threshold.
+pub const BAND_PRESENT: f32 = 0.004;
+
+/// The share of a column that survives the tone controls.
+///
+/// The three band readings are shares of one column -- that is what the
+/// colouring already used them for -- so the share of them the EQ lets
+/// through is the share of the column still being heard. A column with
+/// nothing measured in it keeps its height: the alternative is a wave
+/// that shrinks where the analysis is thin rather than where a knob was
+/// turned.
+///
+/// A knob past unity takes nothing away and so adds nothing: the weight
+/// stops at one. The tone controls may only SUBTRACT from the picture.
+/// The record's own loudest column is the reference the whole lane is
+/// drawn against, the visual gain is the one hand allowed to move that,
+/// and a boosted band climbing out of the envelope would also climb into
+/// the clear band at the top of the lane where the labels live.
+pub fn eq_weight(tile: [u8; 4], eq: [f32; 3]) -> f32 {
+    let band = [
+        tile[0] as f32 / 255.0,
+        tile[1] as f32 / 255.0,
+        tile[2] as f32 / 255.0,
+    ];
+    let sum = band[0] + band[1] + band[2];
+    if sum <= BAND_PRESENT {
+        return 1.0;
+    }
+    ((band[0] * eq[0] + band[1] * eq[1] + band[2] * eq[2]) / sum).clamp(0.0, 1.0)
+}
+
+/// How tall a column is actually DRAWN: its own envelope at the visual
+/// gain, less the share the tone controls have taken from it. The ghost
+/// behind it is [`column_height_at`], which no knob can move.
+pub fn drawn_column_height(tile: [u8; 4], gain: f32, eq: [f32; 3]) -> f32 {
+    column_height_at(tile, gain) * eq_weight(tile, eq)
+}
+
 /// The unseparated wave's grey, as the shader declares it.
 pub const WAVE_GREY: [f32; 3] = [0.545, 0.596, 0.651];
 
@@ -5819,6 +5895,8 @@ pub struct WaveLane {
     pub loaded: bool,
     /// The deck's stem knobs, so the wave shows the mix that will play.
     pub stem_gain: [f32; 4],
+    /// The deck's three tone controls, 1.0 a piece until one is turned.
+    pub eq_gain: [f32; 3],
     /// A hand is on this record: the playhead is whatever the mixer last
     /// said, never extrapolated — a scrub does not move at tempo.
     pub scratching: bool,
@@ -6354,6 +6432,16 @@ impl VjWaveScroll {
         self.area.redraw(cx);
     }
 
+    /// The deck's three tone controls, kills and solos already folded in.
+    pub fn set_eq_gain(&mut self, cx: &mut Cx, deck: DeckId, gains: [f32; 3]) {
+        let lane = &mut self.lanes[deck.index()];
+        if lane.eq_gain == gains {
+            return;
+        }
+        lane.eq_gain = gains;
+        self.area.redraw(cx);
+    }
+
     pub fn zoom_secs(&self) -> f64 {
         self.zoom_secs
     }
@@ -6650,6 +6738,7 @@ impl Widget for VjWaveScroll {
             }
             set_stem_color_uniforms(&mut self.draw_lane, cx);
             set_wave_gain_uniform(&mut self.draw_lane, cx, self.wave_gain as f32);
+            set_eq_gain_uniform(&mut self.draw_lane, cx, lane.eq_gain);
             self.draw_lane.gain_vocals = lane.stem_gain[0];
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
@@ -7691,7 +7780,9 @@ impl Widget for VjWaveOverview {
         set_stem_color_uniforms(&mut self.draw_lane, cx);
         set_wave_gain_uniform(&mut self.draw_lane, cx, self.wave_gain as f32);
         // The reference picture: every layer at full weight, whatever the
-        // knobs are doing to the mix.
+        // knobs are doing to the mix. The tone controls stop here the same
+        // way the stem knobs do.
+        set_eq_gain_uniform(&mut self.draw_lane, cx, [1.0; 3]);
         self.draw_lane.gain_vocals = 1.0;
         self.draw_lane.gain_drums = 1.0;
         self.draw_lane.gain_bass = 1.0;
@@ -9463,6 +9554,84 @@ pub fn format_key_shift(semitones: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tone controls take height out of the picture the way they take
+    /// sound out of the room: per band, so a cut shows up where that band
+    /// was and nowhere else.
+    #[test]
+    fn a_cut_band_shortens_the_columns_that_band_was_in() {
+        let unity = [1.0f32; 3];
+        // Two columns of the same loudness: one nearly all low, one
+        // nearly all high.
+        let bassy = [230u8, 40, 12, 200];
+        let bright = [10u8, 40, 230, 200];
+        assert!((eq_weight(bassy, unity) - 1.0).abs() < 1e-6, "unity takes nothing");
+        assert!((eq_weight(bright, unity) - 1.0).abs() < 1e-6);
+        assert_eq!(
+            drawn_column_height(bassy, 1.0, unity),
+            column_height(bassy),
+            "and the drawn height is the envelope itself"
+        );
+        // Kill the low band: the bass-heavy column collapses, the bright
+        // one barely moves.
+        let no_low = [0.0, 1.0, 1.0];
+        let lost_bassy = 1.0 - eq_weight(bassy, no_low);
+        let lost_bright = 1.0 - eq_weight(bright, no_low);
+        assert!(lost_bassy > 0.7, "the bass column kept {lost_bassy} of itself");
+        assert!(lost_bright < 0.1, "the bright column lost {lost_bright}");
+        // The whole point: the same cut says different things about
+        // different parts of a record, which a broadband scale cannot.
+        assert!(lost_bassy > lost_bright * 5.0);
+        // Everything down is nothing drawn.
+        assert!(eq_weight(bassy, [0.0; 3]).abs() < 1e-6);
+        assert!(drawn_column_height(bassy, 1.0, [0.0; 3]).abs() < 1e-6);
+    }
+
+    /// A knob past unity is not a way to make the wave taller.
+    #[test]
+    fn a_boosted_band_cannot_lift_a_column_past_the_record() {
+        let bassy = [230u8, 40, 12, 200];
+        let boosted = [2.0f32, 2.0, 2.0];
+        assert!((eq_weight(bassy, boosted) - 1.0).abs() < 1e-6, "the weight stops at one");
+        assert_eq!(drawn_column_height(bassy, 1.0, boosted), column_height(bassy));
+        // One band boosted, another killed: what is left is still only a
+        // share of what was there.
+        let mixed = [2.0f32, 0.0, 0.0];
+        assert!(eq_weight(bassy, mixed) <= 1.0);
+        assert!(drawn_column_height(bassy, 1.0, mixed) <= column_height(bassy) + 1e-6);
+    }
+
+    /// The ghost is what was taken away, so nothing a knob does may move
+    /// it -- otherwise it is a second live envelope rather than a record
+    /// of the one before the knobs.
+    #[test]
+    fn the_ghost_is_the_envelope_no_knob_can_move() {
+        let tile = [230u8, 40, 12, 200];
+        let ghost = column_height_at(tile, 1.0);
+        for eq in [[1.0f32; 3], [0.0, 1.0, 1.0], [0.0; 3], [2.0; 3]] {
+            assert_eq!(column_height_at(tile, 1.0), ghost, "{eq:?} moved the ghost");
+            assert!(drawn_column_height(tile, 1.0, eq) <= ghost + 1e-6, "{eq:?}");
+        }
+        // It does follow the eye's own gain, though: the ghost is part of
+        // the picture and the picture has one scale.
+        assert!(column_height_at(tile, 2.0) > ghost);
+    }
+
+    /// A column the analysis has nothing to say about keeps its height: a
+    /// wave that shrank where the reading was thin would look like a cut
+    /// nobody made.
+    #[test]
+    fn a_column_with_no_band_reading_is_left_alone() {
+        for tile in [[0u8, 0, 0, 200], [0, 0, 0, 0], [1, 0, 0, 255]] {
+            let weight = eq_weight(tile, [0.0; 3]);
+            let expect = if (tile[0] as f32 + tile[1] as f32 + tile[2] as f32) / 255.0 <= BAND_PRESENT {
+                1.0
+            } else {
+                0.0
+            };
+            assert!((weight - expect).abs() < 1e-6, "{tile:?} -> {weight}");
+        }
+    }
 
     /// A label's outline is only worth drawing if it is the opposite of
     /// what it is separating the glyph from, which means the pair has to
