@@ -1,0 +1,12 @@
+// Allow the development account to control only the WM service, including over SSH.
+// An administrator opts in by installing this file in /etc/polkit-1/rules.d/.
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "makepad-wm.service" &&
+        subject.user === "arch") {
+        var verb = action.lookup("verb");
+        if (verb === "start" || verb === "stop" || verb === "restart") {
+            return polkit.Result.YES;
+        }
+    }
+});
