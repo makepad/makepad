@@ -206,6 +206,33 @@ const ZOOM_WHEEL_STEP: f32 = 0.15;
 /// How much one wheel notch opens or closes the exploded stack.
 const SPREAD_WHEEL_STEP: f32 = 0.04;
 
+/// What a badge says about its widget. A mark this size has one thing to
+/// say with -- its colour -- so it says the most useful thing: whether what
+/// is written here is a description, a constraint, or both.
+#[derive(Clone, Copy, PartialEq)]
+enum BadgeKind {
+    /// A note only: someone described this.
+    Note,
+    /// A rule only: something here must stay true.
+    Rule,
+    /// Both.
+    Both,
+}
+
+impl BadgeKind {
+    /// Which of the three pre-coloured pins draws this badge. They are three
+    /// separate widgets rather than one recoloured per badge: an apply does
+    /// not land before the draw_walk that follows it, so a single shared
+    /// icon paints each badge in the NEXT badge's colour.
+    fn index(self) -> usize {
+        match self {
+            BadgeKind::Note => 0,
+            BadgeKind::Rule => 1,
+            BadgeKind::Both => 2,
+        }
+    }
+}
+
 /// The pin badge's clickable square, in points.
 const BADGE_SIZE: f64 = 13.0;
 /// How often the badge targets are re-resolved (a whole-tree walk).
@@ -6392,7 +6419,7 @@ pub struct Tweaker {
     /// timer rather than every frame — resolving a note path walks the whole
     /// widget tree, and the rects are read live off the uids anyway.
     #[rust]
-    badge_targets: Vec<(u64, String)>,
+    badge_targets: Vec<(u64, String, BadgeKind)>,
     /// When `badge_targets` was last resolved.
     #[rust]
     badges_at: f64,
@@ -6402,7 +6429,7 @@ pub struct Tweaker {
     badge_rects: Vec<(Rect, u64)>,
     /// The pin badge itself: one Icon, drawn once per badge.
     #[rust]
-    badge_ui: Option<WidgetRef>,
+    badge_ui: Option<[WidgetRef; 3]>,
     /// A badge click, consumed by the tweaker's event loop.
     #[rust]
     badge_open: Option<u64>,
@@ -6429,6 +6456,9 @@ pub struct Tweaker {
     /// are claimed only while the caret is actually there.
     #[rust]
     prompt_focus_pending: bool,
+    /// The cross that empties the notes field.
+    #[rust]
+    spec_clear_uid: u64,
     /// Something in the Spec tab was typed into and is not on disk yet.
     /// Flushed when the caret leaves the tab's fields -- a write per
     /// keystroke would be a file write per frame.
@@ -7266,9 +7296,28 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 6
-                        notes_head := FabHeaderLabel {
+                        notes_head := View {
                             width: Fill
-                            text: "notes"
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            notes_label := FabHeaderLabel {
+                                width: Fill
+                                text: "notes"
+                            }
+                            notes_clear := Button {
+                                width: 15
+                                height: 15
+                                padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                align: Align{x: 0.5 y: 0.5}
+                                text: "\u{00d7}"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #x8a8a94
+                                    text_style +: { font_size: 10.0 }
+                                }
+                            }
                         }
                         spec_notes := TextInput {
                             width: Fill
@@ -7852,6 +7901,15 @@ impl Tweaker {
         // and writing one widget's text into another's is how a note is lost.
         self.note_key_shown = path.clone().unwrap_or_default();
         self.note_text_uid = widget_col.child(live_id!(spec_notes)).widget_uid().0;
+        {
+            // The cross is only there when there is something to clear: an
+            // always-present one invites a click that does nothing, and this
+            // is the only control in the tab that destroys what you wrote.
+            let clear = widget_col.child(live_id!(notes_head)).child(live_id!(notes_clear));
+            self.spec_clear_uid = clear.widget_uid().0;
+            let has_text = !widget_col.child(live_id!(spec_notes)).text().is_empty();
+            clear.set_visible(cx, has_text);
+        }
 
         if let Some(path) = path {
             let (mut notes, mut rules) = {
@@ -7928,6 +7986,27 @@ impl Tweaker {
         {
             self.spec_flush();
         }
+    }
+
+    /// Empty the notes field, and the record behind it. Written through
+    /// straight away rather than left for the caret to leave: a clear is a
+    /// decision, and there is nothing half-typed to protect.
+    fn spec_clear_notes(&mut self, cx: &mut Cx) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        sidebar
+            .child(live_id!(spec_col))
+            .child(live_id!(spec_widget))
+            .child(live_id!(spec_notes))
+            .set_text(cx, "");
+        let path = self.note_key_shown.clone();
+        if !path.is_empty() {
+            let mut s = session().lock().unwrap();
+            if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                note.text.clear();
+            }
+        }
+        self.spec_flush();
+        self.redraw_sidebar(cx);
     }
 
     /// Put what the Spec tab holds on disk: the per-widget records in the
@@ -9005,11 +9084,6 @@ impl Tweaker {
                         field.set_text(cx, &live);
                     }
                 }
-                if self.prompt_focus_pending && field.area() != Area::Empty {
-                    self.prompt_focus_pending = false;
-                    cx.set_key_focus(field.area());
-                    self.next_frame = cx.new_next_frame();
-                }
             }
             // Shader tab content: the layer's live preview + doc + prompt.
             if tab == PanelTab::Shader {
@@ -9347,7 +9421,7 @@ impl Tweaker {
                 // them whether or not a note card happens to be open.
                 self.refresh_badges(cx);
                 let pinned_uids: Vec<u64> =
-                    self.badge_targets.iter().map(|(uid, _)| *uid).collect();
+                    self.badge_targets.iter().map(|(uid, _, _)| *uid).collect();
                 // Isolate: one root — the selection — instead of the app's.
                 // With nothing selected there is nothing to isolate, so the
                 // whole tree stands.
@@ -11127,6 +11201,27 @@ impl Tweaker {
                 }
                 continue;
             }
+            // The prompt strip's buttons and the Spec tab's cross. These sat
+            // inside the note card's action block and went out with it; the
+            // keys kept working, which is why nothing looked wrong.
+            if self.spec_clear_uid != 0 && action_uid == self.spec_clear_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.spec_clear_notes(cx);
+                }
+                continue;
+            }
+            if self.prompt_queue_uid != 0 && action_uid == self.prompt_queue_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.prompt_queue(cx);
+                }
+                continue;
+            }
+            if self.prompt_send_uid != 0 && action_uid == self.prompt_send_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.prompt_send(cx);
+                }
+                continue;
+            }
             if self.shader_fold_uid != 0 && action_uid == self.shader_fold_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.shader_src_open = !self.shader_src_open;
@@ -11858,7 +11953,9 @@ impl Tweaker {
         if self.badge_ui.is_some() {
             return;
         }
-        let ui = cx.with_vm(|vm| {
+        // Amber describes, blue constrains, green does both. The colour is
+        // baked into each instance, not applied per badge.
+        let note = cx.with_vm(|vm| {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
@@ -11874,7 +11971,39 @@ impl Tweaker {
             });
             WidgetRef::script_from_value(vm, value)
         });
-        self.badge_ui = Some(ui);
+        let rule = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #x59b3ff
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let both = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #x57d98a
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        self.badge_ui = Some([note, rule, both]);
     }
 
     /// Re-resolve which widgets carry a pinned note. Walks the whole tree, so
@@ -11886,17 +12015,26 @@ impl Tweaker {
             return;
         }
         self.badges_at = now;
-        let keys: Vec<String> = {
+        // A badge means "something is written about this widget", which is
+        // the only test left once pinning is gone: a record exists for every
+        // widget a prompt was ever sent about, and those must not all wear a
+        // mark. Which KIND it is comes back with it.
+        let keys: Vec<(String, BadgeKind)> = {
             let mut s = session().lock().unwrap();
             s.load_notes();
-            // A badge now means "something is written about this widget",
-            // which is the only test left once pinning is gone: a record
-            // exists for every widget a prompt was ever sent about, and
-            // those must not all wear a mark.
             s.notes
                 .iter()
-                .filter(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty())
-                .map(|n| n.path.clone())
+                .filter_map(|n| {
+                    let note = !n.text.trim().is_empty();
+                    let rule = !n.rules.trim().is_empty();
+                    let kind = match (note, rule) {
+                        (true, true) => BadgeKind::Both,
+                        (true, false) => BadgeKind::Note,
+                        (false, true) => BadgeKind::Rule,
+                        (false, false) => return None,
+                    };
+                    Some((n.path.clone(), kind))
+                })
                 .collect()
         };
         self.badge_targets.clear();
@@ -11904,8 +12042,8 @@ impl Tweaker {
             return;
         }
         for (uid, path) in readable_paths(cx) {
-            if keys.iter().any(|key| *key == path) {
-                self.badge_targets.push((uid, path));
+            if let Some((_, kind)) = keys.iter().find(|(key, _)| *key == path) {
+                self.badge_targets.push((uid, path, *kind));
             }
         }
     }
@@ -11917,10 +12055,10 @@ impl Tweaker {
             return;
         }
         self.ensure_badge_ui(cx);
-        let ui = self.badge_ui.as_ref().unwrap().clone();
+        let pins = self.badge_ui.as_ref().unwrap().clone();
         let max_x = self.overlay_max_x(cx.current_pass_size());
         let targets = self.badge_targets.clone();
-        for (uid, _) in targets {
+        for (uid, _, kind) in targets {
             let widget = cx.widget_tree().widget(WidgetUid(uid));
             if widget.is_empty() {
                 continue;
@@ -11947,7 +12085,7 @@ impl Tweaker {
             }
             let mut walk = Walk::fit();
             walk.abs_pos = Some(pos);
-            let _ = ui.draw_walk(cx, scope, walk);
+            let _ = pins[kind.index()].draw_walk(cx, scope, walk);
             self.badge_rects.push((
                 Rect { pos: badge(rect), size: dvec2(BADGE_SIZE, BADGE_SIZE) },
                 uid,
@@ -12934,6 +13072,23 @@ impl Widget for Tweaker {
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
         self.draw_sidebar(cx, scope, sel.as_ref());
+        // The caret goes back into the prompt box AFTER the sidebar has been
+        // drawn, not while it is being laid out: before the draw the box's
+        // area is last frame's, and the focus set against it does not
+        // survive the field being drawn again. Without this a send or a
+        // queue drops the caret, and every key after it is handled by the
+        // APP -- typing walks its tabs instead of writing the next message.
+        if self.prompt_focus_pending {
+            let field = self
+                .sidebar
+                .as_ref()
+                .map(|s| s.child(live_id!(prompt_row)).child(live_id!(prompt_field)));
+            if let Some(area) = field.map(|f| f.area()).filter(|a| *a != Area::Empty) {
+                self.prompt_focus_pending = false;
+                cx.set_key_focus(area);
+                self.next_frame = cx.new_next_frame();
+            }
+        }
         cx.end_pass_sized_turtle();
         self.sidebar_list.as_mut().unwrap().end(cx);
 
