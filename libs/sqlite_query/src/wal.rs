@@ -592,7 +592,14 @@ impl ShmGuard {
             Ok(None) => unreachable!("create always returns a store"),
             // A read-only directory or file: fall back to reading the log
             // without the lock, which is still checksum-safe.
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                return Ok(None)
+            }
             Err(error) => return Err(Error::Io(error)),
         };
         let got = crate::lock::try_lock_range(file.as_ref(), SHM_LOCK_FIRST, SHM_LOCK_COUNT, exclusive)?;

@@ -1,6 +1,10 @@
-//! The analog face: one code-native quad. Ticks and hands are signed
-//! distances in the pixel shader, so the face stays crisp at any size and
-//! follows the theme's text/accent colours across style reloads.
+//! The analog face: one code-native quad. The disc, ticks and hands are
+//! signed distances in the pixel shader, so the face stays crisp at any
+//! size and follows the theme's text/secondary/accent colours across
+//! style reloads. Metrics are the design's for the 292 pt dial and scale
+//! with the dial: minute ticks 1×4, hour ticks 2×8, hands 70×5 / 105×3.5
+//! / 117×1.5 with rounded ends, a 17 pt second-hand tail, a 7 pt hub, and
+//! all twelve numerals on radius 113.
 use makepad_widgets::*;
 
 script_mod! {
@@ -13,54 +17,57 @@ script_mod! {
         minute_angle: 0.0
         second_angle: 0.0
         show_seconds: 1.0
-        color_face: theme.color_bg_container
-        color_ring: theme.color_text_disabled
+        color_face: theme.color_inset
+        color_tick: theme.color_text_disabled
         color_hand: theme.color_text
-        color_accent: theme.color_focus
+        color_accent: #ff9500
         pixel: fn() {
             let p = self.pos * self.rect_size
             let c = self.rect_size * 0.5
-            let r = min(c.x, c.y) - 5.0
+            let r = min(c.x, c.y)
+            // Everything below is in units of the 292 pt reference dial.
+            let s = r / 146.0
             let d = p - c
             let dist = length(d)
-            let disc = 1.0 - smoothstep(r - 1.0, r + 0.5, dist)
-            let ring = smoothstep(r - 1.5, r - 0.5, dist)*0.18
-            let light = clamp(0.5+(d.x+d.y)/max(r*4.0,1.0),0.0,1.0)
-            let enamel = mix(self.color_face.rgb,self.color_accent.rgb,0.04+light*0.035)
-            let mut col = mix(enamel, self.color_ring.rgb, ring)
+            let disc = 1.0 - smoothstep(r - 0.8, r + 0.4, dist)
+            let mut col = self.color_face.rgb
 
-            // Twelve hour ticks: arc distance to the nearest 30 degree spoke.
+            // Sixty minute ticks (1×4) and twelve hour ticks (2×8), their
+            // outer ends on the dial's edge minus a 6 pt inset.
             let ang = atan2(d.x, -d.y)
-            let minute_arc=abs(fract(ang / 6.2831853 * 60.0 + 0.5)-0.5)*(6.2831853/60.0)*dist
-            let minute_tick=(1.0-smoothstep(0.35,0.9,minute_arc))*smoothstep(r*0.92,r*0.93,dist)*(1.0-smoothstep(r*0.95,r*0.96,dist))
-            col=mix(col,self.color_ring.rgb,minute_tick*0.45)
-            let tick_arc = abs(fract(ang / 6.2831853 * 12.0 + 0.5) - 0.5) * (6.2831853 / 12.0) * dist
-            let tick = (1.0 - smoothstep(0.6, 1.4, tick_arc))
-                * smoothstep(r * 0.84, r * 0.86, dist)
-                * (1.0 - smoothstep(r * 0.93, r * 0.95, dist))
-            col = mix(col, self.color_ring.rgb, tick)
+            let outer = r - 6.0 * s
+            let minute_arc = abs(fract(ang / 6.2831853 * 60.0 + 0.5) - 0.5) * (6.2831853 / 60.0) * dist
+            let minute_tick = (1.0 - smoothstep(0.5 * s, 0.5 * s + 0.8, minute_arc))
+                * smoothstep(outer - 4.0 * s - 0.6, outer - 4.0 * s + 0.4, dist)
+                * (1.0 - smoothstep(outer - 0.4, outer + 0.6, dist))
+            col = mix(col, self.color_tick.rgb, minute_tick * 0.7)
+            let hour_arc = abs(fract(ang / 6.2831853 * 12.0 + 0.5) - 0.5) * (6.2831853 / 12.0) * dist
+            let hour_tick = (1.0 - smoothstep(1.0 * s, 1.0 * s + 0.8, hour_arc))
+                * smoothstep(outer - 8.0 * s - 0.6, outer - 8.0 * s + 0.4, dist)
+                * (1.0 - smoothstep(outer - 0.4, outer + 0.6, dist))
+            col = mix(col, self.color_hand.rgb, hour_tick)
 
-            // Hands: distance to a segment along the hand direction.
+            // Hands: capsules from a short tail to their length, rounded ends.
             let hd = vec2(sin(self.hour_angle), -cos(self.hour_angle))
-            let ht = clamp(dot(d, hd), -r * 0.08, r * 0.52)
-            let hdist = length(d - hd * ht)
-            let hand_h = 1.0 - smoothstep(r * 0.027, r * 0.027 + 1.0, hdist)
+            let ht = clamp(dot(d, hd), -10.0 * s, 70.0 * s)
+            let hand_h = 1.0 - smoothstep(2.5 * s, 2.5 * s + 0.9, length(d - hd * ht))
             col = mix(col, self.color_hand.rgb, hand_h)
 
             let md = vec2(sin(self.minute_angle), -cos(self.minute_angle))
-            let mt = clamp(dot(d, md), -r * 0.08, r * 0.76)
-            let mdist = length(d - md * mt)
-            let hand_m = 1.0 - smoothstep(r * 0.018, r * 0.018 + 1.0, mdist)
+            let mt = clamp(dot(d, md), -10.0 * s, 105.0 * s)
+            let hand_m = 1.0 - smoothstep(1.75 * s, 1.75 * s + 0.9, length(d - md * mt))
             col = mix(col, self.color_hand.rgb, hand_m)
 
             let sd = vec2(sin(self.second_angle), -cos(self.second_angle))
-            let st = clamp(dot(d, sd), -r * 0.16, r * 0.82)
-            let sdist = length(d - sd * st)
-            let hand_s = (1.0 - smoothstep(0.7, 1.7, sdist)) * self.show_seconds
+            let st = clamp(dot(d, sd), -17.0 * s, 117.0 * s)
+            let hand_s = (1.0 - smoothstep(0.75 * s, 0.75 * s + 0.9, length(d - sd * st))) * self.show_seconds
             col = mix(col, self.color_accent.rgb, hand_s)
 
-            let cap = 1.0 - smoothstep(r * 0.04, r * 0.04 + 1.0, dist)
-            col = mix(col, self.color_accent.rgb, cap)
+            // The hub: accent over the second hand, a small dark centre.
+            let hub = 1.0 - smoothstep(3.5 * s, 3.5 * s + 0.9, dist)
+            col = mix(col, mix(self.color_hand.rgb, self.color_accent.rgb, self.show_seconds), hub)
+            let pin = 1.0 - smoothstep(1.2 * s, 1.2 * s + 0.8, dist)
+            col = mix(col, self.color_face.rgb, pin)
             return vec4(col * disc, disc)
         }
     }
@@ -69,7 +76,7 @@ script_mod! {
     mod.widgets.ClockFace = set_type_default() do mod.widgets.ClockFaceBase {
         width: Fill height: Fill
         draw_face: mod.widgets.DrawClockFace {}
-        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 12}}
+        draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 13.5}}
     }
 }
 
@@ -89,7 +96,7 @@ pub struct DrawClockFace {
     #[live]
     color_face: Vec4f,
     #[live]
-    color_ring: Vec4f,
+    color_tick: Vec4f,
     #[live]
     color_hand: Vec4f,
     #[live]
@@ -109,6 +116,10 @@ pub struct ClockFace {
     draw_face: DrawClockFace,
     #[live]
     draw_text: DrawText,
+    /// Numeral size in makepad points (the design's 18 logical = 13.5;
+    /// the tile passes its 12 as 9).
+    #[live(13.5)]
+    numeral_size: f32,
 }
 
 impl ClockFace {
@@ -142,13 +153,20 @@ impl Widget for ClockFace {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_face.draw_walk(cx, walk);
-        let rect=self.draw_face.area().rect(cx);
-        let center=rect.pos+rect.size*0.5;
-        let radius=rect.size.x.min(rect.size.y)*0.34;
-        self.draw_text.text_style.font_size=(radius*0.11).clamp(8.0,12.0) as f32;
-        for (text,x,y) in [("12",0.0,-1.0),("3",1.0,0.0),("6",0.0,1.0),("9",-1.0,0.0)] {
-            if let Some(run)=self.draw_text.prepare_single_line_run(cx,text) {
-                self.draw_text.draw_abs(cx,center+dvec2(x*radius-run.width_in_lpxs as f64*0.5,y*radius-7.0),text);
+        let rect = self.draw_face.area().rect(cx);
+        let center = rect.pos + rect.size * 0.5;
+        let r = rect.size.x.min(rect.size.y) * 0.5;
+        // Numerals on radius 113 of the 292 dial (57 of 154), at the
+        // requested size, all twelve, centred on their ink.
+        let radius = if self.numeral_size <= 9.5 { r * (57.0 / 77.0) } else { r * (113.0 / 146.0) };
+        self.draw_text.text_style.font_size = self.numeral_size;
+        for h in 1..=12u32 {
+            let a = h as f64 / 12.0 * std::f64::consts::TAU;
+            let text = h.to_string();
+            if let Some(run) = self.draw_text.prepare_single_line_run(cx, &text) {
+                let ink = (run.ascender_in_lpxs - run.descender_in_lpxs) as f64;
+                let pos = center + dvec2(a.sin() * radius - run.width_in_lpxs as f64 * 0.5, -a.cos() * radius - ink * 0.5);
+                self.draw_text.draw_abs(cx, pos, &text);
             }
         }
         DrawStep::done()

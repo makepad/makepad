@@ -23,6 +23,7 @@ use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
 use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets::hosted_view::{HostedFace, HostedTransition};
 use makepad_widgets::*;
 use std::path::Path;
 use tile::{presentation, Presentation, Selected};
@@ -174,6 +175,12 @@ pub struct PhotosView {
     /// — the item id only exists after the reload.
     #[rust]
     show_when_opened: Option<String>,
+    /// The host's open/close crossfade, applied on the next draw when the
+    /// view's own rect (the full viewport) is known.
+    #[rust]
+    transition: Option<HostedTransition>,
+    #[rust]
+    last_rect: Rect,
 }
 
 /// One `photos.add` in flight: the blocking tape bake is a heavy pool job.
@@ -218,9 +225,27 @@ impl PhotosView {
 
     fn present_subject(&mut self, cx: &mut Cx) {
         let Some(item)=self.selected.as_ref().map(|s|s.item) else {return;};
+        // A crossfade in flight places the subject itself (`apply_transition`).
+        if self.transition.is_some() && self.mode == HostedViewMode::Full {return;}
         if let Some(mut grid)=self.view.widget(cx,ids!(grid)).borrow_mut::<TileGrid>() {
             grid.present_item(cx,item,self.mode==HostedViewMode::Tile);
         }
+    }
+
+    /// The host's crossfade: opening, the tile's subject sits at the tile's
+    /// rect on the first full frame and glides to rest; closing, it glides
+    /// back to the tile's rect. The rect arrives relative to the full
+    /// viewport, which is this view's own rect.
+    fn apply_transition(&mut self, cx: &mut Cx) {
+        let Some(transition) = self.transition else { return };
+        if self.last_rect.size.x < 1.0 || self.mode != HostedViewMode::Full { return; }
+        let Some(item) = self.selected.as_ref().map(|s| s.item) else { self.transition = None; return };
+        let tile = transition.tile_rect();
+        let rect = Rect { pos: self.last_rect.pos + tile.pos, size: tile.size };
+        if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<TileGrid>() {
+            if transition.opening { grid.present_item_from(cx, item, rect); } else { grid.glide_item_to(cx, item, rect); }
+        }
+        self.transition = None;
     }
 
     fn select_tile_picture(&mut self, cx: &mut Cx) {
@@ -246,7 +271,14 @@ impl PhotosView {
         self.view.widget(cx, ids!(search_row)).set_visible(cx, wanted.chrome);
         self.view.widget(cx, ids!(status)).set_visible(cx, wanted.chrome);
         self.view.widget(cx, ids!(tile_caption)).set_visible(cx, wanted.caption);
+        // The empty face is a card of its own: the wall (whose ground sits
+        // nearer in depth than a sibling's background) steps aside, and the
+        // card's colour and ink are one sheet's pair, whatever the appearance.
+        self.view.widget(cx, ids!(full_face)).set_visible(cx, !wanted.empty);
         self.view.widget(cx, ids!(tile_empty)).set_visible(cx, wanted.empty);
+        if wanted.empty {
+            self.view.label(cx, ids!(empty_body)).set_text(cx, &library::where_a_library_goes(self.collection.as_deref()));
+        }
         self.view.label(cx, ids!(caption_app)).set_text(cx, &wanted.caption_app);
         self.view.label(cx, ids!(caption_title)).set_text(cx, &wanted.caption_title);
         self.applied = Some(wanted);
@@ -302,6 +334,7 @@ impl PhotosView {
             Some(lib) => self.open_library(cx, lib),
             None => self.set_status(cx, library::how_to_bake()),
         }
+        self.applied = None;
     }
 
     fn open_library(&mut self, cx: &mut Cx, lib: Library) {
@@ -503,8 +536,9 @@ impl Widget for PhotosView {
         // The host's face request. Anything else in a Custom message is
         // not ours (the app around us reads its own vocabulary).
         if let Event::Custom(json) = event {
-            if let Some(mode) = HostedViewMode::parse(json) {
-                self.set_mode(cx, mode);
+            if let Some(face) = HostedFace::parse(json) {
+                if face.transition.is_some() { self.transition = face.transition; }
+                self.set_mode(cx, face.mode);
             }
         }
         if matches!(event,Event::BackPressed{..}) && !self.query(cx).is_empty() && event.back_pressed() {
@@ -593,6 +627,8 @@ impl Widget for PhotosView {
         if self.applied.is_none() {
             self.apply_presentation(cx);
         }
+        self.last_rect = cx.turtle().rect();
+        self.apply_transition(cx);
         // The grid owns resize anchoring around the current viewport. A
         // resize must not jump back to the last picture that was clicked.
         let size = cx.turtle().rect().size;

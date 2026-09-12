@@ -21,6 +21,7 @@ use crate::report;
 use crate::runtime::{Backend, ImportState, Runtime};
 use crate::theme;
 use makepad_widgets::*;
+use std::path::PathBuf;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -754,11 +755,26 @@ impl Range {
     }
 }
 
+/// The database path nobody has set yet: a plain SQLite file (not the
+/// storage jail, which is for small settings) under the shared makepad
+/// home's `finance/` directory. The module keeps this; the standalone
+/// window overrides it to a checkout-relative path in `main.rs`.
+fn default_db_path() -> PathBuf {
+    makepad_widgets::makepad_platform::home::makepad_home().join("finance").join("finance.db")
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Finance {
     #[deref]
     view: View,
 
+    /// Where `start()` opens the database, on first draw. The default is
+    /// the makepad home's `finance/finance.db` — the module leaves it at
+    /// the default (and sets it explicitly anyway, for clarity); the
+    /// standalone window overrides it to a checkout-relative path before
+    /// the first draw (see `set_db_path`).
+    #[rust(default_db_path())]
+    db_path: PathBuf,
     #[rust]
     backend: Backend,
     #[rust]
@@ -798,6 +814,15 @@ impl Finance {
         self.ledger.base_currency
     }
 
+    /// Set where `start()` opens the database. Whoever seats this widget
+    /// (the standalone window, a module's `create`) must call this before
+    /// the view's first draw — `start()` runs lazily on that first draw
+    /// and, once it has, the database is already open at whatever path was
+    /// current then.
+    pub fn set_db_path(&mut self, path: PathBuf) {
+        self.db_path = path;
+    }
+
     /// Load either the generated demo household or the native database.
     fn start(&mut self, cx: &mut Cx) {
         if self.started {
@@ -805,7 +830,16 @@ impl Finance {
         }
         self.started = true;
 
-        let started = self.backend.start();
+        let started = self.backend.start(&self.db_path);
+        // One line per start, so a host's log says which file this instance
+        // opened and how it went (a phone has no status bar to read).
+        log!(
+            "finance: {} — {} accounts, {} transactions{}",
+            self.db_path.display(),
+            started.ledger.accounts.len(),
+            started.ledger.transactions.len(),
+            if started.status.is_empty() { String::new() } else { format!("; {}", started.status) }
+        );
         self.today = started.today;
         self.ledger = started.ledger;
         self.status = started.status;
@@ -921,6 +955,17 @@ impl Finance {
         // Stat cards stack rather than shrink to illegibility.
         self.view(cx, ids!(stat_saved)).set_visible(cx, !compact);
         self.view(cx, ids!(stat_net)).set_visible(cx, layout != Layout::Compact);
+        // "Where it went" and "Coming up" side by side need a desktop; on
+        // a phone they stack, each the full width.
+        let mut lower = self.view(cx, ids!(lower_row));
+        if compact {
+            script_apply_eval!(cx, lower, { flow: mod.turtle.Down });
+        } else {
+            script_apply_eval!(cx, lower, { flow: mod.turtle.Right });
+        }
+        // Import needs a file picker a phone has no room (or, hosted, no
+        // dialog) for: four tabs fit, five do not.
+        self.widget(cx, ids!(tab_import)).set_visible(cx, !compact && self.backend.has_import());
     }
 
     /// Push every value the chrome shows. Cheap enough to run whenever
@@ -1338,6 +1383,35 @@ impl Finance {
             ),
         }
     }
+
+    // -- AI --------------------------------------------------------------
+
+    /// Net worth, the current range's flow, and which screen and account
+    /// filter are showing — the one fact the `finance.summary` tool reads.
+    pub fn ai_summary(&self) -> String {
+        let currency = self.currency();
+        let worth = self.ledger.net_worth_on(self.today);
+        let flow = report::flow(&self.ledger, self.range());
+        let filter = match self.account_filter.and_then(|id| self.ledger.account(id)) {
+            Some(account) => format!(" Filtered to {}.", account.name),
+            None => String::new(),
+        };
+        format!(
+            "{} screen. Net worth {}. Over {}: in {}, out {}, net {}.{filter}",
+            self.screen.title(),
+            format_money(worth, currency),
+            self.range.label(),
+            format_money(flow.income, currency),
+            format_money(flow.expense, currency),
+            format_money(flow.net(), currency),
+        )
+    }
+
+    /// Answer one call from the AI bus — the module's executor and, if a
+    /// standalone build opens a service port later, that port too.
+    pub fn ai_answer(&self, call: &makepad_ai_services::wire::ServiceCall) -> makepad_ai_services::wire::ToolResult {
+        crate::ai::answer(call, || self.ai_summary())
+    }
 }
 
 /// Set a bar's length. The meter shader takes the fraction directly, so
@@ -1358,9 +1432,13 @@ impl Widget for Finance {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.start(cx);
 
-        // The layout follows the window, one frame behind on a resize —
-        // which is invisible, because a resize redraws continuously.
-        let width = self.view.area().rect(cx).size.x;
+        // The layout follows the room THIS widget is given — the turtle it
+        // is about to walk, which is the window's body standalone and a
+        // host's tile in a window manager — never a window's geometry. The
+        // area rect it read before is empty for the first draw and for a
+        // root recorded into a host's texture, which left a phone on the
+        // desktop layout.
+        let width = cx.turtle().rect().size.x;
         if width > 1.0 {
             let layout = Layout::for_width(width);
             if layout != self.layout {
@@ -1585,5 +1663,23 @@ impl WidgetMatchEvent for Finance {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::Layout;
+
+    /// A phone's width gets the phone app, a laptop's the desktop, and the
+    /// thresholds sit where the content stops fitting, not on a device.
+    #[test]
+    fn the_layout_follows_the_room_the_view_is_given() {
+        assert_eq!(Layout::for_width(402.0), Layout::Compact);
+        assert_eq!(Layout::for_width(699.0), Layout::Compact);
+        assert_eq!(Layout::for_width(700.0), Layout::Regular);
+        assert_eq!(Layout::for_width(900.0), Layout::Regular);
+        assert_eq!(Layout::for_width(1200.0), Layout::Wide);
+        assert!(!Layout::Compact.has_sidebar());
+        assert!(Layout::Regular.has_sidebar());
     }
 }

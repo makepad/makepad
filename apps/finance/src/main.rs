@@ -1,29 +1,22 @@
-//! Personal finance on Makepad: a ledger, budgets, reports and CSV import
-//! over a SQLite file.
+//! finance — personal finance on Makepad, as a plain full-window app: one
+//! window that is a desktop app when it is wide and a phone app when it is
+//! narrow.
 //!
-//! One window that is a desktop app when it is wide and a phone app when
-//! it is narrow. Run it from the repo root — the file lives at
-//! `local/finance/finance.db`, and a first run fills it with a generated
-//! household so there is something to click.
+//! The ledger, budgets, reports, charts and CSV import all live in the
+//! library crate (`makepad_finance`), around one root widget
+//! ([`makepad_finance::view::Finance`]); this binary is just a `Window`
+//! around it, plus the one thing only a checkout-relative run needs: the
+//! standalone database path. Run from the repo root and the file lives at
+//! `local/finance/finance.db` — a first run fills it with a generated
+//! household so there is something to click. The same crate's module
+//! (`makepad_finance::module`) seats the same root in-process, one
+//! instance per isolate, with the database under the shared makepad home
+//! instead (see `Finance::set_db_path`).
 
-#![allow(dead_code)] // ledger, import and report surface built ahead of the views that use it
-pub use ::makepad_widgets;
+pub use makepad_widgets;
 
+use makepad_finance::{chart, theme, view};
 use makepad_widgets::*;
-
-mod chart;
-mod csv;
-mod date;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
-mod db;
-mod import;
-mod model;
-mod money;
-mod report;
-mod runtime;
-mod seed;
-mod theme;
-mod view;
 
 app_main!(App);
 
@@ -37,7 +30,7 @@ script_mod! {
                 window.inner_size: vec2(1440, 900)
                 pass.clear_color: vec4(0.051, 0.067, 0.09, 1.0)
                 body +: {
-                    Finance{}
+                    finance := Finance{}
                 }
             }
         }
@@ -50,15 +43,24 @@ pub struct App {
     ui: WidgetRef,
 }
 
-impl MatchEvent for App {}
+impl MatchEvent for App {
+    fn handle_startup(&mut self, cx: &mut Cx) {
+        // Only the standalone window, run from a checkout, uses this path;
+        // every other host (the module) keeps `Finance`'s own default —
+        // the makepad home's `finance/finance.db` — set in `module.rs`.
+        if let Some(mut finance) = self.ui.widget(cx, ids!(finance)).borrow_mut::<view::Finance>() {
+            finance.set_db_path(std::path::PathBuf::from("local/finance/finance.db"));
+        }
+    }
+}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        crate::theme::install(vm);
-        crate::chart::script_mod(vm);
-        crate::view::script_mod(vm);
+        theme::install(vm);
+        chart::script_mod(vm);
+        view::script_mod(vm);
         self::script_mod(vm)
     }
 

@@ -71,22 +71,66 @@ CREATE TABLE IF NOT EXISTS shards(
 );
 ";
 
-/// The baker's writable handle on the index.
+/// The baker's handle on the index. Writable when the library is ours to
+/// change; read-only when it lives where nothing may be written (an
+/// application bundle, a read-only volume), in which case every write
+/// answers [`READ_ONLY_LIBRARY`] and the reads are the same.
 pub struct TileDb {
     conn: Connection,
+    read_only: bool,
 }
 
+/// What every write on a read-only library answers.
+pub const READ_ONLY_LIBRARY: &str = "this library is read-only";
+
 impl TileDb {
+    /// Open for writing, creating the index when it is missing. When the OS
+    /// refuses write access to the file or its directory, the library is
+    /// opened read-only instead (one log line says so); any other failure
+    /// is an error.
     pub fn open(path: &Path) -> Result<TileDb, String> {
-        let mut conn = Connection::open(path, Duration::from_secs(5))
-            .map_err(|e| format!("open {}: {e:?}", path.display()))?;
-        conn.execute_batch(SCHEMA).map_err(|e| format!("schema: {e:?}"))?;
-        Ok(TileDb { conn })
+        match Connection::open(path, Duration::from_secs(5)) {
+            Ok(mut conn) => {
+                conn.execute_batch(SCHEMA).map_err(|e| format!("schema: {e:?}"))?;
+                Ok(TileDb { conn, read_only: false })
+            }
+            Err(makepad_sqlite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) && path.is_file() =>
+            {
+                makepad_widgets::log!("image-tiles: {} is read-only ({error}); writes are refused", path.display());
+                Self::open_read_only(path)
+            }
+            Err(e) => Err(format!("open {}: {e:?}", path.display())),
+        }
+    }
+
+    /// Open an existing index for reading only: no schema statement, no
+    /// journal, no lock beyond the shared one a read takes.
+    pub fn open_read_only(path: &Path) -> Result<TileDb, String> {
+        let conn = Connection::open_read_only(path, Duration::from_secs(5))
+            .map_err(|e| format!("open {} read-only: {e:?}", path.display()))?;
+        Ok(TileDb { conn, read_only: true })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn writable(&self) -> Result<(), String> {
+        if self.read_only {
+            Err(READ_ONLY_LIBRARY.to_string())
+        } else {
+            Ok(())
+        }
     }
 
     /// Add a source URL to bake. Already-known URLs keep their row (and
     /// their pixels); title/link are refreshed.
     pub fn add_source(&mut self, url: &str, title: &str, link: &str) -> Result<(), String> {
+        self.writable()?;
         self.conn
             .execute(
                 "INSERT INTO items(url, title, link) VALUES(?, ?, ?)
@@ -112,6 +156,7 @@ impl TileDb {
 
     /// Put permanently-failed items back in the queue for another try.
     pub fn retry_failed(&mut self) -> Result<u64, String> {
+        self.writable()?;
         self.conn
             .execute("UPDATE items SET status = 0, error = '' WHERE status = 2", &[])
             .map_err(|e| format!("retry: {e:?}"))
@@ -125,6 +170,7 @@ impl TileDb {
         shard: i64,
         slot: u32,
     ) -> Result<(), String> {
+        self.writable()?;
         let aspect = width.max(1) as f64 / height.max(1) as f64;
         self.conn
             .execute(
@@ -143,6 +189,7 @@ impl TileDb {
     }
 
     pub fn set_failed(&mut self, id: ItemId, error: &str) -> Result<(), String> {
+        self.writable()?;
         self.conn
             .execute(
                 "UPDATE items SET status = 2, error = ? WHERE id = ?",
@@ -153,6 +200,7 @@ impl TileDb {
     }
 
     pub fn upsert_shard(&mut self, shard: ShardRow) -> Result<(), String> {
+        self.writable()?;
         self.conn
             .execute(
                 "INSERT INTO shards(id, count, sealed) VALUES(?, ?, ?)
@@ -187,6 +235,7 @@ impl TileDb {
     /// holds no pixels: its items go back to pending so they are fetched
     /// again, and the shard id is freed.
     pub fn reset_unsealed_shards(&mut self) -> Result<usize, String> {
+        self.writable()?;
         let open: Vec<i64> = self.shards()?.into_iter().filter(|s| !s.sealed).map(|s| s.id).collect();
         for id in &open {
             self.conn
@@ -258,4 +307,70 @@ pub fn read_items(path: &Path) -> Result<(Vec<ItemRow>, Vec<ShardRow>), String> 
         .filter_map(|r| Some(ShardRow { id: r[0].as_integer()?, count: r[1].as_integer()?, sealed: r[2].as_integer()? != 0 }))
         .collect();
     Ok((items, shards))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("image-tiles-db-{tag}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn set_read_only(path: &Path, read_only: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if read_only { 0o555 } else { 0o755 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A library where nothing may be written — an application bundle —
+    /// opens read-only on the ordinary path: reads are the same, every
+    /// write says why it did not happen, and no sidecar file appears.
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_library_opens_for_reading_and_refuses_writes() {
+        let dir = scratch("read-only");
+        let path = dir.join("library.sqlite");
+        {
+            let mut db = TileDb::open(&path).unwrap();
+            assert!(!db.is_read_only());
+            db.add_source("https://example.invalid/1.png", "one", "").unwrap();
+            db.upsert_shard(ShardRow { id: 0, count: 1, sealed: true }).unwrap();
+        }
+        set_read_only(&path, true);
+        set_read_only(&dir, true);
+        let outcome = std::panic::catch_unwind(|| {
+            let mut db = TileDb::open(&path).unwrap();
+            assert!(db.is_read_only(), "the OS refused writing: the library is read-only");
+            assert_eq!(db.pending().unwrap().len(), 1);
+            assert_eq!(db.shards().unwrap().len(), 1);
+            assert_eq!(db.counts().unwrap(), (1, 0, 0));
+            for result in [
+                db.add_source("https://example.invalid/2.png", "two", ""),
+                db.set_failed(1, "nope"),
+                db.upsert_shard(ShardRow { id: 1, count: 0, sealed: false }),
+                db.retry_failed().map(|_| ()),
+                db.reset_unsealed_shards().map(|_| ()),
+            ] {
+                assert_eq!(result, Err(READ_ONLY_LIBRARY.to_string()));
+            }
+            assert!(TileDb::open_read_only(&path).unwrap().is_read_only());
+            let siblings: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert_eq!(siblings.len(), 1, "no journal, WAL or shm: {siblings:?}");
+            // The viewer's own reader is unaffected.
+            assert!(read_items(&path).is_ok());
+        });
+        set_read_only(&dir, false);
+        set_read_only(&path, false);
+        let _ = std::fs::remove_dir_all(&dir);
+        outcome.unwrap();
+    }
 }

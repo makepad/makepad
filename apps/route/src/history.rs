@@ -1,7 +1,8 @@
 //! Disk-based drive history (route.md follow-up; user directive 2026-07-30).
 //!
 //! Every app session with GPS movement becomes one append-only JSONL drive
-//! record under `local/route_history/`: a header line, `trip` events each
+//! record in the instance's history directory (`local/route_history/` in a
+//! checkout, see maps_root.rs): a header line, `trip` events each
 //! time the planned trip changes, one line per accepted GPS fix, and an
 //! `end` footer. The header reserves `media` (future timelapse video
 //! attachments) and `synced` (future server sync) so the format survives
@@ -11,9 +12,8 @@ use crate::trip::haversine_m;
 use makepad_widgets::makepad_micro_serde::*;
 use makepad_widgets::{Cx, LocationUpdateEvent};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const HISTORY_DIR: &str = "local/route_history";
 /// Ignore jitter below this move distance.
 const MIN_MOVE_M: f64 = 3.0;
 
@@ -59,6 +59,8 @@ struct EndRecord {
 
 #[derive(Default)]
 pub struct DriveLog {
+    /// Where the records go; nothing is written until it is set.
+    dir: PathBuf,
     file: Option<std::fs::File>,
     last: Option<(f64, f64)>,
     pub distance_m: f64,
@@ -71,10 +73,19 @@ fn now_unix() -> f64 {
 }
 
 impl DriveLog {
+    /// Record into `dir`. Before this the log is inert.
+    pub fn set_dir(&mut self, dir: PathBuf) {
+        self.dir = dir;
+    }
+
     fn ensure_file(&mut self) -> Option<&mut std::fs::File> {
         if self.file.is_none() && !self.closed {
-            std::fs::create_dir_all(HISTORY_DIR).ok()?;
-            let path = PathBuf::from(HISTORY_DIR)
+            if self.dir.as_os_str().is_empty() {
+                return None;
+            }
+            std::fs::create_dir_all(&self.dir).ok()?;
+            let path = self
+                .dir
                 .join(format!("drive-{}.jsonl", now_unix() as u64));
             let mut file = std::fs::File::create(&path).ok()?;
             let header = StartRecord {
@@ -146,8 +157,8 @@ impl DriveLog {
 }
 
 /// Digest of recent drive records for the `trip_history` tool.
-pub fn list_drives(limit: usize) -> String {
-    let Ok(dir) = std::fs::read_dir(HISTORY_DIR) else {
+pub fn list_drives(history_dir: &Path, limit: usize) -> String {
+    let Ok(dir) = std::fs::read_dir(history_dir) else {
         return "no drive history yet".into();
     };
     let mut names: Vec<String> = dir
@@ -163,7 +174,7 @@ pub fn list_drives(limit: usize) -> String {
     names.truncate(limit);
     let mut out = String::new();
     for name in &names {
-        let path = PathBuf::from(HISTORY_DIR).join(name);
+        let path = history_dir.join(name);
         let mut date = String::from("?");
         let mut km = String::from("in progress");
         let mut trip = String::new();

@@ -17,6 +17,7 @@ use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
 pub mod bus;
+#[cfg(feature = "gen")]
 pub mod gen;
 pub mod feedback;
 pub mod overlay;

@@ -336,6 +336,15 @@ pub enum TileGridAction {
     Opened { count: usize, error: Option<String> },
 }
 
+/// A host transition's placement of one picture over a rect of the view.
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    item: ItemId,
+    rect: Rect,
+    /// Set the camera there now (opening) or glide there (closing).
+    instant: bool,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct TileGrid {
     #[uid]
@@ -422,6 +431,10 @@ pub struct TileGrid {
     presentation_item: Option<(ItemId, bool)>,
     #[rust]
     presentation_pending: bool,
+    /// A host transition to apply on the next draw, once the view's rect
+    /// is the face's: the subject placed over a rect of the view.
+    #[rust]
+    placement: Option<Placement>,
 
     // ── uniform-only glide bookkeeping ──
     #[rust]
@@ -448,6 +461,13 @@ pub struct TileGrid {
     full_requested: HashSet<ItemId>,
     #[rust]
     page_failed: HashMap<PageKey, f64>,
+    /// Per shard, the finest page level the library ships (see
+    /// `Library::finest_page_level`), asked once and kept.
+    #[rust]
+    finest_shipped: HashMap<i64, Option<usize>>,
+    /// Whether the library ships single-picture pyramids, asked once.
+    #[rust]
+    has_pyramid: Option<bool>,
     #[rust]
     full_failed: HashMap<ItemId, f64>,
 }
@@ -498,6 +518,8 @@ impl TileGrid {
         self.full_requested.clear();
         self.page_failed.clear();
         self.full_failed.clear();
+        self.finest_shipped.clear();
+        self.has_pyramid = None;
         self.plan = None;
         self.packing = None;
         self.bounds = None;
@@ -649,10 +671,70 @@ impl TileGrid {
     pub fn present_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) {
         self.presentation_item = Some((item, cover));
         self.presentation_pending = true;
+        self.placement = None;
         self.resize_anchor = None;
         self.resize_settle_at = None;
         self.zoom_anchor = None;
         self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The host opens this view over its tile: on the next draw the
+    /// picture covers `from` (a rect in the view's coordinates, where the
+    /// tile was) exactly as the tile face showed it, then glides to where
+    /// the full view rests it. No frame of it moves under the crossfade.
+    pub fn present_item_from(&mut self, cx: &mut Cx, item: ItemId, from: Rect) {
+        self.presentation_item = None;
+        self.presentation_pending = false;
+        self.placement = Some(Placement { item, rect: from, instant: true });
+        self.resize_anchor = None;
+        self.resize_settle_at = None;
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The host closes this view into its tile: the picture glides to
+    /// cover `to` (the tile's rect in the view's coordinates), so the tile
+    /// face takes over in place.
+    pub fn glide_item_to(&mut self, cx: &mut Cx, item: ItemId, to: Rect) {
+        self.presentation_item = None;
+        self.presentation_pending = false;
+        self.placement = Some(Placement { item, rect: to, instant: false });
+        self.zoom_anchor = None;
+        self.drag = None;
+        self.area.redraw(cx);
+    }
+
+    /// The camera that shows `item` covering `rect` of the view: the
+    /// cover scale of the rect, the item's centre on the rect's centre.
+    fn cover_camera(&self, item: ItemId, rect: Rect) -> Option<(Vec2d, f64)> {
+        let found = self.items.iter().find(|i| i.id == item)?;
+        let (pos, size) = (found.to_pos, found.to_size);
+        if rect.size.x < 1.0 || rect.size.y < 1.0 { return None; }
+        let scale = (rect.size.x * 1.01 / size.x.max(0.01) as f64).max(rect.size.y * 1.01 / size.y.max(0.01) as f64).clamp(self.min_scale, 6000.0);
+        let centre = Vec2d { x: (pos.x + size.x * 0.5) as f64, y: (pos.y + size.y * 0.5) as f64 };
+        let target = rect.pos + rect.size * 0.5;
+        let cam = centre - (target - self.view_center()) / scale;
+        Some((cam, scale))
+    }
+
+    fn settle_placement(&mut self, cx: &mut Cx) {
+        let Some(placement) = self.placement.take() else { return };
+        let Some((cam, scale)) = self.cover_camera(placement.item, placement.rect) else { return };
+        self.user_moved = true;
+        self.zoom_anchor = None;
+        if placement.instant {
+            // Where the tile showed it, now; the full view's rest from here.
+            self.frame_item(cx, placement.item, false);
+            self.cam_pos = cam;
+            self.cam_scale = scale;
+            self.cam_ready = true;
+        } else {
+            self.cam_pos_t = cam;
+            self.cam_scale_t = scale;
+        }
+        self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
     }
 
@@ -957,15 +1039,21 @@ impl TileGrid {
             match event {
                 StoreEvent::Page { shard, level, planes } => self.on_page(cx, shard, level, planes),
                 StoreEvent::Full { item, px, finest, frame } => self.on_full(cx, item, px, finest, frame),
-                StoreEvent::PageFailed { shard, level } => {
+                StoreEvent::PageFailed { shard, level, reason } => {
                     let until = self.time() + RETRY_EMBARGO_SECS;
                     self.requested.remove(&(shard, level));
-                    self.page_failed.insert((shard, level), until);
+                    // One line per rest, never per retry: a page that keeps
+                    // failing says why once every `RETRY_EMBARGO_SECS`.
+                    if self.page_failed.insert((shard, level), until).is_none() {
+                        log!("image-tiles: page {shard}/L{level} did not decode: {reason}");
+                    }
                 }
-                StoreEvent::FullFailed { item } => {
+                StoreEvent::FullFailed { item, reason } => {
                     let until = self.time() + RETRY_EMBARGO_SECS;
                     self.full_requested.remove(&item);
-                    self.full_failed.insert(item, until);
+                    if self.full_failed.insert(item, until).is_none() {
+                        log!("image-tiles: picture {item} did not decode: {reason}");
+                    }
                 }
             }
         }
@@ -1281,6 +1369,10 @@ impl Widget for TileGrid {
         } else if resized {
             self.restore_resize_anchor();
         }
+        if self.placement.is_some() {
+            if resized || first { self.relayout(); }
+            self.settle_placement(cx);
+        }
         self.frame += 1;
         if !self.cam_usable() || self.items.is_empty() {
             cx.end_turtle_with_area(&mut self.area);
@@ -1349,6 +1441,15 @@ impl Widget for TileGrid {
         let mut passes: Vec<Pass> = Vec::new();
         let mut shards: Vec<i64> = by_shard.keys().copied().collect();
         shards.sort_unstable();
+        // No finer than the library ships: a coarse-only bundle answers
+        // every zoom with its finest page, never with a missing file.
+        if let Some(store) = &self.store {
+            for &key in &shards {
+                if !self.finest_shipped.contains_key(&key) {
+                    self.finest_shipped.insert(key, store.library.finest_page_level(key));
+                }
+            }
+        }
         let inv = 1.0 / GRID as f32;
         for key in shards {
             let indices = by_shard.remove(&key).unwrap();
@@ -1356,7 +1457,8 @@ impl Widget for TileGrid {
                 .iter()
                 .map(|&i| self.items[i].size.x.max(self.items[i].size.y))
                 .fold(CELL_FILL, f32::max);
-            let desired = desired_for(side);
+            let floor = self.finest_shipped.get(&key).copied().flatten().unwrap_or(0);
+            let desired = desired_for(side).max(floor);
             let resident: Vec<usize> = (0..LEVELS).filter(|l| self.pages.contains_key(&(key, *l))).collect();
             if !self.pages.contains_key(&(key, desired)) {
                 // What this page would paint: every visible tile of the
@@ -1491,8 +1593,18 @@ impl Widget for TileGrid {
             })
             .map(|(_, v)| v)
             .collect();
+        // A library without a pyramid (a bundled coarse tail) answers every
+        // zoom with its pages: nothing to ask for, nothing to embargo.
+        let has_pyramid = match self.has_pyramid {
+            Some(has) => has,
+            None => {
+                let has = self.store.as_ref().is_some_and(|store| store.library.has_pyramid());
+                self.has_pyramid = Some(has);
+                has
+            }
+        };
         for (key, area, want) in affordable.into_iter().take(8) {
-            if embargoed(&mut self.full_failed, key, now) {
+            if !has_pyramid || embargoed(&mut self.full_failed, key, now) {
                 continue;
             }
             if let Some(store) = &mut self.store {
