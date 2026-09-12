@@ -37,7 +37,7 @@ pub struct LinuxGpuSnapshot {
     pub error: Option<String>,
 }
 
-#[cfg(all(not(headless), linux_direct, use_vulkan))]
+#[cfg(all(not(gpusim), linux_direct, use_vulkan))]
 impl crate::cx::Cx {
     pub fn linux_gpu_snapshot(&self) -> LinuxGpuSnapshot {
         self.os
@@ -95,7 +95,7 @@ impl crate::cx::Cx {
     }
 }
 
-#[cfg(not(all(not(headless), linux_direct, use_vulkan)))]
+#[cfg(not(all(not(gpusim), linux_direct, use_vulkan)))]
 impl crate::cx::Cx {
     pub fn linux_gpu_snapshot(&self) -> LinuxGpuSnapshot {
         LinuxGpuSnapshot::default()
