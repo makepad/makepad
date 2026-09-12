@@ -286,7 +286,11 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     let outer_vm = cx.script_vm.take();
     cx.script_vm = isolated.vm.take();
 
-    let out = f(cx);
+    // Whether `f` returns or unwinds, the isolate goes back into the table
+    // and the outer VM back onto `Cx`: a panic caught above this frame (a
+    // platform's event catcher, a host isolating a guest) must not cost the
+    // app its VM and the table its isolate.
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cx)));
 
     isolated.vm = cx.script_vm.take();
     cx.script_vm = outer_vm;
@@ -298,7 +302,10 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
         .vms
         .insert(vm_id, isolated);
 
-    out
+    match out {
+        Ok(out) => out,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// A Splash isolate runs untrusted-ish user script on the UI thread; cap how long any
@@ -1423,13 +1430,63 @@ pub struct IsolateEntry {
     outer_vm: Option<Box<ScriptVmBase>>,
 }
 
-/// Install isolate `vm_id` on `Cx` for a stretch of HOST code that draws or
-/// dispatches events to widgets minted in it — a module tile's draw pass,
-/// its event delivery. While it is installed, every `cx.with_vm` those
-/// widgets make (a lazily created child, a shader compiled on first draw,
-/// an `on_click` callback) resolves against the isolate's own heap, which
-/// is the only heap their objects mean anything in. Pair with
-/// [`leave_isolate`]; the main VM is a no-op entry.
+/// The isolate installed on `Cx` right now — [`MAIN_SPLASH_VM_ID`] when
+/// none is: what a host checks after a guest's panic was caught.
+pub fn current_splash_vm_id(cx: &mut Cx) -> SplashVmId {
+    cx.global::<CxWidgetAsync>().current_vm_id
+}
+
+/// A context a host draws or dispatches through that reaches `Cx`: the
+/// bare `Cx` of an event, the `Cx2d` of a draw. What [`with_isolate`] is
+/// generic over, so one entry serves both.
+pub trait IsolateCx {
+    fn isolate_cx(&mut self) -> &mut Cx;
+}
+
+impl IsolateCx for Cx {
+    fn isolate_cx(&mut self) -> &mut Cx {
+        self
+    }
+}
+
+impl<'a> IsolateCx for CxDraw<'a> {
+    fn isolate_cx(&mut self) -> &mut Cx {
+        self.cx
+    }
+}
+
+impl<'a, 'b> IsolateCx for Cx2d<'a, 'b> {
+    fn isolate_cx(&mut self) -> &mut Cx {
+        self.cx.cx
+    }
+}
+
+/// Run a stretch of HOST code that draws or dispatches events to widgets
+/// minted in isolate `vm_id` — a module tile's draw pass, its event
+/// delivery — with that isolate installed on `Cx`. While it is, every
+/// `cx.with_vm` those widgets make (a lazily created child, a shader
+/// compiled on first draw, an `on_click` callback) resolves against the
+/// isolate's own heap, the only heap their objects mean anything in.
+///
+/// The outer VM comes back whether `f` returns or unwinds: a host that
+/// catches a guest's panic finds `Cx` as it was, the isolate back in the
+/// table, ready to be torn down. The main VM is a no-op entry.
+pub fn with_isolate<C: IsolateCx, R>(cx: &mut C, vm_id: SplashVmId, f: impl FnOnce(&mut C) -> R) -> R {
+    let entry = enter_isolate(cx.isolate_cx(), vm_id);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cx)));
+    leave_isolate(cx.isolate_cx(), entry);
+    match out {
+        Ok(out) => out,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// The unguarded half of [`with_isolate`]: install isolate `vm_id` on
+/// `Cx` and hand back what [`leave_isolate`] needs to put the outer VM
+/// back. For straight-line code that cannot unwind between the two (a
+/// test poking at an isolate's objects); a host dispatching or drawing a
+/// guest uses `with_isolate`, which also leaves on unwind — an entry
+/// dropped without its leave takes the outer VM's heap with it.
 pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
     let previous_vm_id = cx.global::<CxWidgetAsync>().current_vm_id;
     if vm_id == MAIN_SPLASH_VM_ID || previous_vm_id == vm_id {
@@ -1469,6 +1526,60 @@ pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
 #[cfg(test)]
 mod isolate_entry_tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// A guest panics while its isolate is installed — through
+    /// `with_isolate` (a tile's dispatch) and through
+    /// `with_script_vm_id_trusted` (a host's own entry): the main VM is
+    /// back on `Cx`, the isolate is back in the table with its heap, and
+    /// both keep working.
+    #[test]
+    fn a_panic_inside_an_installed_isolate_restores_the_outer_vm_and_the_table() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let main_heap = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let vm_id = cx.alloc_splash_vm();
+        let isolate_heap = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
+
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            with_isolate(&mut cx, vm_id, |cx| {
+                assert_eq!(cx.global::<CxWidgetAsync>().current_vm_id, vm_id);
+                cx.with_vm(|_vm| panic!("a guest widget panicked"))
+            })
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held(), "the outer VM is back on Cx");
+        assert_eq!(cx.global::<CxWidgetAsync>().current_vm_id, MAIN_SPLASH_VM_ID);
+        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), main_heap, "and it is the main VM");
+        assert_eq!(cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key()), isolate_heap, "the isolate kept its heap");
+
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_script_vm_id_trusted(vm_id, |_vm| panic!("a module's create panicked"))
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(cx.global::<CxWidgetAsync>().current_vm_id, MAIN_SPLASH_VM_ID);
+        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), main_heap);
+        assert_eq!(cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key()), isolate_heap);
+
+        // A draw context is a valid entry too, and the isolate can be torn
+        // down in the host's order afterwards.
+        let event = DrawEvent::default();
+        {
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            let caught = catch_unwind(AssertUnwindSafe(|| {
+                with_isolate(&mut cx2d, vm_id, |cx| cx.with_vm(|_vm| panic!("a guest's draw panicked")))
+            }));
+            assert!(caught.is_err());
+            assert_eq!(cx2d.global::<CxWidgetAsync>().current_vm_id, MAIN_SPLASH_VM_ID);
+        }
+        cx.free_splash_vm(vm_id);
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! { 2 * 21 });
+            assert_eq!(value.as_f64(), Some(42.0));
+        });
+    }
 
     #[test]
     fn entering_an_isolate_makes_it_the_current_vm_and_leaving_restores_the_outer_one() {

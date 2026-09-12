@@ -234,8 +234,15 @@ pub struct AnimatorState {
     pub ease: Option<Ease>,
     #[live]
     pub from: LiveIdMap<LiveId, Play>,
+    /// The state's target values. Held as a rooted ref, never a raw
+    /// `ScriptObject`: a runtime `script_apply_eval!` (an app resizing its
+    /// page slide distance, say) hands the animator objects from a temporary
+    /// eval tree that nothing else keeps alive. The next GC of that heap —
+    /// the app VM's after paint, an isolate's on any task pump — would free
+    /// them under a still-referencing state, and the next `play` would walk
+    /// a dead slot.
     #[live]
-    pub apply: Option<ScriptObject>,
+    pub apply: Option<ScriptObjectRef>,
     #[live]
     pub redraw: bool,
 }
@@ -259,8 +266,10 @@ mod reload_tests {
             vm.bx.heap.set_value_def(template, id!(off).into(), off.into());
             vm.bx.heap.set_value_def(template, id!(on).into(), on.into());
             let mut group = AnimatorGroup { default: id!(off), ..Default::default() };
-            group.states.insert(id!(off), AnimatorState { apply: Some(off), ..Default::default() });
-            group.states.insert(id!(on), AnimatorState { apply: Some(on), ..Default::default() });
+            let off_ref = vm.bx.heap.new_object_ref(off);
+            let on_ref = vm.bx.heap.new_object_ref(on);
+            group.states.insert(id!(off), AnimatorState { apply: Some(off_ref), ..Default::default() });
+            group.states.insert(id!(on), AnimatorState { apply: Some(on_ref), ..Default::default() });
             (group, vm.bx.heap.new_object_ref(template))
         });
         let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
@@ -286,6 +295,61 @@ mod reload_tests {
             assert_eq!(value, Some(expected));
         }
         assert!(!animator.is_animating());
+    }
+
+    /// `{slide: {hide: {apply: {offset}}}}` as a widget stylesheet or a
+    /// runtime `script_apply_eval!` would hand it to the animator.
+    fn slide_tree(vm: &mut ScriptVm, offset: f64) -> ScriptObject {
+        let apply = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(apply, id!(offset).into(), offset.into());
+        let hide = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(hide, id!(apply).into(), apply.into());
+        let slide = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(slide, id!(hide).into(), hide.into());
+        let tree = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(tree, id!(slide).into(), slide.into());
+        tree
+    }
+
+    #[test]
+    fn eval_applied_state_survives_gc_before_play() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
+        // The stylesheet apply. The widget's source keeps this tree rooted.
+        let stylesheet = cx.with_vm(|vm| {
+            let tree = slide_tree(vm, 100.0);
+            animator.script_apply(vm, &Apply::New, &mut Scope::empty(), tree.into());
+            vm.bx.heap.new_object_ref(tree)
+        });
+        // A runtime re-target (an app resizing its page slide to the live
+        // width). The eval tree is temporary: after the apply nothing but the
+        // animator's state refers to it.
+        cx.with_vm(|vm| {
+            let tree = slide_tree(vm, 402.0);
+            animator.script_apply(vm, &Apply::Eval, &mut Scope::empty(), tree.into());
+        });
+        // The app VM collects after paint; an isolate on any task pump. Both
+        // happen between the re-target and the user's next tap.
+        cx.with_vm(|vm| vm.gc());
+
+        animator
+            .play(&mut cx, &[id!(slide), id!(hide)], Some(Play::Forward { duration: 1.0 }))
+            .expect("hide state still playable after gc");
+        let mut last = None;
+        for (frame, time) in [(0, 0.0), (1, 0.5), (2, 1.1)] {
+            let event = Event::NextFrame(NextFrameEvent {
+                frame,
+                time,
+                set: [animator.next_frame].into_iter().collect(),
+            });
+            let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
+            last = cx.with_vm(|vm| {
+                vm.bx.heap.value(result.as_object().unwrap(), id!(offset).into(), NoTrap).as_f64()
+            });
+        }
+        assert_eq!(last, Some(402.0));
+        assert!(!animator.is_animating());
+        drop(stylesheet);
     }
 }
 
@@ -429,7 +493,7 @@ impl ScriptApplyDefault for Animator {
             .copied()
             .unwrap_or(group.default);
         let state = group.states.get(&state_id)?;
-        Some(state.apply?.into())
+        Some(state.apply.as_ref()?.as_object().into())
     }
 }
 
@@ -496,7 +560,7 @@ impl Animator {
             .copied()
             .unwrap_or(group.default);
         let state = group.states.get(&state_id)?;
-        state.apply
+        state.apply.as_ref().map(|apply| apply.as_object())
     }
 
     /// Start animating to a new state
@@ -516,7 +580,7 @@ impl Animator {
         let target_state = group.states.get(&target_state_id)?;
 
         // Get the apply object
-        let target_apply = target_state.apply?;
+        let target_apply = target_state.apply.as_ref()?.as_object();
 
         // Find existing track for this group (if any)
         let existing_track_idx = self.tracks.iter().position(|t| t.group_id == group_id);
@@ -595,7 +659,10 @@ impl Animator {
 
             // Get the default state's apply for fallback values
             let default_state_id = group.default;
-            let default_apply = group.states.get(&default_state_id).and_then(|s| s.apply);
+            let default_apply = group
+                .states
+                .get(&default_state_id)
+                .and_then(|s| s.apply.as_ref().map(|apply| apply.as_object()));
 
             // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
@@ -678,7 +745,7 @@ impl Animator {
         let target_state = group.states.get(&target_state_id)?;
 
         // Get the apply object
-        let target_apply = target_state.apply?;
+        let target_apply = target_state.apply.as_ref()?.as_object();
 
         // Set cursor if specified
         if let Some(cursor) = target_state.cursor {

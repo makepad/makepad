@@ -6,6 +6,15 @@ use {
     crate::{cx_2d::Cx2d, makepad_platform::*},
 };
 
+/// The enclosing frame's overlay state, saved by
+/// [`Overlay::begin_nested_for_pass`] and restored by [`Overlay::end_nested`].
+pub struct OverlayScope {
+    overlay_id: Option<DrawListId>,
+    overlay_pass_id: Option<DrawPassId>,
+    overlay_seq: u64,
+    overlay_draw_depth: usize,
+}
+
 #[derive(Debug, Script, ScriptHook)]
 pub struct Overlay {
     // draw info per UI element
@@ -41,6 +50,38 @@ impl Overlay {
         cx.overlay_pass_id = Some(pass_id);
         cx.overlay_seq = 0;
         // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
+    }
+
+    /// Begin this overlay for a pass drawn in the MIDDLE of another frame —
+    /// a host recording an app into a texture of its own. Every list begun
+    /// with `begin_overlay_*` while this scope is open records here and
+    /// composites into `pass_id` (the app's texture), never into the
+    /// enclosing window's overlay; the depth ladder restarts, because the
+    /// app's pass has a depth buffer of its own. [`Overlay::end_nested`]
+    /// composites it and hands the enclosing overlay back.
+    pub fn begin_nested_for_pass(&self, cx: &mut Cx2d, pass_id: DrawPassId) -> OverlayScope {
+        let scope = OverlayScope {
+            overlay_id: cx.overlay_id,
+            overlay_pass_id: cx.overlay_pass_id,
+            overlay_seq: cx.overlay_seq,
+            overlay_draw_depth: cx.overlay_draw_depth,
+        };
+        cx.overlay_id = Some(self.draw_list.id());
+        cx.overlay_pass_id = Some(pass_id);
+        cx.overlay_seq = 0;
+        cx.overlay_draw_depth = 0;
+        scope
+    }
+
+    /// The nested overlay composites into the list being recorded (the
+    /// app's root, so it paints last in the app's pass), and the enclosing
+    /// frame's overlay state is exactly what it was.
+    pub fn end_nested(&self, cx: &mut Cx2d, scope: OverlayScope) {
+        self.end(cx);
+        cx.overlay_id = scope.overlay_id;
+        cx.overlay_pass_id = scope.overlay_pass_id;
+        cx.overlay_seq = scope.overlay_seq;
+        cx.overlay_draw_depth = scope.overlay_draw_depth;
     }
 
     pub fn end(&self, cx: &mut Cx2d) {

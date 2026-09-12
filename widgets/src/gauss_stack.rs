@@ -79,6 +79,19 @@ impl GaussStack {
         cx.begin_root_turtle(size, Layout::flow_overlay());
     }
 
+    /// The scene pass of a CAPTURE: sized and shifted like the capture pass
+    /// it nests in, so a body recorded at window coordinates lands where the
+    /// capture has it; the root turtle is the window's, as the capture's is.
+    pub(crate) fn begin_scene_shifted(&mut self, cx: &mut Cx2d, size: Vec2d, shift: Vec2d, root_size: Vec2d) {
+        let dpi = cx.current_dpi_factor();
+        self.scene_pass.set_size(cx, size);
+        cx.set_pass_shift_scale(&self.scene_pass, shift, dvec2(1.0, 1.0));
+        cx.make_child_pass(&self.scene_pass);
+        cx.begin_pass(&self.scene_pass, Some(dpi));
+        self.scene_draw_list.begin_always(cx);
+        cx.begin_root_turtle(root_size, Layout::flow_overlay());
+    }
+
     /// Passes in producer-before-consumer order. Layered compositors explicitly
     /// link this chain, so recycled pool IDs cannot reorder texture dependencies.
     pub(crate) fn dependencies(&self, count: usize) -> Vec<DrawPassId> {
@@ -163,6 +176,17 @@ impl GaussStack {
                 size: root_size,
             },
         );
+    }
+
+    /// The whole scene texture, drawn at `rect` (a capture's scene back into
+    /// the capture, at the capture's own window rect).
+    pub(crate) fn draw_scene_at(&mut self, cx: &mut Cx2d, scene: &mut DrawGaussScene, rect: Rect) {
+        scene.draw_vars.set_uniform(cx, live_id!(source_offset), &[0.0, 0.0]);
+        scene.draw_vars.set_uniform(cx, live_id!(source_scale), &[1.0, 1.0]);
+        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        scene.draw_vars.set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
+        scene.draw_vars.set_texture(0, &self.scene_texture);
+        scene.draw_abs(cx, rect);
     }
 
     pub(crate) fn draw_scene_region(

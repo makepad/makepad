@@ -64,6 +64,7 @@ pub mod ai_slot;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
+pub mod cursor;
 pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
@@ -382,6 +383,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     // The AI slot before the window: its DSL names `AiChatSlot`.
     crate::ai_slot::script_mod(vm);
     crate::app_icon::script_mod(vm);
+    crate::cursor::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);

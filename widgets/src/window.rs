@@ -270,33 +270,8 @@ script_mod! {
         tweaker := Tweaker {}
 
         cursor: MouseCursor.Default
-        mouse_cursor_size: vec2(20 20)
-        draw_cursor +: {
-            border_size: uniform(1.5)
-            color: uniform(theme.color_cursor)
-            border_color: uniform(theme.color_cursor_border)
-
-            get_color: fn() {
-                return self.color
-            }
-
-            get_border_color: fn() {
-                return self.border_color
-            }
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, 1.0)
-                sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y * 0.5)
-                sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
-                sdf.close_path()
-                sdf.fill_keep(self.get_color())
-                if self.border_size > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_size)
-                }
-                return sdf.result
-            }
-        }
+        mouse_cursor_size: vec2(24 24)
+        draw_cursor: mod.widgets.DrawMouseCursor {}
         window +: {
             inner_size: vec2(1024 768)
         }
@@ -1009,20 +984,39 @@ impl Window {
         Redrawing::yes()
     }
 
+    /// Route the display cursor before a WM's menus or drag handlers consume
+    /// pointer events. Updating this overlay does not relayout the desktop.
+    pub fn handle_direct_mouse_cursor(&mut self, cx: &mut Cx, event: &Event) {
+        if !matches!(cx.os_type(), OsType::LinuxDirect) { return; }
+        if let Event::MouseMove(ev) = event {
+            if ev.window_id != self.window.window_id() || ev.abs == self.last_mouse_pos { return; }
+            self.last_mouse_pos = ev.abs;
+            let rect = Rect {
+                pos: ev.abs - crate::cursor::hotspot(cx.mouse_cursor(), self.mouse_cursor_size),
+                size: self.mouse_cursor_size,
+            };
+            if self.draw_cursor.draw_vars.area.is_valid(cx) {
+                self.draw_cursor.update_abs(cx, rect);
+            } else {
+                self.main_draw_list.redraw(cx);
+            }
+            trace!("input.cursor", "direct cursor position=({}, {}) shape={:?}", ev.abs.x, ev.abs.y, cx.mouse_cursor());
+        }
+    }
+
     pub fn end(&mut self, cx: &mut Cx2d) {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         //self.debug_view.draw(cx);
 
-        // lets draw our cursor
+        // Only the direct display owner draws a cursor, above every child.
         if let OsType::LinuxDirect = cx.os_type() {
+            let shape = cx.mouse_cursor();
+            self.draw_cursor.draw_vars.set_dyn_instance(cx, id!(shape), &[crate::cursor::shape_value(shape)]);
             self.cursor_draw_list.begin_overlay_last(cx);
-            self.draw_cursor.draw_abs(
-                cx,
-                Rect {
-                    pos: self.last_mouse_pos,
-                    size: self.mouse_cursor_size,
-                },
-            );
+            self.draw_cursor.draw_abs(cx, Rect {
+                pos: self.last_mouse_pos - crate::cursor::hotspot(shape, self.mouse_cursor_size),
+                size: self.mouse_cursor_size,
+            });
             self.cursor_draw_list.end(cx);
         }
 
@@ -1309,6 +1303,7 @@ impl WindowRef {
 
 impl Widget for Window {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.handle_direct_mouse_cursor(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
             if let Some(keyboard) = makepad_platform::ime::HostedKeyboard::parse(json) {
@@ -1407,6 +1402,27 @@ impl Widget for Window {
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    // Preserve physical cursor position when effective DPI changes before the next mouse event.
+                    if matches!(cx.os_type(), OsType::LinuxDirect) {
+                        let old_dpi = ev.old_geom.dpi_factor;
+                        let new_dpi = ev.new_geom.dpi_factor;
+                        if old_dpi.is_finite()
+                            && new_dpi.is_finite()
+                            && old_dpi > 0.0
+                            && new_dpi > 0.0
+                            && old_dpi != new_dpi
+                        {
+                            self.last_mouse_pos *= old_dpi / new_dpi;
+                        }
+                        // Native pointer bounds follow the chosen mirror-source; the cached
+                        // cursor position must stay visible when the new source is smaller.
+                        let size = ev.new_geom.inner_size;
+                        if size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0 {
+                            self.last_mouse_pos.x = self.last_mouse_pos.x.clamp(0.0, size.x);
+                            self.last_mouse_pos.y = self.last_mouse_pos.y.clamp(0.0, size.y);
+                        }
+                        self.main_draw_list.redraw(cx);
+                    }
                     // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
                     // geometry cache so it is recomputed on the next hit-test.
                     self.drag_query_cache = None;
@@ -1589,19 +1605,7 @@ impl Widget for Window {
         //    CxDraw::reset_icon_atlas(cx);
         //}
 
-        if let Event::MouseMove(ev) = event {
-            if let OsType::LinuxDirect = cx.os_type() {
-                // ok move our mouse cursor
-                self.last_mouse_pos = ev.abs;
-                self.draw_cursor.update_abs(
-                    cx,
-                    Rect {
-                        pos: ev.abs,
-                        size: self.mouse_cursor_size,
-                    },
-                )
-            }
-        }
+
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
