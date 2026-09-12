@@ -6,7 +6,7 @@
 
 use super::common::*;
 #[cfg(feature = "server")]
-use libc::{gid_t, pid_t, uid_t};
+use super::linux::{gid_t, pid_t, uid_t};
 #[cfg(feature = "server")]
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_void};

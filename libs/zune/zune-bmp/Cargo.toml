@@ -22,4 +22,4 @@ default = ["std"]
 
 [dependencies]
 makepad-zune-core = { version = "^0.5.1", path = "../zune-core" }
-log = "0.4"
+makepad-error-log = { path = "../../error_log", version = "1.0.0" }

@@ -7,13 +7,18 @@ use makepad_live_id::LiveId;
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    sync::mpsc::{channel, Sender, TryRecvError},
+    sync::mpsc::{channel, Sender},
     time::{Duration, Instant},
 };
 
 pub struct PlainWebSocket {
-    sender: Option<Sender<WebSocketMessage>>,
+    sender: Option<Sender<Outgoing>>,
     stream: Option<TcpStream>,
+}
+
+enum Outgoing {
+    Message(WebSocketMessage),
+    Pong,
 }
 
 impl Drop for PlainWebSocket {
@@ -28,7 +33,7 @@ impl Drop for PlainWebSocket {
 impl PlainWebSocket {
     pub fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
         if let Some(sender) = &mut self.sender {
-            if sender.send(message).is_err() {
+            if sender.send(Outgoing::Message(message)).is_err() {
                 return Err(());
             }
             return Ok(());
@@ -127,7 +132,19 @@ impl PlainWebSocket {
             }
         };
 
-        let mut io_stream = match stream.try_clone() {
+        // The handshake needs a deadline, but an established connection may
+        // idle indefinitely. Outgoing messages have their own worker and must
+        // never wait for a read timeout or another message from the peer.
+        if let Err(err) = stream.set_read_timeout(None) {
+            let _ = rx_sender.send(WebSocketMessage::Error(format!(
+                "Error clearing websocket read timeout: {err}"
+            )));
+            return PlainWebSocket {
+                sender: None,
+                stream: None,
+            };
+        }
+        let mut read_stream = match stream.try_clone() {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
@@ -139,15 +156,52 @@ impl PlainWebSocket {
                 };
             }
         };
+        let mut write_stream = match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = rx_sender.send(WebSocketMessage::Error(format!(
+                    "Error cloning websocket write stream: {err}"
+                )));
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
+            }
+        };
 
         let (sender, receiver) = channel();
-        let _io_thread = std::thread::spawn(move || {
+        let writer_events = rx_sender.clone();
+        let _write_thread = std::thread::spawn(move || {
+            // All writes, including protocol replies, use this one stream so
+            // a pong cannot split an application frame's header and payload.
+            while let Ok(message) = receiver.recv() {
+                let failed = match message {
+                    Outgoing::Message(WebSocketMessage::Closed) => break,
+                    Outgoing::Message(message) => {
+                        handle_outgoing_message(&mut write_stream, message)
+                    }
+                    Outgoing::Pong => {
+                        write_all_no_error(&mut write_stream, &SERVER_WEB_SOCKET_PONG_MESSAGE)
+                    }
+                };
+                if failed {
+                    let _ = writer_events.send(WebSocketMessage::Error(
+                        "Failed to send websocket data".into(),
+                    ));
+                    break;
+                }
+            }
+            // Also wakes a reader blocked after the peer stops receiving.
+            let _ = write_stream.shutdown(Shutdown::Both);
+        });
+        let reply_sender = sender.clone();
+        let _read_thread = std::thread::spawn(move || {
             let mut web_socket = WebSocketParser::new();
             let mut done = false;
             if !leftover.is_empty() {
                 parse_incoming(
                     &mut web_socket,
-                    &mut io_stream,
+                    &reply_sender,
                     &rx_sender,
                     &mut done,
                     &leftover,
@@ -155,35 +209,15 @@ impl PlainWebSocket {
             }
 
             while !done {
-                loop {
-                    match receiver.try_recv() {
-                        Ok(msg) => {
-                            if handle_outgoing_message(&mut io_stream, msg) {
-                                done = true;
-                                break;
-                            }
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            done = true;
-                            break;
-                        }
-                    }
-                }
-
-                if done {
-                    break;
-                }
-
                 let mut buffer = [0u8; 65535];
-                match io_stream.read(&mut buffer) {
+                match read_stream.read(&mut buffer) {
                     Ok(0) => {
                         let _ = rx_sender.send(WebSocketMessage::Closed);
                         done = true;
                     }
                     Ok(bytes_read) => parse_incoming(
                         &mut web_socket,
-                        &mut io_stream,
+                        &reply_sender,
                         &rx_sender,
                         &mut done,
                         &buffer[0..bytes_read],
@@ -204,7 +238,10 @@ impl PlainWebSocket {
                     }
                 }
             }
-            let _ = io_stream.shutdown(Shutdown::Both);
+            let _ = read_stream.shutdown(Shutdown::Both);
+            // The public handle can outlive an EOF. Wake the writer even if
+            // that handle still retains its sender.
+            let _ = reply_sender.send(Outgoing::Message(WebSocketMessage::Closed));
         });
 
         PlainWebSocket {
@@ -235,14 +272,14 @@ fn handle_outgoing_message(stream: &mut TcpStream, msg: WebSocketMessage) -> boo
 
 fn parse_incoming(
     web_socket: &mut WebSocketParser,
-    stream: &mut TcpStream,
+    reply_sender: &Sender<Outgoing>,
     rx_sender: &Sender<WebSocketMessage>,
     done: &mut bool,
     bytes: &[u8],
 ) {
     web_socket.parse(bytes, |result| match result {
         Ok(ParsedWebSocketMessage::Ping(_)) => {
-            if write_all_no_error(stream, &SERVER_WEB_SOCKET_PONG_MESSAGE) {
+            if reply_sender.send(Outgoing::Pong).is_err() {
                 *done = true;
                 let _ = rx_sender.send(WebSocketMessage::Error("Pong message send failed".into()));
             }

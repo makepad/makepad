@@ -1156,6 +1156,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::Custom(_) => "Custom",
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
+        StudioToApp::Gpu(_) => "Gpu",
     }
 }
 
