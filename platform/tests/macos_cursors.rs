@@ -1,7 +1,7 @@
 //! Exercise the native cursor loaders without a window or changing the user's
 //! cursor. Hidden-window tests do not reliably invoke AppKit resetCursorRects.
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(gpusim)))]
 fn main() {
     use makepad_platform::{
         os::apple::{apple_sys::*, apple_util::*},
@@ -58,5 +58,5 @@ fn main() {
     println!("Native cursor regression passed (supported/missing selectors and 20 cursor kinds)");
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", not(gpusim))))]
 fn main() {}

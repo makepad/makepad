@@ -354,6 +354,10 @@ pub struct CxVulkan {
     render_finished_semaphores: Vec<vk::Semaphore>,
     acquired_image_pending: bool,
     in_flight_fence: vk::Fence,
+    /// The repaint whose submission `in_flight_fence` covers: once the fence
+    /// signals, the frame-serial frontier advances to it (contract §3.3) —
+    /// before this, Vulkan never completed a serial and no receipt could.
+    frame_serial_in_flight: u64,
     #[cfg(target_os = "android")]
     window: *mut ndk_sys::ANativeWindow,
     requested_width: u32,
@@ -708,6 +712,7 @@ impl CxVulkan {
             image_available_semaphore,
             render_finished_semaphores: vec![render_finished_semaphore],
             acquired_image_pending: false,
+            frame_serial_in_flight: 0,
             in_flight_fence,
             window,
             requested_width: width.max(1),
@@ -2776,6 +2781,12 @@ impl CxVulkan {
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences failed: {e:?}"))?;
         }
+        // The fence proved the previous submission complete: every receipt
+        // and delivery proof marked with that repaint may now read
+        // `completed` (the frontier this backend never advanced before).
+        if self.frame_serial_in_flight != 0 {
+            cx.textures.1.serials.complete(self.frame_serial_in_flight);
+        }
 
         self.destroy_frame_resources();
 
@@ -3031,6 +3042,10 @@ impl CxVulkan {
             .signal_semaphores(&signal_semaphores);
 
         self.submit_frame(&submit_info)?;
+        // The frame serial IS the repaint id here (the receipts and the
+        // items' consumed serials are stamped with it above); one writer.
+        cx.textures.1.serials.submitted.store(cx.repaint_id, std::sync::atomic::Ordering::Release);
+        self.frame_serial_in_flight = cx.repaint_id;
         self.acquired_image_pending = false;
 
         let swapchains = [self.swapchain];

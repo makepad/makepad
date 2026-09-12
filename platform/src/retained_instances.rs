@@ -9,38 +9,20 @@ use std::{
     },
 };
 
-/// One allowance for all retained/page copies in a presented frame, shared by
-/// every pass. The startup probe includes touched destination pages, rather
-/// than measuring a copy into an already hot cache line.
-pub const MAX_RETAINED_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
-
+/// A one-time measurement of this machine's copy rate: the bytes one
+/// 2 ms slice copies, reported by the atlas settle line as `probe=`. It
+/// gates nothing — every owed copy is made in its frame (contract §7);
+/// pacing is the producer's (`upload_pacing`, §8). Measured through the
+/// touched destination pages, not a hot cache line.
 pub fn retained_upload_limit() -> usize {
-    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        let source = vec![0x5au8; MAX_RETAINED_UPLOAD_BYTES];
-        let mut destination = vec![0u8; MAX_RETAINED_UPLOAD_BYTES];
-        let start = std::time::Instant::now();
-        destination.copy_from_slice(std::hint::black_box(&source));
-        std::hint::black_box(&destination);
-        let nanos = start.elapsed().as_nanos().max(1);
-        ((MAX_RETAINED_UPLOAD_BYTES as u128 * 2_000_000 / nanos)
-            .min(MAX_RETAINED_UPLOAD_BYTES as u128) as usize)
-            & !3
-    })
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(usize)]
-pub enum UploadCategory {
-    Roofs,
-    Walls,
-    Labels,
-    Outlines,
-    Background,
-    Structure,
-    Code,
-    #[default]
-    Other,
+    const PROBE_BYTES: usize = 4 * 1024 * 1024;
+    let source = vec![0x5au8; PROBE_BYTES];
+    let mut destination = vec![0u8; PROBE_BYTES];
+    let start = std::time::Instant::now();
+    destination.copy_from_slice(std::hint::black_box(&source));
+    std::hint::black_box(&destination);
+    let nanos = start.elapsed().as_nanos().max(1);
+    ((PROBE_BYTES as u128 * 2_000_000 / nanos).min(PROBE_BYTES as u128) as usize) & !3
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,13 +32,12 @@ pub struct RetainedUploadStats {
     pub install_us: u64,
     /// Immediate re-records whose bytes matched the resident copy: no upload.
     pub identical_skips: usize,
-    pub category_bytes: [usize; 8],
-    pub category_instances: [usize; 8],
 }
 
-/// One frame's physical maintenance allowance. A Metal buffer cannot be
-/// freed in pieces: an oversized unit runs alone, and is explicitly reported.
-/// All passes share the same counters; calling service twice grants no credit.
+/// One frame's physical retirement allowance, in bytes: a Metal buffer
+/// cannot be freed in pieces, so an oversized unit runs alone and is
+/// reported. All passes share the same counter; a second call in the frame
+/// grants no credit.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RetainedMaintenance {
     pub bytes: usize,
@@ -64,15 +45,13 @@ pub struct RetainedMaintenance {
     pub largest_unit: usize,
 }
 impl RetainedMaintenance {
-    pub const MAX_BUFFERS: usize = 64;
-    pub fn can_admit(&self, bytes: usize, buffers: usize, limit: usize) -> bool {
-        buffers <= Self::MAX_BUFFERS.saturating_sub(self.buffers)
-            && (bytes <= limit.saturating_sub(self.bytes) || self.buffers == 0)
+    pub fn can_admit(&self, bytes: usize, limit: usize) -> bool {
+        bytes <= limit.saturating_sub(self.bytes) || self.buffers == 0
     }
-    pub fn admit(&mut self, bytes: usize, buffers: usize, limit: usize) -> bool {
-        if !self.can_admit(bytes, buffers, limit) { return false; }
+    pub fn admit(&mut self, bytes: usize, limit: usize) -> bool {
+        if !self.can_admit(bytes, limit) { return false; }
         self.bytes = self.bytes.saturating_add(bytes);
-        self.buffers += buffers;
+        self.buffers += 1;
         self.largest_unit = self.largest_unit.max(bytes);
         true
     }
@@ -83,6 +62,8 @@ pub struct RetainedUploadBudget {
     frame: Option<u64>,
     install_ns: u128,
     total_install_ns: u128,
+    /// The copy probe's bytes-per-slice, a diagnostic the atlas prints
+    /// (`upload_allowance=`); it bounds the retirement drain, never a copy.
     pub limit: usize,
     pub stats: RetainedUploadStats,
     pub totals: RetainedUploadStats,
@@ -97,23 +78,16 @@ pub struct RetainedUploadBudget {
     pub max_install_us: u64,
     pub allocations: RetainedAllocationBudget,
     pub recordings: crate::recording_buffer::RecordingBudget,
-    pub demand_epoch: u64,
-    pub working_set: Vec<bool>,
-    pub working_set_valid: bool,
-    pub working_set_scan_passes: u8,
-    /// The backend exhausted off-demand victims and completed retirement.
-    pub allow_visible_overflow: bool,
     pub retirements: Arc<std::sync::atomic::AtomicUsize>,
     pub retirement_queued: Arc<std::sync::atomic::AtomicBool>,
     pub retirement_frame: Option<u64>,
-    pub reclaim_frame: Option<u64>,
-    pub eviction: RetainedMaintenance,
+    /// This frame's retirement allowance (the drain of buffers the GPU is
+    /// done with): bounded by bytes derived from the copy probe.
     pub retirement: RetainedMaintenance,
-    pub eviction_cursor: usize,
-    pub eviction_item_cursor: usize,
-    pub eviction_scanned: usize,
-    pub eviction_items_scanned: usize,
-    pub eviction_cycle_has_victims: bool,
+    /// Publication ids whose backing lease a draw item released outside a
+    /// collection (`detach_shared`, a consumer's eviction); the backend drops
+    /// each lease at its next upload phase (O(released), no walk).
+    pub backing_releases: Vec<u64>,
 }
 
 /// One process allowance, shared by Scope's prepared cache and the platform.
@@ -142,7 +116,6 @@ pub struct RetainedAllocationBudget {
     limit: usize,
     device_limit: Option<usize>,
     evicted_bytes: usize,
-    waits: usize,
     bytes: usize,
     records: Vec<Arc<RetainedAllocationRecord>>,
     released: Arc<std::sync::atomic::AtomicUsize>,
@@ -150,7 +123,6 @@ pub struct RetainedAllocationBudget {
     collect_cursor: usize,
     collected_frame: Option<u64>,
     refusals: usize,
-    reclaim_bytes: usize,
     cache_pressure: std::cell::Cell<bool>,
     pending_backend_retirements: usize,
 }
@@ -281,7 +253,6 @@ impl RetainedAllocationBudget {
             limit,
             device_limit: None,
             evicted_bytes: 0,
-            waits: 0,
             bytes: 0,
             records: Vec::new(),
             released: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -289,7 +260,6 @@ impl RetainedAllocationBudget {
             collect_cursor: 0,
             collected_frame: None,
             refusals: 0,
-            reclaim_bytes: 0,
             cache_pressure: std::cell::Cell::new(false),
             pending_backend_retirements: 0,
         }
@@ -308,26 +278,14 @@ impl RetainedAllocationBudget {
     pub fn limit(&self) -> usize {
         self.device_limit.unwrap_or(self.limit)
     }
-    /// Existing Metal small-allocation threshold, shared with the recorder.
-    pub fn sync_allocation_bytes(&self) -> usize {
-        (self.limit() / 512).clamp(1 << 20, 16 << 20)
-    }
     pub fn evicted_bytes(&self) -> usize {
         self.evicted_bytes
     }
     pub fn evicted(&mut self, bytes: usize) {
         self.evicted_bytes = self.evicted_bytes.saturating_add(bytes);
     }
-    pub fn waits(&self) -> usize {
-        self.waits
-    }
     pub fn pressure_high(&self) -> usize { self.limit() / 4 * 3 }
     pub fn pressure_low(&self) -> usize { self.limit() / 8 * 5 }
-    pub fn reclaim_bytes(&self) -> usize {
-        self.reclaim_bytes.max(if self.cache_pressure.get() {
-            self.bytes.saturating_sub(self.pressure_low())
-        } else { 0 })
-    }
     pub fn has_pending_retirements(&self) -> bool {
         self.pending_backend_retirements != 0
             || self.released.load(Ordering::Acquire) != 0
@@ -344,48 +302,33 @@ impl RetainedAllocationBudget {
     pub fn record_count(&self) -> usize {
         self.records.len()
     }
-    pub fn can_reserve(&self, bytes: usize) -> bool {
-        bytes <= self.limit().saturating_sub(self.bytes)
-    }
-    /// Deferral while reclaiming is counted but is not an allocation refusal.
-    /// The caller retains the publication and retries after completion.
-    pub fn wait_for_reclaim(&mut self, bytes: usize) {
-        self.waits = self.waits.saturating_add(1);
-        self.reclaim_bytes = self.reclaim_bytes.max(bytes);
-    }
     pub fn bytes(&self) -> usize {
         self.bytes
     }
     pub fn refusals(&self) -> usize {
         self.refusals
     }
+    /// Accounting only (the producer's own eviction policy reads it): the
+    /// resident bytes are above three quarters of the limit, with a Schmitt
+    /// band down to five eighths. Nothing in the platform evicts on it.
     pub fn reclaim_needed(&self) -> bool {
-        // Cache pressure has a Schmitt band. Allocation/receipt maintenance
-        // remains bounded by its existing frame credits and never runs at rest.
         if self.bytes > self.pressure_high() {
             self.cache_pressure.set(true);
         } else if self.bytes <= self.pressure_low() {
             self.cache_pressure.set(false);
         }
-        self.cache_pressure.get() || self.reclaim_bytes > self.limit().saturating_sub(self.bytes)
-    }
-    pub fn take_reclaim_request(&mut self) -> bool {
-        let needed = self.reclaim_needed();
-        self.reclaim_bytes = 0;
-        needed
+        self.cache_pressure.get()
     }
     pub fn reserve(&mut self, bytes: usize) -> Option<RetainedAllocation> {
         if bytes > self.limit().saturating_sub(self.bytes) {
             self.refusals = self.refusals.saturating_add(1);
-            self.reclaim_bytes = self.reclaim_bytes.max(bytes);
             return None;
         }
         Some(self.reserve_visible(bytes))
     }
-    /// A soft device target cannot veto the current visible working set after
-    /// every off-demand victim has retired. Also supplies emergency small-draw
-    /// service while bulk retirement is in flight. Actual driver failure still
-    /// retains the caller's pending publication for retry.
+    /// The charge a draw item's own backing takes whatever the limit says: a
+    /// refused allocation was a hole (residency by construction). The
+    /// producer's policy brings the total back under its limit.
     pub fn reserve_visible(&mut self, bytes: usize) -> RetainedAllocation {
         let record = Arc::new(RetainedAllocationRecord {
             bytes,
@@ -441,7 +384,7 @@ impl RetainedUploadBudget {
             frame: None,
             install_ns: 0,
             total_install_ns: 0,
-            limit: limit.min(MAX_RETAINED_UPLOAD_BYTES),
+            limit,
             stats: Default::default(),
             totals: Default::default(),
             pending_bytes: 0,
@@ -452,22 +395,11 @@ impl RetainedUploadBudget {
             max_install_us: 0,
             allocations: RetainedAllocationBudget::new(usize::MAX),
             recordings: Default::default(),
-            demand_epoch: 0,
-            working_set: Vec::new(),
-            working_set_valid: false,
-            working_set_scan_passes: 0,
-            allow_visible_overflow: false,
             retirements: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             retirement_queued: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             retirement_frame: None,
-            reclaim_frame: None,
-            eviction: RetainedMaintenance::default(),
             retirement: RetainedMaintenance::default(),
-            eviction_cursor: 0,
-            eviction_item_cursor: 0,
-            eviction_scanned: 0,
-            eviction_items_scanned: 0,
-            eviction_cycle_has_victims: false,
+            backing_releases: Vec::new(),
         }
     }
 
@@ -482,63 +414,18 @@ impl RetainedUploadBudget {
         self.frame = Some(frame);
         self.install_ns = 0;
         self.stats = Default::default();
-        self.eviction = RetainedMaintenance::default();
         self.retirement = RetainedMaintenance::default();
-        self.eviction_scanned = 0;
-        self.eviction_items_scanned = 0;
         self.pending_bytes = 0;
     }
 
-    /// A backend copies precisely this range, then reports the actual copy.
-    /// No rounding up, including when one complete record does not fit.
-    pub fn range(&self, remaining: Range<usize>, stride_bytes: usize) -> Range<usize> {
-        assert!(stride_bytes > 0);
-        let available = self.limit.saturating_sub(self.stats.bytes);
-        let bytes = remaining.len().min(available) / stride_bytes * stride_bytes;
-        remaining.start..remaining.start + bytes
-    }
-
-    /// Frame ink is copied whole regardless of the allowance; the statistics
-    /// still count it, and the allowance for retained publications shrinks by
-    /// what the frame's own data took.
-    pub fn copied_whole(
-        &mut self,
-        bytes: usize,
-        stride_bytes: usize,
-        category: UploadCategory,
-        elapsed: std::time::Duration,
-    ) {
+    /// A backend reports every copy it made — whole copies, every frame.
+    pub fn copied(&mut self, bytes: usize, stride_bytes: usize, elapsed: std::time::Duration) {
         let instances = bytes / stride_bytes;
         self.install_ns += elapsed.as_nanos();
         self.total_install_ns += elapsed.as_nanos();
         for stats in [&mut self.stats, &mut self.totals] {
             stats.bytes += bytes;
             stats.instances_uploaded += instances;
-            stats.category_bytes[category as usize] += bytes;
-            stats.category_instances[category as usize] += instances;
-        }
-        self.stats.install_us = (self.install_ns / 1000).min(u64::MAX as u128) as u64;
-        self.totals.install_us = (self.total_install_ns / 1000).min(u64::MAX as u128) as u64;
-        self.max_frame_bytes = self.max_frame_bytes.max(self.stats.bytes);
-        self.max_install_us = self.max_install_us.max(self.stats.install_us);
-    }
-
-    pub fn copied(
-        &mut self,
-        bytes: usize,
-        stride_bytes: usize,
-        category: UploadCategory,
-        elapsed: std::time::Duration,
-    ) {
-        assert!(bytes <= self.limit.saturating_sub(self.stats.bytes));
-        let instances = bytes / stride_bytes;
-        self.install_ns += elapsed.as_nanos();
-        self.total_install_ns += elapsed.as_nanos();
-        for stats in [&mut self.stats, &mut self.totals] {
-            stats.bytes += bytes;
-            stats.instances_uploaded += instances;
-            stats.category_bytes[category as usize] += bytes;
-            stats.category_instances[category as usize] += instances;
         }
         // Round after summing: thousands of sub-microsecond copies must not
         // disappear from the frame's install time.
@@ -825,54 +712,40 @@ mod upload_tests {
         let mut budget = RetainedUploadBudget::default();
         let mut offset = 0;
         let mut frames = 0;
-        while offset != publication.byte_len() {
+        // The whole block is copied in the frame that owes it (contract §7):
+        // one copy, complete, counted once. The bounded, frame-shared pacing
+        // the old allowance provided is the producer's through the async
+        // publication facility (`upload_pacing`, §8).
+        {
             budget.begin_frame(frames);
-            let range = budget.range(offset..publication.byte_len(), 64);
-            assert!(!range.is_empty());
+            let bytes = publication.byte_len();
             let start = std::time::Instant::now();
-            copied[range.start / 4..range.end / 4]
-                .copy_from_slice(&publication.data()[range.start / 4..range.end / 4]);
-            budget.copied(range.len(), 64, UploadCategory::Code, start.elapsed());
-            // A second pass in this same frame cannot replenish the allowance.
+            copied.copy_from_slice(publication.data());
+            budget.copied(bytes, 64, start.elapsed());
             budget.begin_frame(frames);
-            assert!(budget.stats.bytes <= budget.limit);
+            assert_eq!(budget.stats.bytes, bytes);
             assert_eq!(budget.stats.instances_uploaded * 64, budget.stats.bytes);
-            offset = range.end;
+            offset = bytes;
             frames += 1;
         }
-        assert!(frames >= 12);
+        assert_eq!(offset, publication.byte_len());
+        assert_eq!(frames, 1);
         assert_eq!(copied.as_slice(), publication.data());
         assert_eq!(budget.totals.bytes, publication.byte_len());
-        assert_eq!(
-            budget.totals.category_bytes[UploadCategory::Code as usize],
-            publication.byte_len()
-        );
-        assert!(budget.max_frame_bytes <= budget.limit);
-        let small = RetainedUploadBudget::new(63);
-        assert!(
-            small.range(0..128, 64).is_empty(),
-            "never round an oversized record up"
-        );
+        assert_eq!(budget.max_frame_bytes, publication.byte_len());
         let mut short = RetainedUploadBudget::new(1024);
         short.begin_frame(99);
-        assert!(short.eviction.admit(1024, 1, short.limit));
+        assert!(short.retirement.admit(1024, short.limit));
         short.begin_frame(99);
-        assert!(!short.eviction.admit(1, 1, short.limit), "another pass cannot renew maintenance credit");
+        assert!(!short.retirement.admit(1, short.limit), "another pass cannot renew maintenance credit");
         short.begin_frame(100);
-        assert!(short.eviction.admit(4096, 1, short.limit), "indivisible oversized allocation must eventually retire");
-        assert!(!short.eviction.admit(1, 1, short.limit), "oversized allocation must run alone");
-        assert_eq!(short.eviction.largest_unit, 4096);
-        for _ in 0..RetainedMaintenance::MAX_BUFFERS {assert!(short.retirement.admit(1, 1, short.limit));}
-        assert!(!short.retirement.admit(1, 1, short.limit), "small buffers still obey the handle bound");
+        assert!(short.retirement.admit(4096, short.limit), "indivisible oversized allocation must eventually retire");
+        assert!(!short.retirement.admit(1, short.limit), "oversized allocation must run alone");
+        assert_eq!(short.retirement.largest_unit, 4096);
         for frame in 0..2 {
             short.begin_frame(frame);
             for _ in 0..4 {
-                short.copied(
-                    64,
-                    64,
-                    UploadCategory::Code,
-                    std::time::Duration::from_nanos(250),
-                );
+                short.copied(64, 64, std::time::Duration::from_nanos(250));
             }
             assert_eq!(
                 short.stats.install_us, 1,
@@ -921,7 +794,7 @@ mod upload_tests {
             "multiple passes do not count a frame twice"
         );
         stalled.pending_bytes = 2 << 20;
-        stalled.copied(4 << 20, 64, UploadCategory::Code, std::time::Duration::ZERO);
+        stalled.copied(4 << 20, 64, std::time::Duration::ZERO);
         stalled.begin_frame(2);
         assert_eq!(
             stalled.starved_frames, 1,
