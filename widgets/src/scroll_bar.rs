@@ -1203,18 +1203,32 @@ impl ScrollBar {
         view_rect: Rect,
         view_total: Vec2d,
     ) -> f64 {
+        let track = Rect { pos: Vec2d::default(), size: view_rect.size };
+        self.draw_scroll_bar_along(cx, axis, track, view_rect.size, view_total)
+    }
+
+    /// Like [`Self::draw_scroll_bar`], but runs the bar along the far edge of `track`
+    /// (relative to the turtle's origin) instead of the edge of the visible area.
+    pub fn draw_scroll_bar_along(
+        &mut self,
+        cx: &mut Cx2d,
+        axis: ScrollAxis,
+        track: Rect,
+        view_visible: Vec2d,
+        view_total: Vec2d,
+    ) -> f64 {
         self.axis = axis;
 
         match self.axis {
             ScrollAxis::Horizontal => {
-                self.visible = view_total.x > view_rect.size.x + 0.1;
-                self.scroll_size = if view_total.y > view_rect.size.y + 0.1 {
-                    view_rect.size.x - self.bar_size
+                self.visible = view_total.x > view_visible.x + 0.1;
+                self.scroll_size = if view_total.y > view_visible.y + 0.1 {
+                    track.size.x - self.bar_size
                 } else {
-                    view_rect.size.x
+                    track.size.x
                 } - self.bar_side_margin * 2.;
                 self.view_total = view_total.x;
-                self.view_visible = view_rect.size.x;
+                self.view_visible = view_visible.x;
                 self.scroll_pos = self
                     .scroll_pos
                     .min(self.view_total - self.view_visible)
@@ -1229,7 +1243,8 @@ impl ScrollBar {
                     self.draw_bg.draw_rel(
                         cx,
                         Rect {
-                            pos: dvec2(self.bar_side_margin, view_rect.size.y - self.bar_size)
+                            pos: track.pos
+                                + dvec2(self.bar_side_margin, track.size.y - self.bar_size)
                                 + scroll,
                             size: dvec2(self.scroll_size, self.bar_size),
                         },
@@ -1238,14 +1253,14 @@ impl ScrollBar {
             }
             ScrollAxis::Vertical => {
                 // compute if we need a horizontal one
-                self.visible = view_total.y > view_rect.size.y + 0.1;
-                self.scroll_size = if view_total.x > view_rect.size.x + 0.1 {
-                    view_rect.size.y - self.bar_size
+                self.visible = view_total.y > view_visible.y + 0.1;
+                self.scroll_size = if view_total.x > view_visible.x + 0.1 {
+                    track.size.y - self.bar_size
                 } else {
-                    view_rect.size.y
+                    track.size.y
                 } - self.bar_side_margin * 2.;
                 self.view_total = view_total.y;
-                self.view_visible = view_rect.size.y;
+                self.view_visible = view_visible.y;
                 self.scroll_pos = self
                     .scroll_pos
                     .min(self.view_total - self.view_visible)
@@ -1260,7 +1275,8 @@ impl ScrollBar {
                     self.draw_bg.draw_rel(
                         cx,
                         Rect {
-                            pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin)
+                            pos: track.pos
+                                + dvec2(track.size.x - self.bar_size, self.bar_side_margin)
                                 + scroll,
                             size: dvec2(self.bar_size, self.scroll_size),
                         },
