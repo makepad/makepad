@@ -1499,8 +1499,8 @@ impl SkinnedModel {
             if node.parent!=Some(root)||node.name!=attachment.name||!unit(&node.rest)||!identity(&palette[joint])
                 ||inverse.v.iter().zip(expected.v).any(|(a,b)|(*a-b).abs()>2e-5){return Err("soft-body rigid attachment rest frame does not match metadata".into());}
         }
-        let cage=makepad_game_sim::soft_body::SoftBodyDefinition {rest_positions:m.rest_positions.clone(),tetrahedra:m.tetrahedra.clone(),
-            surface_samples:m.surface_samples.iter().map(|b|makepad_game_sim::soft_body::SoftBodyBinding{tetrahedron:b.tetrahedron,weights:b.weights}).collect(),anchors:m.anchors.clone()};
+        let cage=makepad_soft_body::SoftBodyDefinition {rest_positions:m.rest_positions.clone(),tetrahedra:m.tetrahedra.clone(),
+            surface_samples:m.surface_samples.iter().map(|b|makepad_soft_body::SoftBodyBinding{tetrahedron:b.tetrahedron,weights:b.weights}).collect(),anchors:m.anchors.clone()};
         cage.validate()?;
         for vertex in &self.vertices {
             let affine=vertex.joints.iter().zip(vertex.weights).filter(|(_,weight)|*weight>0.).find_map(|(joint,_)|m.tet_joints.iter().position(|j|j==joint));

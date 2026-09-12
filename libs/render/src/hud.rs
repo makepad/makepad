@@ -3,7 +3,7 @@
 //! are lent by the host widget (they carry its theme styling).
 
 use makepad_draw::*;
-use makepad_game_sim::{HudAnchor, HudBar, HudSlot};
+use makepad_scene::{HudAnchor, HudBar, HudSlot};
 
 /// HUD: named text slots pinned to anchors (slots sharing an anchor stack
 /// downward in insertion order), plus gauges. "center" is the big banner,
@@ -191,10 +191,10 @@ pub fn draw_billboard_labels(
 // ---------------------------------------------------------------------------
 
 use crate::shaders::{DrawHudImage, DrawHudShape};
-use makepad_game_sim::hud::{
+use makepad_scene::hud::{
     text_size_for, CAPTION_SIZE, HUD_REFERENCE_HEIGHT, TEXT_SIZE,
 };
-use makepad_game_sim::{
+use makepad_scene::{
     CrosshairStyle, HudDoc, HudElement, HudKind, HudValue,
 };
 
@@ -287,7 +287,7 @@ pub fn draw_hud_doc(
             (l.size_in_lpxs.width as f32, l.size_in_lpxs.height as f32)
         };
         let mut text_of = |e: &HudElement| element_text(e, binder);
-        makepad_game_sim::hud_layout(
+        makepad_scene::hud_layout(
             doc,
             rect.size.x as f32,
             rect.size.y as f32,
@@ -771,7 +771,7 @@ fn draw_log(
 ) {
     let size = (if e.glyph > 0.0 { e.glyph } else { TEXT_SIZE } * scale) as f64;
     let size_f = size as f32;
-    let mine: Vec<&makepad_game_sim::HudLine> = doc
+    let mine: Vec<&makepad_scene::HudLine> = doc
         .lines
         .iter()
         .filter(|l| l.target == e.name)
@@ -919,7 +919,7 @@ fn draw_marker(
 fn draw_crosshair(
     cx: &mut Cx2d,
     rect: Rect,
-    c: &makepad_game_sim::Crosshair,
+    c: &makepad_scene::Crosshair,
     draws: &mut HudDraws,
     scale: f32,
     spread: f32,

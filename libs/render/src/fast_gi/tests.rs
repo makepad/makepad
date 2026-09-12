@@ -301,7 +301,7 @@ fn receiver_bias_never_crosses_a_nearby_visible_probe() {
     assert!(1.5*0.03>0.0285);
 }
 pub(super) fn cube() -> Instance {
-    let(vertices,indices)=crate::geometry::shape_geometry_data(makepad_game_sim::Shape::Box);
+    let(vertices,indices)=crate::geometry::shape_geometry_data(makepad_scene::Shape::Box);
     Instance{mesh:Arc::new(Mesh{vertices,indices,stride:12,color_lane:-1,image:None}),transform:Mat4f::identity(),tint:vec3f(0.8,0.1,0.2),emission:vec3f(0.5,0.0,0.0),diffuse:1.0,exact_box:true}
 }
 

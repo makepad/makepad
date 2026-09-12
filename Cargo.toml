@@ -46,6 +46,8 @@ workspace.members = [
     "libs/fab",
     "libs/fab_tour",
     "apps/fab/loaders/gltf",
+    "libs/scene",
+    "libs/soft_body",
     "libs/show_control",
     "libs/asset/creator",
     "libs/bounded_http",

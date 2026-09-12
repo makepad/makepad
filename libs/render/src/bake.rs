@@ -17,12 +17,12 @@
 //!   a bridge darkens; the shader never learns why.
 //!
 //! **RNG isolation** is structural, exactly as it is for particles: the bake
-//! lives in the renderer, `GameWorld` has no field for it, and the ray
+//! lives in the renderer, `World` has no field for it, and the ray
 //! directions come from a fixed Fibonacci set rather than any random source —
 //! so there is no RNG here to share with the simulation in the first place.
 
 use makepad_draw::*;
-use makepad_game_sim::{BodyKind, Entity, GameWorld, Terrain};
+use makepad_scene::{BodyKind, Entity, World, Terrain};
 
 use crate::sun::SunLight;
 
@@ -351,7 +351,7 @@ impl LightBake {
 
     /// Refresh whatever is stale. Returns true when anything changed, which
     /// is the renderer's cue that its static slabs need repacking.
-    pub fn update(&mut self, world: &GameWorld, sun: &SunLight) -> bool {
+    pub fn update(&mut self, world: &World, sun: &SunLight) -> bool {
         let geometry_stale = self.baked_rev != Some(world.render_rev);
         let sun_stale = match self.baked_sun {
             None => true,
@@ -378,7 +378,7 @@ impl LightBake {
 
     /// Everything that can block light: statics and kinematics (a moving
     /// platform still casts), skipping sensors and decoration.
-    fn collect_occluders(&mut self, world: &GameWorld) {
+    fn collect_occluders(&mut self, world: &World) {
         self.occluders.clear();
         self.terrain_max = world
             .terrain
@@ -386,7 +386,7 @@ impl LightBake {
             .map(|t| t.heights.iter().copied().fold(f32::MIN, f32::max))
             .unwrap_or(f32::MIN);
         for e in world.entities.iter() {
-            if e.sensor || e.bake_skip || !matches!(e.kind, BodyKind::Static | BodyKind::Kinematic) {
+            if e.alpha_primitive || e.bake_skip || !matches!(e.kind, BodyKind::Static | BodyKind::Kinematic) {
                 continue;
             }
             if self.occluders.len() >= self.settings.max_occluders {
@@ -478,15 +478,15 @@ impl LightBake {
     /// Per-static ambient occlusion. Sampled from five face centres so a box
     /// wedged against a wall darkens even though its top is open — a single
     /// centre sample cannot tell those apart.
-    fn bake_ao(&mut self, world: &GameWorld) {
+    fn bake_ao(&mut self, world: &World) {
         let t0 = Cx::monotonic_now();
         let dirs = hemisphere_dirs(self.settings.ao_rays);
-        let terrain = world.terrain.as_ref();
+        let terrain = world.terrain.as_deref();
         let mut near = Vec::new();
         self.ao.clear();
         let mut statics = 0u64;
         for e in world.entities.iter() {
-            if e.kind != BodyKind::Static || e.sensor || e.bake_skip {
+            if e.kind != BodyKind::Static || e.alpha_primitive || e.bake_skip {
                 continue;
             }
             statics += 1;
@@ -525,15 +525,15 @@ impl LightBake {
     /// Per-static sun visibility: one ray each, toward the sun. Cheap enough
     /// to redo whenever the sun swings, which is what lets a day cycle move
     /// the baked shadows instead of freezing them at dawn.
-    fn bake_sun(&mut self, world: &GameWorld, sun: &SunLight) {
+    fn bake_sun(&mut self, world: &World, sun: &SunLight) {
         let t0 = Cx::monotonic_now();
-        let terrain = world.terrain.as_ref();
+        let terrain = world.terrain.as_deref();
         // A long ray: a tower should shadow the ground well away from it.
         let reach = 64.0;
         let mut near = Vec::new();
         self.sun_vis.clear();
         for e in world.entities.iter() {
-            if e.kind != BodyKind::Static || e.sensor || e.bake_skip {
+            if e.kind != BodyKind::Static || e.alpha_primitive || e.bake_skip {
                 continue;
             }
             let h = vec3f(
@@ -575,7 +575,7 @@ impl LightBake {
 
     /// Lay out the lattice over the world's contents and bake its sky term.
     /// Sun visibility is filled in by [`Self::bake_sun`].
-    fn bake_probes_sky(&mut self, world: &GameWorld) {
+    fn bake_probes_sky(&mut self, world: &World) {
         let t0 = Cx::monotonic_now();
         let Some((min, max)) = world_bounds(world) else {
             self.probes = ProbeGrid::default();
@@ -603,7 +603,7 @@ impl LightBake {
             probes: vec![(1.0, 1.0); dims.0 * dims.1 * dims.2],
         };
         let dirs = hemisphere_dirs(self.settings.ao_rays);
-        let terrain = world.terrain.as_ref();
+        let terrain = world.terrain.as_deref();
         let mut near = Vec::new();
         let positions: Vec<Vec3f> = self.probe_positions().collect();
         for (i, p) in positions.into_iter().enumerate() {
@@ -628,12 +628,12 @@ fn lookup(table: &[(u64, f32)], id: u64) -> Option<f32> {
 
 /// World-space box the probe lattice should cover: everything solid, plus
 /// enough headroom above it for things to move through.
-fn world_bounds(world: &GameWorld) -> Option<(Vec3f, Vec3f)> {
+fn world_bounds(world: &World) -> Option<(Vec3f, Vec3f)> {
     let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
     let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
     let mut any = false;
     for e in world.entities.iter() {
-        if e.sensor || e.bake_skip {
+        if e.alpha_primitive || e.bake_skip {
             continue;
         }
         let h = vec3f(
@@ -664,13 +664,9 @@ fn world_bounds(world: &GameWorld) -> Option<(Vec3f, Vec3f)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_game_sim::{BodyKind, Entity, GameWorld};
+    use makepad_scene::{BodyKind, Entity, World};
 
-    /// NB `Entity::default()` leaves `scale` at (0,0,0) — the same
-    /// not-a-playable-default trap that has already bitten `rng`,
-    /// `gravity_scale` and ground friction. A zero-scale entity draws at zero
-    /// size, so the bake agreeing with the renderer and ignoring it is
-    /// correct; a test fixture just has to say what it means.
+    /// Explicit unit scale matches the displayed fixture bounds.
     fn static_box(id: u64, pos: Vec3f, half: Vec3f) -> Entity {
         Entity {
             id,
@@ -683,8 +679,8 @@ mod tests {
     }
 
     /// A big flat slab plus whatever the test adds on top of it.
-    fn world_with(entities: Vec<Entity>) -> GameWorld {
-        let mut world = GameWorld::new();
+    fn world_with(entities: Vec<Entity>) -> World {
+        let mut world = World::new();
         world.entities = entities;
         world
     }

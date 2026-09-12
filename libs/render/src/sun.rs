@@ -107,7 +107,7 @@ impl SunLight {
 
     /// [`Self::from_time_of_day`] with the daylight split re-aimed at a
     /// given disc-to-dome luminance ratio — see
-    /// [`makepad_game_sim::SunConfig::daylight_balance`]. `None` is the
+    /// [`makepad_scene::SunConfig::daylight_balance`]. `None` is the
     /// stock rig, unchanged in every bit.
     pub fn from_time_of_day_balanced(
         hours: f32,
@@ -343,7 +343,7 @@ pub fn celestial_rows(hours: f32, latitude_deg: f32) -> [Vec4f; 3] {
     ]
 }
 
-/// Resolved from the sim's [`makepad_game_sim::SunConfig`], which stores
+/// Resolved from the sim's [`makepad_scene::SunConfig`], which stores
 /// only what script asked for (the sim cannot depend on `makepad_draw`).
 ///
 /// `time_of_day` alone picks the rig — day, twilight or night — from the
@@ -356,7 +356,7 @@ pub fn celestial_rows(hours: f32, latitude_deg: f32) -> [Vec4f; 3] {
 /// light on the walls and the glow in the sky are one sun
 /// ([`SunLight::from_direction_balanced`]). The overrides that follow are
 /// exactly that: overrides.
-pub fn resolve_sun(cfg: &makepad_game_sim::SunConfig) -> SunLight {
+pub fn resolve_sun(cfg: &makepad_scene::SunConfig) -> SunLight {
     let explicit_dir = cfg
         .dir
         .filter(|d| d.x != 0.0 || d.y != 0.0 || d.z != 0.0);
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn an_explicit_direction_carries_the_whole_rig() {
         let lum = crate::sky::luminance;
-        let cfg = |hours: f32, dir: Vec3f| makepad_game_sim::SunConfig {
+        let cfg = |hours: f32, dir: Vec3f| makepad_scene::SunConfig {
             time_of_day: Some(hours),
             latitude: 52.0,
             dir: Some(dir),
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn resolve_applies_explicit_overrides_over_time_of_day() {
-        let mut cfg = makepad_game_sim::SunConfig {
+        let mut cfg = makepad_scene::SunConfig {
             time_of_day: Some(9.0),
             ..Default::default()
         };

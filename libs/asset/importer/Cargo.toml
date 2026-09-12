@@ -58,11 +58,6 @@ makepad-base64 = { path = "../../base64" }
 # durations (standalone seam; no Cx, no window).
 makepad-platform = { path = "../../../platform" }
 
-# Target-correct stat/dirent/errno/openat. Only macOS and Linux are ABI-validated
-# for the pack walk; other Unix and Windows fail closed at runtime.
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 # The real coordinator e2e runs against an actual AssetServer instance.
 makepad-asset-store = { path = "../store" }

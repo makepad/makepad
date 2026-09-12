@@ -115,7 +115,7 @@ fn pack_os_unsupported() -> PackImportError {
     {
         PackImportError::new(
             PackImportErrorKind::Io,
-            "pack import is fail-closed on this Unix; only macOS and Linux have a validated libc ABI walk",
+            "pack import is fail-closed on this Unix; only macOS and Linux have a validated native filesystem walk",
         )
     }
     #[cfg(not(any(unix, windows)))]
@@ -1722,7 +1722,7 @@ mod unix {
     #[cfg(target_os = "macos")]
     const O_CLOEXEC: i32 = 0x0100_0000;
     #[cfg(target_os = "macos")]
-    const O_NOFOLLOW: i32 = 0x0100;
+    pub(super) const O_NOFOLLOW: i32 = 0x0100;
     #[cfg(target_os = "macos")]
     const O_CREAT: i32 = 0x0200;
     #[cfg(target_os = "macos")]
@@ -1755,7 +1755,7 @@ mod unix {
     #[cfg(target_os = "linux")]
     const O_CLOEXEC: i32 = 0x80000;
     #[cfg(target_os = "linux")]
-    const O_NOFOLLOW: i32 = 0x20000;
+    pub(super) const O_NOFOLLOW: i32 = 0x20000;
     #[cfg(target_os = "linux")]
     const O_CREAT: i32 = 0x40;
     #[cfg(target_os = "linux")]
@@ -4429,7 +4429,7 @@ fn open_regular_nofollow(path: &Path, pack_path: &str) -> Result<File, PackImpor
     opts.read(true);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        opts.custom_flags(libc::O_NOFOLLOW);
+        opts.custom_flags(unix::O_NOFOLLOW);
     }
     let file = opts.open(path).map_err(|e| {
         PackImportError::new(PackImportErrorKind::Io, format!("{pack_path}: {e}"))

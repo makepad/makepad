@@ -80,56 +80,62 @@ impl EntityLight {
     }
 }
 
-impl crate::Entity {
-    /// Replaces only this named light; editing lights never dirties geometry.
-    pub fn set_light(&mut self, light: EntityLight) -> Result<(), &'static str> {
-        light.validate()?;
-        if let Some(old) = self.lights.iter_mut().find(|l| l.name == light.name) {
-            *old = light;
-        } else {
-            if self.lights.len() >= MAX_ENTITY_LIGHTS {
-                return Err("at most 16 lights per entity");
-            }
-            self.lights.push(light);
+/// Replaces only this named light; editing lights never dirties geometry.
+pub fn set_light(lights: &mut Vec<EntityLight>, light: EntityLight) -> Result<(), &'static str> {
+    light.validate()?;
+    if let Some(old) = lights.iter_mut().find(|l| l.name == light.name) {
+        *old = light;
+    } else {
+        if lights.len() >= MAX_ENTITY_LIGHTS {
+            return Err("at most 16 lights per entity");
         }
-        Ok(())
+        lights.push(light);
     }
+    Ok(())
+}
 
-    /// Standard vehicle fixture in body space. The offset scales with the
-    /// chassis; reach/intensity do not. Does not require a particular mesh.
+/// Standard vehicle fixture in body space. The offset scales with the
+/// chassis; reach/intensity do not. Does not require a particular mesh.
+pub fn set_headlights(lights: &mut Vec<EntityLight>, half: Vec3f, enabled: bool) -> Result<(), &'static str> {
+    let missing = ["headlight_left", "headlight_right"]
+        .iter()
+        .filter(|name| !lights.iter().any(|l| l.name == **name))
+        .count();
+    if lights.len() + missing > MAX_ENTITY_LIGHTS {
+        return Err("not enough light slots for both headlights");
+    }
+    for (name, side) in [("headlight_left", -1.0), ("headlight_right", 1.0)] {
+        if let Some(light) = lights.iter_mut().find(|l| l.name == name) {
+            light.enabled = enabled;
+            continue;
+        }
+        let light = EntityLight {
+            name: name.into(),
+            pos: vec3f(
+                side * half.x * 0.7,
+                half.y * 0.15,
+                -half.z - 0.08,
+            ),
+            dir: vec3f(0.0, -0.08, -1.0),
+            color: vec3f(1.0, 0.94, 0.82),
+            intensity: 4.0,
+            range: 30.0,
+            spot: true,
+            inner_angle: 12.0,
+            outer_angle: 25.0,
+            enabled,
+            shadows: true,
+        };
+        set_light(lights, light)?;
+    }
+    Ok(())
+}
+impl crate::Entity {
+    pub fn set_light(&mut self, light: EntityLight) -> Result<(), &'static str> {
+        set_light(&mut self.lights, light)
+    }
     pub fn set_headlights(&mut self, enabled: bool) -> Result<(), &'static str> {
-        let missing = ["headlight_left", "headlight_right"]
-            .iter()
-            .filter(|name| !self.lights.iter().any(|l| l.name == **name))
-            .count();
-        if self.lights.len() + missing > MAX_ENTITY_LIGHTS {
-            return Err("not enough light slots for both headlights");
-        }
-        for (name, side) in [("headlight_left", -1.0), ("headlight_right", 1.0)] {
-            if let Some(light) = self.lights.iter_mut().find(|l| l.name == name) {
-                light.enabled = enabled;
-                continue;
-            }
-            let light = EntityLight {
-                name: name.into(),
-                pos: vec3f(
-                    side * self.half.x * 0.7,
-                    self.half.y * 0.15,
-                    -self.half.z - 0.08,
-                ),
-                dir: vec3f(0.0, -0.08, -1.0),
-                color: vec3f(1.0, 0.94, 0.82),
-                intensity: 4.0,
-                range: 30.0,
-                spot: true,
-                inner_angle: 12.0,
-                outer_angle: 25.0,
-                enabled,
-                shadows: true,
-            };
-            self.set_light(light)?;
-        }
-        Ok(())
+        set_headlights(&mut self.lights, self.half, enabled)
     }
 }
 
@@ -138,7 +144,7 @@ mod tests {
     use super::*;
     #[test]
     fn lights_replace_validate_clone_and_follow_owner_lifetime() {
-        let mut w = crate::GameWorld::new();
+        let mut w = crate::World::new();
         let mut e = crate::Entity::default();
         e.set_light(EntityLight::default()).unwrap();
         e.set_light(EntityLight {
@@ -156,7 +162,7 @@ mod tests {
         assert_eq!(e.lights[0].intensity, 3.0);
         w.entities.push(e);
         let snap = w.clone();
-        w.reset_content();
+        w.entities.clear();
         assert!(w.entities.is_empty());
         assert_eq!(snap.entities[0].lights.len(), 1);
     }

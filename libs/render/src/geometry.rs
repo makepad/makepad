@@ -6,7 +6,7 @@
 //! OUTWARD — the same convention the terrain mesh uses.
 
 use makepad_draw::*;
-use makepad_game_sim::Shape;
+use makepad_scene::Shape;
 
 fn pod_vertex(vertices: &mut Vec<f32>, p: Vec3f, n: Vec3f) {
     vertices.extend_from_slice(&[

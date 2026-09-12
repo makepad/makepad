@@ -5,9 +5,9 @@
 
 use makepad_draw::*;
 use crate::custom_material::DrawSceneCustom;
-use makepad_game_sim::{
-    entity_index_sorted, BodyKind, ChunkKey, Entity, GameWorld, Part, Shape, Terrain, TerrainMaterials,
-    VoxelField, WaterState, WaterVolume, MAX_WAVES,
+use makepad_scene::{
+    entity_index_sorted, BodyKind, ChunkKey, Entity, World, Part, Shape, Terrain, TerrainMaterials,
+    VoxelView, WaterView, WaterSurface, MAX_WAVES,
 };
 
 use crate::bake::{BakeSettings, BakeStats, LightBake};
@@ -223,7 +223,7 @@ pub struct Renderer {
     /// Drawn through the SAME terrain shader/lightmap path as the tiles.
     voxel_tiles: Vec<VoxelTile>,
     /// One flat grid per `game.water` volume (W1), displaced in the vertex
-    /// shader by the sim's wave sum. Rebuilt when `WaterState::rev` moves.
+    /// shader by the sim's wave sum. Rebuilt when `WaterView::rev` moves.
     water_tiles: Vec<WaterTile>,
     water_rev: Option<u64>,
     /// REST meshes for GPU-skinned rigs — geometry plus the rig's rest-pose
@@ -260,7 +260,7 @@ pub struct Renderer {
     /// and every host would have had to adopt a new field to get one.
     sky_draw: Option<Box<DrawSceneSkyMap>>,
     /// Engine-owned bullet-hole shader. A host gets the default marks merely
-    /// by drawing a GameWorld; no widget field or per-game wiring is needed.
+    /// by drawing a World; no widget field or per-game wiring is needed.
     decal_draw: Option<Box<DrawSceneDecal>>,
     /// One-shot diagnostic guard for the only state in which a parsed sky
     /// can still disappear before submission: its lazy shader could not be
@@ -1674,14 +1674,14 @@ fn world_boxes(m: &Mat4f, boxes: &[(Vec3f, Vec3f)]) -> (Vec<(Vec3f, Vec3f)>, Vec
 /// What the packed static slabs are valid for: the static geometry, its
 /// paint, and the light baked into its colours. A repaint (`paint_rev`)
 /// repacks the slabs and nothing else.
-fn static_slab_key(world: &GameWorld, bake_generation: u64) -> (u64, u64, u64) {
+fn static_slab_key(world: &World, bake_generation: u64) -> (u64, u64, u64) {
     (world.render_rev, world.paint_rev, bake_generation)
 }
 
 /// What a GPU lightmap job is valid for: the static geometry — never its
 /// paint — the placed models and the daylight quantum. A lamp turning red
 /// must not re-bake a town (Crossroads, 2026-09-02: 68 bakes a minute).
-fn lightmap_world_key(world: &GameWorld, models_rev: u64, day_key: u32) -> (u64, u64, u32) {
+fn lightmap_world_key(world: &World, models_rev: u64, day_key: u32) -> (u64, u64, u32) {
     (world.render_rev, models_rev, day_key)
 }
 
@@ -2181,9 +2181,9 @@ enum PrimitiveBucket {
 /// wall slab: inside the room you saw its far skin, outside you saw the
 /// near wall's inner skin — a box either way.
 fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
-    if entity.sensor {
+    if entity.alpha_primitive {
         Some(PrimitiveBucket::Alpha)
-    } else if entity.shell {
+    } else if entity.suppress_primitive {
         None
     } else {
         Some(PrimitiveBucket::Opaque)
@@ -2297,7 +2297,7 @@ struct WaterTile {
 /// shader to the same expression over these same numbers). Unused slots are
 /// zero; a zero amplitude contributes nothing in the shader.
 pub fn pack_wave_uniforms(
-    volume: &WaterVolume,
+    volume: &WaterSurface,
 ) -> ([[f32; 4]; MAX_WAVES], [[f32; 4]; MAX_WAVES]) {
     let mut a = [[0.0f32; 4]; MAX_WAVES];
     let mut b = [[0.0f32; 4]; MAX_WAVES];
@@ -2312,7 +2312,7 @@ pub fn pack_wave_uniforms(
 /// follows the shortest wavelength — eight cells per wave is enough for the
 /// crest to read as a curve — clamped so a huge bay stays a few thousand
 /// triangles.
-fn water_sheet_data(volume: &WaterVolume) -> (Vec<f32>, Vec<u32>, Vec3f, Vec3f) {
+fn water_sheet_data(volume: &WaterSurface) -> (Vec<f32>, Vec<u32>, Vec3f, Vec3f) {
     let span_x = (volume.max.x - volume.min.x).max(0.01);
     let span_z = (volume.max.z - volume.min.z).max(0.01);
     let shortest = volume
@@ -2474,8 +2474,8 @@ pub(crate) fn apply_sun(cx: &Cx, draws: &mut SceneDraws, sun: &SunLight, fog_col
 /// colour is deliberately NOT part of the test: it only ever tinted the fog
 /// (the village demo customises exactly that), and analytic mode derives
 /// its fog from the model instead.
-fn sky_wants_analytic(sky: &makepad_game_sim::SkyConfig) -> bool {
-    let d = makepad_game_sim::SkyConfig::default();
+fn sky_wants_analytic(sky: &makepad_scene::SkyConfig) -> bool {
+    let d = makepad_scene::SkyConfig::default();
     let close = |a: Vec4f, b: Vec4f| {
         (a.x - b.x).abs() < 1.0e-3 && (a.y - b.y).abs() < 1.0e-3 && (a.z - b.z).abs() < 1.0e-3
     };
@@ -3285,14 +3285,14 @@ impl Renderer {
 
     /// Ground height under a caster: the terrain, or the tallest static box
     /// top it stands over. `None` when it is over a hole.
-    fn ground_under(world: &GameWorld, e: &Entity) -> Option<f32> {
+    fn ground_under(world: &World, e: &Entity) -> Option<f32> {
         let mut ground: Option<f32> = world
             .terrain
             .as_ref()
             .and_then(|t| t.floor_under(e.pos, e.half));
         let feet = e.pos.y - e.half.y;
         for s in world.entities.iter() {
-            if s.sensor || s.hidden || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic) {
+            if s.alpha_primitive || s.hidden || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic) {
                 continue;
             }
             let top = s.pos.y + s.half.y;
@@ -3314,7 +3314,7 @@ impl Renderer {
     /// ever good for. Ties are broken by camera distance so the budget
     /// spends itself on what fills the screen.
     fn shadow_casters<'w>(
-        world: &'w GameWorld,
+        world: &'w World,
         camera_pos: Vec3f,
         budget: usize,
     ) -> Vec<(&'w Entity, f32, bool)> {
@@ -3323,9 +3323,9 @@ impl Renderer {
         let mut small: Vec<(&Entity, f32)> = Vec::new();
         for e in world.entities.iter() {
             if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
-                || e.sensor
+                || e.alpha_primitive
                 || e.hidden
-                || e.attached_to != 0
+                || e.parent != 0
             {
                 continue;
             }
@@ -3352,7 +3352,7 @@ impl Renderer {
     /// Ground-plane extent of the world's content, in world units: the
     /// centre and half-width of everything the diorama's shadow should
     /// catch. `None` when there is nothing to stand on.
-    fn world_footprint(world: &GameWorld) -> Option<(Vec3f, f32)> {
+    fn world_footprint(world: &World) -> Option<(Vec3f, f32)> {
         let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
         let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
         let mut any = false;
@@ -3365,7 +3365,7 @@ impl Renderer {
             max.z = max.z.max(p.z + h.z);
             any = true;
         }
-        if let Some(t) = world.terrain.as_ref() {
+        if let Some(t) = world.terrain.as_deref() {
             let half = t.cell_size * (t.cells.saturating_sub(1)) as f32 * 0.5;
             let c = t.origin + half;
             min.x = min.x.min(c - half);
@@ -3420,7 +3420,7 @@ impl Renderer {
 
     /// Rebuild the water sheets when the world's water revision moved
     /// (volume added, wave added by `game.surf_spot`, re-eval).
-    fn ensure_water_tiles(&mut self, cx: &mut Cx, water: Option<&WaterState>) {
+    fn ensure_water_tiles(&mut self, cx: &mut Cx, water: Option<&WaterView>) {
         let rev = water.map(|w| w.rev);
         if rev == self.water_rev {
             return;
@@ -3428,7 +3428,7 @@ impl Renderer {
         self.water_tiles.clear();
         if let Some(water) = water {
             for volume in &water.volumes {
-                // A physics-only volume draws NOTHING (`WaterVolume::draw_sheet`
+                // A physics-only volume draws NOTHING (`WaterSurface::draw_sheet`
                 // documents why a transparent sheet is not the same thing: this
                 // pass blends premultiplied, so alpha 0 adds instead of hides).
                 // A river's chain of axis-aligned boxes takes this branch; its
@@ -3458,7 +3458,7 @@ impl Renderer {
     /// Mirror the voxel field's chunk meshes into GPU geometries: a merge
     /// over two sorted sequences, re-uploading only chunks whose mesh
     /// revision moved (a dig re-uploads its own chunks, nothing else).
-    fn ensure_voxel_tiles(&mut self, cx: &mut Cx, voxel: Option<&VoxelField>) {
+    fn ensure_voxel_tiles(&mut self, cx: &mut Cx, voxel: Option<&VoxelView>) {
         let empty = std::collections::BTreeMap::new();
         let meshes = voxel.map_or(&empty, |v| &v.meshes);
         if self.voxel_tiles.is_empty() && meshes.is_empty() {
@@ -3522,33 +3522,26 @@ impl Renderer {
     }
 
     fn entity_rotation(e: &Entity) -> Mat4f {
-        // Hitscan tracers are replicated sensor entities, so their velocity
-        // reaches every peer through the ordinary volatile entity state. Use
-        // that shared direction as local +Z: a pitched shot becomes a thin
-        // 3D streak along the exact gameplay ray rather than a yaw-only box.
-        if e.tag == "tracer" {
-            let speed_sq = e.vel.length_squared();
-            if speed_sq > 1.0e-8 {
-                let f = e.vel * (1.0 / speed_sq.sqrt());
-                let up_hint = if f.y.abs() > 0.99 {
-                    vec3f(1.0, 0.0, 0.0)
-                } else {
-                    vec3f(0.0, 1.0, 0.0)
-                };
-                let r = Vec3f::cross(up_hint, f).normalize();
-                let u = Vec3f::cross(f, r);
-                let mut m = Mat4f::identity();
-                m.v[0] = r.x;
-                m.v[1] = r.y;
-                m.v[2] = r.z;
-                m.v[4] = u.x;
-                m.v[5] = u.y;
-                m.v[6] = u.z;
-                m.v[8] = f.x;
-                m.v[9] = f.y;
-                m.v[10] = f.z;
-                return m;
-            }
+        // The producer resolves an optional local +Z display direction.
+        if let Some(f) = e.forward_axis {
+            let up_hint = if f.y.abs() > 0.99 {
+                vec3f(1.0, 0.0, 0.0)
+            } else {
+                vec3f(0.0, 1.0, 0.0)
+            };
+            let r = Vec3f::cross(up_hint, f).normalize();
+            let u = Vec3f::cross(f, r);
+            let mut m = Mat4f::identity();
+            m.v[0] = r.x;
+            m.v[1] = r.y;
+            m.v[2] = r.z;
+            m.v[4] = u.x;
+            m.v[5] = u.y;
+            m.v[6] = u.z;
+            m.v[8] = f.x;
+            m.v[9] = f.y;
+            m.v[10] = f.z;
+            return m;
         }
         // A rigid body's orientation comes from box3d; a kinematic RIDE body
         // (a coaster car halfway round a loop) writes its own. Either way a
@@ -3580,7 +3573,7 @@ impl Renderer {
         owner_frame.v[12] = owner.pos.x;
         owner_frame.v[13] = owner.pos.y;
         owner_frame.v[14] = owner.pos.z;
-        let mut local = Mat4f::rotation(part.rot + part.procedural_rot);
+        let mut local = Mat4f::rotation(part.rot);
         local.v[12] = part.offset.x * owner.scale.x;
         local.v[13] = part.offset.y * owner.scale.y;
         local.v[14] = part.offset.z * owner.scale.z;
@@ -3662,7 +3655,7 @@ impl Renderer {
     /// PERF: rebuild the packed static instance slabs. Only runs when
     /// `world.render_rev` moved — the world bumps it on every mutation that
     /// changes what static content looks like (see mark_render_dirty).
-    fn rebuild_static_slabs(&mut self, draws: &mut SceneDraws, world: &GameWorld) {
+    fn rebuild_static_slabs(&mut self, draws: &mut SceneDraws, world: &World) {
         // Chunks are dropped, not cleared: a vacated cell must not linger as
         // an empty entry the per-frame loops keep testing. Rebuilds run at
         // edit cadence, so the reallocation is not a per-frame cost.
@@ -3684,7 +3677,7 @@ impl Renderer {
                 e.half.z * 2.0 * e.scale.z,
             );
             let mut color = e.color;
-            if e.sensor && color.w >= 0.99 {
+            if e.alpha_primitive && color.w >= 0.99 {
                 color.w = 0.35;
             }
             // Baked occlusion rides in the colour we were already sending —
@@ -3706,7 +3699,7 @@ impl Renderer {
         for p in world
             .parts
             .iter()
-            .filter(|p| !p.anim_active && !p.procedural_anim)
+            .filter(|p| !p.animated)
         {
             // Entity ids are spawn-ordered, so the list stays sorted; the
             // shared sim helper owns (and debug-asserts) that invariant.
@@ -3747,7 +3740,7 @@ impl Renderer {
     /// each model's own AO atlas — the merged silhouette geometry this used
     /// to build (30ms per world settle) drew nothing but artifacts on top
     /// of them and was deleted.
-    fn refresh_shadow_receivers(&mut self, world: &GameWorld) {
+    fn refresh_shadow_receivers(&mut self, world: &World) {
         // Tops that can catch a draped shadow: visible, solid static boxes —
         // road slabs, platforms, crate lids. TALL hidden colliders stay
         // excluded (their tops are the invisible lids the roof surfaces
@@ -3761,7 +3754,7 @@ impl Renderer {
             .iter()
             .filter(|e| {
                 e.kind == BodyKind::Static
-                    && !e.sensor
+                    && !e.alpha_primitive
                     && !e.hidden
                     && e.shape == Shape::Box
                     && e.color.w >= 0.99
@@ -3796,7 +3789,7 @@ impl Renderer {
                 );
                 let flat_slab = h.1 <= 0.25 && h.0 >= 0.8 && h.2 >= 0.8;
                 e.kind == BodyKind::Static
-                    && !e.sensor
+                    && !e.alpha_primitive
                     && e.shape == Shape::Box
                     && (!e.hidden || flat_slab)
             })
@@ -4801,7 +4794,7 @@ impl Renderer {
     /// replaces a pending one wholesale (the baker re-plans the layout).
     fn kick_lightmap_bake(
         &mut self,
-        world: &GameWorld,
+        world: &World,
         sun: &SunLight,
         trigger: crate::gpu_lightmap::BakeTrigger,
     ) {
@@ -5251,7 +5244,7 @@ impl Renderer {
     /// Local lights must see all opaque architecture, not just the subset
     /// owned by CSM when a world atlas is present. Reuse resident geometry;
     /// terrain/voxel conversions are cached with each tile's revision.
-    fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &GameWorld) -> Vec<crate::gpu_lightmap::GpuBakeMesh> {
+    fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &World) -> Vec<crate::gpu_lightmap::GpuBakeMesh> {
         use crate::gpu_lightmap::GpuBakeMesh;
         let mut out = Vec::new();
         for inst in self.placed_models.iter().filter(|i| !i.dynamic) {
@@ -5278,8 +5271,8 @@ impl Renderer {
             cached.as_ref().map(Geometry::geometry_id)
         }
         if self.stage.shows_environment() {
-            if let Some(terrain)=world.terrain.as_ref() {
-                self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_ref());
+            if let Some(terrain)=world.terrain.as_deref() {
+                self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());
                 for tile in &mut self.terrain_tiles {
                     if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
                         out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max});
@@ -5299,7 +5292,7 @@ impl Renderer {
     /// World primitives used to enter CSM through the realized atlas. Keep
     /// them as ordinary caster instances when clustered lighting skips it.
     fn append_unbaked_world_casters(
-        &mut self, cx: &mut Cx, world: &GameWorld,
+        &mut self, cx: &mut Cx, world: &World,
         out: &mut Vec<crate::gpu_lightmap::GpuLmMover>,
     ) {
         for e in &world.entities {
@@ -5387,7 +5380,7 @@ impl Renderer {
     /// shadow reads.
     fn collect_lm_movers(
         &self,
-        world: &GameWorld,
+        world: &World,
         eye:Vec3f,
         skinned_items: Option<&[SkinnedDraw]>,
     ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
@@ -5498,9 +5491,9 @@ impl Renderer {
         if let Some(box_geom) = &self.lm_box_geometry {
             for e in world.entities.iter() {
                 if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid | BodyKind::Kinematic)
-                    || e.sensor
+                    || e.alpha_primitive
                     || e.hidden
-                    || e.attached_to != 0
+                    || e.parent != 0
                 {
                     continue;
                 }
@@ -5547,7 +5540,7 @@ impl Renderer {
     fn run_gpu_lightmap(
         &mut self,
         cx: &mut CxDraw,
-        world: &GameWorld,
+        world: &World,
         movers: &[crate::gpu_lightmap::GpuLmMover],
         csm_view: Option<&crate::shadow_csm::CsmView>,
         eye: Vec3f,
@@ -7504,7 +7497,7 @@ impl Renderer {
         cx: &mut Cx3d,
         draw_list: &mut DrawList,
         draws: &mut SceneDraws,
-        world: &GameWorld,
+        world: &World,
         scene_state: SceneState3D,
     ) -> RenderStats {
         self.draw_scene_full(cx, draw_list, draws, world, scene_state, None, None)
@@ -7516,7 +7509,7 @@ impl Renderer {
         cx: &mut Cx3d,
         draw_list: &mut DrawList,
         draws: &mut SceneDraws,
-        world: &GameWorld,
+        world: &World,
         scene_state: SceneState3D,
         skinned: Option<SkinnedBatch>,
         mut models_draw: Option<&mut DrawSceneSkinned>,
@@ -7617,8 +7610,10 @@ impl Renderer {
         }
         if self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
             self.gi.poll();
-            let terrain_rev=world.terrain.as_ref().map_or(0,|t|t.revision);
-            let voxel_rev=world.voxel.as_ref().map_or(0,|v|v.meshes.values().fold(v.structure_rev,|h,m|h.wrapping_mul(1099511628211)^m.rev));
+            let terrain_rev=world.terrain.as_deref().map_or(0,|t|t.revision);
+            let voxel_rev=world.voxel.as_ref().map_or(0,|v|v.meshes.iter().fold(0xcbf29ce484222325u64, |h, (key, mesh)| {
+                [key.x as u64, key.y as u64, key.z as u64, mesh.rev].into_iter().fold(h, |h, value| h.wrapping_mul(1099511628211) ^ value)
+            }));
             let key=(world.render_rev^terrain_rev.rotate_left(17)^voxel_rev.rotate_left(31),world.paint_rev,self.models_rev);
             if self.gi.needs_scene(key) {
                 if let Ok(slot)=cx.task_pool().reserve(makepad_platform::thread::Lane::Heavy) {
@@ -7635,8 +7630,8 @@ impl Renderer {
             // back to its world-space eye when no game camera is active.
             let center=if let Some(focus)=self.csm_focus {
                 camera_pos-vec3f(scene_state.view.v[2],scene_state.view.v[6],scene_state.view.v[10])*focus
-            }else if let Some(e)=world.entity(world.cam_third).or_else(||world.entity(world.cam_follow)) {e.pos+vec3f(0.0,1.0,0.0)}
-            else if self.stage.mode==StageMode::Flat {world.cam_target}else{camera_pos};
+            }else if let Some(e)=world.entity(world.camera.third).or_else(||world.entity(world.camera.follow)) {e.pos+vec3f(0.0,1.0,0.0)}
+            else if self.stage.mode==StageMode::Flat {world.camera.target}else{camera_pos};
             let movers=self.gi_movers(world,center,skinned.as_ref().map(|b|b.items.as_slice()));
             self.gi.run(cx.cx,center,&movers,&sun,&self.clustered,self.gpu_baker.csm_binding());
             if self.gi.stats.relit_rays>0 {if let Some(parent)=self.gi.relight_pass(){self.clustered.parent_shadows(cx.cx,parent);self.gpu_baker.parent_csm_to(cx.cx,parent);}}
@@ -7733,6 +7728,13 @@ impl Renderer {
             let (top_tex, top_base, top_range) = self.lm_top_binding(cx.cx);
             let (lm_rect, lm_world) = self.lm_ground.unwrap_or_default();
             let csm = self.gpu_baker.csm_binding();
+            trace!(
+                "csm",
+                "bind rx0w={:.4} rz0w={:.4} tex={:?}",
+                csm.as_ref().map_or(0.0, |(f, _, _)| f.cascades[0].rx.w),
+                csm.as_ref().map_or(0.0, |(f, _, _)| f.cascades[0].rz.w),
+                csm.as_ref().map(|(_, t, _)| t.texture_id())
+            );
             for dv in [
                 &mut draws.cube.cube.draw_vars,
                 &mut draws.alpha.cube.cube.draw_vars,
@@ -7873,8 +7875,8 @@ impl Renderer {
         // Terrain can be megabytes at 257². It is immutable for the whole
         // draw, so borrow it from the world; cloning here turned a steady
         // landscape into frame-rate-scaled memory bandwidth.
-        if let Some(terrain) = world.terrain.as_ref().filter(|_| shows_environment) {
-            self.ensure_terrain_tiles(cx.cx, terrain, world.terrain_materials.as_ref());
+        if let Some(terrain) = world.terrain.as_deref().filter(|_| shows_environment) {
+            self.ensure_terrain_tiles(cx.cx, terrain, world.terrain_materials.as_deref());
             draws.terrain.transform = Mat4f::identity();
             draws.terrain.depth_clip = 1.0;
             draws.terrain.fog_color = fog_color;
@@ -8071,8 +8073,7 @@ impl Renderer {
                 continue;
             };
             if world.entities[owner_index].kind != BodyKind::Static
-                || part.anim_active
-                || part.procedural_anim
+                || part.animated
             {
                 dyn_parts.push((part_index, owner_index));
             }
@@ -8342,7 +8343,7 @@ impl Renderer {
                     let sz = (t.v[8] * t.v[8] + t.v[9] * t.v[9] + t.v[10] * t.v[10]).sqrt();
                     let receiver = Receiver {
                         base_y: ground,
-                        terrain: world.terrain.as_ref(),
+                        terrain: world.terrain.as_deref(),
                         statics: &self.receiver_boxes,
                     };
                     let feet = vec3f(t.v[12], t.v[13], t.v[14]);
@@ -8463,7 +8464,7 @@ impl Renderer {
                     .unwrap_or(0.0);
                 let receiver = Receiver {
                     base_y: base,
-                    terrain: world.terrain.as_ref(),
+                    terrain: world.terrain.as_deref(),
                     statics: &self.receiver_boxes,
                 };
                 self.char_ground.push(receiver.sample(x, z).0);
@@ -8527,7 +8528,7 @@ impl Renderer {
                     .unwrap_or(0.0);
                 let receiver = Receiver {
                     base_y: ground,
-                    terrain: world.terrain.as_ref(),
+                    terrain: world.terrain.as_deref(),
                     statics: &self.receiver_boxes,
                 };
                 // Tilt/air gates: body-up vs world-up from the transform's
@@ -8635,7 +8636,7 @@ impl Renderer {
                     .unwrap_or(0.0);
                 let receiver = Receiver {
                     base_y: base,
-                    terrain: world.terrain.as_ref(),
+                    terrain: world.terrain.as_deref(),
                     statics: &self.receiver_boxes,
                 };
                 self.model_ground.push(receiver.sample(x, z).0);
@@ -8682,7 +8683,7 @@ impl Renderer {
                     .unwrap_or(0.0);
                 let receiver = Receiver {
                     base_y: base,
-                    terrain: world.terrain.as_ref(),
+                    terrain: world.terrain.as_deref(),
                     statics: &self.receiver_boxes,
                 };
                 self.world_attachment_ground
@@ -8742,7 +8743,7 @@ impl Renderer {
                 );
                 // The sim's own f32 tick-time — the ONE time base both sides
                 // of the wave expression consume.
-                let t = makepad_game_sim::water::tick_time(world.tick);
+                let t = world.water_time;
                 const WAVE_A: [LiveId; 8] = [
                     live_id!(wave_a0), live_id!(wave_a1), live_id!(wave_a2), live_id!(wave_a3),
                     live_id!(wave_a4), live_id!(wave_a5), live_id!(wave_a6), live_id!(wave_a7),
@@ -8800,9 +8801,9 @@ impl Renderer {
                 && tiers.sdf_quads
                 && world.entities.iter().any(|e| {
                     matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
-                        && !e.sensor
+                        && !e.alpha_primitive
                         && !e.hidden
-                        && e.attached_to == 0
+                        && e.parent == 0
                 });
             let has_particles = shape == Shape::Box && particle_count > 0;
             let has_deferred = !deferred_alpha[shape_index].is_empty();
@@ -8851,7 +8852,7 @@ impl Renderer {
                         );
                         let receiver = Receiver {
                             base_y: ground,
-                            terrain: world.terrain.as_ref(),
+                            terrain: world.terrain.as_deref(),
                             statics: &self.receiver_boxes,
                         };
                         if crate::shadow_mesh::build_caster_shadow(
@@ -8923,7 +8924,7 @@ impl Renderer {
             for e in world
                 .entities
                 .iter()
-                .filter(|e| e.sensor && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
+                .filter(|e| e.alpha_primitive && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
             {
                 if let Some(frustum) = frustum {
                     let r = vec3f(
@@ -9144,10 +9145,10 @@ impl Renderer {
         }
 
         // 6.55 Engine-default bullet holes: one bounded, instanced procedural
-        // quad per live mark. Static/level marks are already world-space;
-        // entity marks reconstruct their owner-local pose here every frame.
+        // quad per live mark. The producer has resolved every mark to its
+        // current world-space pose, including the surface offset.
         // Nothing in this path keys the static slabs or allocates per frame.
-        if !world.bullet_decals.is_empty() {
+        if !world.decals.is_empty() {
             if self.decal_draw.is_none() {
                 self.decal_draw = cx
                     .cx
@@ -9157,10 +9158,8 @@ impl Renderer {
                 let geometry_id = self.ensure_flare_geometry(cx.cx);
                 decal.draw_vars.geometry_id = Some(geometry_id);
                 decal.depth_clip = 1.0;
-                for mark in world.bullet_decals.as_slice() {
-                    let Some((pos, normal)) = mark.world_pose(world) else {
-                        continue;
-                    };
+                for mark in &world.decals {
+                    let (pos, normal) = (mark.pos, mark.normal);
                     if let Some(frustum) = frustum {
                         if !frustum.intersects_sphere(pos, mark.size) {
                             continue;
@@ -9272,8 +9271,8 @@ mod shell_bucket_tests {
     #[test]
     fn entity_shell_flag_draws_nothing_at_all() {
         let ordinary = Entity::default();
-        let shell = Entity { shell: true, ..Default::default() };
-        let sensor_shell = Entity { shell: true, sensor: true, ..Default::default() };
+        let shell = Entity { suppress_primitive: true, ..Default::default() };
+        let sensor_shell = Entity { suppress_primitive: true, alpha_primitive: true, ..Default::default() };
 
         assert_eq!(primitive_bucket(&ordinary), Some(PrimitiveBucket::Opaque));
         // Invisible containment: an interior is an open stage.
@@ -9294,7 +9293,7 @@ mod realm_lifecycle_tests {
         let mut renderer = Renderer::default();
         renderer.set_clustered_lighting(true);
         renderer.set_gpu_lightmap_mode(GpuLightmapMode::Realtime);
-        let world = GameWorld::new();
+        let world = World::new();
         renderer.kick_lightmap_bake(&world, &SunLight::default(), BakeTrigger::FirstBake);
         assert!(!renderer.world_atlas_required());
         assert!(!renderer.gpu_baker.has_state());
@@ -9368,7 +9367,7 @@ mod realm_lifecycle_tests {
 
     #[test]
     fn a_repaint_repacks_the_slabs_but_never_rekicks_the_bake() {
-        let mut world = GameWorld::new();
+        let mut world = World::new();
         let slab = static_slab_key(&world, 1);
         let bake = lightmap_world_key(&world, 3, 6);
         world.mark_paint_dirty();
@@ -9398,8 +9397,8 @@ mod realm_lifecycle_tests {
     #[test]
     fn sun_presentation_changes_preserve_layout_but_invalidate_baked_daylight() {
         use crate::gpu_lightmap::GpuLightmapMode::{OnChange, Realtime};
-        let mut world = GameWorld::new();
-        world.sun = makepad_game_sim::SunConfig {
+        let mut world = World::new();
+        world.sun = makepad_scene::SunConfig {
             dir: Some(vec3f(0.0, 1.0, 0.0)),
             color: Some(vec3f(0.05, 0.05, 0.05)),
             ambient: Some(vec3f(0.05, 0.05, 0.05)),
@@ -9493,8 +9492,10 @@ mod realm_lifecycle_tests {
         let dir = vec3f(0.31, 0.47, -0.83).normalize();
         let tracer = Entity {
             kind: BodyKind::Mover,
-            vel: dir * 90.0,
-            tag: "tracer".to_string(),
+            forward_axis: Some({
+                let velocity = dir * 90.0;
+                velocity * (1.0 / velocity.length_squared().sqrt())
+            }),
             ..Default::default()
         };
 
@@ -9688,7 +9689,7 @@ mod sun_tests {
     /// did, so adopting SceneSun did not restyle every existing game.
     #[test]
     fn the_default_sun_is_the_legacy_look() {
-        let sun = crate::sun::resolve_sun(&makepad_game_sim::SunConfig::default());
+        let sun = crate::sun::resolve_sun(&makepad_scene::SunConfig::default());
         assert_eq!(sun, SunLight::default());
         // Flat hemisphere collapses mix(ground, sky, h) to the old constant.
         assert_eq!(sun.sky, sun.ground);
@@ -9851,7 +9852,7 @@ mod part_attachment_tests {
         };
 
         let first = center(Renderer::part_transform(&owner, &part));
-        let expected = owner.pos + makepad_game_sim::heading_to_forward(owner.yaw) * 2.0;
+        let expected = owner.pos + makepad_scene::heading_to_forward(owner.yaw) * 2.0;
         assert!((first - expected).length() < 1.0e-5, "part offset was world-space: {first:?}");
 
         let delta = vec3f(7.0, -0.5, 4.0);
@@ -10412,17 +10413,15 @@ mod light_tests {
 #[cfg(test)]
 mod water_sheet_tests {
     use super::*;
-    use makepad_game_sim::WaterWave;
+    use makepad_scene::WaterWave;
 
-    fn test_volume() -> WaterVolume {
+    fn test_volume() -> WaterSurface {
         let mut wave = WaterWave::new(0.6, -0.8, 0.7, 18.0, 5.0);
         wave.phase = 1.25;
         wave.group = 4.0;
-        WaterVolume {
+        WaterSurface {
             min: vec3f(-10.0, -5.0, -10.0),
             max: vec3f(10.0, 0.0, 10.0),
-            density: 1.0,
-            current: vec3f(0.0, 0.0, 0.0),
             waves: vec![wave],
             color: vec4(0.2, 0.5, 0.8, 0.6),
             entity: 0,
@@ -11193,11 +11192,11 @@ mod prepared_static_preview_tests {
         renderer.set_world_attachments(vec![instance]);
         renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();
         renderer.set_model_clip_weighted(ModelTarget::Attachment(0),Some("pulse".into()),1.,false,0.5).unwrap();
-        let movers=renderer.collect_lm_movers(&GameWorld::default(),vec3f(0.,0.,0.),None);
+        let movers=renderer.collect_lm_movers(&World::default(),vec3f(0.,0.,0.),None);
         assert_eq!(movers.len(),2);
         assert_eq!(movers[0].morph.as_ref().unwrap().weights[0].x,0.75);
         assert_eq!(movers[1].morph.as_ref().unwrap().weights[0].x,0.625);
         assert!(renderer.csm_static_casters.is_empty());
-        assert!(renderer.collect_local_static_casters(&mut cx,&GameWorld::default()).is_empty());
+        assert!(renderer.collect_local_static_casters(&mut cx,&World::default()).is_empty());
     }
 }

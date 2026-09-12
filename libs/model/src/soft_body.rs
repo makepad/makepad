@@ -1,7 +1,7 @@
 //! Transactional worker-side cage binding. Geometry stays authoritative;
 //! affine palette weights and immutable runtime metadata are derived once.
 use crate::{canon::{Reader,Writer},document::State,json::{self,Value},mesh,service::*,schema,transform::*,Error,Limits,Result,Joint,Skeleton,OperationResult};
-use makepad_game_sim::soft_body as physics;
+use makepad_soft_body as physics;
 use makepad_gltf::{SoftBodyMetadata,SoftBodySettings,SoftBodyBinding,SoftBodyAttachment,SOFT_BODY_TETRAHEDRA,SOFT_BODY_PARTICLES};
 use std::collections::BTreeSet;
 

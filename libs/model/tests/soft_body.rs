@@ -238,7 +238,7 @@ fn accessory_affine_weights_fail_during_edit_and_valid_root_binding_remains_publ
     // An accessory can deliberately use affine cells too, provided every
     // vertex satisfies the same embedding contract as the runtime consumer.
     let metadata=d.soft_body().unwrap();
-    let cage=makepad_game_sim::soft_body::SoftBodyDefinition{
+    let cage=makepad_soft_body::SoftBodyDefinition{
         rest_positions:metadata.rest_positions.clone(),tetrahedra:metadata.tetrahedra.clone(),surface_samples:vec![],anchors:metadata.anchors.clone(),
     };
     let binder=cage.binder().unwrap();
@@ -283,7 +283,7 @@ fn explicit_yarn_preset_is_firm_and_preserves_generic_and_serialized_settings() 
 
 #[test]
 fn yarn_preset_keeps_acceleration_landing_and_facing_motion_small_at_three_sizes() {
-    use makepad_game_sim::soft_body::{SoftBodyDefinition,SoftBodySettings,SoftBodyState,SoftBodyPose,SoftBodyCollider,SoftBodyFrame};
+    use makepad_soft_body::{SoftBodyDefinition,SoftBodySettings,SoftBodyState,SoftBodyPose,SoftBodyCollider,SoftBodyFrame};
     use std::sync::Arc;
     let yarn=parsed_soft_settings(r#", "preset":"yarn_ball""#);
     let settings=SoftBodySettings{edge_compliance:yarn.edge_compliance,pose_compliance:yarn.pose_compliance,damping:yarn.damping,..Default::default()};

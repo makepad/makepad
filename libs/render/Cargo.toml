@@ -7,7 +7,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
-makepad-game-sim = { path = "../sim" }
+makepad-scene = { path = "../scene" }
+makepad-soft-body = { path = "../soft_body" }
 # Generated skin material-atlas preparation uses the shared GLB reader.
 makepad-gltf = { path = "../gltf" }
 makepad-raytrace = { path = "../raytrace" }

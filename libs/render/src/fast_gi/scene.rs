@@ -6,7 +6,7 @@ fn rgb(c:Vec4f)->Vec3f{vec3f(c.x,c.y,c.z)}
 fn scaled(mut t:Mat4f,size:Vec3f)->Mat4f{for j in 0..3{t.v[j]*=size.x;t.v[4+j]*=size.y;t.v[8+j]*=size.z;}t}
 fn material(m:&LayerMaterial)->(Vec3f,f32){let e=m.surface.as_ref().map(|s|s.definition.emissive).unwrap_or([0.0;3]);(vec3f(e[0],e[1],e[2]),if m.surface.is_some(){1.0-m.metallic.clamp(0.0,1.0)}else{1.0})}
 impl Renderer {
-    pub(super) fn gi_snapshot(&mut self,cx:&mut Cx,world:&GameWorld)->Result<Vec<Instance>,String>{
+    pub(super) fn gi_snapshot(&mut self,cx:&mut Cx,world:&World)->Result<Vec<Instance>,String>{
         let mut out=Vec::new();let mut cache=HashMap::<GeometryId,Vec<(Option<TextureId>,Arc<Mesh>)>>::new();let mut total=0usize;let mut source_bytes=0usize;
         let mut add=|cx:&mut Cx,geometry:&Geometry,stride:usize,color_lane:i32,texture:Option<&Texture>,transform:Mat4f,tint:Vec3f,emission:Vec3f,diffuse:f32,exact_box:bool|->Result<(),String>{
             let image_bytes=texture.map(|t|match t.get_format(cx){TextureFormat::VecBGRAu8_32{width,height,..}|TextureFormat::VecMipBGRAu8_32{width,height,..}=>width.saturating_mul(*height).saturating_mul(4),_=>0}).unwrap_or(0);
@@ -53,14 +53,14 @@ impl Renderer {
             }
         }
         if self.stage.shows_environment(){
-            if let Some(terrain)=world.terrain.as_ref(){self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_ref());}
+            if let Some(terrain)=world.terrain.as_deref(){self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());}
             self.ensure_voxel_tiles(cx,world.voxel.as_deref());
             for tile in &self.terrain_tiles{add(cx,&tile.geometry,16,8,None,Mat4f::identity(),vec3f(1.0,1.0,1.0),Vec3f::default(),1.0,false)?;}
             for tile in &self.voxel_tiles{add(cx,&tile.geometry,16,8,None,Mat4f::identity(),vec3f(1.0,1.0,1.0),Vec3f::default(),1.0,false)?;}
         }
         Ok(out)
     }
-    pub(super) fn gi_movers(&self,world:&GameWorld,center:Vec3f,skins:Option<&[SkinnedDraw]>)->Vec<Mover>{
+    pub(super) fn gi_movers(&self,world:&World,center:Vec3f,skins:Option<&[SkinnedDraw]>)->Vec<Mover>{
         let mut out=Vec::new();let radius=self.gi.config().ray_distance+self.gi.config().spacing*16.0;
         let mut add=|transform:Mat4f,min:Vec3f,max:Vec3f,color:Vec3f,emission:Vec3f,exact_box:bool|{
             // One sentinel is enough to signal overflow; never allocate a
@@ -70,7 +70,7 @@ impl Renderer {
             if ((lo+hi)*0.5-center).length()<=radius+(hi-lo).length()*0.5 {out.push(Mover{transform,min,max,color,emission,exact_box});}
         };
         for e in &world.entities {
-            if e.kind==BodyKind::Static||e.hidden||e.sensor||primitive_bucket(e)!=Some(PrimitiveBucket::Opaque){continue;}
+            if e.kind==BodyKind::Static||e.hidden||e.alpha_primitive||primitive_bucket(e)!=Some(PrimitiveBucket::Opaque){continue;}
             let size=vec3f(e.half.x*e.scale.x,e.half.y*e.scale.y,e.half.z*e.scale.z)*2.0;
             add(scaled(Self::rigid_transform(e),size),vec3f(-0.5,-0.5,-0.5),vec3f(0.5,0.5,0.5),rgb(e.color),rgb(e.color)*(e.glow*0.6),e.shape==Shape::Box);
         }

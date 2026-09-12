@@ -22,16 +22,15 @@
 //! # Consequences you must respect
 //!
 //! - **Steering input is not a yaw rate.** A positive steer input means "turn
-//!   right", and turning right means yaw *decreases*. Use [`steer_to_yaw_rate`]
-//!   rather than negating by hand at the call site, or the next vehicle — the
-//!   plane, the boat, the turret — will get it wrong on its own.
+//!   right", and turning right means yaw *decreases*. Simulation steering
+//!   converts this sign at the gameplay boundary.
 //! - **Camera-relative movement uses the same yaw**, so a character walking
 //!   "forward" relative to a camera at `cam_yaw` moves along `forward(cam_yaw)`.
 //!
 //! Everything that turns something should call into here. If you find yourself
 //! writing `sin`/`cos` on a yaw, use these instead.
 
-use crate::math as gm;
+use makepad_math::deterministic as gm;
 use makepad_math::*;
 
 /// Unit forward vector for a heading. `yaw = 0` faces −Z.
@@ -95,7 +94,7 @@ pub fn camera_yaw_to_heading(yaw: f32) -> f32 {
 /// Same mirror: the renderer places the eye at `target − forward·distance` with
 /// `forward.y = sin P`, so *negative* render pitch puts the camera above its
 /// target looking down. A rig that thinks "positive is higher" — the intuitive
-/// direction, and the one [`crate::camera_boom_limit`]'s callers use — must
+/// direction, and the one camera obstruction queries use — must
 /// flip. The renderer's own clamps corroborate it: it allows pitch in
 /// −1.2..0.25, a nearly all-negative range, for an over-the-shoulder camera.
 #[inline]
@@ -112,17 +111,6 @@ pub fn forward_to_heading(dir: Vec3f) -> f32 {
         return 0.0;
     }
     gm::atan2(-dir.x, -dir.z)
-}
-
-/// Yaw rate for a steering input, in radians/second.
-///
-/// **This is where the sign lives.** A positive `steer` means the driver wants
-/// to go right, and going right means the heading decreases — see the module
-/// docs. Callers pass driver intent and get an angular velocity; nobody else
-/// should be negating anything.
-#[inline]
-pub fn steer_to_yaw_rate(steer: f32, rate: f32) -> f32 {
-    -steer * rate
 }
 
 /// Shortest signed difference `to - from`, wrapped to (−π, π]. Positive means
@@ -231,15 +219,6 @@ mod tests {
             -render.sin() > 0.0,
             "positive rig pitch must lift the render eye, got {render}"
         );
-    }
-
-    #[test]
-    fn steering_right_decreases_heading() {
-        // The bug this module exists to prevent: a driver pulling right must
-        // not turn the car left.
-        let rate = steer_to_yaw_rate(1.0, 2.0);
-        assert!(rate < 0.0, "steer right must lower yaw, got {rate}");
-        assert!(steer_to_yaw_rate(-1.0, 2.0) > 0.0);
     }
 
     #[test]
