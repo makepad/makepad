@@ -920,6 +920,12 @@ pub struct FabValueInput {
     #[layout]
     layout: Layout,
 
+    /// Held for as long as a drag is in flight, so `Escape` cancels the drag
+    /// rather than dismissing whatever the field is inside. Reconciled from
+    /// `drag` on every event, since the drag ends by several routes.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+
     #[live]
     label: String,
     #[live]
@@ -1245,11 +1251,24 @@ impl Widget for FabValueInput {
             }
         }
 
+        // Derived from `drag` rather than hooked at each end: the drag ends by
+        // several routes (cancel, release, double-click reset, begin_edit).
+        if self.drag.is_some() && self.cancel_scope.is_none() {
+            self.cancel_scope = Some(cx.begin_cancel_scope());
+        } else if self.drag.is_none() {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
+
         // Escape or a right-button press cancels an in-flight drag and
         // restores the pressed value.
         if self.drag.is_some() {
             match event {
-                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                Event::KeyDown(ke)
+                    if ke.key_code == KeyCode::Escape
+                        && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
                     self.cancel_drag(cx, uid);
                     return;
                 }
@@ -1852,6 +1871,10 @@ pub struct FabColorPick {
     overlay_list: Option<DrawList2d>,
     #[rust]
     open: bool,
+    /// Held while the popover is open, so `Escape` reverts this picker rather
+    /// than dismissing whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     #[rust]
     hsv: [f32; 3],
     #[rust(1.0)]
@@ -2122,10 +2145,22 @@ impl Widget for FabColorPick {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
+        // Derived from `open` rather than hooked at each end: the popover closes
+        // through close_popover and close_quiet alike.
+        if self.open && self.cancel_scope.is_none() {
+            self.cancel_scope = Some(cx.begin_cancel_scope());
+        } else if !self.open {
+            if let Some(held) = self.cancel_scope.take() {
+                cx.end_cancel_scope(held);
+            }
+        }
+
         if self.open {
             // Escape reverts and closes, from anywhere.
             if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
+                if ke.key_code == KeyCode::Escape
+                    && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                {
                     self.close_popover(cx, true);
                     return;
                 }

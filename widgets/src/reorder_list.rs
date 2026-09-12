@@ -166,6 +166,11 @@ pub struct ReorderList {
     drag_threshold: f64,
     #[rust]
     drag: Option<ReorderDrag>,
+    /// Held for as long as `drag` is, so `Escape` cancels the drag rather than
+    /// dismissing whatever the list is inside. Reconciled from `drag` on every
+    /// event, since the release path clears the drag without calling cancel_drag.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     /// Pointer y of the live drag — read by the edge auto-scroll pump so a
     /// finger HELD at the viewport's edge keeps scrolling between moves.
     #[rust]
@@ -254,6 +259,15 @@ impl ReorderList {
     /// must NOT reach the inner list (that is what keeps a gripper drag from
     /// also drag-scrolling the viewport).
     fn handle_drag(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        // Derived from `drag` rather than hooked at each end: the release path
+        // below clears the drag inline instead of calling cancel_drag.
+        if self.drag.is_some() && self.cancel_scope.is_none() {
+            self.cancel_scope = Some(cx.begin_cancel_scope());
+        } else if self.drag.is_none() {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
         if self.drag_handle == LiveId(0) {
             return false;
         }
@@ -264,7 +278,9 @@ impl ReorderList {
             // by itself at release; until then the swallowed pointer events
             // keep the list from scroll-grabbing mid-gesture.
             if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
+                if ke.key_code == KeyCode::Escape
+                    && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                {
                     self.cancel_drag(cx);
                     return true;
                 }
