@@ -37,7 +37,7 @@ use {
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
-            metal::{metal_submit_command_buffer, DrawPassMode, MetalCx},
+            metal::{DrawPassMode, MetalCx},
         },
         permission::Permission,
         shared_framebuf::PollTimers,
@@ -199,12 +199,7 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
-            // nextDrawable never throttles to compositor consumption (may
-            // tear). Distinguishes "our frames are slow" from "the
-            // compositor returns drawables slowly/unevenly".
-            let () = msg_send![ca_layer, setDisplaySyncEnabled:
-                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: YES];
@@ -252,12 +247,7 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
-            // nextDrawable never throttles to compositor consumption (may
-            // tear). Distinguishes "our frames are slow" from "the
-            // compositor returns drawables slowly/unevenly".
-            let () = msg_send![ca_layer, setDisplaySyncEnabled:
-                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: YES];
@@ -640,7 +630,7 @@ impl Cx {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         crate::startup_trace("event_loop: MetalCx::new begin");
-        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new(&mut cx.borrow_mut().draw_lists.1.allocations)));
+        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
         crate::startup_trace("event_loop: MetalCx::new done");
 
         // store device object ID for double buffering
@@ -703,18 +693,13 @@ impl Cx {
         // A beat with nothing to paint still services the backend's
         // retirement debt (the maintenance a paint used to carry): it never
         // dirties a pass, and its receipt lets the app's wake stop.
-        if passes_todo.is_empty() && self.draw_lists.has_pending_instance_retirements() {
+        if passes_todo.is_empty()
+            && (self.draw_lists.has_pending_instance_retirements() || metal_cx.allocation_retry_due())
+        {
             self.maintain_instance_retirements(metal_cx);
         }
         metal_cx.present_trace = (!passes_todo.is_empty()).then(|| crate::present_trace::begin(self.repaint_id + 1)).flatten();
         let _trace_end = crate::present_trace::RequestEnd(metal_cx.present_trace.clone());
-        // Safety flush: if a previous repaint batched offscreen passes but
-        // no window pass followed (texture-only frame), commit that work
-        // now so it is never stranded.
-        if let Some(shared) = metal_cx.frame_command_buffer.take() {
-            metal_submit_command_buffer(shared, None);
-            let () = unsafe { msg_send![shared, release] };
-        }
         // Some(drawable), including Some(nil), means this beat came from a
         // CAMetalDisplayLinkUpdate. None keeps the legacy CADisplayLink /
         // NSTimer path on CAMetalLayer.nextDrawable.
@@ -1050,17 +1035,10 @@ impl Cx {
         // FRAME-FLIP pacing: the display link IS the refresh — one beat per
         // actual flip, phase-locked, tracking the window's own panel. The
         // NSTimer stays as the fallback (no window yet, pre-macOS-14) and
-        // as the idle heartbeat. MAKEPAD_DISPLAY_LINK=0 forces timer pacing.
-        static WANT_LINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let want_link = *WANT_LINK.get_or_init(|| {
-            // NSView.displayLink never fires for a window that is not on
-            // screen — hidden eval/test runs (MAKEPAD_HIDE_WINDOWS) must
-            // pace on the timer or they freeze.
-            std::env::var("MAKEPAD_DISPLAY_LINK")
-                .map(|v| v != "0")
-                .unwrap_or(true)
-                && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none()
-        });
+        // as the idle heartbeat. NSView.displayLink never fires for a window
+        // that is not on screen — hidden eval/test runs (MAKEPAD_HIDE_WINDOWS)
+        // pace on the timer or they freeze.
+        let want_link = std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
         // Self-heal: a window close invalidated the link while the beat
         // thought itself armed — re-anchor on a surviving window.
         if self.os.timer0_armed && want_link && with_macos_app(|app| app.display_link_needs_rearm())

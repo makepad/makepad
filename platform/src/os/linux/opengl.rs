@@ -2686,6 +2686,14 @@ pub struct CxOsDrawCall {
 }
 
 impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
+}
+
+impl CxOsDrawCall {
     pub fn free_resources(&mut self, gl: &LibGl) {
         self.inst_vb.free_resources(gl);
         if let Some(vao) = self.vao.take() {

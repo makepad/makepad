@@ -72,7 +72,7 @@ impl Cx {
             device_model,
             system_version,
         });
-        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new(&mut cx.borrow_mut().draw_lists.1.allocations)));
+        let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
         crate::log!("Makepad tvOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));

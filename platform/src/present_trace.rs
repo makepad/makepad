@@ -63,7 +63,6 @@ pub enum Cause {
     MetalLinkBeat,
     Occluded,
     SubmitterFull,
-    CommandBufferCap,
     SetupPending,
     UniformsNotResident,
     PassAborted,
@@ -81,7 +80,6 @@ const CAUSE_NAMES: [&str; CAUSES] = [
     "metal_link_beat",
     "occluded",
     "submitter_full",
-    "command_buffer_cap",
     "setup_pending",
     "uniforms_not_resident",
     "pass_aborted",
@@ -117,9 +115,8 @@ pub struct Frame {
     drawable_wait: AtomicU64,
     /// The presented handler ran without a glass time (see `presented`).
     unconfirmed: AtomicU64,
-    maintenance: [AtomicU64; 6],
+    maintenance: [AtomicU64; 4],
     admission: [AtomicU64; 5],
-    category_bytes: [AtomicU64; 8],
     logs: u64,
 }
 pub type Trace = Arc<Frame>;
@@ -148,19 +145,11 @@ impl Frame {
         self.drawable_wait.store(ns, Ordering::Relaxed);
     }
     pub fn maintenance(&self, budget: &crate::retained_instances::RetainedUploadBudget) {
-        for (slot, value) in self.category_bytes.iter().zip(budget.stats.category_bytes) {
-            slot.store(value as u64, Ordering::Relaxed);
-        }
         let values = [
             budget.limit,
-            budget.eviction.bytes,
-            budget.eviction.buffers,
             budget.retirement.bytes,
             budget.retirement.buffers,
-            budget
-                .eviction
-                .largest_unit
-                .max(budget.retirement.largest_unit),
+            budget.retirement.largest_unit,
         ];
         for (slot, value) in self.maintenance.iter().zip(values) {
             slot.store(value as u64, Ordering::Relaxed);
@@ -246,7 +235,6 @@ pub fn begin(repaint: u64) -> Option<Trace> {
         unconfirmed: AtomicU64::new(0),
         maintenance: std::array::from_fn(|_| AtomicU64::new(0)),
         admission: std::array::from_fn(|_| AtomicU64::new(0)),
-        category_bytes: std::array::from_fn(|_| AtomicU64::new(0)),
         logs: crate::log::dropped_log_records(),
     });
     frame.mark(Stage::Request);
@@ -330,9 +318,8 @@ struct Snapshot {
     causes: u64,
     cb: u64,
     values: [u64; 8],
-    maintenance: [u64; 6],
+    maintenance: [u64; 4],
     admission: [u64; 5],
-    category_bytes: [u64; 8],
 }
 impl Snapshot {
     fn take(f: &Frame) -> Self {
@@ -353,7 +340,6 @@ impl Snapshot {
             ],
             maintenance: std::array::from_fn(|i| f.maintenance[i].load(Ordering::Relaxed)),
             admission: std::array::from_fn(|i| f.admission[i].load(Ordering::Relaxed)),
-            category_bytes: std::array::from_fn(|i| f.category_bytes[i].load(Ordering::Relaxed)),
         }
     }
     fn glass(&self) -> u64 {
@@ -380,11 +366,10 @@ impl Snapshot {
         }
         let [uploads, pending, retired, evicted, queued, pool, inflight, wait] = self.values;
         let _=write!(s," uploads={uploads} pending={pending} retired_bytes={retired} evicted_bytes={evicted} retirement_pending={queued} pool_bytes={pool} inflight={inflight} drawable_wait_ms={:.3}",wait as f64/1e6);
-        let [b, eviction_bytes, eviction_buffers, retirement_bytes, retirement_buffers, unit] =
-            self.maintenance;
-        let _=write!(s," B={b} eviction_service_bytes={eviction_bytes} eviction_buffers={eviction_buffers} retirement_service_bytes={retirement_bytes} retirement_buffers={retirement_buffers} largest_unit={unit}");
+        let [b, retirement_bytes, retirement_buffers, unit] = self.maintenance;
+        let _=write!(s," probe={b} retirement_service_bytes={retirement_bytes} retirement_buffers={retirement_buffers} retirement_unit={unit}");
         let [missing, staged, list, shader, wanted] = self.admission;
-        let _=write!(s," missing_items={missing} staged_items={staged} first_missing_list={list} first_missing_shader={shader} first_missing_wanted={wanted} category_bytes(Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other)={:?}",self.category_bytes);
+        let _=write!(s," missing_items={missing} staged_items={staged} first_missing_list={list} first_missing_shader={shader} first_missing_wanted={wanted}");
         s
     }
 }
@@ -402,9 +387,8 @@ fn report(
     let mut retired = 0;
     let mut evicted = 0;
     let mut upload_max = 0;
-    let mut maintenance_max = [0; 6];
+    let mut maintenance_max = [0; 4];
     let mut staged_max = 0;
-    let mut category_bytes = [0; 8];
     for r in records.iter_mut() {
         let mut s = Snapshot::take(&r.frame);
         let commit = s.times[Stage::Commit as usize];
@@ -433,9 +417,6 @@ fn report(
             evicted += s.values[3];
             upload_max = upload_max.max(s.values[0]);
             staged_max = staged_max.max(s.admission[1]);
-            for (total, value) in category_bytes.iter_mut().zip(s.category_bytes) {
-                *total += value;
-            }
             for (max, value) in maintenance_max.iter_mut().zip(s.maintenance) {
                 *max = (*max).max(value);
             }
@@ -503,10 +484,9 @@ fn report(
     for (i, count) in causes.iter().enumerate() {
         let _ = write!(line, " cause={}:{}", CAUSE_NAMES[i], count);
     }
-    let [b, eviction_bytes, eviction_buffers, retirement_bytes, retirement_buffers, unit] =
-        maintenance_max;
-    let _=write!(line," upload_frame_max={upload_max} B={b} eviction_frame_max={eviction_bytes} eviction_buffers_max={eviction_buffers} retirement_frame_max={retirement_bytes} retirement_buffers_max={retirement_buffers} largest_unit={unit}");
-    let _=write!(line," staged_items_max={staged_max} category_bytes(Roofs,Walls,Labels,Outlines,Background,Structure,Code,Other)={category_bytes:?}");
+    let [b, retirement_bytes, retirement_buffers, unit] = maintenance_max;
+    let _=write!(line," upload_frame_max={upload_max} probe={b} retirement_frame_max={retirement_bytes} retirement_buffers_max={retirement_buffers} retirement_unit_max={unit}");
+    let _=write!(line," staged_items_max={staged_max}");
     crate::trace!("present", "{line}");
     if let Some((prev, next)) = worst {
         let origin = prev.times[Stage::Request as usize];

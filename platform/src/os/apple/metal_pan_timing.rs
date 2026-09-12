@@ -8,7 +8,12 @@ use std::sync::atomic::AtomicBool;
 /// Every application pass, including glyph/texture producers. Only Metal
 /// completion callbacks lock the accumulator; the UI only installs a callback.
 /// Duration sums describe work, not utilization: command buffers can overlap.
+/// The one-second accumulation window of `record_pass`, owned by the
+/// context and shared with its completion handlers (no static).
+pub(super) type PassWindowShared = Arc<Mutex<Option<PassWindow>>>;
+
 pub(super) fn record_pass(
+    window: PassWindowShared,
     command: ObjcId, query: Option<GpuTimeRecorder>, label: String,
     repaint: u64, serial: u64, size: (f64, f64), containing: bool,
     intrusive: bool, upload_cpu_ms: f64, counters: GpuSampleCounters,
@@ -20,8 +25,7 @@ pub(super) fn record_pass(
         let status: u64 = unsafe {msg_send![command, status]};
         crate::trace!("gpu.pass", "repaint={repaint} cb={serial} pass={label} pixels={:.0}x{:.0} start={start:.9} end={end:.9} ms={:.3} containing={containing} intrusive={intrusive} instances={} instance_bytes={} texture_bytes={} status={status}",size.0,size.1,(end-start)*1000.0,counters.instances,counters.instance_bytes,counters.texture_bytes);
         if intrusive || status != 4 || !start.is_finite() || start <= 0.0 || !end.is_finite() || end < start {return;}
-        static WINDOW: Mutex<Option<PassWindow>> = Mutex::new(None);
-        let Ok(mut state) = WINDOW.lock() else {return;};
+        let Ok(mut state) = window.lock() else {return;};
         let now = Instant::now();
         let window = state.get_or_insert_with(||PassWindow {since:now,..Default::default()});
         let ms = (end-start)*1000.0;
@@ -50,7 +54,7 @@ pub(super) fn record_pass(
         window.instance_bytes=0; window.texture_bytes=0; window.dropped=0;
     })];}
 }
-struct PassWindow {
+pub(super) struct PassWindow {
     since: Instant, passes: Vec<(String,u64,f64,f64)>, command_buffers:u64,
     total:f64, outside:f64, upload_cpu:f64, instance_bytes:u64, texture_bytes:u64, dropped:u64,
 }

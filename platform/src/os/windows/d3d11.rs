@@ -2668,6 +2668,14 @@ pub struct CxOsDrawCall {
     pub user_uniforms_gen: Option<u64>,
 }
 
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct CxOsUniformBuffer {
     pub buffer: D3d11Buffer,

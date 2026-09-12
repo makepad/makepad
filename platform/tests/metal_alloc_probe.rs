@@ -6,7 +6,7 @@
 //! copied bytes readable back). Run with
 //! `cargo test --release -p makepad-platform --test metal_alloc_probe -- --nocapture`.
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(gpusim)))]
 fn main() {
     use makepad_platform::os::apple::apple_sys::*;
     use std::time::Instant;
@@ -90,5 +90,5 @@ fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", not(gpusim))))]
 fn main() {}
