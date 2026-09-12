@@ -10,50 +10,51 @@ script_mod! {
         }
         demos +: {
             H4{text: "Default"}
+            // A plain View's pixel is transparent and never reads `color`: paint it here.
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150 flow: Down
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150 flow: Down
                 Image{src: crate_resource("self:resources/ducky.png")}
             }
 
             Hr{}
             H4{text: "fit: Stretch"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Stretch}
             }
 
             Hr{}
             H4{text: "fit: Horizontal"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Horizontal}
             }
 
             Hr{}
             H4{text: "fit: Vertical"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Vertical}
             }
 
             Hr{}
             H4{text: "fit: Smallest"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Smallest}
             }
 
             Hr{}
             H4{text: "fit: Biggest"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Biggest}
             }
 
             Hr{}
             H4{text: "fit: CropToFill"}
             View{
-                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.CropToFill}
             }
         }

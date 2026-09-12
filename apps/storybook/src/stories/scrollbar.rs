@@ -12,7 +12,8 @@ script_mod! {
             height: 4000.
             width: Fill
             draw_bg +: {
-                color_2: uniform(#f00)
+                // A plain value: a `uniform(..)` here redeclared the input and the red end never drew.
+                color_2: #f00
             }
         }
         scroll_bars: ScrollBars{

@@ -14,11 +14,12 @@ script_mod! {
         spacing: theme.space_2
         padding: theme.mspace_2
         show_bg: true
+        // Plain values: a uniform(..) in this merge does not set RoundedView's instance colours, and the card drew no fill or border.
         draw_bg +: {
-            color: uniform(theme.color_inset)
-            border_radius: uniform(theme.corner_radius)
-            border_size: uniform(1.0)
-            border_color: uniform(#fff2)
+            color: theme.color_inset
+            border_radius: theme.corner_radius
+            border_size: 1.0
+            border_color: #fff2
         }
     }
 
@@ -46,11 +47,12 @@ script_mod! {
         spacing: theme.space_2
         padding: theme.mspace_2
         show_bg: true
+        // Plain values, as on SlugDemoCard: the uniform(..) colours never drew.
         draw_bg +: {
-            color: uniform(theme.color_inset_1)
-            border_radius: uniform(theme.corner_radius)
-            border_size: uniform(1.0)
-            border_color: uniform(#fff1)
+            color: theme.color_inset_1
+            border_radius: theme.corner_radius
+            border_size: 1.0
+            border_color: #fff1
         }
     }
 

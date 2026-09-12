@@ -32,7 +32,8 @@ script_mod! {
                     spacing: theme.space_1
                     padding: theme.mspace_2
                     show_bg: true
-                    draw_bg +: {color: uniform(theme.color_bg_container)}
+                    // A plain View's pixel is transparent and never reads `color`: paint it here.
+                    draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
                     Line{text: "2400 lines."}
                     Line{text: "Nineteen of them are worth a mark: two errors, two warnings,"}
                     Line{text: "four changed lines and eleven plain hits."}
@@ -72,7 +73,7 @@ script_mod! {
                 spacing: theme.space_1
                 padding: theme.mspace_2
                 show_bg: true
-                draw_bg +: {color: uniform(theme.color_bg_container)}
+                draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
                 Line{text: "One — the top of this list is flat, because nothing is above it."}
                 Line{text: "Two"}
                 Line{text: "Three"}
@@ -107,7 +108,7 @@ script_mod! {
                     padding: theme.mspace_2
                     fade_top: false
                     show_bg: true
-                    draw_bg +: {color: uniform(theme.color_bg_container)}
+                    draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
                     Line{text: "First"}
                     Line{text: "Second"}
                     Line{text: "Third"}
@@ -133,7 +134,7 @@ script_mod! {
                 spacing: theme.space_1
                 padding: theme.mspace_2
                 show_bg: true
-                draw_bg +: {color: uniform(theme.color_bg_container)}
+                draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
                 Line{text: "One"}
                 Line{text: "Two"}
                 Line{text: "Three"}
@@ -151,7 +152,7 @@ script_mod! {
                 spacing: theme.space_1
                 padding: theme.mspace_2
                 show_bg: true
-                draw_bg +: {color: uniform(theme.color_bg_container)}
+                draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
                 Label{text: "A row long enough that it runs off the right of the box and keeps going for a good while after that."}
                 Label{text: "Another row of about the same length, so the box has somewhere to scroll across to."}
                 Label{text: "A third, and a fourth below it, so it has somewhere to scroll down to as well."}

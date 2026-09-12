@@ -7,13 +7,15 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
+    // Plain values: a `uniform(..)` inside a merge redeclares the input
+    // instead of setting it, and the boxes drew as nothing but their labels.
     let AlignScrollBox = RoundedView{
         show_bg: true
         draw_bg +: {
-            color: uniform(#x0F02)
-            border_size: uniform(1.)
-            border_radius: uniform(0.)
-            border_color: uniform(#xfff8)
+            color: theme.color_surface_container_high
+            border_size: 1.
+            border_radius: 0.
+            border_color: theme.color_outline_variant
         }
         padding: 3.
         align: Align{x: 0.5 y: 0.5}
