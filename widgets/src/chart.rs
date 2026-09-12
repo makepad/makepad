@@ -155,8 +155,12 @@ script_mod! {
         range_max: 0.0
         series: []
 
+        // The face is named outright: a merge into a text style the type
+        // default has not set yet left the tile with a style that measured
+        // but drew nothing -- a key of swatches with no names beside them,
+        // a gutter with no numbers.
         draw_text +: {
-            text_style +: {font_size: 8.0}
+            text_style: theme.font_regular{font_size: 8.0}
             color: #x8890a8
         }
     }
@@ -2290,6 +2294,36 @@ mod tests {
         });
         assert!(!chart.is_empty(), "TrendChart built no widget");
         (cx, chart)
+    }
+
+    /// Any widget of the library, built as a page builds it.
+    fn declared_as(cx: &mut Cx, name: &str) -> WidgetRef {
+        let widget = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!widget.is_empty(), "{name} built no widget");
+        widget
+    }
+
+    /// The tile's text is drawn in the face the rest of the library draws
+    /// in, at the tile's size. A style that only merged a size into the
+    /// raw default was left with a family of one member that named no
+    /// file: its words measured, and none of them drew.
+    #[test]
+    fn as_declared_the_text_is_in_the_library_face() {
+        let (mut cx, chart) = declared();
+        let label = declared_as(&mut cx, "Label");
+        let chart = chart.borrow::<TrendChart>().unwrap();
+        let label = label.borrow::<crate::Label>().unwrap();
+        let (tile, library) = (&chart.draw_text.text_style, &label.draw_text.text_style);
+        assert_eq!(
+            tile.font_family.member_ids().collect::<Vec<_>>(),
+            library.font_family.member_ids().collect::<Vec<_>>(),
+            "the tile's face is not the library's"
+        );
+        assert_eq!(tile.font_size, 8.0);
     }
 
     #[test]
