@@ -41,6 +41,12 @@ const ICONS: &[BundledIcon] = &[
     icon!("photos"),
     icon!("clock"),
     icon!("weather"),
+    icon!("finance"),
+    icon!("mail"),
+    icon!("notes"),
+    icon!("calendar"),
+    icon!("reminders"),
+    icon!("calculator"),
     icon!("fabric"),
     icon!("score"),
     icon!("video"),
@@ -185,6 +191,20 @@ impl AppIconDraw {
         opacity: f32,
         ink: Vec4f,
     ) {
+        self.draw_rotated(cx, name, style, rect, opacity, ink, 0.0);
+    }
+    /// [`draw`](Self::draw) with the icon turned `rotation` radians about
+    /// its centre (edit mode's jiggle).
+    pub fn draw_rotated(
+        &mut self,
+        cx: &mut Cx2d,
+        name: &str,
+        style: DesktopStyle,
+        rect: Rect,
+        opacity: f32,
+        ink: Vec4f,
+        rotation: f32,
+    ) {
         let name = canonical_name(name);
         let source = source(cx, style, name);
         let key = (style as usize, name.into());
@@ -209,6 +229,7 @@ impl AppIconDraw {
             vec4(-1.0, -1.0, -1.0, -1.0)
         };
         cached.draw.opacity = opacity;
+        cached.draw.rotation = rotation;
         cached.draw.draw_abs(cx, rect);
     }
 }
@@ -348,6 +369,15 @@ mod tests {
             &source(&mut cx, DesktopStyle::Macos, "app")
         ));
         assert_eq!(canonical_name("makepad-app-score"), "score");
+        assert_eq!(canonical_name("makepad-mail"), "mail");
+        assert_eq!(canonical_name("makepad-app-notes"), "notes");
+        assert_eq!(canonical_name("makepad-calendar"), "calendar");
+        assert_eq!(canonical_name("makepad-app-reminders"), "reminders");
+        assert_eq!(canonical_name("makepad-calculator"), "calculator");
+        let names: Vec<_> = ICONS.iter().map(|icon| icon.name).collect();
+        for id in ["mail", "notes", "calendar", "reminders", "calculator"] {
+            assert!(names.contains(&id), "{id}");
+        }
         assert!(!valid_name("../secret"));
     }
 }

@@ -14,9 +14,12 @@ struct BackdropReuse {
     damage: Vec<Rect>,
 }
 impl BackdropReuse {
-    fn needs_checkpoint(&self, rect: Rect, level: f64) -> bool {
-        // Include the downsample kernel, smooth upsampling and bicubic taps.
-        let support = 2.0f64.powf(level.ceil() + 2.0);
+    fn needs_checkpoint(&self, rect: Rect, level: f64, reach: f64) -> bool {
+        // Include the downsample kernel, smooth upsampling and bicubic taps —
+        // and how far a lens reads OUTSIDE its rect (the peak displacement
+        // plus any chroma), or content moving just past the rim would change
+        // what the glass shows without a new checkpoint.
+        let support = 2.0f64.powf(level.ceil() + 2.0) + reach.max(0.0);
         let sample = Rect {
             pos: rect.pos - dvec2(support, support),
             size: rect.size + dvec2(2.0 * support, 2.0 * support),
@@ -101,7 +104,14 @@ impl BackdropCompositor {
     }
 
     pub fn backdrop(&mut self, cx: &mut Cx2d, rect: Rect, level: f64) -> GaussBlurSnapshot {
-        if self.reuse.needs_checkpoint(rect, level) {
+        self.backdrop_with_reach(cx, rect, level, 0.0)
+    }
+
+    /// A backdrop for a LENSED surface: `reach` is how far outside `rect`
+    /// its shader samples (the peak displacement plus chroma), so the reuse
+    /// footprint covers what the lens draws in from around the slab.
+    pub fn backdrop_with_reach(&mut self, cx: &mut Cx2d, rect: Rect, level: f64, reach: f64) -> GaussBlurSnapshot {
+        if self.reuse.needs_checkpoint(rect, level, reach) {
             self.stacks[self.current].end_scene(cx);
             self.reuse.checkpoint(self.current);
             self.current += 1;
@@ -121,7 +131,7 @@ impl BackdropCompositor {
     ) -> (Option<GaussBlurSnapshot>, usize, usize) {
         self.stacks[self.current].end_scene(cx);
         let backdrop = final_glass.map(|(rect, level)| {
-            if self.reuse.needs_checkpoint(rect, level) {
+            if self.reuse.needs_checkpoint(rect, level, 0.0) {
                 self.reuse.checkpoint(self.current);
             }
             self.snapshot(cx, self.reuse.source.unwrap(), level)
@@ -170,21 +180,31 @@ mod tests {
     #[test]
     fn disjoint_surfaces_reuse_their_backdrop_but_overlaps_checkpoint() {
         let mut reuse = BackdropReuse::default();
-        assert!(reuse.needs_checkpoint(rect(0.0, 0.0, 200.0, 200.0), 3.0));
+        assert!(reuse.needs_checkpoint(rect(0.0, 0.0, 200.0, 200.0), 3.0, 0.0));
         reuse.checkpoint(0);
         reuse.damage.push(rect(0.0, 0.0, 200.0, 200.0));
-        assert!(!reuse.needs_checkpoint(rect(400.0, 0.0, 200.0, 200.0), 3.0));
-        assert!(reuse.needs_checkpoint(rect(150.0, 0.0, 200.0, 200.0), 3.0));
+        assert!(!reuse.needs_checkpoint(rect(400.0, 0.0, 200.0, 200.0), 3.0, 0.0));
+        assert!(reuse.needs_checkpoint(rect(150.0, 0.0, 200.0, 200.0), 3.0, 0.0));
         reuse.checkpoint(1);
-        assert!(!reuse.needs_checkpoint(rect(150.0, 0.0, 200.0, 200.0), 3.0));
+        assert!(!reuse.needs_checkpoint(rect(150.0, 0.0, 200.0, 200.0), 3.0, 0.0));
     }
     #[test]
     fn blur_support_and_opaque_intervening_content_count() {
         let mut reuse = BackdropReuse::default();
         reuse.checkpoint(0);
         reuse.damage.push(rect(100.0, 100.0, 200.0, 200.0));
-        assert!(reuse.needs_checkpoint(rect(320.0, 100.0, 100.0, 100.0), 3.0));
-        assert!(!reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 3.0));
-        assert!(reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 4.5));
+        assert!(reuse.needs_checkpoint(rect(320.0, 100.0, 100.0, 100.0), 3.0, 0.0));
+        assert!(!reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 3.0, 0.0));
+        assert!(reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 4.5, 0.0));
+    }
+    #[test]
+    fn a_lens_reaches_past_its_rect_by_its_displacement() {
+        let mut reuse = BackdropReuse::default();
+        reuse.checkpoint(0);
+        reuse.damage.push(rect(100.0, 100.0, 200.0, 200.0));
+        // Level 1 (mip0): 8 pt of blur support. Content 10 pt beyond that is
+        // out of a frosted surface's footprint, but a 10 pt lens reads it.
+        assert!(!reuse.needs_checkpoint(rect(318.0, 100.0, 100.0, 100.0), 1.0, 0.0));
+        assert!(reuse.needs_checkpoint(rect(318.0, 100.0, 100.0, 100.0), 1.0, 10.25));
     }
 }

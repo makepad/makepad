@@ -269,18 +269,44 @@ script_mod! {
             press_flatten: uniform(0.0)
             ripple_age: uniform(1000.0)
             ripple_strength: uniform(0.0)
-            diffraction_strength: uniform(4.0)
+            // The Liquid Glass material, control profile (gauss_view.rs, design
+            // §3): a short edge lens, a lit rim, a clear fill. Kept in step
+            // with `GaussRoundedView`; the numbers are the toolbar row.
+            lens_band: uniform(6.0)
+            lens_strength: uniform(3.0)
+            interior_level: uniform(1.0)
+            edge_level: uniform(0.25)
+            rim_alpha: uniform(0.40)
+            rim_width: uniform(1.0)
+            inner_shadow_alpha: uniform(0.03)
+            seal_alpha: uniform(0.06)
             // Lens corner radius (visual radius is 2x this, Sdf2d convention).
-            corner_radius: uniform(9.0)
+            corner_radius: uniform(11.0)
 
-            // Frosted sample (weight the blurred mips) so the button reads as glass and a
-            // hard background line doesn't show as a sharp dark bar behind the label.
-            sample_blur: fn(uv: vec2) -> vec4 {
+            sample_level: fn(level: float, uv: vec2) -> vec4 {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
-                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+                if level < 0.5 {
+                    return self.scene_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 1.5 {
+                    return self.mip0_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 2.5 {
+                    return self.mip1_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 3.5 {
+                    return self.mip2_texture.sample_as_bgra(safe_uv)
+                }
+                return self.mip3_texture.sample_as_bgra(safe_uv)
+            }
+
+            sample_blur: fn(level: float, uv: vec2) -> vec4 {
+                let safe = clamp(level, 0.0, 4.0)
+                let base = floor(safe)
+                let t = safe - base
+                let blend = t * t * (3.0 - 2.0 * t)
+                return self.sample_level(base, uv).mix(self.sample_level(min(base + 1.0, 4.0), uv), blend)
             }
 
             pixel: fn() {
@@ -295,8 +321,8 @@ script_mod! {
                 sdf.box(ins, ins, w - ins * 2.0, h - ins * 2.0, r)
 
                 let shape = sdf.shape
+                let depth = max(-shape, 0.0)
                 let screen_pos = self.rect_pos + self.pos * self.rect_size
-                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
                 let src = max(self.source_size, vec2(1.0, 1.0))
                 // Rounded box has a flat interior (gradient 0 -> normalize = NaN); branch explicitly.
                 let gradient = vec2(dFdx(shape), dFdy(shape))
@@ -306,63 +332,36 @@ script_mod! {
                     normal = gradient / glen
                 }
 
-                // Flattening WAVE (examples/splash focus lens). An expanding Gaussian ring whose
-                // crest both ripples the surface and FLATTENS the lens as it passes - on release
-                // (press_flatten < 0) it un-flattens the same way. No spring, so no jiggle.
-                let lens_pos = self.pos * 2.0 - 1.0
-                let ripple_dist = length(lens_pos)
-                let ripple_age = max(self.ripple_age, 0.0)
-                let ripple_life = clamp(1.0 - ripple_age / 1.30, 0.0, 1.0)
-                let wave_t = clamp(ripple_age / 1.05, 0.0, 1.0)
-                let wave_center = mix(0.0, 1.25, wave_t * wave_t * (3.0 - 2.0 * wave_t))
-                let wave_width = 0.24
-                let wave_delta = ripple_dist - wave_center
-                let wave = exp(-(wave_delta * wave_delta) / (wave_width * wave_width))
-                let wave_mask = smoothstep(0.0, 0.10, ripple_age) * (1.0 - smoothstep(1.16, 1.44, ripple_dist))
-                let ripple_wave = wave * ripple_life * ripple_life * self.ripple_strength * wave_mask
-                let ripple_slope = (-wave_delta / wave_width) * ripple_wave
-                let ripple_dir = lens_pos / max(ripple_dist, 0.001)
+                // The lens band, capped at 22% of the short side; a press
+                // flattens the lens to 85% and lifts the rim.
+                let band = min(max(self.lens_band, 1.0), max(min(w, h) * 0.22, 1.0))
+                let edge = 1.0 - smoothstep(0.0, band, depth)
                 let press = clamp(self.press_flatten, 0.0, 1.0)
-                let restore = clamp(-self.press_flatten, 0.0, 1.0)
-                let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
-                let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
-                let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
-                let ripple_surface = ripple_slope * 1.35 + ripple_wave * 0.34
-                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.45, 0.0, 1.85)
-                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.6, 0.0, 2.60)
+                let strength = self.lens_strength * (band / max(self.lens_band, 1.0)) * (1.0 - 0.15 * press)
+                // The press ripple: one soft ring, at most 0.8 pt.
+                let age = max(self.ripple_age, 0.0)
+                let life = 1.0 - smoothstep(0.0, 0.32, age)
+                let lens_pos = self.pos * 2.0 - 1.0
+                let dist = length(lens_pos)
+                let delta = dist - smoothstep(0.0, 0.32, age) * 1.2
+                let wave = exp(-(delta * delta) / 0.02) * life * clamp(self.ripple_strength, 0.0, 1.0)
+                let ripple = (lens_pos / max(dist, 0.001)) * (wave * 0.8)
 
-                // Edge lens + RGB-split diffraction. The base offset bends the background at the rim
-                // (scaled by the flattening wave); the colour offset samples R/G/B at slightly
-                // different positions for the chromatic splice. The click-ripple displacement is
-                // cranked WAY up here to try out a much stronger lensing pulse.
-                let rim = clamp(1.0 - abs(shape) / 13.0, 0.0, 1.0)
-                let lens = rim * rim * lens_depth
-                let water_offset = ripple_dir * (ripple_surface * 85.0) / src
-                let base_offset = normal * (lens * 18.0) / src + water_offset
-                let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / src
-                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 14.0) / src
-                let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let s_r = self.sample_blur(uv_r)
-                let s_g = self.sample_blur(uv_g)
-                let s_b = self.sample_blur(uv_b)
-                let refracted = vec3(s_r.x, s_g.y, s_b.z)
+                let q = clamp((screen_pos + normal * (edge * strength) + ripple) / src, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let level = mix(self.interior_level, self.edge_level, edge)
+                let sampled = self.sample_blur(level, q).rgb
                 let fallback = vec3(0.80, 0.88, 0.95)
-                let base = fallback.mix(refracted, self.has_gauss)
+                let transmitted = fallback.mix(sampled, self.has_gauss)
+                let material = transmitted.mix(self.tint.rgb, self.tint.a + self.hover * 0.03)
 
-                // Fully OPAQUE glass - the "transparent" look comes only from the refraction lookup.
-                let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
-                let frost = base.mix(vec3(1.0, 1.0, 1.0), 0.06 + top * 0.08 + self.hover * 0.04)
-                let material = frost.mix(self.tint.rgb, self.tint.a)
-                sdf.fill_keep(vec4(material, 1.0))
-
-                // Bright specular crescent on the upper-right rim + a crest highlight on the wave.
-                let light_dir = normalize(vec2(0.5, -0.86))
-                let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
-                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
-                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.50 + self.hover * 0.12) + ripple_wave * 0.11))
-                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.18 + self.hover * 0.10), 0.9)
+                let inner = (1.0 - smoothstep(0.0, 2.5, depth)) * (0.25 + 0.75 * max(normal.y, 0.0)) * self.inner_shadow_alpha
+                let light = normalize(vec2(-0.18, -1.0))
+                let facing = pow(max(dot(normal, light), 0.0), 0.8)
+                let rim = (1.0 - smoothstep(0.0, max(self.rim_width, 0.01), depth)) * facing * (self.rim_alpha + 0.06 * press + self.hover * 0.04)
+                let shaded = (material * (1.0 - inner)).mix(vec3(1.0, 1.0, 1.0), clamp(rim, 0.0, 1.0))
+                // Opaque glass: the "transparent" look is the transmitted scene itself.
+                sdf.fill_keep(vec4(shaded, 1.0))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, self.seal_alpha), 0.5)
                 return sdf.result
             }
         }
@@ -508,13 +507,41 @@ script_mod! {
             hover: uniform(0.0)
             pill_x: uniform(0.0)
             pill_w: uniform(0.0)
+            // The Liquid Glass material, tabs profile (gauss_view.rs, design §3).
+            lens_band: uniform(8.0)
+            lens_strength: uniform(4.0)
+            interior_level: uniform(2.0)
+            edge_level: uniform(0.5)
+            fill_color: uniform(vec4(1.0, 1.0, 1.0, 0.06))
+            rim_alpha: uniform(0.35)
+            rim_width: uniform(1.0)
+            inner_shadow_alpha: uniform(0.04)
+            seal_alpha: uniform(0.06)
 
-            sample_blur: fn(uv: vec2) -> vec4 {
+            sample_level: fn(level: float, uv: vec2) -> vec4 {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
-                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+                if level < 0.5 {
+                    return self.scene_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 1.5 {
+                    return self.mip0_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 2.5 {
+                    return self.mip1_texture.sample_as_bgra(safe_uv)
+                }
+                if level < 3.5 {
+                    return self.mip2_texture.sample_as_bgra(safe_uv)
+                }
+                return self.mip3_texture.sample_as_bgra(safe_uv)
+            }
+
+            sample_blur: fn(level: float, uv: vec2) -> vec4 {
+                let safe = clamp(level, 0.0, 4.0)
+                let base = floor(safe)
+                let t = safe - base
+                let blend = t * t * (3.0 - 2.0 * t)
+                return self.sample_level(base, uv).mix(self.sample_level(min(base + 1.0, 4.0), uv), blend)
             }
 
             pixel: fn() {
@@ -533,8 +560,9 @@ script_mod! {
                 sdf.box(pill_x, pill_y, pill_w, pill_h, r)
 
                 let shape = sdf.shape
+                let depth = max(-shape, 0.0)
                 let screen_pos = self.rect_pos + self.pos * self.rect_size
-                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
+                let src = max(self.source_size, vec2(1.0, 1.0))
                 let gradient = vec2(dFdx(shape), dFdy(shape))
                 let glen = length(gradient)
                 var normal = vec2(0.0, 1.0)
@@ -542,32 +570,30 @@ script_mod! {
                     normal = gradient / glen
                 }
 
-                let rim = clamp(1.0 - abs(shape) / 12.0, 0.0, 1.0)
-                let bend = rim * rim
-                let disp = normal * (bend * 12.0) / max(self.source_size, vec2(1.0, 1.0))
-                let chroma = normal * (bend * 3.5) / max(self.source_size, vec2(1.0, 1.0))
-                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-                let s_g = self.sample_blur(uv_g)
-                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-                let refracted = vec3(s_r.r, s_g.g, s_b.b)
+                let band = min(max(self.lens_band, 1.0), max(min(pill_w, pill_h) * 0.22, 1.0))
+                let edge = 1.0 - smoothstep(0.0, band, depth)
+                let strength = self.lens_strength * (band / max(self.lens_band, 1.0))
+                let q = clamp((screen_pos + normal * (edge * strength)) / src, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let level = mix(self.interior_level, self.edge_level, edge)
+                let sampled = self.sample_blur(level, q).rgb
                 let fallback = vec3(0.85, 0.92, 0.90)
-                let base = fallback.mix(refracted, self.has_gauss)
+                let transmitted = fallback.mix(sampled, self.has_gauss)
+                let material = transmitted.mix(self.fill_color.rgb, self.fill_color.a + self.hover * 0.03)
 
-                let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
-                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.16 + top * 0.10)
-                sdf.fill_keep(vec4(material, 1.0))
-
-                let light_dir = normalize(vec2(0.5, -0.86))
-                let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
-                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
-                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.45 + self.hover * 0.1)))
-                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.18), 0.9)
+                let inner = (1.0 - smoothstep(0.0, 2.5, depth)) * (0.25 + 0.75 * max(normal.y, 0.0)) * self.inner_shadow_alpha
+                let light = normalize(vec2(-0.18, -1.0))
+                let facing = pow(max(dot(normal, light), 0.0), 0.8)
+                let rim = (1.0 - smoothstep(0.0, max(self.rim_width, 0.01), depth)) * facing * (self.rim_alpha + self.hover * 0.04)
+                let shaded = (material * (1.0 - inner)).mix(vec3(1.0, 1.0, 1.0), clamp(rim, 0.0, 1.0))
+                sdf.fill_keep(vec4(shaded, 1.0))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, self.seal_alpha), 0.5)
                 return sdf.result
             }
         }
     }
 
+    // The Liquid Glass family (gauss_view.rs, design §3): every surface is the
+    // one material with a profile — a floating shell here.
     mod.widgets.glass.Panel = mod.widgets.AppleGlassRoundedView{
         width: Fill
         height: Fit
@@ -577,56 +603,49 @@ script_mod! {
         clip_x: false
         clip_y: false
         draw_bg +: {
-            blur_level: 5.2
-            lensing_effect: 0.94
-            lensing_strength: 28.0
-            lensing_width: 20.0
-            corner_radius: 10.0
-            tint_color: #xf8fbff
-            tint_alpha: 0.006
-            surface_alpha: 1.0
-            border_alpha: 0.72
-            border_width: 1.0
-            specular_strength: 0.22
-            noise_strength: 0.004
+            corner_radius: 12.0
             fallback_color: #x334156
-            shadow_color: #x0007
-            shadow_radius: 13.0
-            shadow_offset: vec2(0.0, 5.0)
-            diffraction_strength: 4.4
         }
     }
 
+    // The clear profile: the dock's — the strongest lens, a near-zero fill.
     mod.widgets.glass.ClearPanel = mod.widgets.glass.Panel{
         draw_bg +: {
-            blur_level: 5.4
-            lensing_effect: 1.0
-            lensing_strength: 34.0
-            lensing_width: 18.0
-            tint_alpha: 0.004
-            surface_alpha: 1.0
-            border_alpha: 0.84
-            specular_strength: 0.28
+            blur_level: 1.0
+            edge_blur_level: 0.25
+            lensing_strength: 10.0
+            lensing_width: 12.0
+            tint_alpha: 0.015
+            rim_alpha: 0.55
+            rim_width: 1.25
+            inner_shadow_alpha: 0.10
             fallback_color: #x263242
-            shadow_color: #x0005
-            diffraction_strength: 5.4
+            shadow_offset: vec2(0.0, 5.0)
         }
     }
 
+    // A bar of tabs or navigation (the Clock's 370×64 tab strip): a wide
+    // radius, a short lens, a light frost.
     mod.widgets.glass.NavBar = mod.widgets.glass.ClearPanel{
-        height: 58
+        height: Fit
         flow: Right
         spacing: 8
-        padding: Inset{left: 8, right: 8, top: 8, bottom: 8}
-        align: Align{x: 0.5 y: 0.5}
+        padding: Inset{left: 8, right: 8, top: 6, bottom: 6}
+        align: Align{x: 0.5, y: 0.5}
         draw_bg +: {
-            corner_radius: 12.0
-            blur_level: 5.2
-            lensing_effect: 1.0
-            lensing_strength: 36.0
-            lensing_width: 18.0
+            corner_radius: 16.0
+            blur_level: 2.0
+            edge_blur_level: 0.5
+            lensing_strength: 4.0
+            lensing_width: 8.0
+            tint_alpha: 0.06
+            rim_alpha: 0.35
+            rim_width: 1.0
+            inner_shadow_alpha: 0.04
+            shadow_color: #0000001f
+            shadow_sigma: 4.0
             shadow_radius: 12.0
-            shadow_offset: vec2(0.0, 4.0)
+            shadow_offset: vec2(0.0, 3.0)
         }
     }
 
@@ -640,19 +659,14 @@ script_mod! {
     }
 
     mod.widgets.glass.Group = mod.widgets.glass.Panel{
-        spacing: 10
+        spacing: 8
         padding: 12
         draw_bg +: {
-            corner_radius: 10.0
-            blur_level: 5.0
-            lensing_effect: 0.88
-            lensing_strength: 26.0
-            lensing_width: 18.0
-            tint_alpha: 0.004
-            surface_alpha: 1.0
-            border_alpha: 0.60
-            shadow_radius: 10.0
+            corner_radius: 12.0
+            shadow_sigma: 4.0
+            shadow_radius: 12.0
             shadow_offset: vec2(0.0, 3.0)
+            shadow_color: #0000001f
         }
     }
 
@@ -664,6 +678,8 @@ script_mod! {
         }
     }
 
+    // A control-sized surface (44 pt toolbar buttons): clear, a short lens,
+    // a lit rim, no shadow of its own.
     mod.widgets.glass.LensSurface = mod.widgets.AppleGlassRoundedView{
         width: Fit
         height: 42
@@ -671,23 +687,22 @@ script_mod! {
         clip_x: false
         clip_y: false
         draw_bg +: {
-            blur_level: 0.36
-            lensing_effect: 1.0
-            lensing_strength: 42.0
-            lensing_width: 12.0
-            corner_radius: 10.0
+            corner_radius: 11.0
+            blur_level: 1.0
+            edge_blur_level: 0.25
+            lensing_strength: 3.0
+            lensing_width: 6.0
             tint_color: #xf8fbff
             tint_alpha: 0.014
-            surface_alpha: 1.0
-            border_alpha: 0.86
-            border_width: 1.0
-            specular_strength: 0.28
-            noise_strength: 0.004
+            rim_alpha: 0.40
+            rim_width: 1.0
+            inner_shadow_alpha: 0.03
+            border_alpha: 0.06
             fallback_color: #x314052
             shadow_color: #x0000
             shadow_radius: 0.0
+            shadow_sigma: 0.0
             shadow_offset: vec2(0.0, 0.0)
-            diffraction_strength: 5.6
         }
     }
 
@@ -695,11 +710,10 @@ script_mod! {
 
     mod.widgets.glass.ProminentButtonSurface = mod.widgets.glass.LensSurface{
         draw_bg +: {
-            tint_alpha: 0.024
-            surface_alpha: 1.0
-            border_alpha: 0.94
+            tint_color: #x2975eb
+            tint_alpha: 0.30
+            rim_alpha: 0.45
             fallback_color: #x234e74
-            diffraction_strength: 6.2
         }
     }
 
@@ -712,10 +726,10 @@ script_mod! {
         height: 34
         draw_bg +: {
             corner_radius: 8.0
-            lensing_strength: 36.0
-            lensing_width: 10.0
-            shadow_radius: 0.0
-            shadow_offset: vec2(0.0, 0.0)
+            lensing_strength: 2.0
+            lensing_width: 5.0
+            rim_alpha: 0.30
+            rim_width: 0.75
         }
     }
 
@@ -723,10 +737,9 @@ script_mod! {
         height: 40
         draw_bg +: {
             corner_radius: 10.0
-            lensing_strength: 40.0
-            lensing_width: 11.0
+            lensing_strength: 2.5
+            lensing_width: 5.0
             tint_alpha: 0.010
-            surface_alpha: 1.0
         }
     }
 
@@ -1183,19 +1196,24 @@ impl Widget for GlassLayer {
         self.view.handle_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
         let draw_list = self.draw_list.as_mut().unwrap();
         draw_list.begin_overlay_reuse(cx);
 
-        let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, self.view.layout);
-        self.draw_bg.begin(cx, self.view.walk, self.view.layout);
+        // The layer takes its walk in the tree it sits in, the way
+        // `GaussRoundedView` does in normal flow: at a window root that is
+        // the whole window; inside a host's tile (a module drawn into a
+        // capture pass at the tile's window position) it is the tile. A
+        // root turtle of the pass size would put it at the pass origin
+        // instead, and a bottom-anchored row a tile's offset too high.
+        cx.begin_turtle(walk, self.view.layout);
+        self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
         self.view.draw_all(cx, scope);
         self.draw_bg.end(cx);
-        cx.end_pass_sized_turtle();
+        cx.end_turtle();
 
         self.draw_list.as_mut().unwrap().end(cx);
         DrawStep::done()
