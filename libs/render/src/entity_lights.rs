@@ -2,7 +2,7 @@
 //! no cached transforms or geometry revisions, and no per-frame script writes.
 use crate::{lightmap::LmLight, Renderer};
 use makepad_draw::*;
-use makepad_game_sim::{Entity, EntityLight, GameWorld, MAX_ENTITY_LIGHTS};
+use makepad_scene::{Entity, EntityLight, World, MAX_ENTITY_LIGHTS};
 
 pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight> {
     if !light.enabled || light.intensity <= 0.0 || light.validate().is_err() {
@@ -31,11 +31,11 @@ pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight
     Some(placed)
 }
 
-pub fn append_entity_lights(world: &GameWorld, out: &mut Vec<LmLight>) {
+pub fn append_entity_lights(world: &World, out: &mut Vec<LmLight>) {
     append_entity_lights_with_model_headlights(world, out, &[]);
 }
 
-pub fn append_entity_lights_with_model_headlights(world: &GameWorld, out: &mut Vec<LmLight>, model_owners: &[u64]) {
+pub fn append_entity_lights_with_model_headlights(world: &World, out: &mut Vec<LmLight>, model_owners: &[u64]) {
     for entity in &world.entities {
         // Hidden chassis still own visible models and fixtures.
         for light in entity.lights.iter().take(MAX_ENTITY_LIGHTS) {
@@ -56,11 +56,11 @@ mod tests {
     use super::*;
     #[test]
     fn authored_exterior_suppresses_only_standard_headlights_and_restores_on_removal() {
-        let mut world = GameWorld::new();
+        let mut world = World::new();
         let mut car = Entity { id: 17, scale: vec3f(1.0, 1.0, 1.0), half: vec3f(1.0, 0.5, 2.0), ..Default::default() };
         car.set_headlights(true).unwrap();
         car.set_light(EntityLight { name: "cabin".into(), ..Default::default() }).unwrap();
-        world.push_entity(car);
+        world.push_entity(car).unwrap();
         let mut lights = Vec::new();
         append_entity_lights_with_model_headlights(&world, &mut lights, &[17]);
         assert_eq!(lights.len(), 1, "the independent cabin light remains");
@@ -71,7 +71,7 @@ mod tests {
     }
     #[test]
     fn lights_follow_translation_yaw_scale_and_hidden_owners() {
-        let mut world = GameWorld::new();
+        let mut world = World::new();
         let mut e = Entity {
             id: 1,
             pos: vec3f(10.0, 2.0, 3.0),
@@ -90,7 +90,7 @@ mod tests {
             .transform_vec4(vec4(0.0, 0.0, -2.0, 1.0))
             .to_vec3f();
         e.set_light(light.clone()).unwrap();
-        world.push_entity(e);
+        world.push_entity(e).unwrap();
         let mut out = Vec::new();
         append_entity_lights(&world, &mut out);
         assert_eq!(out.len(), 1);
@@ -115,7 +115,7 @@ mod tests {
     fn rigid_pitch_rotates_emission_and_bad_pose_is_rejected() {
         let s = (std::f32::consts::FRAC_PI_4).sin();
         let mut e = Entity {
-            kind: makepad_game_sim::BodyKind::Rigid,
+            kind: makepad_scene::BodyKind::Rigid,
             scale: vec3f(1.0, 1.0, 1.0),
             orient: Quat {
                 x: s,

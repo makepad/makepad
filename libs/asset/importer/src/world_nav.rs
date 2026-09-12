@@ -34,7 +34,7 @@ pub const DEATHMATCH: &str = "deathmatch";
 /// consumer of these anchors reads — the map walker, `player_nav`, and the
 /// importer's own `world_preview`. It is NOT the sim's entity heading, whose
 /// forward is `(−sin yaw, 0, −cos yaw)`; the two agree only at yaw 0, and
-/// `makepad_game_sim::heading_to_camera_yaw` negates between them.
+/// `makepad_scene::heading_to_camera_yaw` negates between them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavStart {
     pub name: String,

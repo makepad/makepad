@@ -1695,6 +1695,20 @@ impl GpuLightmapBaker {
             passes += self.encode_cascades(cx, static_casters, movers, &frame);
         }
         let us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
+        if let Some(frame) = &csm {
+            let c = &frame.cascades[0];
+            trace!(
+                "csm",
+                "run rt={} passes={} tex={:?} rx0w={:.4} ry0w={:.4} rz0w={:.4} bias0={:.6} sun=({:.3},{:.3},{:.3}) statics={} movers={} state={}",
+                self.rt_frames,
+                passes,
+                self.csm_tex.as_ref().map(|t| t.texture_id()),
+                c.rx.w, c.ry.w, c.rz.w, c.bias01,
+                sun_dir.x, sun_dir.y, sun_dir.z,
+                static_casters.len(), movers.len(),
+                self.state.is_some()
+            );
+        }
         self.csm_last = csm;
         if !batch.is_empty() {
             self.bake_frames += 1;

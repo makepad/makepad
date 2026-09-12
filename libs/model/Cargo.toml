@@ -15,7 +15,7 @@ makepad-csg-math = { path = "../csg/csg_math" }
 makepad-csg-mesh = { path = "../csg/csg_mesh" }
 makepad-csg-boolean = { path = "../csg/csg_boolean", default-features = false }
 makepad-remesh = { path = "../remesh" }
-makepad-game-sim = { path = "../sim" }
+makepad-soft-body = { path = "../soft_body" }
 
 [dev-dependencies]
 makepad-render = { path = "../render" }

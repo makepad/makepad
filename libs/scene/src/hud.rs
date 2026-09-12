@@ -34,7 +34,6 @@
 //! pane height, uniformly scaled. A HUD authored once is the same size on a
 //! phone and on a wall, and an author never writes a device check.
 
-use crate::entity::HudAnchor;
 use makepad_math::*;
 
 /// The reference pane height HUD units are a fraction of.
@@ -1154,3 +1153,50 @@ mod tests {
         assert_eq!(doc.elements.len(), MAX_ELEMENTS);
     }
 }
+
+/// Where a HUD slot pins to the pane. Slots sharing an anchor stack downward
+/// in insertion order.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum HudAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    #[default]
+    Center,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl HudAnchor {
+    pub fn parse(name: &str) -> HudAnchor {
+        match name {
+            "top_left" => HudAnchor::TopLeft,
+            "top" => HudAnchor::Top,
+            "top_right" => HudAnchor::TopRight,
+            "bottom_left" => HudAnchor::BottomLeft,
+            "bottom" => HudAnchor::Bottom,
+            "bottom_right" => HudAnchor::BottomRight,
+            _ => HudAnchor::Center,
+        }
+    }
+}
+
+/// One line of screen text. `size`/`color.w` of 0 mean "use the slot default".
+#[derive(Clone, Debug, Default)]
+pub struct HudSlot {
+    pub text: String,
+    pub color: Vec4f,
+    pub size: f32,
+    pub anchor: HudAnchor,
+}
+
+/// A HUD gauge (speedometer, boost). Fraction 0..1 fills left to right.
+#[derive(Clone, Debug)]
+pub struct HudBar {
+    pub name: String,
+    pub fraction: f32,
+    pub color: Vec4f,
+    pub anchor: HudAnchor,
+}
+

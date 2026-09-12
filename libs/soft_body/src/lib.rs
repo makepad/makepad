@@ -20,6 +20,8 @@ pub struct SoftBodyDefinition {
     pub surface_samples: Vec<SoftBodyBinding>,
     /// Kinematic core particles; other particles have compliant pose targets.
     pub anchors: Vec<u16>,
+    #[cfg(test)]
+    validation_count: std::cell::Cell<usize>,
 }
 
 /// Validated immutable cage and its precomputed rest inverses. Reuse this
@@ -133,7 +135,7 @@ fn cross(a: V3, b: V3) -> V3 {
     ]
 }
 fn length(a: V3) -> f32 {
-    crate::math::sqrt(dot(a, a))
+    (dot(a, a)).sqrt()
 }
 fn unit(a: V3) -> V3 {
     let l = length(a);
@@ -249,7 +251,7 @@ impl SoftBodyPose {
         let mut q = std::array::from_fn::<_, 4, _>(|i| {
             self.rotation[i] * (1. - t) + b.rotation[i] * t * sign
         });
-        let len = crate::math::sqrt(q.iter().map(|v| v * v).sum::<f32>());
+        let len = (q.iter().map(|v| v * v).sum::<f32>()).sqrt();
         for v in &mut q {
             *v /= len;
         }
@@ -308,7 +310,7 @@ impl SoftBodySettings {
 impl SoftBodyDefinition {
     pub fn validate(&self) -> Result<(), String> {
         #[cfg(test)]
-        tests::DEFINITION_VALIDATIONS.with(|count| count.set(count.get() + 1));
+        self.validation_count.set(self.validation_count.get() + 1);
         if self.rest_positions.len() < 4
             || self.rest_positions.len() > MAX_SOFT_PARTICLES
             || self.tetrahedra.is_empty()
@@ -480,6 +482,8 @@ impl SoftBodyDefinition {
             tetrahedra,
             surface_samples: Vec::new(),
             anchors: vec![core],
+            #[cfg(test)]
+            validation_count: std::cell::Cell::new(0),
         };
         let binder = definition.binder()?;
         definition.surface_samples = surface
@@ -1126,7 +1130,7 @@ impl SoftBodyFrame {
 fn matrix_quaternion(r: M3) -> [f32; 4] {
     let trace = r[0][0] + r[1][1] + r[2][2];
     let mut q = if trace > 0. {
-        let s = crate::math::sqrt(trace + 1.) * 2.;
+        let s = (trace + 1.).sqrt() * 2.;
         [
             (r[2][1] - r[1][2]) / s,
             (r[0][2] - r[2][0]) / s,
@@ -1143,7 +1147,7 @@ fn matrix_quaternion(r: M3) -> [f32; 4] {
         };
         let j = (i + 1) % 3;
         let k = (i + 2) % 3;
-        let s = crate::math::sqrt((1. + r[i][i] - r[j][j] - r[k][k]).max(0.)) * 2.;
+        let s = ((1. + r[i][i] - r[j][j] - r[k][k]).max(0.)).sqrt() * 2.;
         let mut q = [0.; 4];
         q[i] = s * 0.25;
         q[j] = (r[j][i] + r[i][j]) / s;
@@ -1151,7 +1155,7 @@ fn matrix_quaternion(r: M3) -> [f32; 4] {
         q[3] = (r[k][j] - r[j][k]) / s;
         q
     };
-    let len = crate::math::sqrt(q.iter().map(|v| v * v).sum::<f32>());
+    let len = (q.iter().map(|v| v * v).sum::<f32>()).sqrt();
     for v in &mut q {
         *v /= len;
     }
@@ -1161,14 +1165,11 @@ fn matrix_quaternion(r: M3) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    std::thread_local! {
-        pub(super) static DEFINITION_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
 
     #[test]
     fn batch_embedding_validates_once_and_reuses_rest_inverses() {
         let definition = SoftBodyDefinition::ellipsoid([0.1, 0.4, -0.2], [0.5, 0.8, 0.3]).unwrap();
-        DEFINITION_VALIDATIONS.with(|count| count.set(0));
+        definition.validation_count.set(0);
         let binder = definition.binder().unwrap();
         for i in 0..20_000 {
             let angle = i as f32 * 0.1;
@@ -1181,7 +1182,7 @@ mod tests {
         }
         assert!(binder.bind_point([f32::NAN, 0., 0.]).is_err());
         assert!(binder.bind_point([5., 0., 0.]).is_err());
-        DEFINITION_VALIDATIONS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(definition.validation_count.get(), 1);
         let mut invalid = definition.clone();
         invalid.tetrahedra[0].swap(0, 1);
         assert!(invalid.binder().is_err());
