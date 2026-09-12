@@ -42,8 +42,23 @@ impl StyleTween {
     pub fn value<const N: usize>(&self, values: [f64; N]) -> f64 {
         self.weights.iter().zip(values).map(|(w, v)| w * v).sum()
     }
+    /// Allocation and layout targets use the destination style. Interpolated
+    /// values are only for presentation; feeding them back into app geometry
+    /// recreates child framebuffers throughout the transition.
+    pub fn target_value<const N: usize>(&self, values: [f64; N]) -> f64 {
+        values.get(self.target as usize).copied().unwrap_or(0.0)
+    }
+    /// The same mix taken at the tween's start.
+    pub fn from_value<const N: usize>(&self, values: [f64; N]) -> f64 {
+        self.from.iter().zip(values).map(|(w, v)| w * v).sum()
+    }
+    /// The eased progress of the running tween, 1 once settled: the
+    /// weights move from `from` to the target along this curve.
+    pub fn progress(&self) -> f64 {
+        self.elapsed * self.elapsed * (3.0 - 2.0 * self.elapsed)
+    }
     pub fn reserved_height(&self) -> f64 {
-        self.value([0.0, 0.0, 54.0, 34.0, 0.0])
+        self.target_value([0.0, 0.0, 54.0, 34.0, 0.0])
     }
     pub fn title_height(&self) -> f64 {
         self.value([0.0, 32.0, 34.0, 20.0, 22.0])
@@ -447,15 +462,53 @@ pub fn app_icon(id: &str) -> Ico {
         _ => Ico::Monitor,
     }
 }
-fn shelf_geometry(screen: Rect, style: &StyleTween, app_count: usize) -> Rect {
+/// The shelf rect for one mix of the per-style geometries.
+fn shelf_rect(screen: Rect, mix: impl Fn([f64; 5]) -> f64, app_count: usize) -> Rect {
     let dock_width = (((app_count + 1) as f64) * 62.0 + 20.0).min((screen.size.x - 24.0).max(1.0));
     let next_height = ((app_count + 1) as f64 * 56.0).min((screen.size.y - 48.0).max(1.0));
     rect(
-        screen.pos.x + style.value([8.0, (screen.size.x - dock_width) * 0.5, 0.0, 0.0, screen.size.x - 64.0]),
-        screen.pos.y + style.value([0.0, screen.size.y - 88.0, screen.size.y - 54.0, screen.size.y - 34.0, 40.0]),
-        style.value([32.0, dock_width, screen.size.x, screen.size.x, 56.0]),
-        style.value([0.0, 78.0, 54.0, 34.0, next_height]),
+        screen.pos.x + mix([8.0, (screen.size.x - dock_width) * 0.5, 0.0, 0.0, screen.size.x - 64.0]),
+        screen.pos.y + mix([0.0, screen.size.y - 88.0, screen.size.y - 54.0, screen.size.y - 34.0, 40.0]),
+        mix([32.0, dock_width, screen.size.x, screen.size.x, 56.0]),
+        mix([0.0, 78.0, 54.0, 34.0, next_height]),
     )
+}
+fn shelf_geometry(screen: Rect, style: &StyleTween, app_count: usize) -> Rect {
+    shelf_rect(screen, |values| style.value(values), app_count)
+}
+
+/// Where the shelf paints this frame. The NeXT dock stands at the right
+/// edge while every other shelf lies along the bottom; a tween between
+/// those orientations does not morph one rect (lerping width and height
+/// sweeps a screen-sized box across the desktop) but crossfades the two
+/// shelves in place: `bar` is the bottom shelf, `next` the dock, `mix` the
+/// dock's share. Same-orientation tweens keep morphing the single rect.
+struct ShelfLayout {
+    bar: Rect,
+    next: Option<Rect>,
+    mix: f64,
+}
+fn shelf_layout(screen: Rect, style: &StyleTween, app_count: usize) -> ShelfLayout {
+    let to_next = style.target == DesktopStyle::NextStep;
+    let from_next = style.from_value([0.0, 0.0, 0.0, 0.0, 1.0]) > 0.5;
+    if style.active() && to_next != from_next {
+        let from = shelf_rect(screen, |values| style.from_value(values), app_count);
+        let to = shelf_rect(screen, |values| style.target_value(values), app_count);
+        let mix = style.weights[4];
+        if to_next {
+            ShelfLayout { bar: from, next: Some(to), mix }
+        } else {
+            ShelfLayout { bar: to, next: Some(from), mix }
+        }
+    } else {
+        ShelfLayout { bar: shelf_geometry(screen, style, app_count), next: None, mix: 0.0 }
+    }
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let pos = dvec2(a.pos.x.min(b.pos.x), a.pos.y.min(b.pos.y));
+    let far = dvec2((a.pos.x + a.size.x).max(b.pos.x + b.size.x), (a.pos.y + a.size.y).max(b.pos.y + b.size.y));
+    Rect { pos, size: far - pos }
 }
 
 /// Center the icon and its running indicator as one group inside each dock cell.
@@ -468,7 +521,7 @@ fn mac_icon_box(cell: Rect, hover: f64) -> Rect {
 /// The compositor samples exactly the shelf it will paint this frame, including
 /// an interrupted style tween. Glass outside the dock cannot add a blur stack.
 fn dock_app_ids(state: &WmState) -> Vec<String> {
-    let mut apps: Vec<_> = crate::shell::launcher::apps()
+    let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
         .into_iter().filter(|app| !app.disabled).map(|app| app.id).collect();
     for client in state.layout.clients_on(state.layout.active) {
         if let Some(client) = state.clients.get(&client) {
@@ -479,11 +532,11 @@ fn dock_app_ids(state: &WmState) -> Vec<String> {
     apps
 }
 pub fn dock_bounds(state: &WmState, size: Vec2d) -> Rect {
-    shelf_geometry(rect(0.0,0.0,size.x,size.y), &state.style, dock_app_ids(state).len())
+    shelf_layout(rect(0.0,0.0,size.x,size.y), &state.style, dock_app_ids(state).len()).bar
 }
 pub fn dock_icon_bounds(state: &WmState, size: Vec2d, app: &str) -> Rect {
     let apps=dock_app_ids(state);
-    let dock=shelf_geometry(rect(0.0,0.0,size.x,size.y), &state.style, apps.len());
+    let dock=shelf_layout(rect(0.0,0.0,size.x,size.y), &state.style, apps.len()).bar;
     let slot=apps.iter().position(|id| id==&format!("apps.{app}")).map(|i|i+1).unwrap_or(0);
     let cell=(dock.size.x-20.0)/(apps.len()+1) as f64;
     mac_icon_box(rect(dock.pos.x+10.0+slot as f64*cell,dock.pos.y+6.0,cell,dock.size.y-12.0), 0.0)
@@ -518,7 +571,7 @@ impl Widget for DesktopShelf {
             }
             let opacity = (1.0 - t.weights[0]) as f32;
             if opacity > 0.001 && !style.mobile() {
-                let mut apps: Vec<_> = crate::shell::launcher::apps()
+                let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
                     .into_iter()
                     .filter(|a| !a.disabled)
                     .collect();
@@ -548,9 +601,9 @@ impl Widget for DesktopShelf {
                     }
                 }
                 let n = (apps.len() + 1).max(1) as f64;
-                let r = shelf_geometry(screen, t, apps.len());
-                let (x, y, w, h) = (r.pos.x, r.pos.y, r.size.x, r.size.y);
-                self.bounds = r;
+                let layout = shelf_layout(screen, t, apps.len());
+                let r = layout.bar;
+                self.bounds = layout.next.map_or(r, |next| union_rect(r, next));
                 // Window-backed Gaussian blur, sampled from the live desktop.
                 if t.weights[1] > 0.01 {
                     if let Some(mut glass) = self.glass.borrow_mut::<gauss_view::GaussRoundedView>()
@@ -576,19 +629,24 @@ impl Widget for DesktopShelf {
                 self.chrome.new_draw_call(cx);
                 self.chrome.pressed = 0.0;
                 self.chrome.selected = 0.0;
-                self.chrome.color = alpha(
-                    if style == DesktopStyle::Windows2000 {
-                        rgb(212, 208, 200)
-                    } else if dark {
-                        rgb(32, 32, 32)
-                    } else {
-                        rgb(234, 238, 245)
-                    },
-                    opacity * (1.0 - t.weights[1]) as f32,
-                );
+                let color = if style == DesktopStyle::Windows2000 {
+                    rgb(212, 208, 200)
+                } else if dark {
+                    rgb(32, 32, 32)
+                } else {
+                    rgb(234, 238, 245)
+                };
+                let bar_share = if layout.next.is_some() { 1.0 - layout.mix } else { 1.0 };
+                self.chrome.color = alpha(color, (opacity as f64 * (1.0 - t.weights[1]) * bar_share) as f32);
                 self.chrome.radius = t.value([0.0, 18.0, 0.0, 0.0, 0.0]) as f32;
                 self.chrome.bevel = t.weights[3] as f32;
                 self.chrome.draw_abs(cx, r);
+                if let Some(next) = layout.next {
+                    self.chrome.color = alpha(color, (opacity as f64 * layout.mix) as f32);
+                    self.chrome.radius = 0.0;
+                    self.chrome.bevel = 0.0;
+                    self.chrome.draw_abs(cx, next);
+                }
                 for style in [
                     DesktopStyle::Macos,
                     DesktopStyle::Windows,
@@ -600,6 +658,9 @@ impl Widget for DesktopShelf {
                         continue;
                     }
                     let hit_start = self.hits.len();
+                    // Each shelf lays out in its own rect while two crossfade.
+                    let place = if style == DesktopStyle::NextStep { layout.next.unwrap_or(r) } else { r };
+                    let (x, y, w, h) = (place.pos.x, place.pos.y, place.size.x, place.size.y);
                     if style == DesktopStyle::NextStep {
                         let cell = h / n;
                         self.button(cx, rect(x,y,w,cell), ShelfHit::Launcher, Ico::Menu, "Workspace", false, style, opacity);
@@ -730,5 +791,51 @@ impl Widget for DesktopShelf {
             }
             self.redraw(cx);
         }
+    }
+}
+
+/// The person's accessibility choices for the phone's glass and motion,
+/// read from `~/.makepad/wm/accessibility.splash` — a settings file, never
+/// an environment variable — in the same shape as `apps.splash`:
+/// `reduce_transparency: true` / `reduce_motion: true`, one per line.
+/// Reduce Transparency draws every glass surface opaque with a hairline;
+/// Reduce Motion makes presses and presents instant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Accessibility {
+    pub reduce_transparency: bool,
+    pub reduce_motion: bool,
+}
+
+impl Accessibility {
+    pub fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path).map(|text| Self::parse(&text)).unwrap_or_default()
+    }
+
+    pub fn parse(text: &str) -> Self {
+        let mut out = Accessibility::default();
+        for raw in text.lines() {
+            let line = raw.split("//").next().unwrap_or("").trim().trim_matches(|c| c == '{' || c == '}' || c == ',').trim();
+            let Some((key, value)) = line.split_once(':') else { continue };
+            let on = matches!(value.trim().trim_matches(',').trim().to_lowercase().as_str(), "true" | "on" | "1" | "yes");
+            match key.trim().to_lowercase().as_str() {
+                "reduce_transparency" => out.reduce_transparency = on,
+                "reduce_motion" => out.reduce_motion = on,
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::Accessibility;
+
+    #[test]
+    fn the_settings_file_reads_like_the_other_wm_files_and_defaults_off() {
+        let text = "// glass and motion\n{\n  reduce_transparency: true,\n  Reduce_Motion: on\n  nonsense\n}\n";
+        assert_eq!(Accessibility::parse(text), Accessibility { reduce_transparency: true, reduce_motion: true });
+        assert_eq!(Accessibility::parse("reduce_motion: false"), Accessibility::default());
+        assert_eq!(Accessibility::load(std::path::Path::new("/nonexistent/accessibility.splash")), Accessibility::default());
     }
 }

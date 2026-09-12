@@ -426,6 +426,9 @@ pub struct MenuModel {
     items: Vec<MenuItem>,
     /// The card top, frozen on the first keystroke or descent.
     pub frozen_top: Option<f64>,
+    /// What the `apps` provider may list (apps.rs); the host sets it from
+    /// its registry at startup.
+    pub launchable: crate::apps::Launchable,
 }
 
 impl Default for MenuModel {
@@ -441,6 +444,7 @@ impl Default for MenuModel {
             scroll: 0,
             items: Vec::new(),
             frozen_top: None,
+            launchable: Default::default(),
         }
     }
 }
@@ -453,7 +457,7 @@ impl MenuModel {
     /// `Menu.qml` searches every descendant of the open menu, so typing
     /// "vj" at the root has to find Apps > VJ. Which rows are LISTED is
     /// still the path's business — the search filter does that.
-    fn all_items(path: &str) -> Vec<MenuItem> {
+    fn all_items(path: &str, launchable: &crate::apps::Launchable) -> Vec<MenuItem> {
         let mut items = omarchy_tree();
         if path.starts_with("workspace") {
             for (id, label, kind) in [
@@ -478,7 +482,7 @@ impl MenuModel {
                 ("start.power","Shut Down…",MenuKind::Action,Ico::Power),
             ] {items.push(MenuItem::new(id,label,kind).icon(icon));}
         }
-        items.extend(launcher::apps());
+        items.extend(launcher::apps(launchable));
         items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
         for style in crate::desktop::DesktopStyle::ALL {
             items.push(MenuItem::new(&format!("desktop.{}",style.id()),style.label(),MenuKind::Action));
@@ -503,7 +507,7 @@ impl MenuModel {
         self.sel = 0;
         self.scroll = 0;
         self.frozen_top = None;
-        self.items = Self::all_items(path);
+        self.items = Self::all_items(path, &self.launchable);
         self.rebuild();
     }
 
@@ -521,7 +525,7 @@ impl MenuModel {
         self.filter.clear();
         self.sel = 0;
         self.scroll = 0;
-        self.items = Self::all_items(&self.path);
+        self.items = Self::all_items(&self.path, &self.launchable);
         self.rebuild();
     }
 
@@ -530,7 +534,7 @@ impl MenuModel {
         if let Some((path, sel)) = self.stack.pop() {
             self.path = path;
             self.filter.clear();
-            self.items = Self::all_items(&self.path);
+            self.items = Self::all_items(&self.path, &self.launchable);
             self.rebuild();
             self.sel = sel.min(self.rows.len().saturating_sub(1));
             return true;
@@ -545,7 +549,7 @@ impl MenuModel {
         self.path = parent;
         self.filter.clear();
         self.sel = 0;
-        self.items = Self::all_items(&self.path);
+        self.items = Self::all_items(&self.path, &self.launchable);
         self.rebuild();
         true
     }

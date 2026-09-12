@@ -26,11 +26,29 @@ pub fn wall_now() -> f64 {
     Cx::time_now()
 }
 
-/// Whether this build can host apps as child PROCESSES: a hub to accept
-/// them, a spawner to start them, a pool to keep them warm. The web
-/// build hosts its linked modules in-process and nothing else.
+/// Whether this PLATFORM can host apps as child PROCESSES: a hub to accept
+/// them, a spawner to start them, a shared framebuffer per tile, a pool to
+/// keep them warm. The web, iOS, tvOS, Android and OHOS have none of that:
+/// those builds host their linked modules in-process and nothing else.
+/// Whether a build that could host processes WANTS to is the build's say
+/// (`WmBuild::modules_only`, asked through `App::processes`).
 pub const fn processes_available() -> bool {
-    cfg!(not(target_arch = "wasm32"))
+    cfg!(not(any(
+        target_arch = "wasm32",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "android",
+        target_env = "ohos"
+    )))
+}
+
+/// Whether this build runs ON a phone: the OS draws the status bar, the
+/// island and the home indicator, owns rotation and appearance, and
+/// reports the safe-area insets the shell lays out against
+/// (`mobile::PhoneChrome`). A desktop window playing a phone (the iOS and
+/// Android skins) draws all of that itself.
+pub const fn device_phone() -> bool {
+    cfg!(any(target_os = "ios", target_os = "android"))
 }
 
 /// Hand a child process a setting through its environment (the theme
@@ -50,6 +68,9 @@ pub const STORAGE: &str = "wm";
 
 /// The key the chosen theme's name is kept under.
 pub const THEME_KEY: &str = "theme";
+/// The key the home page's arranged icon order is kept under (mobile_tiles
+/// `HomeOrder::to_document`).
+pub const HOME_ORDER_KEY: &str = "home.order";
 
 /// Remember the theme the person chose: the omarchy-style state file
 /// beside the themes natively (what the next start and every child reads),
@@ -116,7 +137,16 @@ mod tests {
 
     #[test]
     fn the_desk_knows_where_it_runs() {
-        assert_eq!(processes_available(), cfg!(not(target_arch = "wasm32")));
+        assert_eq!(
+            processes_available(),
+            cfg!(not(any(
+                target_arch = "wasm32",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "android",
+                target_env = "ohos"
+            )))
+        );
         assert!(now() >= 0.0);
     }
 }

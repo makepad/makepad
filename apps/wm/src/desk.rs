@@ -391,6 +391,11 @@ pub struct WmState {
     /// frame, and every tile snaps to the layout like a dragged one — a
     /// tween on top of the slide would lag it (see `dragging`).
     pub pane_sliding: bool,
+    /// What the shell surfaces may offer to launch (apps.rs): the linked
+    /// modules, and the checkout's apps where this build hosts processes.
+    pub launchable: crate::apps::Launchable,
+    /// Reduce Transparency / Reduce Motion (desktop.rs `Accessibility`).
+    pub accessibility: crate::desktop::Accessibility,
 }
 
 impl WmState {
@@ -525,11 +530,12 @@ script_mod! {
         terminal_glass: GaussRoundedView {
             width: Fill height: Fill show_bg: true
             draw_bg +: {
-                blur_level: 3.0
+                blur_level: 3.0 edge_blur_level: 3.0
                 corner_radius: 0.0
                 tint_alpha: 0.0 surface_alpha: 1.0
-                lensing_strength: 0.0 specular_strength: 0.0 noise_strength: 0.0
-                border_width: 0.0 border_alpha: 0.0 shadow_radius: 0.0
+                lensing_effect: 0.0 lensing_strength: 0.0 specular_strength: 0.0 noise_strength: 0.0
+                rim_alpha: 0.0 inner_shadow_alpha: 0.0
+                border_width: 0.0 border_alpha: 0.0 shadow_radius: 0.0 shadow_sigma: 0.0
                 shadow_color: #0000
             }
         }
@@ -1072,6 +1078,16 @@ impl WmDesk {
         moving
     }
 
+    /// Remove these dock warps; a warp's capture forgets its gauss state
+    /// before its pass slot can be reused.
+    pub(super) fn drop_dock_warps(&mut self, cx: &mut Cx, clients: impl IntoIterator<Item = ClientId>) {
+        for client in clients {
+            if let Some(frame) = self.dock_warps.remove(&client).and_then(|warp| warp.frame) {
+                frame.forget(cx);
+            }
+        }
+    }
+
     /// Draw one tile: the border ring (nothing else — the wallpaper stays
     /// visible behind the child, which composites itself at the window
     /// opacity), plus the child at the ring's inset.
@@ -1216,13 +1232,17 @@ impl WmDesk {
 
         // The child is configured at the SETTLED size (resize-sync), snapped
         // the same way so its swapchain matches the rect it will be drawn at.
+        // Chrome may still be morphing, but its intermediate border/taskbar
+        // dimensions must never become another child resize request.
         let settled = snap_to_device(Self::lrect_to_rect(target), dpi);
+        let settled_inset = self.style.target_value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0]);
+        let settled_resize_bar = self.style.target_value([0.0, 0.0, 0.0, 0.0, 8.0]);
         let mut settled_inner = snap_child_rect(
             Rect {
-                pos: settled.pos + dvec2(inset, inset),
+                pos: settled.pos + dvec2(settled_inset, settled_inset),
                 size: dvec2(
-                    (settled.size.x - inset * 2.0).max(1.0),
-                    (settled.size.y - inset * 2.0 - resize_bar).max(1.0),
+                    (settled.size.x - settled_inset * 2.0).max(1.0),
+                    (settled.size.y - settled_inset * 2.0 - settled_resize_bar).max(1.0),
                 ),
             },
             dpi,
@@ -1644,8 +1664,14 @@ impl Widget for WmDesk {
                     if let Some(slot)=state.clients.get(&client) {warp.dock=crate::desktop::dock_icon_bounds(state,size,&slot.app);}
                 }
             }
-            self.dock_warps.retain(|client,warp|state.clients.contains_key(client) && (warp.minimized || warp.active()));
-        } else { self.dock_warps.clear(); }
+            let done: Vec<ClientId> = self.dock_warps.iter()
+                .filter(|(client,warp)| !(state.clients.contains_key(client) && (warp.minimized || warp.active())))
+                .map(|(client,_)| *client).collect();
+            self.drop_dock_warps(cx, done);
+        } else {
+            let all: Vec<ClientId> = self.dock_warps.keys().copied().collect();
+            self.drop_dock_warps(cx, all);
+        }
         for client in &self.minimized {
             if let Some(warp)=self.dock_warps.get(client) {
                 let r=warp.source;
@@ -1751,7 +1777,19 @@ impl Widget for WmDesk {
         // when the workspace returns.
         self.anims
             .retain(|client, anim| live.contains(client) || anim.close_t.is_some());
-        self.desktop_frames.retain(|client, _| self.anims.contains_key(client));
+        // A dropped capture also leaves the gauss request table, which is
+        // keyed by its pass slot and would otherwise greet the next capture.
+        let dropped: Vec<ClientId> = self
+            .desktop_frames
+            .keys()
+            .filter(|client| !self.anims.contains_key(client))
+            .copied()
+            .collect();
+        for client in dropped {
+            if let Some(frame) = self.desktop_frames.remove(&client) {
+                frame.forget(cx);
+            }
+        }
 
         // Closing tiles paint under the live ones.
         let closing: Vec<ClientId> = self

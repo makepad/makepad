@@ -10,18 +10,20 @@ use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
     RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
 };
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use makepad_studio_protocol::HostToAppGpu;
 use makepad_widgets::makepad_micro_serde::SerBin;
+use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+use makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_from_host_swapchain;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use makepad_widgets::makepad_platform::shared_framebuf::{
-    shared_swapchain_from_host_swapchain, HostSwapchain,
+    export_host_swapchain, ExportedHostSwapchain, LinuxSwapchainSender,
 };
 use makepad_widgets::*;
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use std::sync::mpsc::Receiver;
+use makepad_widgets::makepad_platform::shared_framebuf::aux_chan::ExternalEndpointListener;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -131,6 +133,15 @@ struct RunTarget {
     window_id: usize,
 }
 
+/// One GPU renderer-replacement transaction for this tile. Native Linux only.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+struct GpuTransition {
+    id: u64,
+    epoch: u64,
+    candidate: Option<HostSwapchain>,
+    queued: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum MpRunViewAction {
     ForwardToApp {
@@ -140,6 +151,13 @@ pub enum MpRunViewAction {
     /// The user clicked this tile (the WM moves focus to it).
     Clicked {
         client: ClientId,
+    },
+    /// A module instance's root panicked under this tile (in an event or
+    /// a draw). The tile has let go of the root and shows "crashed"; the
+    /// WM tears the instance down in the host's order.
+    Crashed {
+        client: ClientId,
+        message: String,
     },
     #[default]
     None,
@@ -196,6 +214,21 @@ pub struct MpRunView {
     first_present_at: Option<f64>,
     #[rust]
     tick_timer: Timer,
+    /// The tile tick's period: the unit of the Tick pacing below.
+    #[rust]
+    tick_period: f64,
+    /// When the `Tick` the child has not acknowledged (`TickDone`) yet
+    /// went out. The timer sends the next Tick only once this clears, so
+    /// a slow child never has more than one frame's ticks and pointer
+    /// moves queued behind it; a child that never acknowledges (an older
+    /// binary, a GPU handoff pause) is pumped again after `tick_fallback`.
+    #[rust]
+    tick_outstanding: Option<f64>,
+    /// The pointer's latest position since the last Tick went out: the
+    /// child sees at most one MouseMove per frame, flushed ahead of the
+    /// Tick or of any Down/Up/Scroll so their order holds.
+    #[rust]
+    pending_move: Option<RemoteMouseMove>,
     #[rust]
     last_rect: Rect,
     #[rust]
@@ -234,20 +267,48 @@ pub struct MpRunView {
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    aux_chan_host_endpoint: Option<aux_chan::HostEndpoint>,
+    outbox: Option<LinuxSwapchainSender>,
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    aux_chan_rx: Option<Receiver<Result<aux_chan::HostEndpoint, String>>>,
+    aux_chan_listener: Option<ExternalEndpointListener>,
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    aux_chan_task: Option<TaskHandle<()>>,
+    aux_chan_deadline: f64,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    next_export_tag: u64,
+    /// In-flight descriptor batch: tag and optional GPU (transition, epoch).
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    inflight: Option<(u64, Option<(u64, u64)>)>,
+    /// `try_send` Full: the same batch, retried by ownership.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    pending: Option<(u64, ExportedHostSwapchain)>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    gpu_transition: Option<GpuTransition>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    frozen: Option<u64>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    retired_swapchain: Option<HostSwapchain>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    transport_error: Option<String>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    outbox_full_logged: bool,
 }
 
 impl ScriptHook for MpRunView {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         vm.with_cx_mut(|cx| {
             self.draw_app.set_texture(0, &cx.null_texture());
-            self.tick_timer = cx.start_interval(0.008);
+            // 240 Hz direct sessions must not be throttled by the old 125 Hz poll.
+            self.tick_period = if matches!(cx.os_type(), OsType::LinuxDirect) { 1.0 / 240.0 } else { 0.008 };
+            self.tick_timer = cx.start_interval(self.tick_period);
             self.draw_app
                 .draw_vars
                 .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
@@ -264,12 +325,56 @@ impl MpRunView {
         cx.widget_action(self.uid, MpRunViewAction::ForwardToApp { client, msg_bin });
     }
 
+    /// A press, release or scroll: the pointer position it happened at
+    /// goes out first, in the same batch, so the child sees the move
+    /// before the edge exactly as the host did.
+    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
+        let mut msgs = Vec::with_capacity(2);
+        if let Some(mv) = self.pending_move.take() {
+            msgs.push(StudioToApp::MouseMove(mv));
+        }
+        msgs.push(msg);
+        self.emit_to_app(cx, client, msgs);
+    }
+
+    /// How long a Tick may stay unacknowledged before the child is pumped
+    /// anyway: four tick periods, never under 50 ms, so a child that does
+    /// not speak `TickDone` still runs at 20 Hz.
+    fn tick_fallback(&self) -> f64 {
+        (self.tick_period * 4.0).max(0.050)
+    }
+
+    /// The child consumed a Tick: the next one may go out on the next
+    /// timer beat.
+    pub fn tick_done(&mut self, _cx: &mut Cx) {
+        if let Some(target) = self.current_target {
+            trace_host(&format!("ack c{}", target.client));
+        }
+        self.tick_outstanding = None;
+    }
+
     fn set_target(&mut self, cx: &mut Cx, target: Option<RunTarget>) {
         if self.current_target == target {
             return;
         }
         let had_target = self.current_target.is_some();
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        {
+            // Drop the outbox first: Drop shuts the aux endpoint before the
+            // client socket is replaced.
+            self.outbox = None;
+            self.aux_chan_listener = None;
+            self.inflight = None;
+            self.pending = None;
+            self.gpu_transition = None;
+            self.frozen = None;
+            self.retired_swapchain = None;
+            self.transport_error = None;
+            self.outbox_full_logged = false;
+        }
         self.current_target = target;
+        self.tick_outstanding = None;
+        self.pending_move = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.swapchain = None;
@@ -279,14 +384,6 @@ impl MpRunView {
         self.first_present_at = None;
         self.app_ready_for_swapchain = false;
         self.ime_pos = None;
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        {
-            self.aux_chan_host_endpoint = None;
-            self.aux_chan_rx = None;
-            if let Some(task) = self.aux_chan_task.take() {
-                task.cancel();
-            }
-        }
         self.last_rect = Rect::default();
         self.last_dpi_factor = 0.0;
         self.bootstrap_pending = target.is_some();
@@ -346,17 +443,10 @@ impl MpRunView {
             return false;
         };
 
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if let Some(buffer) = drawn.software_buffer.as_ref() {
-            cx.upload_presentable_image_software_buffer(
-                &drawn.texture,
-                swapchain.alloc_width,
-                swapchain.alloc_height,
-                buffer.as_bytes(),
-            );
-        }
-
-        draw_app.set_texture(0, &drawn.texture);
+        let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
+            return false;
+        };
+        draw_app.set_texture(0, &texture);
         draw_app.draw_vars.set_dyn_instance(
             cx,
             id!(tex_scale),
@@ -383,7 +473,7 @@ impl MpRunView {
         #[cfg(not(target_os = "windows"))]
         draw_app
             .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
+            .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
         // Linux's software fallback is copied row-for-row from a top-left
         // framebuffer and needs the historical shader flip. A GPU-shared
         // DMA-BUF texture already has the orientation expected by the GL
@@ -437,12 +527,12 @@ impl MpRunView {
     }
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn setup_aux_chan(&mut self, cx: &mut Cx, hub_port: u16, client: ClientId) {
-        if self.aux_chan_host_endpoint.is_some() || self.aux_chan_rx.is_some() {
+    fn setup_aux_chan(&mut self, _cx: &mut Cx, hub_port: u16, client: ClientId) {
+        if self.outbox.is_some() || self.aux_chan_listener.is_some() {
             return;
         }
         let studio_addr = format!("http://127.0.0.1:{}", hub_port);
-        let listener = match aux_chan::ExternalEndpointListener::new_for_studio(
+        let listener = match ExternalEndpointListener::new_for_studio(
             &studio_addr,
             &client.to_string(),
         ) {
@@ -452,41 +542,137 @@ impl MpRunView {
                 return;
             }
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        match cx.task_pool().submit(Lane::Heavy, move || {
-            let result = listener.accept_host_endpoint().map_err(|err| err.to_string());
-            let _ = tx.send(result);
-        }) {
-            Ok(task) => {
-                self.aux_chan_rx = Some(rx);
-                self.aux_chan_task = Some(task);
+        // The listener is nonblocking. Poll it on the existing view timer;
+        // a dormant child must not monopolize the shared heavy worker.
+        self.aux_chan_listener = Some(listener);
+        self.aux_chan_deadline = crate::host::now() + 120.0;
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fn poll_aux_chan(&mut self, cx: &mut Cx) {
+        let Some(listener) = &self.aux_chan_listener else {
+            return;
+        };
+        match listener.try_accept_host_endpoint() {
+            Ok(Some(endpoint)) => {
+                self.aux_chan_listener = None;
+                match LinuxSwapchainSender::start(&cx.thread_spawner(), endpoint) {
+                    Ok(sender) => self.outbox = Some(sender),
+                    Err(error) => {
+                        log!("wm aux_chan outbox failed: {error}");
+                        self.transport_error = Some(error);
+                    }
+                }
             }
-            Err(error) => log!("wm aux_chan accept could not be queued: {error}"),
+            Err(error) => {
+                log!("wm aux_chan accept failed: {error}");
+                self.transport_error = Some(error.to_string());
+                self.aux_chan_listener = None;
+            }
+            Ok(None) if crate::host::now() >= self.aux_chan_deadline => {
+                let error = "timeout while waiting for child aux-channel connection";
+                log!("wm aux_chan accept failed: {error}");
+                self.transport_error = Some(error.into());
+                self.aux_chan_listener = None;
+            }
+            Ok(None) => {}
         }
     }
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn poll_aux_chan(&mut self) {
-        let Some(rx) = &self.aux_chan_rx else {
-            return;
+    fn export_busy(&self) -> bool {
+        self.pending.is_some() || self.inflight.is_some()
+    }
+
+    /// Queue one exported batch. One transaction at a time: the caller must
+    /// not export while `export_busy`. Full retains the batch for retry.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fn queue_exported(
+        &mut self,
+        batch: ExportedHostSwapchain,
+        kind: Option<(u64, u64)>,
+    ) -> Result<(), String> {
+        let tag = self.next_export_tag;
+        self.next_export_tag = self.next_export_tag.wrapping_add(1);
+        self.inflight = Some((tag, kind));
+        let Some(outbox) = self.outbox.as_mut() else {
+            self.inflight = None;
+            return Err("GPU descriptor outbox is not ready".into());
         };
-        match rx.try_recv() {
-            Ok(Ok(endpoint)) => {
-                self.aux_chan_host_endpoint = Some(endpoint);
-                self.aux_chan_rx = None;
+        match outbox.try_send(tag, batch) {
+            Ok(()) => Ok(()),
+            Err(batch) => {
+                if let Some(error) = outbox.error().map(str::to_string) {
+                    self.inflight = None;
+                    self.transport_error = Some(error.clone());
+                    Err(error)
+                } else {
+                    self.pending = Some((tag, batch));
+                    if !self.outbox_full_logged {
+                        self.outbox_full_logged = true;
+                        log!("wm swapchain outbox full; retrying the same batch");
+                    }
+                    Ok(())
+                }
             }
-            Ok(Err(error)) => {
-                log!("wm aux_chan accept failed: {error}");
-                self.aux_chan_rx = None;
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.aux_chan_rx = None;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
         }
-        if let Some(mut task) = self.aux_chan_task.take() {
-            let _ = task.try_take();
+    }
+
+    /// Retry a Full batch and collect completed descriptor metadata. Always
+    /// emit completed tags: the FDs are already in the child's ordered stream.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fn take_outbox_msgs(&mut self) -> Vec<StudioToApp> {
+        let mut msgs = Vec::new();
+        let Some(outbox) = self.outbox.as_mut() else {
+            return msgs;
+        };
+        if let Some((tag, batch)) = self.pending.take() {
+            match outbox.try_send(tag, batch) {
+                Ok(()) => {}
+                Err(batch) => {
+                    if let Some(error) = outbox.error().map(str::to_string) {
+                        self.inflight = None;
+                        self.transport_error = Some(error);
+                    } else {
+                        self.pending = Some((tag, batch));
+                    }
+                }
+            }
         }
+        let completed = outbox.poll();
+        let sender_error = outbox.error().map(str::to_string);
+        for sent in completed {
+            let kind = match self.inflight {
+                Some((tag, kind)) if tag == sent.tag => {
+                    self.inflight = None;
+                    kind
+                }
+                _ => {
+                    self.transport_error = Some("GPU descriptor completion tag mismatch".into());
+                    // Unknown metadata cannot safely describe the ordered
+                    // FD stream. Close this transport, rather than rebinding
+                    // descriptors to an ordinary swapchain by accident.
+                    self.outbox = None;
+                    self.pending = None;
+                    self.inflight = None;
+                    return msgs;
+                }
+            };
+            msgs.push(match kind {
+                Some((transition, transport_epoch)) => StudioToApp::Gpu(HostToAppGpu::Swapchain {
+                    transition,
+                    transport_epoch,
+                    swapchain: sent.swapchain,
+                }),
+                None => StudioToApp::Swapchain(sent.swapchain),
+            });
+        }
+        if let Some(error) = sender_error {
+            if self.transport_error.is_none() {
+                self.transport_error = Some(error);
+            }
+        }
+        msgs
     }
 
     fn ensure_swapchain_for_rect(
@@ -496,6 +682,10 @@ impl MpRunView {
         dpi_factor: f64,
         target: RunTarget,
     ) {
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        if self.frozen.is_some() {
+            return;
+        }
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
         }
@@ -574,16 +764,25 @@ impl MpRunView {
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
-            self.poll_aux_chan();
-            let Some(host_endpoint) = self.aux_chan_host_endpoint.as_ref() else {
-                return outbound;
-            };
-            if let Some(swapchain) = self.swapchain.as_mut() {
-                match shared_swapchain_from_host_swapchain(swapchain, cx, host_endpoint) {
-                    Ok(shared) => outbound.push(StudioToApp::Swapchain(shared)),
-                    Err(err) => log!("wm swapchain share failed: {:?}", err),
+            self.poll_aux_chan(cx);
+            outbound.extend(self.take_outbox_msgs());
+            if self.outbox.is_some() && !self.export_busy() {
+                let exported = self.swapchain.as_mut().map(|swapchain| export_host_swapchain(swapchain, cx));
+                match exported {
+                    Some(Ok(batch)) => {
+                        if let Err(error) = self.queue_exported(batch, None) {
+                            log!("wm swapchain export queue failed: {error}");
+                        }
+                    }
+                    Some(Err(err)) => {
+                        let error = format!("{err:?}");
+                        log!("wm swapchain export failed: {error}");
+                        self.transport_error = Some(error);
+                    }
+                    None => {}
                 }
             }
+            outbound.extend(self.take_outbox_msgs());
         }
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
         {
@@ -635,6 +834,7 @@ impl MpRunView {
             self.set_target(cx, Some(target));
         }
         self.app_ready_for_swapchain = true;
+        self.tick_outstanding = None;
         self.present_ok_count = 0;
         self.first_present_at = None;
         self.bootstrap_pending = true;
@@ -649,6 +849,153 @@ impl MpRunView {
 
     pub fn client(&self) -> Option<ClientId> {
         self.current_target.map(|t| t.client)
+    }
+
+    /// A hosted window may freeze only after bootstrap has produced a frame.
+    /// Freezing earlier would suppress the geometry/bootstrap it still needs.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_window_id(&self) -> Option<usize> {
+        (self.app_ready_for_swapchain
+            && self.present_ok_count > 0
+            && self.outbox.is_some()
+            && self.gpu_error().is_none())
+            .then(|| self.current_target.map(|t| t.window_id))
+            .flatten()
+    }
+
+    /// Freeze ordinary Tick/bootstrap and swapchain resize. Last rect, DPI,
+    /// and displayed texture stay. In-flight descriptor metadata still
+    /// drains through the outbox.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_freeze(&mut self, id: u64) {
+        match self.frozen {
+            Some(frozen) if frozen == id => {}
+            Some(_) => {
+                self.transport_error = Some("GPU freeze id mismatch".into());
+            }
+            None => {
+                self.frozen = Some(id);
+            }
+        }
+    }
+
+    /// Export a candidate swapchain from the prepared renderer. `Ok(false)`
+    /// means accept or a previous export is not ready yet; retry. Errors do
+    /// not drop the active swapchain.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_prepare(&mut self, cx: &mut Cx, id: u64, epoch: u64) -> Result<bool, String> {
+        if self.frozen != Some(id) {
+            return Err("GPU prepare without matching freeze".into());
+        }
+        if let Some(transition) = &self.gpu_transition {
+            if transition.id != id || transition.epoch != epoch {
+                return Err("GPU prepare transport epoch mismatch".into());
+            }
+            if transition.queued { return Ok(true); }
+        }
+        self.poll_aux_chan(cx);
+        if self.outbox.is_none() || self.export_busy() {
+            return Ok(false);
+        }
+        if !self.app_ready_for_swapchain {
+            return Ok(false);
+        }
+        if self.last_rect.size.x <= 0.0
+            || self.last_rect.size.y <= 0.0
+            || !(self.last_dpi_factor.is_finite() && self.last_dpi_factor > 0.0)
+        {
+            return Ok(false);
+        }
+        let Some(target) = self.current_target else {
+            return Err("GPU prepare has no client window".into());
+        };
+        let alloc_width = ((self.last_rect.size.x * self.last_dpi_factor).ceil() as u32).max(1);
+        let alloc_height = ((self.last_rect.size.y * self.last_dpi_factor).ceil() as u32).max(1);
+        let mut candidate = HostSwapchain::new(target.window_id, alloc_width, alloc_height, cx);
+        match export_host_swapchain(&mut candidate, cx) {
+            Ok(batch) => {
+                self.queue_exported(batch, Some((id, epoch)))?;
+                self.gpu_transition = Some(GpuTransition {
+                    id,
+                    epoch,
+                    candidate: Some(candidate),
+                    queued: true,
+                });
+                Ok(true)
+            }
+            Err(err) => {
+                let error = format!("{err:?}");
+                self.transport_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Install the queued candidate as the active swapchain. Stay frozen
+    /// until `gpu_retire`. The last displayed texture is left on `draw_app`.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_commit(&mut self, cx: &mut Cx, id: u64) -> Result<(), String> {
+        let Some(transition) = self.gpu_transition.as_mut() else {
+            return Err("GPU commit without prepared candidate".into());
+        };
+        if transition.id != id || !transition.queued {
+            return Err("GPU commit requires a queued candidate".into());
+        }
+        if self.frozen != Some(id) {
+            return Err("GPU commit without matching freeze".into());
+        }
+        let candidate = transition
+            .candidate
+            .take()
+            .ok_or_else(|| "GPU commit missing candidate swapchain".to_string())?;
+        self.retired_swapchain = self.swapchain.take();
+        self.swapchain = Some(candidate);
+        self.last_swapchain_with_completed_draws = None;
+        self.pending_draw = None;
+        // Preserve the displayed old frame until the first new-generation
+        // present, without showing startup chrome or replaying its fade.
+        self.bootstrap_pending = false;
+        self.bootstrap_tick_count = 0;
+        self.redraw(cx);
+        Ok(())
+    }
+
+    /// Drop the retired generation and unfreeze. Ordinary Tick resumes.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_retire(&mut self, cx: &mut Cx, id: u64) {
+        let matches = self.frozen == Some(id)
+            || self.gpu_transition.as_ref().is_some_and(|t| t.id == id);
+        if !matches {
+            self.transport_error = Some("GPU retire id mismatch".into());
+            return;
+        }
+        self.retired_swapchain = None;
+        self.gpu_transition = None;
+        self.frozen = None;
+        self.redraw(cx);
+    }
+
+    /// Drop the candidate, unfreeze the old active swapchain, and keep
+    /// draining any in-flight descriptor metadata. Terminal transport
+    /// errors are not retried as a reconnect.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_cancel(&mut self, cx: &mut Cx, id: u64) {
+        let matches = self.frozen == Some(id)
+            || self.gpu_transition.as_ref().is_some_and(|t| t.id == id);
+        if !matches {
+            self.transport_error = Some("GPU cancel id mismatch".into());
+            return;
+        }
+        self.gpu_transition = None;
+        self.frozen = None;
+        self.redraw(cx);
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub fn gpu_error(&self) -> Option<&str> {
+        self.transport_error
+            .as_deref()
+            .or_else(|| self.outbox.as_ref().and_then(|sender| sender.error()))
     }
 
     pub fn set_target_size(&mut self, size: Option<Vec2d>) {
@@ -796,9 +1143,7 @@ impl Widget for MpRunView {
             };
             self.ensure_swapchain_for_rect(cx, config_rect, dpi_factor, target);
             if let Some(presentable_draw) = self.pending_draw {
-                if self.try_present_draw(cx, presentable_draw) {
-                    self.pending_draw = None;
-                }
+                self.set_presentable_draw(cx, presentable_draw);
             }
         }
 
@@ -907,16 +1252,46 @@ impl Widget for MpRunView {
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
                 if let Some(target) = target {
-                    trace_host(&format!("tick c{}", target.client));
                     let mut msgs = Vec::new();
-                    let should_bootstrap = self.present_ok_count == 0 || self.bootstrap_pending;
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    {
+                        self.poll_aux_chan(cx);
+                        msgs.extend(self.take_outbox_msgs());
+                    }
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    let frozen = self.frozen.is_some();
+                    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+                    let frozen = false;
+                    let should_bootstrap = !frozen && (self.present_ok_count == 0 || self.bootstrap_pending);
                     if should_bootstrap {
                         self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
                         if self.bootstrap_tick_count == 1 || self.bootstrap_tick_count % 15 == 0 {
                             msgs.extend(self.build_bootstrap_msgs(cx, target));
                         }
                     }
-                    msgs.push(StudioToApp::Tick);
+                    if !frozen {
+                        let now = crate::host::now();
+                        let due = match self.tick_outstanding {
+                            None => true,
+                            Some(sent_at) if now - sent_at >= self.tick_fallback() => {
+                                trace_host(&format!(
+                                    "tick-fallback c{} {:.1}ms",
+                                    target.client,
+                                    (now - sent_at) * 1000.0
+                                ));
+                                true
+                            }
+                            Some(_) => false,
+                        };
+                        if due {
+                            trace_host(&format!("tick c{}", target.client));
+                            if let Some(mv) = self.pending_move.take() {
+                                msgs.push(StudioToApp::MouseMove(mv));
+                            }
+                            msgs.push(StudioToApp::Tick);
+                            self.tick_outstanding = Some(now);
+                        }
+                    }
                     self.emit_to_app(cx, target.client, msgs);
                 }
             }
@@ -950,48 +1325,42 @@ impl Widget for MpRunView {
                         },
                     );
                     self.redraw(cx);
-                    self.emit_to_app(
+                    self.emit_after_pending_move(
                         cx,
                         target.client,
-                        vec![StudioToApp::MouseDown(RemoteMouseDown {
+                        StudioToApp::MouseDown(RemoteMouseDown {
                             button_raw_bits: Self::default_mouse_button(&e.device).bits(),
                             x: local.x,
                             y: local.y,
                             time: e.time,
                             modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
+                        }),
                     );
                 }
             }
             Hit::FingerMove(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
                     trace_host("mm");
-                    self.emit_to_app(
-                        cx,
-                        target.client,
-                        vec![StudioToApp::MouseMove(RemoteMouseMove {
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
+                    // Held until the next Tick (or the next edge): one
+                    // position per frame is all a frame can show.
+                    self.pending_move = Some(RemoteMouseMove {
+                        x: local.x,
+                        y: local.y,
+                        time: e.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                    });
                 }
             }
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {
                 self.is_hovered = true;
                 cx.set_cursor(self.remote_cursor);
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
-                        cx,
-                        target.client,
-                        vec![StudioToApp::MouseMove(RemoteMouseMove {
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
+                    self.pending_move = Some(RemoteMouseMove {
+                        x: local.x,
+                        y: local.y,
+                        time: e.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                    });
                 }
             }
             Hit::FingerHoverOut(_) => {
@@ -1000,25 +1369,25 @@ impl Widget for MpRunView {
             }
             Hit::FingerUp(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
+                    self.emit_after_pending_move(
                         cx,
                         target.client,
-                        vec![StudioToApp::MouseUp(RemoteMouseUp {
+                        StudioToApp::MouseUp(RemoteMouseUp {
                             button_raw_bits: Self::default_mouse_button(&e.device).bits(),
                             x: local.x,
                             y: local.y,
                             time: e.time,
                             modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
+                        }),
                     );
                 }
             }
             Hit::FingerScroll(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
+                    self.emit_after_pending_move(
                         cx,
                         target.client,
-                        vec![StudioToApp::Scroll(RemoteScroll {
+                        StudioToApp::Scroll(RemoteScroll {
                             is_mouse: e.device.is_mouse(),
                             time: e.time,
                             x: local.x,
@@ -1026,7 +1395,7 @@ impl Widget for MpRunView {
                             sx: e.scroll.x,
                             sy: e.scroll.y,
                             modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
+                        }),
                     );
                 }
             }
