@@ -8649,11 +8649,15 @@ impl Tweaker {
                             height: Fit
                             flow: Right
                             align: Align{x: 0.0 y: 0.5}
-                            target_label := FabLabelSmall {
+                            target_wrap := View {
                                 width: Fill
-                                text: ""
-                                max_lines: 1
-                                text_overflow: TextOverflow.Ellipsis
+                                height: Fit
+                                target_label := FabLabelSmall {
+                                    width: Fill
+                                    text: ""
+                                    max_lines: 1
+                                    text_overflow: TextOverflow.Ellipsis
+                                }
                             }
                             prompt_status := FabLabelSmall {
                                 width: Fit
@@ -9371,7 +9375,7 @@ impl Tweaker {
             let label = sidebar
                 .child(live_id!(prompt_row))
                 .child(live_id!(prompt_bar))
-                .child(live_id!(target_label));
+                .child(live_id!(target_wrap));
             if let Some(r) = hit(cx, &label, abs) {
                 return Some(place(r, &self.target_tip));
             }
@@ -10846,7 +10850,9 @@ impl Tweaker {
                     }
                 };
                 bar.child(live_id!(prompt_status)).set_text(cx, &status);
-                bar.child(live_id!(target_label)).set_text(cx, &self.target_line);
+                bar.child(live_id!(target_wrap))
+                    .child(live_id!(target_label))
+                    .set_text(cx, &self.target_line);
                 let field = row.child(live_id!(prompt_field));
                 self.prompt_field_uid = field.widget_uid().0;
                 if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
