@@ -519,7 +519,7 @@ Metal skips drawing after shader compilation errors, and readbacks can report de
 Vulkan is configuration gated; gpusim (the CPU simulated-GPU backend, formerly "headless") has a separate software renderer.
 A universal render thread and GPU memory ceiling are unknown."""
 lane = "render"
-refs = ["platform/src/os/apple/metal.rs", "platform/src/os/windows/d3d11.rs", "platform/src/os/linux/opengl.rs", "platform/src/os/linux/mod.rs", "platform/src/os/web/web_gl.rs", "platform/src/os/headless/mod.rs", "platform/src/os/apple/macos/macos.rs", "platform/src/os/windows/windows.rs", "platform/src/os/linux/x11/linux_x11.rs", "platform/src/os/web/web.rs"]
+refs = ["platform/src/os/apple/metal.rs", "platform/src/os/windows/d3d11.rs", "platform/src/os/linux/opengl.rs", "platform/src/os/linux/mod.rs", "platform/src/os/web/web_gl.rs", "platform/src/os/gpusim/mod.rs", "platform/src/os/apple/macos/macos.rs", "platform/src/os/windows/windows.rs", "platform/src/os/linux/x11/linux_x11.rs", "platform/src/os/web/web.rs"]
 
 [nodes.memory_budget]
 kind = "memory"
