@@ -1107,11 +1107,11 @@ impl AudioUnitAccess {
                                     if channel_count > 0 {
                                         input_channels = channel_count as usize;
                                     }
-                                    crate::log!(
-                                        "voice input: native format {}Hz {}ch",
-                                        stream_desc.mSampleRate,
-                                        input_channels
-                                    );
+                                    // crate::log!(
+                                    //     "voice input: native format {}Hz {}ch",
+                                    //     stream_desc.mSampleRate,
+                                    //     input_channels
+                                    // );
                                 }
                             }
                         }
@@ -1176,9 +1176,9 @@ impl AudioUnitAccess {
                                     std::mem::size_of::<DuckingConfig>() as u32,
                                 );
                                 if status == 0 {
-                                    crate::log!(
-                                        "voice input: other-audio ducking level {level} advanced {advanced}"
-                                    );
+                                    // crate::log!(
+                                    //     "voice input: other-audio ducking level {level} advanced {advanced}"
+                                    // );
                                 } else {
                                     crate::log!(
                                         "voice input: ducking config not applied (OSStatus {status})"
