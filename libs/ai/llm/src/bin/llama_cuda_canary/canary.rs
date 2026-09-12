@@ -26,25 +26,19 @@ use makepad_ai_llm::{
     CudaExecRuntime, ExecBackendKind, ExecRuntime, LlamaModel, LlamaSession, LlamaSessionConfig,
 };
 use makepad_ai_llm::cuda_exec::MMV_MAX_COLUMNS;
-use makepad_ai_cuda::quant;
+use makepad_ai_loader::quant;
 use makepad_ai_llm::{
     BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
     GGML_ROPE_TYPE_IMROPE,
 };
 
-/// `quant_kind_routes`, shimmed: the FFI symbol only exists on CUDA
-/// platforms, and this canary must still COMPILE on a Mac (where every
-/// run exits early anyway).
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+/// `quant_kind_routes` straight from the CUDA op surface: this module only
+/// compiles on Linux/Windows (main.rs gates it), so no shim is needed.
 fn quant_kind_routes_shim(kind: i32) -> i32 {
     unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) }
 }
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn quant_kind_routes_shim(_kind: i32) -> i32 {
-    0
-}
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some("opcheck") => opcheck(),
@@ -660,7 +654,7 @@ fn iq_blocks(rng: &mut Rng, ty: TensorType, k: usize, rows: usize) -> Vec<u8> {
 fn iq_dequant_row(ty: TensorType, row: &[u8], k: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; k];
     assert!(
-        makepad_ai_cuda::quant_iq::dequantize_row_iq(ty.ggml_type(), row, k, &mut out),
+        makepad_ai_loader::quant_iq::dequantize_row_iq(ty.ggml_type(), row, k, &mut out),
         "no CPU reference dequant for {:?}",
         ty
     );

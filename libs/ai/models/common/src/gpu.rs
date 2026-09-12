@@ -7,8 +7,7 @@
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
-#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
-pub use makepad_ai_cuda::launch::GemmPrecision;
+pub use makepad_ai_loader::accel::GemmPrecision;
 
 /// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
 /// a ggml dtype, its output width and its bias (empty for none).
@@ -115,7 +114,7 @@ pub fn gpu_vit_backbone_resident(
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
     use super::GemmPrecision;
-    use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+    use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
     pub struct CudaMappedHostU32Buffer;

@@ -1,23 +1,3 @@
-/// Per-model precision policy for the generic CUDA dense-linear path.
-///
-/// The default is the validated Flux policy that the old unset environment
-/// switches selected. Models with a stricter numerical contract pass an
-/// explicit value to the `*_with_precision` launch entry points.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GemmPrecision {
-    pub f16_accumulate: bool,
-    pub f16_activations: bool,
-}
-
-impl Default for GemmPrecision {
-    fn default() -> Self {
-        Self {
-            f16_accumulate: true,
-            f16_activations: true,
-        }
-    }
-}
-
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
     use crate::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
@@ -34,7 +14,7 @@ mod imp {
     use std::ptr::NonNull;
     use std::rc::Rc;
 
-    use super::GemmPrecision;
+    use makepad_ai_loader::accel::GemmPrecision;
 
     pub use crate::{CudaGraph, CudaGraphExec};
 

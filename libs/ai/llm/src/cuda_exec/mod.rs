@@ -29,11 +29,11 @@ use crate::runtime::{
 };
 use crate::weights::LoadedGgufWeights;
 
-#[cfg(makepad_llama_cuda_kernels)]
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_llama_cuda_kernels))]
 #[path = "real.rs"]
 mod imp;
 
-#[cfg(not(makepad_llama_cuda_kernels))]
+#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_llama_cuda_kernels)))]
 #[path = "stub.rs"]
 mod imp;
 
