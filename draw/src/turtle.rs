@@ -2925,7 +2925,7 @@ impl Turtle {
         if walk.height.is_fit() {
             return None;
         }
-        Some(self.next_walk_width(walk.height, walk.margin))
+        Some(self.next_walk_height(walk.height, walk.margin))
     }
 }
 
