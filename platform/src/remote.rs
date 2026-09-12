@@ -25,7 +25,7 @@
 mod imp {
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
-    use crate::makepad_math::dvec2;
+    use crate::makepad_math::{dvec2, Vec2d};
     use crate::window::WindowId;
     use makepad_studio_protocol::{
         KeyCode, KeyEvent, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp,
@@ -172,6 +172,14 @@ mod imp {
         },
         Close {
             window: Option<usize>,
+            tx: Sender<Reply>,
+        },
+        /// Give a window a new inner size, in layout points, the way a
+        /// person dragging its edge would. Answered after the frame that
+        /// follows, so a grab right after sees the new layout.
+        Resize {
+            window: Option<usize>,
+            size: Vec2d,
             tx: Sender<Reply>,
         },
         /// A tweaker-overlay operation. The route only parses; the whole
@@ -988,6 +996,24 @@ mod imp {
                 let _ = tx.send(Reply::Ok);
                 cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
             }
+            Cmd::Resize { window, size, tx } => {
+                let window_id = match resolve_window(cx, window) {
+                    Ok(window_id) => window_id,
+                    Err(err) => {
+                        let _ = tx.send(Reply::Err(err));
+                        return;
+                    }
+                };
+                cx.push_unique_platform_op(crate::cx_api::CxOsOp::ResizeWindow(window_id, size));
+                // The size lands on the next frame or the one after; the
+                // reply carries what was asked, the following `/s` what is.
+                frame_waiters().lock().unwrap().push((
+                    cx.repaint_id + 2,
+                    tx,
+                    Some(format!("{{\"resize\":[{},{}]}}", size.x, size.y)),
+                ));
+                cx.redraw_all();
+            }
             Cmd::Tweak { op, args, wait, tx } => {
                 let result = match cx.tweak_callback {
                     Some(callback) => callback(cx, &op, &args),
@@ -1195,6 +1221,18 @@ mod imp {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
             }
+            // A responsive layout is checked by resizing, so the bridge can:
+            // `/resize?w=&h=[&window=]` in layout points, answered after the
+            // frame that shows it; a following `/s` reports the size taken.
+            "/resize" => {
+                // `w` is the width here, so the window goes by `window=`.
+                let window = p.get(&["window"]).and_then(|v| v.parse::<usize>().ok());
+                let (w, h) = (p.f64(&["w"], 0.0), p.f64(&["h"], 0.0));
+                if w < 1.0 || h < 1.0 {
+                    return Out::Text(400, "give w= and h= in layout points".to_string());
+                }
+                reply_to_out(ask(move |tx| Cmd::Resize { window, size: dvec2(w, h), tx }, 6))
+            }
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next
             // drawn frame so a following grab sees the change.
@@ -1360,6 +1398,7 @@ mod imp {
              /shader/consts    the compiled shaders' hot-patchable constants (annotated literals): {{\"shaders\":[{{\"id\",\"consts\":[{{\"i\",\"name\",\"value\",\"min\",\"max\",\"step\",\"file\",\"line\"}}]}}]}}; shader=ID for one\n\
              /shader/const     ?shader=ID&i=N&v=VALUE patches one constant on the GPU (no recompile, source untouched); reset=1 puts the literal back\n\
              /close?w=ID       close one window the normal way\n\
+             /resize?w=&h=     give the window a new inner size, in layout points (like dragging its edge); answers after the frame that shows it\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
              if you launched this app, you MUST end with /gq (or /quit) — never leave test windows on the user's screen, never pkill\n\
