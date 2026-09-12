@@ -133,6 +133,7 @@ pub use {
         draw_vars::DrawVars,
         sploded::{SplodedParams, SplodedView},
         event::{
+            CancelScope,
             CharOffset,
             DigitDevice,
             DragEvent,

@@ -4825,6 +4825,9 @@ pub struct Tweaker {
     saved_body_right: Option<f64>,
     #[rust]
     splitter_drag: bool,
+    /// Held for as long as `splitter_drag` is. Reconciled below `tweak_is_on`'s
+    /// early return, so closing the panel with F12 mid-drag cannot strand it.
+    cancel_scope: Option<CancelScope>,
 }
 
 impl ScriptHook for Tweaker {
@@ -8729,6 +8732,13 @@ impl Tweaker {
 
 impl Widget for Tweaker {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Above the early return on purpose: F12 turns the panel off without
+        // clearing splitter_drag, and a stranded scope would wedge Escape app-wide.
+        if self.cancel_scope.is_some() && (!self.splitter_drag || !tweak_is_on()) {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
         if !tweak_is_on() {
             return;
         }

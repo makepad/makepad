@@ -5,8 +5,8 @@ use {
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
         event::{
-            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent, TimerEvent,
-            TriggerEvent,
+            DrawEvent, Event, KeyCode, KeyFocusEvent, NextFrameEvent, TextClipboardEvent,
+            TimerEvent, TriggerEvent,
         },
         makepad_live_id::{live_id, LiveId},
         makepad_network::NetworkResponse,
@@ -1085,6 +1085,16 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        // Settle who owns this cancel gesture before anyone sees it: the frontmost scope
+        // takes the whole press, so one that ends part-way can't hand the rest to the next.
+        match event {
+            Event::KeyDown(key) if key.key_code == KeyCode::Escape && !key.is_repeat => {
+                self.cancel_scopes.begin_press();
+            }
+            Event::BackPressed { .. } => self.cancel_scopes.begin_press(),
+            _ => {}
+        }
+
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
