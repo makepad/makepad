@@ -266,10 +266,6 @@ impl DesktopInit {
             );
         }
         let mut renderer = CxVulkan {
-            // NOTE (makepad-05, 2026-09-12): `frame_serial_in_flight` is DL-5's Vulkan
-            // completion frontier (work 393de54d1, vulkan.rs); this one line keeps your
-            // untracked constructor compiling under MAKEPAD=vulkan — fold it in and
-            // delete this note when you commit vulkan_linux.rs.
             frame_serial_in_flight: 0,
             _entry: self.entry.take().unwrap(),
             instance: self.instance.take().unwrap(),
