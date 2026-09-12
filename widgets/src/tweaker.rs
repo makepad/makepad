@@ -2506,7 +2506,7 @@ fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String
                 _ => None,
             };
             if let Some(unit) = unit {
-                return Some(format!("{}{unit}", fmt_num(factor * 100.0)));
+                return Some(format!("{}{unit}", fmt_f64(factor * 100.0)));
             }
         }
     }
@@ -2575,13 +2575,115 @@ fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String
     Some(out)
 }
 
-/// A number the way a person writes it: `200`, not `200.0`; `0.5` stays.
-fn fmt_num(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        let s = format!("{v:.4}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
+/// One axis of a size, as the Props tab reads it off a reflected row. The
+/// row's text is whatever `fmt_enum` wrote -- `Size.Fill{weight: 100 ..}`,
+/// `Size.Fixed(200)`, `Fit`, a bare number from an older row, `"50%"` or
+/// `"calc(100% - 20px)"` for the CSS spellings -- and every one of them
+/// has to come back as the same handful of shapes the editor draws.
+#[derive(Clone, Debug, PartialEq)]
+enum SizeText {
+    Fill { weight: f64 },
+    Fit,
+    Fixed(f64),
+    /// `50%`, `25vw`, `60cqw`: a size relative to something, as written.
+    Rel(String),
+    /// `calc(..)`, `min(..)`, `clamp(..)`: a size the layout pass works out.
+    Expr(String),
+}
+
+impl SizeText {
+    /// The value the field shows for it.
+    fn field_text(&self) -> String {
+        match self {
+            SizeText::Fill { .. } => "Fill".to_string(),
+            SizeText::Fit => "Fit".to_string(),
+            SizeText::Fixed(v) => fmt_f64(*v),
+            SizeText::Rel(text) | SizeText::Expr(text) => text.clone(),
+        }
+    }
+}
+
+/// Read a size row's text. Tolerant of every spelling the panel has ever
+/// shown for one, because rows come from `fmt_value` today and came from
+/// dotted fragments and bare numbers before it.
+fn parse_size_text(text: &str) -> SizeText {
+    let text = text.trim().trim_matches('"').trim();
+    if text.is_empty() {
+        return SizeText::Fit;
+    }
+    if let Ok(v) = text.parse::<f64>() {
+        return SizeText::Fixed(v);
+    }
+    // `Size.Fill{weight: 100 ..}`, `Fill{..}`, `Fill`, and the Fit / Fixed
+    // shapes: the variant is the word after the last dot before any brace
+    // or paren. Tried FIRST, because a printed Fill carries `Abs(0)` inside
+    // it and a paren alone would read as an expression.
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    let variant = head.rsplit('.').next().unwrap_or("").trim();
+    match variant {
+        "Fill" => {
+            let weight = field_number(text, "weight").unwrap_or(100.0);
+            return SizeText::Fill { weight };
+        }
+        "Fit" => return SizeText::Fit,
+        "Fixed" => {
+            let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
+            return SizeText::Fixed(inner.parse().unwrap_or(0.0));
+        }
+        _ => {}
+    }
+    let lower = text.to_ascii_lowercase();
+    // A relative size or an expression is kept as written: the field shows
+    // it as such, and it is emitted back as the same string.
+    if lower.contains('(') {
+        return SizeText::Expr(text.to_string());
+    }
+    if let Some(num) = lower
+        .strip_suffix("cqw")
+        .or_else(|| lower.strip_suffix("cqh"))
+        .or_else(|| lower.strip_suffix("vw"))
+        .or_else(|| lower.strip_suffix("vh"))
+        .or_else(|| lower.strip_suffix('%'))
+        .or_else(|| lower.strip_suffix("px"))
+    {
+        if num.trim().parse::<f64>().is_ok() {
+            return if lower.ends_with("px") {
+                SizeText::Fixed(num.trim().parse().unwrap_or(0.0))
+            } else {
+                SizeText::Rel(text.to_string())
+            };
+        }
+    }
+    SizeText::Fit
+}
+
+/// `weight: 100` out of a printed named variant, when the field is a plain
+/// number.
+fn field_number(text: &str, field: &str) -> Option<f64> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    let end = rest.find([' ', '}', ',']).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// What a person typed into a size field, as the chunk that sets it. A bare
+/// word is a mode, a number is points, a percent or a viewport unit or a
+/// function is the CSS spelling and goes in quotes so the engine's string
+/// parser sees it; anything else is passed through as written and the
+/// engine says what it thinks of it.
+fn size_chunk(axis: &str, typed: &str) -> String {
+    let typed = typed.trim().trim_matches('"').trim();
+    match typed.to_ascii_lowercase().as_str() {
+        "fill" => return format!("{axis}: Fill"),
+        "fit" => return format!("{axis}: Fit"),
+        _ => {}
+    }
+    match parse_size_text(typed) {
+        SizeText::Fixed(v) => format!("{axis}: {}", fmt_f64(v)),
+        SizeText::Rel(text) | SizeText::Expr(text) => format!("{axis}: \"{text}\""),
+        SizeText::Fill { .. } => format!("{axis}: Fill"),
+        SizeText::Fit => format!("{axis}: {typed}"),
     }
 }
 
@@ -10274,22 +10376,24 @@ impl Tweaker {
                             ),
                         ] {
                             let row = size_col.child(row_id);
-                            let fixed = self
-                                .row_value(axis)
-                                .and_then(|v| v.parse::<f64>().ok());
-                            let filled =
-                                self.row_index(&format!("{axis}.weight")).is_some();
+                            // The row is ONE value now -- `Size.Fill{..}`,
+                            // `Size.Fixed(200)`, `"50%"` -- read as such.
+                            let size = parse_size_text(self.row_value(axis).unwrap_or("Fit"));
+                            let fixed = match &size {
+                                SizeText::Fixed(v) => Some(*v),
+                                _ => None,
+                            };
                             // The autolayout convention: Fill spreads
-                            // (arrows out), Fit hugs (arrows in), Fixed is
-                            // a number — the value field lights only then.
+                            // (arrows out), Fit hugs (arrows in), and the
+                            // third is a size in the person's own words --
+                            // a number of points, `50%`, `25vw`, or an
+                            // expression -- which the field then shows.
                             let seg = row.child(seg_id);
                             let labels = ["\u{2194}", "\u{2192}\u{2190}", "#"];
-                            let active = if fixed.is_some() {
-                                2
-                            } else if filled {
-                                0
-                            } else {
-                                1
+                            let active = match size {
+                                SizeText::Fill { .. } => 0,
+                                SizeText::Fit => 1,
+                                _ => 2,
                             };
                             for (i, seg_child) in segs.into_iter().enumerate() {
                                 let btn = seg.child(seg_child);
@@ -10308,12 +10412,7 @@ impl Tweaker {
                             let input = row.child(input_id);
                             if input.area() == Area::Empty || !cx.has_key_focus(input.area())
                             {
-                                let text = match fixed {
-                                    Some(v) => fmt_f64(v),
-                                    None if filled => "Fill".to_string(),
-                                    None => "Fit".to_string(),
-                                };
-                                input.set_text(cx, &text);
+                                input.set_text(cx, &size.field_text());
                             }
                             self.composite_fields
                                 .push((input.widget_uid().0, axis.to_string()));
@@ -11820,7 +11919,15 @@ impl Tweaker {
                     TextInputAction::Changed(text) => {
                         let text = text.trim().to_string();
                         if !text.is_empty() {
-                            edits.push(Edit::Apply(format!("{prop}: {text}")));
+                            // A size field takes a mode, points, a CSS
+                            // spelling or an expression; the chunk is the
+                            // one the engine accepts for each.
+                            let chunk = if prop == "width" || prop == "height" {
+                                size_chunk(&prop, &text)
+                            } else {
+                                format!("{prop}: {text}")
+                            };
+                            edits.push(Edit::Apply(chunk));
                         }
                         continue;
                     }
@@ -13753,6 +13860,34 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_size_row_reads_as_one_value_however_it_was_spelled() {
+        assert_eq!(parse_size_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}"), SizeText::Fill { weight: 100.0 });
+        assert_eq!(parse_size_text("Fill"), SizeText::Fill { weight: 100.0 });
+        assert_eq!(parse_size_text("Size.Fill{weight: 2 shrink: 1}"), SizeText::Fill { weight: 2.0 });
+        assert_eq!(parse_size_text("Size.Fit{}"), SizeText::Fit);
+        assert_eq!(parse_size_text("Fit"), SizeText::Fit);
+        assert_eq!(parse_size_text("Size.Fixed(200)"), SizeText::Fixed(200.0));
+        assert_eq!(parse_size_text("200"), SizeText::Fixed(200.0));
+        assert_eq!(parse_size_text("24px"), SizeText::Fixed(24.0));
+        assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
+        assert_eq!(parse_size_text("25vw"), SizeText::Rel("25vw".into()));
+        assert_eq!(parse_size_text("calc(100% - 20px)"), SizeText::Expr("calc(100% - 20px)".into()));
+        assert_eq!(parse_size_text(""), SizeText::Fit);
+    }
+
+    #[test]
+    fn what_is_typed_into_a_size_field_becomes_the_chunk_the_engine_accepts() {
+        assert_eq!(size_chunk("width", "fill"), "width: Fill");
+        assert_eq!(size_chunk("width", "Fit"), "width: Fit");
+        assert_eq!(size_chunk("width", "200"), "width: 200");
+        assert_eq!(size_chunk("height", "24px"), "height: 24");
+        assert_eq!(size_chunk("width", "50%"), "width: \"50%\"");
+        assert_eq!(size_chunk("width", "clamp(200px, 50%, 600px)"), "width: \"clamp(200px, 50%, 600px)\"");
+        // A Fill with fields still sets Fill; the weight gets its own field.
+        assert_eq!(size_chunk("width", "Fill{weight: 2}"), "width: Fill");
+    }
 
     #[test]
     fn layout_enums_print_as_whole_values() {
