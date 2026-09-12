@@ -130,3 +130,12 @@ fleet-hosts*.txt
 window_*_frame_*.png
 remote-jobs/
 apps/asset-ui/resources/
+
+# Alternate cargo target directories (cross-checks, gpusim runs, lane
+# verification) live beside the checkout as `target-<name>`; anywhere in the
+# tree they are build output, never source. Same for the agents' scratch
+# dirs at the root and a stray log.
+target-*/
+/scratchpad/
+/.grok/
+/*.log
