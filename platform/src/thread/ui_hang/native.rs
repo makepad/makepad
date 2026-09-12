@@ -22,6 +22,10 @@ mod demangle;
 const THRESHOLD: Duration = Duration::from_millis(250);
 const INTERVAL: Duration = Duration::from_millis(100);
 
+fn sample_interval(threshold: Duration) -> Duration {
+    INTERVAL.min(threshold / 4).max(Duration::from_millis(1))
+}
+
 fn configured_threshold() -> Duration {
     std::env::var("MAKEPAD_UI_HANG_MS")
         .ok()
@@ -96,11 +100,13 @@ struct Sample { phase: u64, frames: Vec<usize>, count: usize }
 
 fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, mut emit: impl FnMut(String)) {
     let mut samples: HashMap<u64, Vec<Sample>> = HashMap::new();
+    let mut ticks: HashMap<u64, usize> = HashMap::new();
     loop {
         let tick = Instant::now();
         let start = state.start.load(Ordering::Acquire);
         let elapsed = (state.origin.elapsed().as_nanos() as u64 + 1).saturating_sub(start);
         if start != 0 && elapsed >= state.threshold.as_nanos() as u64 {
+            *ticks.entry(start).or_default() += 1;
             let phase = state.phase.load(Ordering::Relaxed);
             let frames = target.sample();
             if state.start.load(Ordering::Acquire) == start {
@@ -114,11 +120,16 @@ fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, m
         }
         while let Ok(done) = rx.try_recv() {
             let mut batch = samples.remove(&done.start).unwrap_or_default();
+            let tick_count = ticks.remove(&done.start).unwrap_or(0);
             batch.sort_by_key(|s| std::cmp::Reverse(s.count));
             let count: usize = batch.iter().map(|s| s.count).sum();
             let phase = batch.first().map_or(done.phase, |s| s.phase);
-            let mut line = format!("[ui-hang] {:.0} ms · phase={} detail={} · samples={} · top frames: ",
-                done.nanos as f64 / 1e6, phase_name(phase as u32), phase >> 32, count);
+            let interval = sample_interval(state.threshold);
+            let expected = (done.nanos.saturating_sub(state.threshold.as_nanos() as u64) as f64
+                / interval.as_nanos() as f64)
+                .round() as u64;
+            let mut line = format!("[ui-hang] {:.0} ms · phase={} detail={} · samples={} · ticks={}/expected={} · top frames: ",
+                done.nanos as f64 / 1e6, phase_name(phase as u32), phase >> 32, count, tick_count, expected);
             if batch.is_empty() { line.push_str("<event ended before stack sample>"); }
             for (i, sample) in batch.iter().take(4).enumerate() {
                 if i > 0 { line.push_str(" | "); }
@@ -135,6 +146,7 @@ fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, m
         if samples.len() > 16 {
             let active = state.start.load(Ordering::Acquire);
             samples.retain(|&key, _| key == active);
+            ticks.retain(|&key, _| key == active);
         }
         let lost = state.lost.swap(0, Ordering::Relaxed);
         if lost != 0 {
@@ -146,10 +158,7 @@ fn watch(state: Arc<State>, rx: Receiver<Completion>, target: backend::Target, m
             break;
         }
         std::thread::park_timeout(
-            INTERVAL
-                .min(state.threshold / 4)
-                .max(Duration::from_millis(1))
-                .saturating_sub(tick.elapsed()),
+            sample_interval(state.threshold).saturating_sub(tick.elapsed()),
         );
     }
 }

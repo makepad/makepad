@@ -66,73 +66,6 @@ unsafe impl Encode for CAFrameRateRange {
     }
 }
 
-static METAL_LINK_TRACE_UPDATES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static METAL_LINK_TRACE_DRAWABLES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static METAL_LINK_TRACE_PRESENTED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static METAL_LINK_TRACE_LAST_US: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-fn metal_link_frame_trace_enabled() -> bool {
-    crate::makepad_error_log::trace_enabled("frame")
-}
-
-pub(super) fn metal_link_trace_drawable_consumed() {
-    if metal_link_frame_trace_enabled() {
-        METAL_LINK_TRACE_DRAWABLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-pub(super) fn metal_link_trace_presented() {
-    if metal_link_frame_trace_enabled() {
-        METAL_LINK_TRACE_PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn metal_link_trace_update_fired() {
-    if metal_link_frame_trace_enabled() {
-        METAL_LINK_TRACE_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn metal_link_trace_report() {
-    if !metal_link_frame_trace_enabled() {
-        return;
-    }
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let now_us = START
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_micros()
-        .min(u64::MAX as u128) as u64;
-    let last_us = METAL_LINK_TRACE_LAST_US.load(std::sync::atomic::Ordering::Relaxed);
-    if now_us.saturating_sub(last_us) < 1_000_000
-        || METAL_LINK_TRACE_LAST_US
-            .compare_exchange(
-                last_us,
-                now_us,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_err()
-    {
-        return;
-    }
-    let updates = METAL_LINK_TRACE_UPDATES.swap(0, std::sync::atomic::Ordering::AcqRel);
-    let drawables = METAL_LINK_TRACE_DRAWABLES.swap(0, std::sync::atomic::Ordering::AcqRel);
-    let presented = METAL_LINK_TRACE_PRESENTED.swap(0, std::sync::atomic::Ordering::AcqRel);
-    crate::trace!(
-        "frame",
-        "metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
-        now_us.saturating_sub(last_us) as f64 / 1000.0,
-        updates,
-        drawables,
-        presented,
-    );
-}
-
 pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
     MACOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
@@ -358,6 +291,9 @@ pub struct MacosApp {
     display_links: Vec<(ObjcId, ObjcId)>,
     display_links_paused: bool,
     remote_capture_deadline: Option<Instant>,
+    /// `NSProcessInfo` activity token that keeps a `--remote` or
+    /// `MAKEPAD_HIDE_WINDOWS` instance out of App Nap for the process life.
+    nap_activity: Option<RcObjcId>,
     /// The frame clock, measured (`MAKEPAD_TRACE=frames`).
     pub frame_trace: crate::frame_trace::FrameTrace,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
@@ -431,6 +367,7 @@ impl MacosApp {
                 display_links: Vec::new(),
                 display_links_paused: false,
                 remote_capture_deadline: None,
+                nap_activity: None,
                 frame_trace: crate::frame_trace::FrameTrace::new(),
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
@@ -460,6 +397,25 @@ impl MacosApp {
             }
         }
     }
+    /// Hold an `NSActivityUserInitiated` token so a hidden or `--remote`
+    /// test instance is not App-Napped during a long rest. No-op for a
+    /// normal interactive launch.
+    fn begin_test_instance_activity(&mut self) {
+        if self.nap_activity.is_some() {
+            return;
+        }
+        if !crate::remote::requested() && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+            return;
+        }
+        unsafe {
+            let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
+            let reason = str_to_nsstring("makepad remote/hidden test instance");
+            let options = NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled;
+            let token: ObjcId = msg_send![info, beginActivityWithOptions: options reason: reason];
+            self.nap_activity = NonNull::new(token).map(RcObjcId::from_unowned);
+        }
+    }
+
     pub fn init_quit_menu(&mut self) {
         // Use the running app's CFBundleName (which is what macOS already
         // shows as the application menu title in the menu bar) so the
@@ -974,7 +930,10 @@ impl MacosApp {
             // Quit affordance out of the box. Apps that build their own menu
             // (via `cx.update_macos_menu` or the `WindowMenu` widget) will
             // overwrite this; the call is harmless either way.
-            with_macos_app(|app| app.init_quit_menu());
+            with_macos_app(|app| {
+                app.init_quit_menu();
+                app.begin_test_instance_activity();
+            });
             // get_macos_app_global().startup_focus_hack();
 
             loop {
@@ -1470,33 +1429,6 @@ impl MacosApp {
         }
     }
 
-    /// Retire a CAMetalDisplayLink before a manual capture takes ownership of
-    /// its layer's drawables. The ordinary paint path re-arms the missing link.
-    pub(super) fn remove_window_metal_display_link(&mut self, window: ObjcId) -> bool {
-        let Some(class) = Class::get("CAMetalDisplayLink") else {
-            return false;
-        };
-        let mut removed = false;
-        self.display_links.retain(|(owner, link)| {
-            if *owner != window {
-                return true;
-            }
-            let is_metal: BOOL = unsafe { msg_send![*link, isKindOfClass: class] };
-            if is_metal != YES {
-                return true;
-            }
-            unsafe {
-                let () = msg_send![*link, invalidate];
-                // This branch only accepts CAMetalDisplayLink, which we
-                // created with alloc/initWithMetalLayer in ensure_display_link.
-                let () = msg_send![*link, release];
-            }
-            removed = true;
-            false
-        });
-        removed
-    }
-
     pub(super) fn schedule_remote_capture(&mut self, deadline: Option<Instant>) {
         if self.remote_capture_deadline == deadline {
             return;
@@ -1538,51 +1470,6 @@ impl MacosApp {
             drawable: None,
             target_presentation_time: target,
         });
-    }
-
-    /// CAMetalDisplayLink's delegate update is the authoritative frame:
-    /// transport time comes from its presentation target, and rendering uses
-    /// the drawable delivered for that same target instead of polling the
-    /// layer. A re-entrant callback simply skips this update rather than
-    /// panicking through the Objective-C delegate frame.
-    pub fn send_metal_display_link_update(link: ObjcId, update: ObjcId) {
-        metal_link_trace_update_fired();
-        if update == nil {
-            metal_link_trace_report();
-            return;
-        }
-        let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) = unsafe {
-            (
-                msg_send![update, targetTimestamp],
-                msg_send![update, targetPresentationTimestamp],
-                msg_send![update, drawable],
-                CACurrentMediaTime(),
-            )
-        };
-        let Some((window, primary, app_now)) = try_with_macos_app(|app| {
-            app.display_links
-                .iter()
-                .position(|(_w, l)| *l == link)
-                .map(|i| (app.display_links[i].0, i == 0, app.time_now()))
-        })
-        .flatten() else {
-            metal_link_trace_report();
-            return;
-        };
-        let flip_target = if target_presentation > 0.0 {
-            target_presentation
-        } else {
-            target
-        };
-        let time = app_now + (flip_target - media_now).clamp(-0.1, 0.1);
-        MacosApp::do_callback(MacosEvent::LinkFire {
-            window,
-            time,
-            primary,
-            drawable: Some(drawable),
-            target_presentation_time: flip_target,
-        });
-        metal_link_trace_report();
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
