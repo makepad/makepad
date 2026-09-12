@@ -652,6 +652,15 @@ pub struct DataGrid {
     /// knows to draw it where the loop did not reach.
     #[rust]
     editor_drawn: bool,
+    /// A cell asked for before the first draw, when the viewport has no
+    /// size to scroll it into view against; done on the draw that gives
+    /// it one.
+    #[rust]
+    scroll_pending: Option<(usize, usize)>,
+    /// An edit the grid shrank out from under, reported on the next event,
+    /// when there is a context to say it with.
+    #[rust]
+    edit_dropped: Option<(usize, usize)>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -757,6 +766,7 @@ impl DataGrid {
             if row >= rows || col >= cols {
                 self.editing = None;
                 self.edit_focus_pending = false;
+                self.edit_dropped = Some((row, col));
             }
         }
         // If we're mid-draw (size set from the draw loop before iteration),
@@ -955,6 +965,10 @@ impl DataGrid {
         cx.begin_turtle(walk, self.layout);
         self.vp.widget_rect = cx.turtle().rect();
         self.compute_viewport();
+        if let Some((row, display_col)) = self.scroll_pending.take() {
+            self.scroll_to_cell(row, display_col);
+            self.compute_viewport();
+        }
         self.draw_bg.color = self.color_bg;
         self.draw_bg.draw_abs(cx, self.vp.widget_rect);
         cx.push_clip_rect(self.vp.data_rect);
@@ -1543,6 +1557,17 @@ impl DataGrid {
 
     /// Scroll the minimum amount needed to bring a cell fully into view.
     pub fn scroll_cell_into_view(&mut self, cx: &mut Cx, row: usize, display_col: usize) {
+        // Before the first draw the viewport has no size, and a scroll
+        // measured against nothing would leave the row just past the top.
+        if self.vp.data_rect.size.x <= 0.0 || self.vp.data_rect.size.y <= 0.0 {
+            self.scroll_pending = Some((row, display_col));
+        } else {
+            self.scroll_to_cell(row, display_col);
+        }
+        self.area.redraw(cx);
+    }
+
+    fn scroll_to_cell(&mut self, row: usize, display_col: usize) {
         let x0 = self.col_sizes.offset_of(display_col);
         let x1 = x0 + self.col_sizes.size_of(display_col);
         let y0 = self.row_sizes.offset_of(row);
@@ -1559,7 +1584,6 @@ impl DataGrid {
         } else if y1 > self.scroll.y + vh {
             self.scroll.y = y1 - vh;
         }
-        self.area.redraw(cx);
     }
 
     // ---------------------------------------------------------------
@@ -1623,8 +1647,21 @@ impl DataGrid {
             return;
         };
         self.edit_focus_pending = false;
+        self.take_keys_back(cx, row, col);
         cx.widget_action(self.uid, DataGridAction::EditCancelled { row, col });
         self.area.redraw(cx);
+    }
+
+    /// The keyboard back from a retired editor, if it still holds it. A
+    /// commit or a cancel the host asks for outright would otherwise leave
+    /// the field focused, and a field the sweep has pooled is never asked
+    /// to give the focus up: the arrows would be dead until a click.
+    fn take_keys_back(&mut self, cx: &mut Cx, row: usize, col: usize) {
+        if let Some((_, editor)) = self.get_item(row, col) {
+            if cx.has_key_focus(editor.area()) {
+                cx.set_key_focus(self.area);
+            }
+        }
     }
 
     /// The cell whose editor is seated, as (row, data col).
@@ -1647,6 +1684,7 @@ impl DataGrid {
             .get_item(row, col)
             .map(|(_, editor)| editor.text())
             .unwrap_or_default();
+        self.take_keys_back(cx, row, col);
         cx.widget_action(self.uid, DataGridAction::CellEdited { row, col, text });
         if let Some((dr, dc)) = step {
             let display_col = self.data_to_display(col);
@@ -2120,6 +2158,13 @@ impl Widget for DataGrid {
             }
         }
 
+        // An edit the grid shrank out from under: the host hears the
+        // cancel it was promised, and the keyboard comes back from an
+        // editor that is about to be retired.
+        if let Some((row, col)) = self.edit_dropped.take() {
+            self.take_keys_back(cx, row, col);
+            cx.widget_action(self.uid, DataGridAction::EditCancelled { row, col });
+        }
         if let Event::Actions(actions) = event {
             self.handle_editor_actions(cx, actions);
         }
@@ -2897,9 +2942,11 @@ mod tests {
     }
 
     /// A grid that shrinks under the editor puts it away rather than
-    /// reporting a commit for a row that no longer exists.
+    /// reporting a commit for a row that no longer exists -- and says so,
+    /// once, on the next event, since the host was promised a cancel or a
+    /// commit for every editor that closes.
     #[test]
-    fn a_grid_that_shrinks_under_the_editor_puts_it_away() {
+    fn a_grid_that_shrinks_under_the_editor_puts_it_away_and_says_so() {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 15, 1, "abc");
@@ -2907,6 +2954,23 @@ mod tests {
         assert_eq!(grid.editing(), None);
         let out = deliver(&mut cx, &mut grid, Vec::new());
         assert!(edited(&out).is_empty());
+        assert!(
+            out.iter()
+                .any(|a| matches!(a, DataGridAction::EditCancelled { row: 15, col: 1 })),
+            "the dropped edit was not reported: {out:?}"
+        );
+        assert!(deliver(&mut cx, &mut grid, Vec::new()).is_empty(), "reported twice");
+    }
+
+    /// A cell asked for before the first draw is scrolled to on that
+    /// draw, not measured against a viewport that has no size yet.
+    #[test]
+    fn an_edit_before_the_first_draw_waits_for_a_viewport_to_scroll_in() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.edit_cell(&mut cx, 4, 1, "abc");
+        assert_eq!((grid.scroll.x, grid.scroll.y), (0.0, 0.0), "scrolled against nothing");
+        assert_eq!(grid.scroll_pending, Some((4, 1)));
     }
     /// The editor is drawn every frame, on screen or off, so its area is
     /// always the current frame's and the keyboard leaving it - what a

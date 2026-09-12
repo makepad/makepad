@@ -57,12 +57,16 @@
 //! Fill the face; do not draw it. The faces of a row are drawn together, in
 //! the row's own turtle, once that row's last slot has been handed out.
 //!
-//! The face must not answer the press. The grid hit-tests the pointer
+//! The face does not answer the press. The grid hit-tests the pointer
 //! against the items it put on screen and claims a press that lands on one
-//! before the layout sees it, so a face that handles its own presses — a
-//! button, an interactive row — takes the press first and nothing is
-//! picked. The face the grid ships is a row with `interactive: false` for
-//! exactly that reason. A press anywhere else in the grid is left alone and
+//! before the layout sees it, so a face's own press handling never runs:
+//! `interactive: false` on the face the grid ships is what keeps it from
+//! looking pressable, and a face that needs a press of its own belongs
+//! outside the grid. The pick is made on the release, and only when the
+//! release was a tap: a finger that went on to scroll the rows, or a
+//! button that dragged, chose nothing; a finger held on an item flips it,
+//! the one touch gesture that means what a modifier key means to a mouse.
+//! A press anywhere else in the grid is left alone and
 //! reaches the layout, which is what keeps the rows flingable — and so is a
 //! press in the band the layout draws its scroll bar in, because that bar
 //! is painted OVER the last column rather than beside it. See
@@ -165,15 +169,15 @@ script_mod! {
         }
 
         // The layout, whole, as a child. It is a slot (`grid:`) rather than
-        // a named child so that anything a host writes with `:=` on an
-        // instance is unambiguously about the items and not about this.
+        // a named child. The tiles are the list's, so a face of one's own
+        // is written into it: `grid +: { Tile := MyFace{} }`.
         grid: mod.widgets.TileList{
             width: Fill
             height: Fill
 
             /** The face of one item. `interactive: false` is not decoration:
-             * the grid hit-tests the pointer itself, and a face that
-             * answered the press would take it. */
+             * the grid answers the press itself, and a face that looked
+             * pressable would promise what it cannot do. */
             Tile := mod.widgets.ListItem{
                 height: 72.
                 interactive: false
@@ -397,10 +401,15 @@ impl ItemGridPicker {
     /// A press past the end of the set is not a press: an index the order
     /// does not hold has no position for a range to be measured from.
     pub fn press(&mut self, index: usize, modifiers: KeyModifiers) -> SelectionChange {
+        self.press_with(index, SelectionGesture::from_modifiers(modifiers))
+    }
+
+    /// Press an item with the gesture named outright: a finger held on an
+    /// item toggles it without a key to say so.
+    pub fn press_with(&mut self, index: usize, gesture: SelectionGesture) -> SelectionChange {
         if index >= self.count {
             return SelectionChange::default();
         }
-        let gesture = SelectionGesture::from_modifiers(modifiers);
         let order = self.order();
         self.selection.click(&order, index, gesture)
     }
@@ -600,6 +609,14 @@ impl ScriptHook for ItemGrid {
     }
 }
 
+/// What a release over an item comes to. See [`ItemGrid::pick_outcome`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PickOutcome {
+    Press,
+    Activate,
+    Nothing,
+}
+
 impl Widget for ItemGrid {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.visible && event.requires_visibility() {
@@ -783,19 +800,34 @@ impl ItemGrid {
             })
         };
         match hit {
+            // The press claims the keyboard and the digit; the pick waits
+            // for the release, so a finger that goes on to scroll the rows
+            // has chosen nothing.
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.area);
-                let Some(index) = self.item_under(fe.abs) else {
+            }
+            // A finger held on an item flips it: the one touch gesture that
+            // means Toggle, since a finger has no keys to hold.
+            Hit::FingerLongPress(lp) => {
+                if let Some(index) = self.item_under(lp.abs) {
+                    let change = self.picker.press_with(index, SelectionGesture::Toggle);
+                    self.announce(cx, change, Some(index));
+                }
+            }
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                let Some(index) = self.item_under(fe.abs_start) else {
                     return;
                 };
-                // A second press is an ask to open, not an ask to pick
-                // again: the first press of the pair already chose it.
-                if fe.tap_count > 1 {
-                    cx.widget_action(self.uid, ItemGridAction::Activated(index));
-                    return;
+                match Self::pick_outcome(fe.was_tap(), fe.tap_count, fe.modifiers) {
+                    PickOutcome::Activate => {
+                        cx.widget_action(self.uid, ItemGridAction::Activated(index));
+                    }
+                    PickOutcome::Press => {
+                        let change = self.picker.press(index, fe.modifiers);
+                        self.announce(cx, change, Some(index));
+                    }
+                    PickOutcome::Nothing => {}
                 }
-                let change = self.picker.press(index, fe.modifiers);
-                self.announce(cx, change, Some(index));
             }
             Hit::KeyDown(ke) => self.handle_key(cx, ke),
             // The ring is drawn whether or not the grid has the focus, but
@@ -803,6 +835,24 @@ impl ItemGrid {
             // reader has to see it appear.
             Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => self.area.redraw(cx),
             _ => {}
+        }
+    }
+
+    /// What a release over an item means. A release that was a tap picks;
+    /// the second tap of a pair with no key held is an ask to open, since
+    /// the first of the pair already chose it, while a second quick press
+    /// with a key held is a second pick -- a toggle undone, a sweep
+    /// adjusted; a release after a drag or a hold picks nothing, the drag
+    /// having been the rows scrolling and the hold already answered.
+    fn pick_outcome(was_tap: bool, tap_count: u32, modifiers: KeyModifiers) -> PickOutcome {
+        if !was_tap {
+            return PickOutcome::Nothing;
+        }
+        let held = modifiers.shift || modifiers.control || modifiers.logo || modifiers.alt;
+        if tap_count > 1 && !held {
+            PickOutcome::Activate
+        } else {
+            PickOutcome::Press
         }
     }
 
@@ -1220,11 +1270,49 @@ mod tests {
         });
         let actions = cx.capture_actions(|cx| {
             grid.handle_event(cx, &event, &mut Scope::empty());
+            // The pick is made on the release: a tap is a down and an up
+            // at the same point.
+            let release = Event::MouseUp(crate::event::MouseUpEvent {
+                abs,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                time: 0.0,
+            });
+            grid.handle_event(cx, &release, &mut Scope::empty());
         });
         let Event::MouseDown(press) = &event else {
             unreachable!()
         };
         (press.handled.get(), actions)
+    }
+
+    #[test]
+    fn a_release_picks_only_when_it_was_a_tap_and_opens_only_with_no_key_held() {
+        let bare = KeyModifiers::default();
+        let ctrl = KeyModifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(ItemGrid::pick_outcome(true, 1, bare), PickOutcome::Press);
+        assert_eq!(ItemGrid::pick_outcome(true, 2, bare), PickOutcome::Activate);
+        // A second quick press with a key held is a second pick, not an open.
+        assert_eq!(ItemGrid::pick_outcome(true, 2, ctrl), PickOutcome::Press);
+        // After a drag or a hold there is nothing left to pick.
+        assert_eq!(ItemGrid::pick_outcome(false, 1, bare), PickOutcome::Nothing);
+    }
+
+    /// A finger held on an item flips it, and flips it back: the touch
+    /// route to holding several.
+    #[test]
+    fn a_finger_held_on_an_item_flips_it() {
+        let mut picker = ItemGridPicker::new(SelectionMode::Many);
+        picker.set_count(6);
+        picker.press_with(2, SelectionGesture::Toggle);
+        picker.press_with(4, SelectionGesture::Toggle);
+        assert_eq!(picker.chosen(), vec![2, 4]);
+        picker.press_with(2, SelectionGesture::Toggle);
+        assert_eq!(picker.chosen(), vec![4]);
     }
 
     #[test]

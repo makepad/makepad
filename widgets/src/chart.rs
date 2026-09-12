@@ -1803,8 +1803,37 @@ pub fn axis_range(lo: f64, hi: f64, pin_min: f64, pin_max: f64) -> (f64, f64) {
     if pin_max > pin_min {
         return (pin_min, pin_max);
     }
-    let room = (hi - lo).max(1e-9) * AXIS_ROOM;
+    // A flat line still gets an axis, and one in proportion to its numbers:
+    // a fixed floor under a million is smaller than the difference between
+    // two neighbouring f64s there, and a tick step made from it never
+    // advanced.
+    let floor = (hi.abs().max(lo.abs()) * 1e-6).max(1e-9);
+    let room = (hi - lo).max(floor) * AXIS_ROOM;
     (lo - room, hi + room)
+}
+
+/// At most this many grid lines on the value axis: a step that cannot
+/// advance a tick stops here rather than never.
+const MAX_TICKS: usize = 64;
+
+/// The ticks of the value axis: multiples of `step` from the first at or
+/// above `min` up to and including `max`, so an axis pinned to a round
+/// number labels its own ceiling; a fitted axis pads its ends and never
+/// lands a tick on them.
+pub fn axis_ticks(min: f64, max: f64, step: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    if !(step > 0.0) || !min.is_finite() || !max.is_finite() {
+        return out;
+    }
+    let first = (min / step).ceil();
+    for n in 0..MAX_TICKS {
+        let tick = (first + n as f64) * step;
+        if tick > max + step * 1e-6 {
+            break;
+        }
+        out.push(tick);
+    }
+    out
 }
 
 /// The least and greatest number in the rows that can be drawn, and how
@@ -1921,6 +1950,9 @@ impl TrendChart {
         if self.seeded_from != self.series {
             self.seeded_from = self.series.clone();
             self.rows = parse_rows(&self.series);
+            // The markup is lines; candles that were set from Rust would
+            // otherwise keep the tile, drawn ahead of them.
+            self.candles.clear();
         }
     }
 
@@ -1951,8 +1983,11 @@ impl TrendChart {
         let widths: Vec<f64> = named.iter().map(|&r| measure(&self.draw_text, cx, &self.rows[r].label)).collect();
         let text_h = self.draw_text.text_style.font_size as f64 * TEXT_BOX;
         let key = legend_row(plot.pos + dvec2(6.0, 6.0), &widths, text_h);
-        self.draw_bg.color = self.color_bg;
-        self.draw_bg.draw_abs(cx, key.panel);
+        // The panel goes through the grid's quad, not the tile's: the
+        // tile's is the widget's area, and the last rect it draws is what
+        // the overlay and the tree would take for the whole chart.
+        self.draw_grid.color = self.color_bg;
+        self.draw_grid.draw_abs(cx, key.panel);
         self.draw_text.color = self.color_text;
         for (k, &r) in named.iter().enumerate() {
             self.draw_grid.color = self.line_color(r);
@@ -1999,10 +2034,9 @@ impl Widget for TrendChart {
 
         // horizontal grid at nice ticks, labels in the right gutter
         let step = Self::nice_step(range / 5.0);
-        let mut tick = (min / step).ceil() * step;
         self.draw_grid.color = self.color_grid;
         self.draw_text.color = self.color_text;
-        while tick < max {
+        for tick in axis_ticks(min, max, step) {
             let y = py(tick);
             self.draw_grid.draw_abs(cx, Rect {
                 pos: dvec2(plot.pos.x, y),
@@ -2015,7 +2049,6 @@ impl Widget for TrendChart {
             };
             self.draw_text
                 .draw_abs(cx, dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0), &label);
-            tick += step;
         }
         // vertical grid every ~90px
         let vticks = (plot.size.x / 90.0).max(1.0) as usize;
@@ -2324,6 +2357,29 @@ mod tests {
             "the tile's face is not the library's"
         );
         assert_eq!(tile.font_size, 8.0);
+    }
+
+    #[test]
+    fn a_pinned_axis_labels_its_ceiling_and_a_fitted_one_never_lands_on_its_ends() {
+        assert_eq!(axis_ticks(0.0, 100.0, 20.0), vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0]);
+        let (min, max) = axis_range(0.0, 100.0, 0.0, 0.0);
+        let ticks = axis_ticks(min, max, TrendChart::nice_step((max - min) / 5.0));
+        assert!(ticks.first().copied().unwrap() > min);
+        assert!(ticks.last().copied().unwrap() < max);
+    }
+
+    /// A flat line at a million: the axis has room in proportion to the
+    /// number, and the ticks advance and end.
+    #[test]
+    fn a_flat_series_of_large_numbers_has_an_axis_and_a_finite_number_of_ticks() {
+        let (min, max) = axis_range(1_048_576.0, 1_048_576.0, 0.0, 0.0);
+        assert!(max > min);
+        let ticks = axis_ticks(min, max, TrendChart::nice_step((max - min) / 5.0));
+        assert!(!ticks.is_empty() && ticks.len() <= MAX_TICKS);
+        assert!(ticks.windows(2).all(|w| w[1] > w[0]), "the ticks do not advance: {ticks:?}");
+        // A step below what an f64 can add to the number still ends.
+        assert!(axis_ticks(1e6, 1e6 + 2e-10, 5e-11).len() <= MAX_TICKS);
+        assert!(axis_ticks(0.0, 1.0, 0.0).is_empty());
     }
 
     #[test]
