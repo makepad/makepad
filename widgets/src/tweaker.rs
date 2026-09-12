@@ -2448,6 +2448,143 @@ fn fmt_scalar(heap: &ScriptHeap, value: ScriptValue) -> Option<String> {
 }
 
 /// Splash-ish one-line rendering of a value, `depth` levels of objects deep.
+/// How an enum value is written out. `Full` names the enum and carries
+/// every field that is set, so the text re-applies exactly under
+/// `Apply::Eval`; `Display` is for a row's eye and drops the enum's name and
+/// the fields equal to the variant's own defaults.
+#[derive(Clone, Copy, PartialEq)]
+enum EnumFmt {
+    Full,
+    Display,
+}
+
+/// (enum, variant) for an object that came from a derived enum, else None.
+/// The derive stamps `__enum` on every variant object -- a bare variant, a
+/// tuple, a named one -- and instances inherit it through the proto chain;
+/// the variant itself is the first bare id in that chain.
+fn enum_info(heap: &ScriptHeap, obj: ScriptObject) -> Option<(LiveId, LiveId)> {
+    let en = heap.value(obj, live_id!(__enum).into(), NoTrap).as_id()?;
+    let mut ptr = obj;
+    for _ in 0..8 {
+        let proto = heap.proto(ptr);
+        if let Some(id) = proto.as_id() {
+            return Some((en, id));
+        }
+        ptr = proto.as_object()?;
+    }
+    None
+}
+
+/// The nearest proto that is an object: for an instance of a named variant
+/// that is the frozen variant itself, which holds the field defaults.
+fn enum_variant_proto(heap: &ScriptHeap, obj: ScriptObject) -> Option<ScriptObject> {
+    heap.proto(obj).as_object()
+}
+
+/// `Flow.Down`, `Size.Fixed(200)`, `Size.Fill{weight: 100 basis: 0 shrink: 0}`.
+/// A relative size prints as the CSS it was written as: `50%`, `25vw`.
+fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String> {
+    let (en, var) = enum_info(heap, obj)?;
+    let en_name = live_id_token(en);
+    let var_name = live_id_token(var);
+
+    // A relative size is a string in the person's head, not a struct.
+    if var_name == "Rel" && (en_name == "Size" || en_name == "FitBound") {
+        let factor = heap.value(obj, live_id!(factor).into(), NoTrap).as_number();
+        let base = heap
+            .value(obj, live_id!(base).into(), NoTrap)
+            .as_object()
+            .and_then(|b| enum_info(heap, b))
+            .map(|(_, v)| live_id_token(v));
+        if let (Some(factor), Some(base)) = (factor, base) {
+            let unit = match base.as_str() {
+                "Parent" => Some("%"),
+                "Vw" => Some("vw"),
+                "Vh" => Some("vh"),
+                "Cqw" => Some("cqw"),
+                "Cqh" => Some("cqh"),
+                _ => None,
+            };
+            if let Some(unit) = unit {
+                return Some(format!("{}{unit}", fmt_num(factor * 100.0)));
+            }
+        }
+    }
+
+    let head = match fmt {
+        EnumFmt::Full => format!("{en_name}.{var_name}"),
+        EnumFmt::Display => var_name.clone(),
+    };
+
+    // Tuple: the positional values.
+    let len = heap.vec_len(obj);
+    if len > 0 {
+        let mut out = head;
+        out.push('(');
+        for index in 0..len {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            let value = heap.vec_value_if_exist(obj, index)?;
+            out.push_str(&fmt_value(heap, value, 2).unwrap_or_else(|| "?".to_string()));
+        }
+        out.push(')');
+        return Some(out);
+    }
+
+    // Named: the instance's own fields first, in the order they were set,
+    // then the variant's defaults it did not set. Hidden keys stay hidden.
+    let mut keys: Vec<LiveId> = Vec::new();
+    collect_prop_keys(heap, obj, &mut keys);
+    keys.retain(|k| *k != live_id!(__enum) && !live_id_token(*k).starts_with('_'));
+    if keys.is_empty() {
+        return Some(head); // bare
+    }
+    let defaults = enum_variant_proto(heap, obj);
+    let mut out = head.clone();
+    out.push('{');
+    let mut first = true;
+    for key in keys {
+        let value = heap.value(obj, key.into(), NoTrap);
+        if value.is_nil() {
+            continue; // an Option that is None
+        }
+        let Some(text) = fmt_value(heap, value, 2) else { continue };
+        if fmt == EnumFmt::Display {
+            if let Some(defaults) = defaults {
+                let default = heap.value(defaults, key.into(), NoTrap);
+                if fmt_value(heap, default, 2).as_deref() == Some(text.as_str()) {
+                    continue;
+                }
+            }
+        }
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str(&live_id_token(key));
+        out.push_str(": ");
+        out.push_str(&text);
+    }
+    if first {
+        // Nothing to say beyond the variant: every field is its default
+        // (Display) or none is set. `Fill`, not `Fill{}`.
+        return Some(head);
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// A number the way a person writes it: `200`, not `200.0`; `0.5` stays.
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{v:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<String> {
     if let Some(text) = fmt_scalar(heap, value) {
         return Some(text);
@@ -2480,6 +2617,10 @@ fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<Stri
                 return None; // texture/buffer declarations, not values
             }
             return fmt_value(heap, inner, depth);
+        }
+        // A derived enum prints as one whole value, never as its fields.
+        if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+            return Some(text);
         }
         if depth == 0 {
             return Some("{..}".to_string());
@@ -2592,6 +2733,15 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
                 if heap.as_fn(obj).is_some() {
                     continue;
                 }
+                // An enum is one row, whole -- `width: Size.Fill{weight: 100}`
+                // -- and is never dotted into `width.weight`: a field of a
+                // variant is not a property a person can set on its own.
+                if enum_info(heap, obj).is_some() {
+                    if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+                        out.push((name, text, is_set));
+                    }
+                    continue;
+                }
                 // One level of dotted expansion for typed sub-structs
                 // (draw_bg.color, padding.left ...), own map only.
                 let sub_keys: Vec<LiveId> = heap
@@ -2650,6 +2800,14 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
                 let value = heap.value(source, key.into(), NoTrap);
                 if let Some(obj) = value.as_object() {
                     if heap.as_fn(obj).is_some() {
+                        continue;
+                    }
+                    if enum_info(heap, obj).is_some() {
+                        if !out.iter().any(|(existing, _, _)| *existing == name) {
+                            if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+                                out.push((name, text, false));
+                            }
+                        }
                         continue;
                     }
                     let mut sub_keys = Vec::new();
@@ -13595,6 +13753,49 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_enums_print_as_whole_values() {
+        use crate::makepad_draw::turtle::RowAlign;
+        use crate::makepad_draw::{Base, FitBound, Flow, Size};
+        use crate::makepad_script::{ScriptApply, ScriptNew};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            // In dependency order, the way the draw crate's module does it:
+            // building a named variant's proto converts its DEFAULT fields
+            // to script values, and a bare default such as `Base::Full` or
+            // `RowAlign::Top` looks its own type up on the way.
+            <Base as ScriptNew>::script_api(vm);
+            <RowAlign as ScriptNew>::script_api(vm);
+            <FitBound as ScriptNew>::script_api(vm);
+            <Size as ScriptNew>::script_api(vm);
+            <Flow as ScriptNew>::script_api(vm);
+            let fill = Size::Fill {
+                weight: 100.0,
+                basis: FitBound::Abs(0.0),
+                shrink: 0.0,
+                min: None,
+                max: None,
+            }
+            .script_to_value(vm);
+            let fixed = Size::Fixed(200.0).script_to_value(vm);
+            let down = Flow::Down.script_to_value(vm);
+            let heap = &vm.bx.heap;
+            let fill_obj = fill.as_object().expect("a named variant is an object");
+            assert_eq!(
+                enum_info(heap, fill_obj).map(|(e, v)| (live_id_token(e), live_id_token(v))),
+                Some(("Size".to_string(), "Fill".to_string()))
+            );
+            assert_eq!(
+                fmt_value(heap, fill, 2).as_deref(),
+                Some("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}")
+            );
+            assert_eq!(fmt_value(heap, fixed, 2).as_deref(), Some("Size.Fixed(200)"));
+            assert_eq!(fmt_value(heap, down, 2).as_deref(), Some("Flow.Down"));
+            // Display drops the enum and the fields equal to the defaults.
+            assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
+        });
+    }
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
         Rect { pos: dvec2(x, y), size: dvec2(w, h) }
