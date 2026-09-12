@@ -277,6 +277,7 @@ impl Cx {
                                 | AppToStudio::AfterStartup
                                 | AppToStudio::RequestAnimationFrame
                                 | AppToStudio::DrawCompleteAndFlip(_)
+                                | AppToStudio::TickDone
                         ) {
                             collect_time = urgent_collect_time;
                         }
@@ -325,8 +326,19 @@ impl Cx {
             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
             let mut request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
             request.set_websocket_transport(WebSocketTransport::PlainTcp);
-            *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
-            match self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+            let network = self.net.clone();
+            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+            let network = if crate::app_main::should_run_stdin_loop_from_env() {
+                // GPU handoff must keep receiving control while application
+                // networking callbacks are paused. A separate runtime owns
+                // the control socket; ordinary responses keep their original
+                // queue and are dispatched after the handoff.
+                let network = Arc::new(NetworkRuntime::new(Default::default()));
+                self.os.gpu_control_net = Some(network.clone());
+                network
+            } else { network };
+            *STUDIO_NET_RUNTIME.lock().unwrap() = Some(network.clone());
+            match network.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
                 Ok(()) => self.run_studio_websocket_thread(),
                 Err(err) => {
                     crate::error!("could not open studio websocket: {err}");
@@ -339,7 +351,10 @@ impl Cx {
     }
 
     pub fn stop_studio_websocket(&mut self) {
-        let _ = self.net.ws_close(LiveId(STUDIO_SOCKET_ID));
+        let network = self.net.clone();
+        #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+        let network = self.os.gpu_control_net.take().unwrap_or(network);
+        let _ = network.ws_close(LiveId(STUDIO_SOCKET_ID));
         *STUDIO_NET_RUNTIME.lock().unwrap() = None;
         HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
         STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
@@ -376,10 +391,28 @@ impl Cx {
 
     #[cfg(not(target_os = "android"))]
     #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
-    #[cfg(not(gpusim))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    #[cfg(not(all(target_os = "linux", linux_direct, use_vulkan)))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        self.receive_studio_websocket_message(true)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    pub(crate) fn try_recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        self.receive_studio_websocket_message(false)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    fn receive_studio_websocket_message(&mut self, wait: bool) -> Option<WebSocketMessage> {
         loop {
-            let response = self.net.recv().ok()?;
+            let network = &self.net;
+            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+            let network = self.os.gpu_control_net.as_ref().unwrap_or(network);
+            let response = if wait { network.recv().ok()? } else { network.try_recv()? };
             match response {
                 NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
                     STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);

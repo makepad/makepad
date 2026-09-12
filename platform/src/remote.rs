@@ -1243,37 +1243,47 @@ mod imp {
                             dy,
                             mods,
                             hw: _,
-                        } => match kind {
-                            MouseKind::Move => StudioToApp::MouseMove(RemoteMouseMove {
-                                time,
-                                x,
-                                y,
-                                modifiers: mods,
-                            }),
-                            MouseKind::Down => StudioToApp::MouseDown(RemoteMouseDown {
-                                time,
-                                x,
-                                y,
-                                button_raw_bits: 1 << button,
-                                modifiers: mods,
-                            }),
-                            MouseKind::Up => StudioToApp::MouseUp(RemoteMouseUp {
-                                time,
-                                x,
-                                y,
-                                button_raw_bits: 1 << button,
-                                modifiers: mods,
-                            }),
-                            MouseKind::Scroll => StudioToApp::Scroll(RemoteScroll {
-                                time,
-                                x,
-                                y,
-                                sx: dx,
-                                sy: dy,
-                                is_mouse: true,
-                                modifiers: mods,
-                            }),
-                        },
+                        } => {
+                            // Remote /click and /m are window-local layout points.
+                            // dispatch_studio_msg calls stdin_pointer_abs ->
+                            // dpi_override_scale and remaps native OS points into
+                            // layout. Convert first so that remap restores the
+                            // requested layout coordinate (saved scale 2.0 over
+                            // native 1.3 would otherwise send x1193 to x775.45).
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            match kind {
+                                MouseKind::Move => StudioToApp::MouseMove(RemoteMouseMove {
+                                    time,
+                                    x: native.x,
+                                    y: native.y,
+                                    modifiers: mods,
+                                }),
+                                MouseKind::Down => StudioToApp::MouseDown(RemoteMouseDown {
+                                    time,
+                                    x: native.x,
+                                    y: native.y,
+                                    button_raw_bits: 1 << button,
+                                    modifiers: mods,
+                                }),
+                                MouseKind::Up => StudioToApp::MouseUp(RemoteMouseUp {
+                                    time,
+                                    x: native.x,
+                                    y: native.y,
+                                    button_raw_bits: 1 << button,
+                                    modifiers: mods,
+                                }),
+                                MouseKind::Scroll => StudioToApp::Scroll(RemoteScroll {
+                                    time,
+                                    x: native.x,
+                                    y: native.y,
+                                    sx: dx,
+                                    sy: dy,
+                                    is_mouse: true,
+                                    modifiers: mods,
+                                }),
+                            }
+                        }
                         Input::Key { down, code, mods } => {
                             let event = KeyEvent {
                                 key_code: code,

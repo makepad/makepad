@@ -65,17 +65,17 @@ pub struct EncodedPacket {
     pub is_key: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use crate::apple_stream_encoder::AppleStreamEncoder as OsStreamEncoder;
 #[cfg(target_os = "windows")]
 use crate::windows_stream_encoder::WindowsStreamEncoder as OsStreamEncoder;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 const UNSUPPORTED: &str = "hardware video stream encode is not implemented on this platform yet";
 
 pub struct VideoStreamEncoder {
     options: VideoStreamEncoderOptions,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
     os: OsStreamEncoder,
 }
 
@@ -90,12 +90,12 @@ impl VideoStreamEncoder {
         if options.fps == 0 {
             return Err(VideoFileError::new("invalid stream encoder fps 0"));
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         {
             let os = OsStreamEncoder::new(&options)?;
             return Ok(Self { options, os });
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         {
             let _ = &options;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -132,9 +132,9 @@ impl VideoStreamEncoder {
                 nv12.len()
             )));
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         return self.os.push_frame_nv12(nv12, pts_100ns);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -146,7 +146,7 @@ impl VideoStreamEncoder {
     /// decoding immediately instead of waiting for the next scheduled
     /// keyframe (up to `keyint` frames away).
     pub fn request_keyframe(&mut self) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         self.os.request_keyframe();
     }
 }

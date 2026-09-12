@@ -39,7 +39,7 @@ use crate::{
     Cx,
 };
 
-#[cfg(not(gpusim))]
+#[cfg(all(not(gpusim), not(linux_direct)))]
 use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
 
 #[cfg(any(

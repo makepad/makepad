@@ -178,22 +178,22 @@ use windows_decoder::WindowsVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "windows")]
 use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple_decoder;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple_encoder;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple_intra_frame;
 // Pure Rust and portable, but only the macOS still-writer uses it so far.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod mp4_single_frame;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple_stream_encoder;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple_stream_decoder;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use apple_decoder::MacosVideoFileDecoder as OsVideoFileDecoder;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use apple_encoder::MacosVideoFileEncoder as OsVideoFileEncoder;
 
 // Linux arm: GStreamer via dlopen (no -dev packages, no link dependency),
@@ -212,7 +212,7 @@ use linux_decoder::LinuxVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "linux")]
 use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
 const UNSUPPORTED: &str = "video file codec is not implemented on this platform yet";
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ const UNSUPPORTED: &str = "video file codec is not implemented on this platform 
 
 pub struct VideoFileEncoder {
     options: VideoFileEncoderOptions,
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
     os: OsVideoFileEncoder,
 }
 
@@ -251,12 +251,12 @@ impl VideoFileEncoder {
                 )));
             }
         }
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             let os = OsVideoFileEncoder::new(path, &options)?;
             return Ok(Self { options, os });
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -270,9 +270,9 @@ impl VideoFileEncoder {
     /// The codec transform the platform selected for the video stream, when
     /// known. Resolved during `new`.
     pub fn video_transform(&self) -> Option<&VideoTransformInfo> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.video_transform();
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         return None;
     }
 
@@ -289,9 +289,9 @@ impl VideoFileEncoder {
                 self.options.height
             )));
         }
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.push_frame_rgb(rgb, 3, pts_100ns);
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -310,9 +310,9 @@ impl VideoFileEncoder {
                 self.options.height
             )));
         }
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.push_frame_rgb(rgba, 4, pts_100ns);
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -329,9 +329,9 @@ impl VideoFileEncoder {
                 expected
             )));
         }
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.push_frame_nv12(nv12, pts_100ns);
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -353,17 +353,17 @@ impl VideoFileEncoder {
                 audio.channels
             )));
         }
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.push_audio_i16(samples);
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
     /// Flush and finalize the container. Must be called for a playable mp4.
     pub fn finish(mut self) -> Result<(), VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.finish();
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = &mut self;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -423,7 +423,7 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             .next_frame()?
             .ok_or_else(|| VideoFileError::new("first frame decode: container has no frames"));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         let au = mp4_first_frame::first_access_unit(bytes)?;
         let mut decoder = VideoStreamDecoder::new(au.codec)?;
@@ -442,7 +442,7 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             nv12: frame.nv12,
         });
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple")))]
     {
         let _ = bytes;
         Err(VideoFileError::new(
@@ -460,24 +460,24 @@ pub struct DecodedAudioChunk {
 }
 
 pub struct VideoFileDecoder {
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
     os: OsVideoFileDecoder,
     /// Where [`VideoFileDecoder::seek`]'s discard loop stopped: the frame and
     /// chunk it kept, handed to the next `next_frame`/`next_audio` call. Held
     /// here rather than in each backend so the "first at or after the target"
     /// rule is written once and cannot drift between platforms.
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
     pending_video: Option<DecodedVideoFrame>,
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
     pending_audio: Option<DecodedAudioChunk>,
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
     info: VideoFileInfo,
 }
 
 impl VideoFileDecoder {
     /// Open an mp4 (or any container the platform demuxes) for decoding.
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             let os = OsVideoFileDecoder::open(path)?;
             return Ok(Self {
@@ -486,7 +486,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -508,35 +508,35 @@ impl VideoFileDecoder {
     }
 
     pub fn info(&self) -> &VideoFileInfo {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         return self.os.info();
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         return &self.info;
     }
 
     /// Pull the next decoded video frame; `Ok(None)` at end of stream.
     pub fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             if let Some(frame) = self.pending_video.take() {
                 return Ok(Some(frame));
             }
             return self.os.next_frame();
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
     /// Pull the next decoded PCM audio chunk; `Ok(None)` at end of stream.
     pub fn next_audio(&mut self) -> Result<Option<DecodedAudioChunk>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             if let Some(chunk) = self.pending_audio.take() {
                 return Ok(Some(chunk));
             }
             return self.os.next_audio();
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
@@ -559,7 +559,7 @@ impl VideoFileDecoder {
     /// [`next_frame`]: VideoFileDecoder::next_frame
     /// [`next_audio`]: VideoFileDecoder::next_audio
     pub fn seek(&mut self, pts_100ns: i64) -> Result<(), VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             let target = pts_100ns.max(0);
             // Anything held from a previous seek belongs to the old position.
@@ -594,7 +594,7 @@ impl VideoFileDecoder {
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -617,7 +617,7 @@ impl VideoFileDecoder {
 ///
 /// `nv12` is a tightly packed NV12 buffer: `width * height` luma followed by
 /// interleaved chroma for `ceil(height / 2)` rows.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub fn encode_intra_frame_mp4(
     nv12: &[u8],
     width: u32,
@@ -640,7 +640,7 @@ pub fn encode_intra_frame_mp4(
 /// and read back. It pays the container machinery the Apple path avoids,
 /// but the bytes mean the same thing to every decoder, which is what a
 /// tile tape needs — the tape format is not a platform's.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(target_vendor = "apple"))]
 pub fn encode_intra_frame_mp4(
     nv12: &[u8],
     width: u32,

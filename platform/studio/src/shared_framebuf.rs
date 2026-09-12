@@ -91,9 +91,21 @@ pub struct LinuxSharedImagePlane {
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
+pub struct LinuxVulkanSharedImage {
+    pub allocation_size: u64,
+    pub memory_type_index: u32,
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct LinuxSharedImage {
     pub drm_format: DrmFormat,
     pub plane: LinuxSharedImagePlane,
+    /// OPAQUE_FD image memory and a second auxiliary timeline semaphore FD.
+    /// None retains the existing DMA-BUF / software-buffer protocol.
+    pub vulkan: Option<LinuxVulkanSharedImage>,
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -145,4 +157,7 @@ pub struct PresentableDraw {
     pub target_id: PresentableImageId,
     pub width: u32,
     pub height: u32,
+    /// Odd Vulkan timeline value identifying this completed frame; zero for
+    /// transports without an explicit image lease.
+    pub sequence: u64,
 }

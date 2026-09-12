@@ -6,8 +6,7 @@ use {
     super::gl_video_upload::upload_yuv_to_gl,
     super::gstreamer_sys::LibGStreamer,
     super::linux_video_gpu::{
-        present_dmabuf_nv12, present_gl_memory_rgba, LinuxDmabufPresentCache,
-        LinuxGlMemoryPresentCache, LinuxGlTextureTarget,
+        LinuxDmabufPresentCache, LinuxGlMemoryPresentCache,
     },
     super::linux_video_playback::{
         poll_pending_gstreamer_teardowns, GStreamerVideoPlayer, GstRuntimeEvent, YuvTextureIds,
@@ -29,6 +28,9 @@ use {
         video_decode::software_video::PlaybackSessionHandle,
     },
 };
+
+#[cfg(not(linux_direct))]
+use super::linux_video_gpu::{present_dmabuf_nv12, present_gl_memory_rgba, LinuxGlTextureTarget};
 
 #[derive(Clone)]
 pub struct YuvTextureSet {
@@ -279,19 +281,24 @@ impl LinuxVideoPlayer {
             LinuxVideoPlayer::Software {
                 player: p,
                 yuv,
+                #[cfg(not(linux_direct))]
                 texture_id,
                 yuv_matrix,
                 yuv_biplanar,
                 yuv_external,
                 rgba_gl_2d,
+                #[cfg(not(linux_direct))]
                 dmabuf_cache,
+                #[cfg(not(linux_direct))]
                 gl_memory_cache,
+                ..
             } => {
                 if !p.poll_frame() {
                     return false;
                 }
 
                 // Prefer DMA-Buf NV12 zero-copy when the MediaPlugin supplies it.
+                #[cfg(not(linux_direct))]
                 if let (Some(y_oes), Some(u_oes), Some(cx)) = (
                     yuv.ids.tex_y_oes_id,
                     yuv.ids.tex_u_oes_id,
@@ -322,6 +329,7 @@ impl LinuxVideoPlayer {
                 }
 
                 // GStreamer GLMemory / share-group RGBA texture.
+                #[cfg(not(linux_direct))]
                 if let Some(gpu) = p.take_linux_gl_memory_rgba_frame() {
                     match present_gl_memory_rgba(gl, textures, *texture_id, &gpu, gl_memory_cache)
                     {
@@ -589,6 +597,19 @@ pub fn collect_linux_video_player_events(
     textures: &mut CxTexturePool,
     opengl_cx: Option<&OpenglCx>,
 ) -> Vec<Event> {
+    collect_linux_player_events(player, |player| player.poll_frame(gl, textures, opengl_cx))
+}
+
+/// Audio-only playback has no graphics context or video texture to update.
+#[cfg(use_vulkan)]
+pub fn collect_linux_audio_player_events(player: &mut LinuxVideoPlayer) -> Vec<Event> {
+    collect_linux_player_events(player, |_| false)
+}
+
+fn collect_linux_player_events(
+    player: &mut LinuxVideoPlayer,
+    poll_frame: impl FnOnce(&mut LinuxVideoPlayer) -> bool,
+) -> Vec<Event> {
     poll_pending_gstreamer_teardowns();
     let mut video_events = Vec::new();
     match player.check_prepared() {
@@ -667,7 +688,7 @@ pub fn collect_linux_video_player_events(
             ranges,
         }));
     }
-    if player.poll_frame(gl, textures, opengl_cx) {
+    if poll_frame(player) {
         video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
             video_id: player.video_id(),
             current_position_ms: player.current_position_ms(),

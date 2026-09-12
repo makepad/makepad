@@ -442,6 +442,15 @@ impl Cx {
                         storage_responses.push(response);
                     }
                 }
+                live_id!(ToWasmGpuCompletion) => {
+                    let tw=ToWasmGpuCompletion::read_to_wasm(&mut to_wasm);
+                    let serial=tw.serial_lo as u64|((tw.serial_hi as u64)<<32);
+                    if self.os.completion_pending==serial {
+                        self.os.completion_pending=0;
+                        if tw.success {self.textures.1.serials.complete(serial);}
+                        self.call_event_handler(&Event::Signal);
+                    }
+                }
                 live_id!(ToWasmRenderTextureCapture) => {
                     let tw = ToWasmRenderTextureCapture::read_to_wasm(&mut to_wasm);
                     if tw.ticket_lo != 0 || tw.ticket_hi != 0 {
@@ -1444,6 +1453,7 @@ impl CxOsApi for Cx {
             ToWasmTextCopy::to_js_code(),
             ToWasmStorageResult::to_js_code(),
             ToWasmRenderTextureCapture::to_js_code(),
+            ToWasmGpuCompletion::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
@@ -1516,6 +1526,7 @@ impl CxOsApi for Cx {
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
             FromWasmFreeWebGLResources::to_js_code(),
+            FromWasmPollGpuCompletion::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
@@ -1634,6 +1645,7 @@ pub struct CxOs {
     /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
     /// on those programs are dropped by the browser side.
     pub(crate) webgl_shaders_pending: usize,
+    pub(crate) completion_pending: u64,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1662,6 +1674,7 @@ impl Default for CxOs {
             index_buffers: 0,
             vaos: 0,
             webgl_shaders_pending: 0,
+            completion_pending: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),

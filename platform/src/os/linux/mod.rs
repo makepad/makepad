@@ -1,4 +1,4 @@
-#[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod opengl_cx;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod file_dialog;
@@ -14,6 +14,12 @@ pub mod x11;
 
 #[cfg(linux_direct)]
 pub mod direct;
+
+// Display inventory contract for the WM, defined at the crate root
+// (`crate::linux_display`) so headless builds share it. Native Linux only:
+// Android and OHOS report displays through their own platform layers.
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub use crate::linux_display as display;
 
 #[cfg(target_os = "android")]
 pub mod openxr;
@@ -83,8 +89,8 @@ pub(crate) fn wake_ui_event_loop() {
 
 #[cfg(linux_direct)]
 pub(crate) fn wake_ui_event_loop() {
-    // The direct backend never blocks its main loop; setting SignalToUI is
-    // sufficient and is observed on the next loop turn.
+    // Direct display apps sleep on the shared wake pipe while idle.
+    select_timer::wake_ui_event_loop();
 }
 
 #[cfg(target_os = "android")]
@@ -134,3 +140,18 @@ pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
 //#[cfg(target_env="ohos")]
 //pub(crate) use self::open_harmony::oh_media::{OsMidiInput, OsMidiOutput};
+
+// Vulkan hosts upload the existing shared-memory transport on both display paths.
+#[cfg(all(not(any(target_env = "ohos", target_os = "android")), all(linux_direct, not(use_vulkan))))]
+mod presentable;
+#[cfg(all(linux_direct, use_vulkan))]
+#[path = "x11/linux_x11_stdin.rs"]
+mod direct_stdin;
+#[cfg(all(linux_direct, use_vulkan))]
+pub(crate) mod hosted_gpu;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub(crate) mod hosted_gpu_sender;
+
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+#[path = "direct/drm_sys.rs"]
+pub mod drm_sys;

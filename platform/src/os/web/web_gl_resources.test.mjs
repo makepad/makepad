@@ -182,3 +182,30 @@ test("WebGL retirement is idempotent, dependency-safe, and bounded across slot r
   assert.ok(harness.textures.length <= 11);
   assert.ok(harness.framebuffers.length <= 11);
 });
+
+test("completion reports only a signalled GPU fence and retires it", async () => {
+  const harness = makeHarness();
+  harness.wasm = {};
+  const reports = [];
+  harness.to_wasm = { ToWasmGpuCompletion: value => reports.push(value) };
+  harness.do_wasm_pump = () => {};
+  let polls = 0, deleted = 0;
+  Object.assign(harness.gl, {
+    SYNC_GPU_COMMANDS_COMPLETE: 20, TIMEOUT_EXPIRED: 21, WAIT_FAILED: 22,
+    fenceSync: () => ({}), flush() {}, isContextLost: () => false,
+    clientWaitSync: (_fence, flags, timeout) => {
+      assert.equal(flags, 0); assert.equal(timeout, 0);
+      return ++polls < 3 ? 21 : 23;
+    },
+    deleteSync: () => deleted++,
+  });
+  harness.FromWasmPollGpuCompletion({ serial_lo: 17, serial_hi: 2 });
+  assert.equal(reports.length, 0);
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.deepEqual(reports, [{ serial_lo: 17, serial_hi: 2, success: true }]);
+  assert.equal(deleted, 1);
+  harness.gl.clientWaitSync = () => harness.gl.WAIT_FAILED;
+  harness.FromWasmPollGpuCompletion({ serial_lo: 18, serial_hi: 2 });
+  assert.deepEqual(reports.at(-1), { serial_lo: 18, serial_hi: 2, success: false });
+  assert.equal(deleted, 2);
+});

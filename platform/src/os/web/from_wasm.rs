@@ -337,6 +337,12 @@ pub struct FromWasmFreeWebGLResources {
     pub framebuffer_ids: Vec<usize>,
 }
 
+#[derive(FromWasm)]
+pub struct FromWasmPollGpuCompletion {
+    pub serial_lo: u32,
+    pub serial_hi: u32,
+}
+
 #[derive(FromWasm, Default)]
 pub struct WColor {
     pub r: f32,

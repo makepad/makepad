@@ -264,14 +264,22 @@ pub trait AppMain {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _app_main_event_closure {
-    ($app:ident) => {{
+    ($app:ident) => {
+        $crate::_app_main_event_closure!($app, |_cx: &mut Cx| {})
+    };
+    ($app:ident, $configure:expr) => {{
         // Event dispatch already excludes synchronous re-entry. Plain captured slots
         // also survive a caught wasm panic=abort trap; a RefCell borrow flag would not
         // be released because wasm does not unwind the trapped Rust stack.
         let mut app: Option<$app> = None;
         let mut app_value: Option<$crate::ScriptObjectRef> = None;
+        let mut configure = $crate::app_main_configure($configure);
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
+                // The binary's say before anything of the app runs: what
+                // this build is, as globals on `Cx` the app's `script_mod`
+                // and startup read (`app_main!`'s `configure:` clause).
+                configure(cx);
                 // Font resource registration happens inside AppMain::script_mod,
                 // so freeze the app_main! choice before that code can run.
                 cx.freeze_font_set();
@@ -348,33 +356,66 @@ pub fn new_cx_with_font_set(
     cx
 }
 
+/// Pins the type of an `app_main!` `configure:` closure so a bare
+/// `|cx| {...}` infers `&mut Cx` without an annotation.
+#[doc(hidden)]
+pub fn app_main_configure<F: FnMut(&mut Cx)>(f: F) -> F {
+    f
+}
+
+/// The application entry point, for every platform at once.
+///
+/// `configure: |cx| {...}` is the binary's say before anything of the app
+/// runs — it is called once, at `Event::Startup`, before
+/// `AppMain::script_mod`. A binary that links an app LIBRARY uses it to
+/// hand the app its build (`cx.set_global(...)`), which the library's
+/// `script_mod` reads through `vm.cx_mut()` and its startup through `cx`:
+/// one mechanism on desktop, Android, OHOS and the web, and no statics.
 #[macro_export]
 macro_rules! app_main {
     ( $app:ident ) => {
+        $crate::app_main!($app, configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, []);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
         #[cfg(not(target_arch = "wasm32"))]
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, []);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
     ( $app:ident, font_assets: [$($asset:literal),* $(,)?] ) => {
+        $crate::app_main!($app, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*]);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
         #[cfg(not(target_arch = "wasm32"))]
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*]);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
     };
     ( $app:ident, font_set: Latin ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, []);
+        $crate::app_main!($app, font_set: Latin, configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_set: Latin, configure: $configure:expr ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
     };
     ( $app:ident, font_set: International ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, []);
+        $crate::app_main!($app, font_set: International, configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_set: International, configure: $configure:expr ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
     ( $app:ident, font_set: Latin, font_assets: [$($asset:literal),* $(,)?] ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*]);
+        $crate::app_main!($app, font_set: Latin, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_set: Latin, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
     };
     ( $app:ident, font_set: International, font_assets: [$($asset:literal),* $(,)?] ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*]);
+        $crate::app_main!($app, font_set: International, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
-    (@impl $app:ident, $font_set:expr, $manifest:expr, [$($asset:literal),*]) => {
+    ( $app:ident, font_set: International, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
+    };
+    (@impl $app:ident, $font_set:expr, $manifest:expr, [$($asset:literal),*], $configure:expr) => {
         // The payload is line-oriented UTF-8. Lane B reads this section from
         // freshly linked wasm before any optional custom-section stripping.
         const MAKEPAD_EXTRA_FONT_ASSETS: &[&str] = &[
@@ -417,7 +458,7 @@ macro_rules! app_main {
             // platform entry points via `_app_main_event_closure!`.
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(
                 $crate::new_cx_with_font_set(
-                $crate::_app_main_event_closure!($app),
+                $crate::_app_main_event_closure!($app, $configure),
                 $font_set,
             )));
             $crate::startup_trace("Cx::new (vm + std script)");
@@ -471,7 +512,7 @@ macro_rules! app_main {
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
                 let mut cx = Box::new($crate::new_cx_with_font_set(
-                    $crate::_app_main_event_closure!($app),
+                    $crate::_app_main_event_closure!($app, $configure),
                     $font_set,
                 ));
                 cx.init_websockets(&studio_http);
@@ -488,7 +529,7 @@ macro_rules! app_main {
         ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
                 let mut cx = Box::new($crate::new_cx_with_font_set(
-                    $crate::_app_main_event_closure!($app),
+                    $crate::_app_main_event_closure!($app, $configure),
                     $font_set,
                 ));
                 let studio_http = $crate::resolve_studio_http();
@@ -507,7 +548,7 @@ macro_rules! app_main {
         pub extern "C" fn create_wasm_app() -> u32 {
             Cx::init_log();
             let mut cx = Box::new($crate::new_cx_with_font_set(
-                $crate::_app_main_event_closure!($app),
+                $crate::_app_main_event_closure!($app, $configure),
                 $font_set,
             ));
             let studio_http = $crate::resolve_studio_http();

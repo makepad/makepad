@@ -3341,6 +3341,31 @@ impl DrawVars {
             // Buffer indices start at 3 (0=vertex buffer, 1=instance buffer, 2=uniform struct)
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
+            // The same shader as the Vulkan / WebGPU backends would compile
+            // it, so a WGSL lowering problem can be seen and validated here
+            // without a Linux box (feed the dump to naga).
+            if crate::makepad_error_log::trace_enabled("shader.wgsl") {
+                let name = vm
+                    .bx
+                    .heap
+                    .object_type_name_in_chain(io_self)
+                    .map(|id| format!("{}", id))
+                    .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+                match crate::makepad_script::shader_wgsl::compile_draw_shader_wgsl_source(
+                    vm, io_self, &output, false,
+                ) {
+                    Ok(wgsl) => {
+                        crate::trace!("shader.wgsl", "---- WGSL {} ----\n{}", name, wgsl.wgsl)
+                    }
+                    Err(err) => crate::trace!(
+                        "shader.wgsl",
+                        "---- WGSL {} ---- lowering failed:\n{}",
+                        name,
+                        err
+                    ),
+                }
+            }
+
             let mut out = String::new();
             write!(out, "#include <metal_stdlib>\nusing namespace metal;\n").ok();
             output.create_struct_defs(vm, &mut out);
