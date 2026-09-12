@@ -7003,6 +7003,20 @@ pub struct Tweaker {
     /// The search box's input uid, captured at draw.
     #[rust]
     search_uid: u64,
+    /// The filter box searches instead of filtering: every row stays on
+    /// screen, the hits are counted, and the arrows (F3, Shift+F3) walk
+    /// them.
+    #[rust]
+    search_mode: bool,
+    /// Which hit the walk is on, modulo the count.
+    #[rust]
+    search_hit: usize,
+    #[rust]
+    find_uid: u64,
+    #[rust]
+    prev_uid: u64,
+    #[rust]
+    next_uid: u64,
     /// Double-click detection on row labels: (time, row index).
     #[rust]
     last_label_click: Option<(f64, usize)>,
@@ -8191,6 +8205,31 @@ impl Tweaker {
                         spacing: 4
                         align: Align{x: 0.0 y: 0.5}
                         search := FabSearch {}
+                        // Search mode: how many hits, and the arrows that
+                        // walk them. Only there while searching.
+                        nav := View {
+                            width: Fit
+                            height: Fit
+                            flow: Right
+                            spacing: 1
+                            align: Align{x: 0.0 y: 0.5}
+                            visible: false
+                            hits := FabLabelSmall { width: Fit margin: Inset{left: 0 right: 3 top: 0 bottom: 0} text: "" }
+                            prev := Button { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{2039}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                            next := Button { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{203a}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                        }
+                        find := Button {
+                            width: 28
+                            height: 24
+                            padding: Inset{left: 7 right: 7 top: 5 bottom: 5}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: ""
+                            icon_walk: Walk{width: 12 height: Fit}
+                            draw_icon +: {
+                                color: #xd8d8d8
+                                svg: crate_resource("self:resources/icons/icon_search.svg")
+                            }
+                        }
                         select := Button {
                             width: 28
                             height: 24
@@ -9277,8 +9316,11 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 23] = [
-            (&[live_id!(filter_row), live_id!(search)], "filter the properties by name"),
+        let chrome: [(&[LiveId], &str); 26] = [
+            (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
+            (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
+            (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
+            (&[live_id!(filter_row), live_id!(nav), live_id!(next)], "the next hit (F3)"),
             (&[live_id!(filter_row), live_id!(select)], "hand the mouse back to the app: its buttons work, the selection stays"),
             (&[live_id!(filter_row), live_id!(sploded)], "explode the widget tree into layers \u{00b7} wheel extrudes, drag orbits"),
             (&[live_id!(tab_row), live_id!(tab_props)], "the selection's properties, edited live"),
@@ -10179,6 +10221,13 @@ impl Tweaker {
     /// `/** */` annotation (docs are searchable: "banding" finds
     /// color_dither through its doc line).
     fn row_matches_filter(&self, row: &RowBinding) -> bool {
+        // A search keeps every row; the hits are marked, not selected.
+        self.search_mode || self.row_hit(row)
+    }
+
+    /// Does the box's text land on this row: its name, its value, or the
+    /// annotation under it. True for no text at all.
+    fn row_hit(&self, row: &RowBinding) -> bool {
         self.filter.is_empty()
             || row.prop.to_lowercase().contains(&self.filter)
             || row.value.to_lowercase().contains(&self.filter)
@@ -10186,6 +10235,62 @@ impl Tweaker {
                 .row_docs
                 .get(&row.prop)
                 .is_some_and(|doc| doc.to_lowercase().contains(&self.filter))
+    }
+
+    /// The entries a search lands on: rows by name, value or doc, and the
+    /// composite rows by the words they answer to.
+    fn search_hits(&self, entries: &[VisKind]) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return Vec::new();
+        }
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| match entry {
+                VisKind::Prop(index) | VisKind::Tweakable(index) => self.row_hit(&self.rows[*index]),
+                VisKind::Section(..)
+                | VisKind::More(..)
+                | VisKind::Group(_)
+                | VisKind::Identity
+                | VisKind::Measured
+                | VisKind::Material(_)
+                | VisKind::TweakHeader(..)
+                | VisKind::InputsHeader(_)
+                | VisKind::CascadeLevel(_) => false,
+                other => Self::composite_terms(other).contains(self.filter.as_str()),
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Bring the hit the walk is on to the top of the list.
+    fn scroll_to_hit(&mut self, cx: &mut Cx) {
+        let entries = self.build_visible();
+        let hits = self.search_hits(&entries);
+        if !hits.is_empty() {
+            let target = hits[self.search_hit % hits.len()];
+            if let Some(sidebar) = self.sidebar.as_ref() {
+                let list_ref = sidebar.child(live_id!(props_wrap)).child(live_id!(props));
+                {
+                    if let Some(mut list) = list_ref.borrow_mut::<PortalList>() {
+                        list.set_first_id_and_scroll(target, 0.0);
+                    }
+                }
+                drop(list_ref);
+            }
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// One hit forward or back, round the end.
+    fn search_step(&mut self, cx: &mut Cx, delta: isize) {
+        let count = self.search_hits(&self.build_visible()).len();
+        if count == 0 {
+            return;
+        }
+        let at = (self.search_hit % count) as isize;
+        self.search_hit = (at + delta).rem_euclid(count as isize) as usize;
+        self.scroll_to_hit(cx);
     }
 
     /// The visible entry list: sections in order, folded sections
@@ -10196,7 +10301,10 @@ impl Tweaker {
     /// suspends (a long-tail match shows regardless) and sections stay
     /// open.
     fn build_visible(&self) -> Vec<VisKind> {
-        let filtering = !self.filter.is_empty();
+        // A search keeps everything on screen -- sections open, tails
+        // shown -- so any hit can be walked to; a filter narrows.
+        let searching = self.search_mode && !self.filter.is_empty();
+        let filtering = !self.filter.is_empty() && !searching;
         let mut out = Vec::new();
         // WHAT IT IS, before what it looks like: the selection's own name —
         // editable, because "this one needs a name" is the commonest thing
@@ -10305,13 +10413,13 @@ impl Tweaker {
             if members.is_empty() && composites.is_empty() {
                 continue;
             }
-            let open = filtering || !self.collapsed[section.index()];
+            let open = filtering || searching || !self.collapsed[section.index()];
             out.push(VisKind::Section(section, members.len(), open));
             if !open {
                 continue;
             }
             out.extend(composites.iter().copied());
-            let expanded = filtering || self.expanded[section.index()];
+            let expanded = filtering || searching || self.expanded[section.index()];
             // A section with no primary row read as an empty header over a
             // "show all": lead with its first three rows instead.
             let primary = members
@@ -10620,7 +10728,13 @@ impl Tweaker {
                     .child(live_id!(search))
                     .child(live_id!(input));
                 if let Some(mut input) = input.borrow_mut::<crate::TextInput>() {
-                    let hint = if filters_here { "Filter" } else { "no filter on this tab" };
+                    let hint = if !filters_here {
+                        "no filter on this tab"
+                    } else if self.search_mode {
+                        "Search"
+                    } else {
+                        "Filter"
+                    };
                     if input.empty_text() != hint {
                         input.set_empty_text(cx, hint.to_string());
                     }
@@ -10640,6 +10754,29 @@ impl Tweaker {
                     draw_text +: { color: #(text) }
                     draw_bg +: { color: #(bg) }
                 });
+                // The search toggle lights while on; the count and the
+                // arrows show only then, and only where rows are searched
+                // (the Tree tab keeps its filter).
+                let searches_here = filters_here && tab != PanelTab::Tree;
+                let row = sidebar.child(live_id!(filter_row));
+                let find = row.child(live_id!(find));
+                self.find_uid = find.widget_uid().0;
+                set_button_fill(cx, find.clone(), self.search_mode && searches_here);
+                let nav = row.child(live_id!(nav));
+                nav.set_visible(cx, self.search_mode && searches_here);
+                self.prev_uid = nav.child(live_id!(prev)).widget_uid().0;
+                self.next_uid = nav.child(live_id!(next)).widget_uid().0;
+                if self.search_mode && searches_here {
+                    let hits = self.search_hits(&self.build_visible());
+                    let count = if self.filter.is_empty() {
+                        String::new()
+                    } else if hits.is_empty() {
+                        "0".to_string()
+                    } else {
+                        format!("{}/{}", self.search_hit % hits.len() + 1, hits.len())
+                    };
+                    nav.child(live_id!(hits)).set_text(cx, &count);
+                }
             }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
@@ -11118,6 +11255,12 @@ impl Tweaker {
                 continue;
             };
             let entries = if in_shader_tab { &shader_entries } else { &entries_all };
+            let hits = if self.search_mode && !in_shader_tab {
+                self.search_hits(entries)
+            } else {
+                Vec::new()
+            };
+            let current_hit = (!hits.is_empty()).then(|| hits[self.search_hit % hits.len()]);
             list.set_item_range(cx, 0, entries.len());
             // A row can draw twice (TWEAKABLES + its home section); every
             // draw registers its fields, so the sets start empty per frame.
@@ -12029,6 +12172,29 @@ impl Tweaker {
                             }
                         }
                         }
+                    }
+                }
+                // A search hit reads in blue and the one the walk is on
+                // brighter; a composite's label goes back to dim otherwise,
+                // since its item is reused and keeps what it was given.
+                if let Some(mut label) = item.child(live_id!(name)).borrow_mut::<Label>() {
+                    if current_hit == Some(entry_id) {
+                        label.draw_text.color = vec4(0.62, 0.82, 1.0, 1.0);
+                    } else if hits.contains(&entry_id) {
+                        label.draw_text.color = vec4(0.38, 0.62, 0.92, 1.0);
+                    } else if matches!(
+                        entry,
+                        VisKind::Size
+                            | VisKind::Measured
+                            | VisKind::BoxInset(_)
+                            | VisKind::FlowSpacing
+                            | VisKind::AlignGrid
+                            | VisKind::Container
+                            | VisKind::Absolute
+                            | VisKind::GridTracks
+                            | VisKind::Cell
+                    ) {
+                        label.draw_text.color = vec4(0.604, 0.604, 0.604, 1.0);
                     }
                 }
                 item.draw_all(cx, &mut Scope::empty());
@@ -13000,11 +13166,40 @@ impl Tweaker {
                     log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
                 }
             }
+            if self.find_uid != 0 && widget_action.widget_uid.0 == self.find_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_mode = !self.search_mode;
+                    self.search_hit = 0;
+                    log!("TWEAK filter box {}", if self.search_mode { "searches" } else { "filters" });
+                    if self.search_mode {
+                        self.scroll_to_hit(cx);
+                    }
+                    self.redraw_sidebar(cx);
+                }
+            }
+            if self.prev_uid != 0 && widget_action.widget_uid.0 == self.prev_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_step(cx, -1);
+                }
+            }
+            if self.next_uid != 0 && widget_action.widget_uid.0 == self.next_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_step(cx, 1);
+                }
+            }
             if self.search_uid != 0 && widget_action.widget_uid.0 == self.search_uid {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
                         self.filter = text.to_lowercase();
+                        self.search_hit = 0;
+                        if self.search_mode {
+                            self.scroll_to_hit(cx);
+                        }
                         self.redraw_sidebar(cx);
+                    }
+                    // Enter walks the hits, like the arrows.
+                    TextInputAction::Returned(_, modifiers) if self.search_mode => {
+                        self.search_step(cx, if modifiers.shift { -1 } else { 1 });
                     }
                     TextInputAction::Escaped => {
                         self.filter.clear();
@@ -14555,6 +14750,13 @@ impl Widget for Tweaker {
                 } else {
                     self.note_close(cx);
                 }
+            }
+            // F3 walks the search hits forward, Shift+F3 back, from
+            // anywhere in the app while the box is searching.
+            Event::KeyDown(ke)
+                if tweak_is_on() && self.search_mode && ke.key_code == KeyCode::F3 =>
+            {
+                self.search_step(cx, if ke.modifiers.shift { -1 } else { 1 });
             }
             // The arrows walk the hierarchy while something is selected —
             // parent / first child / previous / next sibling, the scene
