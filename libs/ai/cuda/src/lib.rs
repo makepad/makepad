@@ -1,5 +1,5 @@
 //! THE CUDA store: driver/cuDNN FFI, every .cu kernel + nvcc build, the
-//! dense `gpu_*` launch surface, quant compute, and llm `mkllm_*` ops.
+//! dense `gpu_*` launch surface, and the llm `mkllm_*` ops.
 //! Plan of record: /aiarch.md §1 + §4.
 
 // Declared first, and with `#[macro_use]`, so `cuda_ffi!` is in scope for
@@ -7,16 +7,18 @@
 #[macro_use]
 mod link_gate;
 
-pub mod accel;
+// The CPU quant kernels, the accel specs and the op profiler are backend-
+// neutral and live in makepad-ai-loader; the launch surface reaches them as
+// `crate::{quant, accel, prof}`. Nothing here re-exports them — consumers
+// import from the loader, so a build without this crate loses nothing.
+#[allow(unused_imports)] // launch.rs is an empty stub off linux/windows-with-kernels
+use makepad_ai_loader::{accel, prof, quant};
+
 pub mod cudnn;
 pub mod cudnn_v8_bench;
 pub mod driver;
 pub mod launch;
 pub mod llm_ops;
-pub mod prof;
-pub mod quant;
-pub mod quant_iq;
-pub mod quant_iq_tables;
 pub mod roformer_ops;
 
 pub use driver::*;

@@ -7,10 +7,14 @@ license = "MIT"
 
 [dependencies]
 makepad-ai-loader = { path = "../../loader" }
-# Must not be target-specific: when this crate is a path dep of another
-# standalone `[workspace]` (diffusion / family crates), cargo 1.92 drops
-# target-cfg deps. metal-precompile bakes the metallib at build time so
-# the first Metal dispatch is not a 13k-line shader compile.
-makepad-ai-cuda = { path = "../../cuda" }
+# metal-precompile bakes the metallib at build time so the first Metal
+# dispatch is not a 13k-line shader compile.
 makepad-ai-metal = { path = "../../metal", features = ["metal-precompile"] }
 makepad-ai-llm = { path = "../../llm" }
+
+# The CUDA store is Linux/Windows-only: gpu.rs / backend.rs reach it only
+# under that target, and a macOS/iOS build never compiles it. The
+# `links = "makepad_ai_cuda"` handshake (DEP_MAKEPAD_AI_CUDA_KERNELS, read
+# in build.rs) arrives exactly on the targets that have the dependency.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../../cuda" }

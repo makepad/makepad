@@ -11,7 +11,7 @@ use crate::{
     ggml_row_size_for_type, BufferUsage, Context, GluOp, Graph, InitParams, Op, Prec, SortOrder,
     Tensor, TensorId, TensorType, TriType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
 };
-use makepad_ai_cuda::quant::{f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
+use makepad_ai_loader::quant::{f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
 use makepad_ai_metal::{
     try_matmul_nt_ggml_bytes, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer,
     MetalDeviceFeatures, MetalRuntime,

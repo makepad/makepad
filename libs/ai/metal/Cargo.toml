@@ -12,6 +12,10 @@ metal-precompile = []
 
 [dependencies]
 makepad-ai-loader = { path = "../loader" }
+
+# Only shim.rs's non-macOS CUDA bounce needs the CUDA store: a macOS or iOS
+# build never compiles it.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../cuda" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

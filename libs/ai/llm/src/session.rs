@@ -1260,7 +1260,7 @@ impl LlamaSession {
                 }
                 _ => {
                     for chunk in bytes.chunks_exact(2) {
-                        let v = makepad_ai_cuda::quant::f16_to_f32(u16::from_le_bytes(
+                        let v = makepad_ai_loader::quant::f16_to_f32(u16::from_le_bytes(
                             chunk.try_into().unwrap(),
                         ));
                         if v.is_nan() {

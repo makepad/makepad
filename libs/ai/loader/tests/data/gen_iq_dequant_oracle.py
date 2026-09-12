@@ -18,7 +18,7 @@ import numpy as np
 from gguf.constants import GGMLQuantizationType
 from gguf import quants
 
-OUT = "/Users/admin/makepad/makepad/libs/ai/cuda/tests/data/iq_dequant_oracle.bin"
+OUT = "/Users/admin/makepad/makepad/libs/ai/loader/tests/data/iq_dequant_oracle.bin"
 
 TYPE_IDS = {
     "Q2_K": 10, "Q3_K": 11,

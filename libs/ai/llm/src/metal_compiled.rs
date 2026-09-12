@@ -5980,8 +5980,8 @@ mod tests {
     use super::*;
     use crate::context::Context;
     use crate::core::{InitParams, ScaleMode, SortOrder};
-    use makepad_ai_cuda::quant::f16_to_f32;
-    use makepad_ai_cuda::quant::f32_to_f16;
+    use makepad_ai_loader::quant::f16_to_f32;
+    use makepad_ai_loader::quant::f32_to_f16;
     use crate::graph::Graph;
     use crate::op::{GluOp, Op, UnaryOp};
     use crate::tensor::{ggml_row_size_for_type, BufferUsage, TensorType};

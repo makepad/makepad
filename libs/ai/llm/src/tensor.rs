@@ -1,6 +1,6 @@
 use crate::core::{TensorFlag, GGML_MAX_DIMS, GGML_MAX_NAME, GGML_MAX_OP_PARAMS, GGML_MAX_SRC};
 use crate::op::{Ftype, GluOp, Op, UnaryOp};
-use makepad_ai_cuda::quant::*;
+use makepad_ai_loader::quant::*;
 
 pub type TensorId = usize;
 

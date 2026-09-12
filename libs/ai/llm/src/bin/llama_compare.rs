@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use makepad_ai_cuda::quant::{bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
+use makepad_ai_loader::quant::{bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
 use makepad_ai_llm::metal_compiled::{
     prepare_graph, MetalContextBuffers, MetalGraphSession, MetalGraphTensorWrite,
 };
