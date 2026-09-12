@@ -3,6 +3,7 @@ pacman
 linux
 linux-headers
 amd-ucode
+intel-ucode
 grub
 openssh
 sudo
@@ -39,6 +40,7 @@ npm
 binaryen
 brotli
 vulkan-icd-loader
+vulkan-intel
 vulkan-tools
 vulkan-validation-layers
 vulkan-headers
@@ -69,6 +71,7 @@ noto-fonts
 noto-fonts-emoji
 alsa-lib
 alsa-utils
+sof-firmware
 libpulse
 pipewire
 pipewire-alsa
@@ -95,6 +98,9 @@ ethtool
 iproute2
 iputils
 iptables
+iwd
+iw
+wireless-regdb
 dkms
 libusb
 libevdev
@@ -111,6 +117,8 @@ unzip
 zip
 zstd
 linux-firmware-realtek
+linux-firmware-mediatek
+linux-firmware-intel
 linux-firmware-nvidia
 linux-firmware-amdgpu
 e2fsprogs

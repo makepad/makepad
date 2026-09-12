@@ -69,6 +69,7 @@ EOF
 mkdir -p /etc/mkinitcpio.conf.d
 cat > /etc/mkinitcpio.conf.d/makepad.conf <<'EOF'
 MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm r8169 xhci_pci usbhid)
+HOOKS=(base systemd microcode modconf kms keyboard sd-vconsole block filesystems fsck)
 EOF
 cat > /etc/profile.d/makepad-cuda.sh <<'EOF'
 export CUDA_HOME=/opt/cuda
@@ -86,17 +87,25 @@ CUDAHOSTCXX=/usr/bin/g++-15
 EOF
 printf '/opt/cuda/lib64\n/opt/cuda/targets/x86_64-linux/lib\n' > /etc/ld.so.conf.d/makepad-cuda.conf
 ldconfig
-sed -i '/^GRUB_CMDLINE_LINUX_DEFAULT=/c\GRUB_CMDLINE_LINUX_DEFAULT="rootflags=compress=zstd:1 nvidia_drm.modeset=1 nvidia_drm.fbdev=1 console=tty1 loglevel=3 module_blacklist=bluetooth,btusb,cfg80211,mac80211"' /etc/default/grub
+sed -i '/^GRUB_CMDLINE_LINUX_DEFAULT=/c\GRUB_CMDLINE_LINUX_DEFAULT="rootflags=compress=zstd:1 nvidia_drm.modeset=1 nvidia_drm.fbdev=1 console=tty1 loglevel=3 module_blacklist=bluetooth,btusb"' /etc/default/grub
 sed -i '/^GRUB_TERMINAL=/c\GRUB_TERMINAL="console"' /etc/default/grub
-sed -i '/^GRUB_TIMEOUT=/c\GRUB_TIMEOUT=2' /etc/default/grub
+sed -i '/^GRUB_TIMEOUT=/c\GRUB_TIMEOUT=0' /etc/default/grub
+if grep -q '^GRUB_TIMEOUT_STYLE=' /etc/default/grub; then
+    sed -i '/^GRUB_TIMEOUT_STYLE=/c\GRUB_TIMEOUT_STYLE=hidden' /etc/default/grub
+else
+    printf 'GRUB_TIMEOUT_STYLE=hidden\n' >> /etc/default/grub
+fi
 mkinitcpio -P
 grub-mkconfig -o /boot/grub/grub.cfg
 systemctl set-default multi-user.target
 systemctl enable sshd systemd-resolved systemd-timesyncd
-systemctl mask systemd-networkd-wait-online.service systemd-time-wait-sync.service bluetooth.service iwd.service wpa_supplicant.service
+systemctl mask systemd-networkd-wait-online.service systemd-time-wait-sync.service pacman-init.service bluetooth.service wpa_supplicant.service
 systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service
 loginctl enable-linger arch
 systemctl enable --now makepad-mount-win.service
+systemctl unmask iwd.service
+systemctl enable --now iwd.service
+networkctl reload
 
 stage 'Installing pinned Fanatec driver source and DKMS module'
 fanatec_version=0.0.dd78ef477c0d
@@ -117,6 +126,8 @@ for directory in /usr/lib/modules/*; do
     fi
 done
 printf '%s\n' "$fanatec_ok" > "$state/fanatec-built"
+install -o root -g root -m 0755 "$seed/gbelt-bind.sh" /usr/local/sbin/makepad-gbelt-bind
+install -o root -g root -m 0644 "$seed/70-makepad-game-hardware.rules" /etc/udev/rules.d/70-makepad-game-hardware.rules
 udevadm control --reload-rules
 
 stage 'Unpacking the Makepad source snapshot and Cargo cache'
@@ -147,8 +158,11 @@ install -d /etc/makepad
 install -m 0755 "$seed/wm-session.sh" /usr/local/bin/makepad-wm-session
 install -m 0644 "$seed/wm.env" /etc/makepad/wm.env
 install -m 0644 "$seed/makepad-wm.service" /etc/systemd/system/makepad-wm.service
+install -m 0755 "$seed/aihub-session.sh" /usr/local/bin/makepad-aihub-session
+install -m 0644 "$seed/aihub.env" /etc/makepad/aihub.env
+install -m 0644 "$seed/makepad-aihub.service" /etc/systemd/system/makepad-aihub.service
 systemctl daemon-reload
-systemctl enable makepad-wm.service
+systemctl enable makepad-wm.service makepad-aihub.service
 
 stage 'Recording installed tool versions' 
 source /etc/profile.d/makepad-cuda.sh
@@ -161,6 +175,8 @@ source /etc/profile.d/makepad-cuda.sh
     lsusb
     dkms status
 } > "$state/installed.txt" 2>&1
+stage 'Building release WM and CUDA AI Hub offline'
+runuser -u arch -- env HOME=/home/arch MAKEPAD=linux_direct+vulkan CARGO_NET_OFFLINE=true MAKEPAD_CEF_OFFLINE=1 CUDA_HOME=/opt/cuda CUDA_PATH=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-wm -p makepad-app-ai-hub'
 sshd -t
 systemctl reload sshd
 touch "$state/complete"

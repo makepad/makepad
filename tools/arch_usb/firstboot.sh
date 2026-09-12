@@ -44,10 +44,12 @@ for policy in 'pubkeyauthentication yes' 'passwordauthentication no' 'kbdinterac
 done
 
 # Firmware is available before re-probing the Realtek Ethernet adapter.
-mkdir -p /usr/lib/firmware /etc/systemd/network /etc/modprobe.d
+mkdir -p /usr/lib/firmware /etc/systemd/network /etc/modprobe.d /etc/iwd
 tar -xf "$seed/realtek-firmware.tar" -C /usr/lib/firmware
 install -m 0644 "$seed/wired.network" /etc/systemd/network/05-makepad-wired.network
-install -m 0644 "$seed/no-wireless.conf" /etc/modprobe.d/makepad-no-wireless.conf
+install -m 0644 "$seed/wifi.network" /etc/systemd/network/25-makepad-wireless.network
+install -m 0644 "$seed/no-bluetooth.conf" /etc/modprobe.d/makepad-no-bluetooth.conf
+install -m 0644 "$seed/iwd.conf" /etc/iwd/main.conf
 ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 printf 'makepad-arch\n' > /etc/hostname
 printf 'makepad-arch\n' > /proc/sys/kernel/hostname
@@ -64,10 +66,10 @@ install -m 0644 "$seed/fanatec-access.rules" /etc/udev/rules.d/70-makepad-fanate
 
 # Networkd is already enabled in the checked base. Enabling it again would
 # also enable its wait-online service, which is deliberately masked at boot.
-systemctl --root=/ unmask sshd.service systemd-resolved.service
+systemctl --root=/ unmask sshd.service systemd-resolved.service iwd.service
 systemctl --root=/ is-enabled systemd-networkd.service
 systemctl --root=/ enable sshd.service systemd-resolved.service systemd-timesyncd.service makepad-provision.service makepad-mount-win.service
-for unit in pacman-init.service systemd-networkd-wait-online.service systemd-networkd-wait-online@.service systemd-time-wait-sync.service bluetooth.service iwd.service wpa_supplicant.service; do
+for unit in pacman-init.service systemd-networkd-wait-online.service systemd-networkd-wait-online@.service systemd-time-wait-sync.service bluetooth.service wpa_supplicant.service; do
     systemctl --root=/ disable "$unit" || true
     if test -f "/etc/systemd/system/$unit" && ! test -L "/etc/systemd/system/$unit"; then
         mv "/etc/systemd/system/$unit" "$state/$unit.original"
@@ -87,7 +89,7 @@ if test "${MAKEPAD_KEEP_NETWORK:-0}" != 1; then
 fi
 
 printf 'Makepad Arch USB - login: arch\nIPv4: \\4\nSSH uses the Mac key. Run makepad-status for package setup progress.\n\n' > /etc/issue
-printf 'Makepad Arch USB\nInitial console/sudo password: 12345. SSH uses your Mac key.\npacman is available; initial package installation runs in the background.\nRun makepad-status for progress.\n' > /etc/motd
+printf 'Makepad Arch USB\nInitial console/sudo password: 12345. SSH uses your Mac key.\npacman is available; initial package installation runs in the background.\nRun makepad-status for progress.\nWi-Fi connections are configured with iwctl after package setup completes.\n' > /etc/motd
 
 # SSH is ordered after this cloud-init stage. Queue it without waiting for
 # that dependency; returning from this script lets it start normally.

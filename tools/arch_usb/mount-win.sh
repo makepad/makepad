@@ -30,6 +30,4 @@ if test -z "$best_uuid"; then
     echo 'No readable Windows NTFS OS volume found; /mnt/win is empty.'
     exit 0
 fi
-printf 'UUID=%s /mnt/win ntfs3 ro,nofail,uid=1000,gid=1000,umask=022,x-systemd.device-timeout=5s 0 0\n' "$best_uuid" >> /etc/fstab
-systemctl daemon-reload
-mount /mnt/win
+mount -t ntfs3 -o ro,nofail,uid=1000,gid=1000,umask=022 /dev/disk/by-uuid/"$best_uuid" /mnt/win

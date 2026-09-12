@@ -15,6 +15,8 @@ containing mirror.tar.*, realtek-firmware.tar, fanatec.tar.gz and cargo-cache.ta
 Use --base-image for a different pristine raw Arch cloud image. All executable
 build/setup/writer logic lives beside this script, independently of the cache.
 The source snapshot is refreshed from this checkout unless --cached-source is set.
+Use --include-checkout apps/sandbox to package an optional local Sandbox clone;
+the default snapshot does not require a network or private clone.
 
 Outputs: clean arch-boot.raw, CIDATA ISO, backup GPT, a pinned write-plan.json,
 and a validation report. Device identity is read-only metadata; this command
@@ -56,16 +58,50 @@ def copy(source, target):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
 
-def package_source(seed, assets):
+def resolve_include_checkout(value):
+    path = Path(value)
+    if not path.is_absolute():
+        path = REPO / path
+    path = path.resolve()
+    if not path.is_dir() or not path.is_relative_to(REPO) or path == REPO:
+        raise ValueError(f'include-checkout must be a directory strictly inside the repository: {value}')
+    try:
+        toplevel = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], cwd=path, text=True).strip()
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f'include-checkout must be a nested git checkout: {value}') from exc
+    if Path(toplevel).resolve() != path:
+        raise ValueError(f'include-checkout must be a nested git checkout: {value}')
+    return path
+
+def package_source(seed, assets, include_checkouts=()):
     names = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=REPO).split(b'\0')
     if (REPO/'Cargo.lock').is_file():
         names.append(b'Cargo.lock')
+    included = []
+    for value in include_checkouts:
+        checkout = resolve_include_checkout(value)
+        relative_checkout = checkout.relative_to(REPO)
+        listed = subprocess.check_output(['git', '-C', str(checkout), 'ls-files', '--cached', '--others', '--exclude-standard', '-z']).split(b'\0')
+        if (checkout/'Cargo.lock').is_file():
+            listed.append(b'Cargo.lock')
+        prefixed = []
+        for raw in listed:
+            if not raw: continue
+            inner = Path(os.fsdecode(raw))
+            if inner.is_absolute() or '..' in inner.parts:
+                raise ValueError(f'path traversal in include-checkout {relative_checkout.as_posix()}: {inner}')
+            prefixed.append(os.fsencode((relative_checkout / inner).as_posix()))
+        if not prefixed:
+            raise ValueError(f'include-checkout has no files: {relative_checkout.as_posix()}')
+        names.extend(prefixed)
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=checkout, text=True).strip()
+        included.append((relative_checkout.as_posix(), head))
     count = 0
     with tarfile.open(seed/'makepad-source.tgz', 'w:gz', compresslevel=3) as archive:
         for raw in sorted(set(names)):
             if not raw: continue
             relative = Path(os.fsdecode(raw))
-            if any(part in ('local', '.claude', '.grok', '__pycache__') or part.startswith('target') for part in relative.parts): continue
+            if any(part in ('local', '.claude', '.grok', '.git', '__pycache__') or part.startswith('target') for part in relative.parts): continue
             if relative.name.startswith('.env') or relative.suffix in ('.log', '.pem', '.key', '.pyc'): continue
             path = REPO/relative
             if path.is_relative_to(seed.parent) or path.is_relative_to(assets): continue
@@ -76,7 +112,13 @@ def package_source(seed, assets):
             archive.add(path, arcname=str(relative), recursive=False)
             count += 1
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
-    (seed/'source-revision.txt').write_text(f'Base HEAD: {head}\nWorking-tree snapshot: {time.strftime("%Y-%m-%dT%H:%M:%S%z")}\nFiles: {count}\n')
+    revision = [f'Base HEAD: {head}\n']
+    for relative_checkout, checkout_head in included:
+        revision.append(f'Included checkout: {relative_checkout}\n')
+        revision.append(f'Included checkout HEAD: {checkout_head}\n')
+    revision.append(f'Working-tree snapshot: {time.strftime("%Y-%m-%dT%H:%M:%S%z")}\n')
+    revision.append(f'Files: {count}\n')
+    (seed/'source-revision.txt').write_text(''.join(revision))
     print(f'Packaged current Makepad source: {count} files.', flush=True)
 
 def prepare_seed(args, output):
@@ -87,7 +129,7 @@ def prepare_seed(args, output):
     metadata = json.loads((args.assets/'resolved-packages.json').read_text())
     packages = (HERE/'packages.txt').read_text().splitlines()
     assert set(packages) <= {item['NAME'][0] for item in metadata}, 'Requested package absent from the supplied cache'
-    assert 'pacman' in packages and not {'iwd', 'wireless-regdb', 'cloud-init'} & set(packages)
+    assert 'pacman' in packages and not {'cloud-init'} & set(packages)
     for path in sorted(original.glob('mirror.tar.*')):
         copy(path, seed/('mirror-'+path.suffix[1:]+'.tar'))
     assert list(seed.glob('mirror-*.tar')), 'Offline package mirror is missing'
@@ -99,9 +141,11 @@ def prepare_seed(args, output):
         original_name = ('mirror.tar.'+path.stem.removeprefix('mirror-')) if path.name.startswith('mirror-') else ('fanatec.tar.gz' if path.name == 'fanatec.tgz' else path.name)
         assert digest(path) == cached_hashes[original_name], f'Cached payload changed: {path.name}'
     if args.cached_source:
+        if args.include_checkout:
+            raise ValueError('--cached-source is incompatible with --include-checkout')
         for name, target in (('makepad-source.tar.gz', 'makepad-source.tgz'), ('SOURCE-REVISION.txt', 'source-revision.txt')): copy(original/name, seed/target)
     else:
-        package_source(seed, args.assets)
+        package_source(seed, args.assets, args.include_checkout)
     cef_archive = args.cef_archive or args.assets/'cef-linux.tar.bz2'
     assert cef_archive.is_file(), f'Cached Linux CEF archive missing: {cef_archive}'
     # Keep the untouched distribution, including resources, helper libraries
@@ -117,18 +161,21 @@ def prepare_seed(args, output):
         assert cef_root+'/include/cef_version.h' in members
     copy(cef_archive, seed/'cef-linux.bz2')
     (seed/'cef-directory.txt').write_text(cef_root+'\n')
-    for name in ('firstboot.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh'):
+    for name in ('firstboot.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'aihub-session.sh', 'gbelt-bind.sh'):
         copy(HERE/name, seed/name)
         subprocess.run(['/bin/bash', '-n', str(seed/name)], check=True)
-    for name in ('makepad-wm.service', 'wm.env'):
+    for name in ('makepad-wm.service', 'wm.env', 'makepad-aihub.service', 'aihub.env', '70-makepad-game-hardware.rules'):
         copy(HERE/name, seed/name)
     (seed/'requested-packages.txt').write_text('\n'.join(packages)+'\n')
     key = args.ssh_key.read_text().strip()
     assert key.startswith('ssh-ed25519 ') and '\n' not in key, 'Expected one Ed25519 public key'
     (seed/'authorized_keys').write_text(key+'\n')
     (seed/'sshd.conf').write_text('PubkeyAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\nPermitRootLogin no\nAllowUsers arch\n')
-    (seed/'wired.network').write_text('[Match]\nName=eth* en*\n\n[Network]\nDHCP=ipv4\nIPv6AcceptRA=yes\n\n[Link]\nRequiredForOnline=no\n')
-    (seed/'no-wireless.conf').write_text(''.join(f'blacklist {name}\ninstall {name} /bin/false\n' for name in ('bluetooth', 'btusb', 'cfg80211', 'mac80211')))
+    # Cloned USB/internal roots must identify their own adapter to DHCP.
+    (seed/'wired.network').write_text('[Match]\nName=eth* en*\n\n[Network]\nDHCP=ipv4\nIPv6AcceptRA=yes\n\n[DHCPv4]\nClientIdentifier=mac\n\n[Link]\nRequiredForOnline=no\n')
+    (seed/'wifi.network').write_text('[Match]\nName=wl*\n\n[Network]\nDHCP=ipv4\nIPv6AcceptRA=yes\n\n[DHCPv4]\nClientIdentifier=mac\nRouteMetric=2048\n\n[IPv6AcceptRA]\nRouteMetric=2048\n\n[Link]\nRequiredForOnline=no\n')
+    (seed/'no-bluetooth.conf').write_text(''.join(f'blacklist {name}\ninstall {name} /bin/false\n' for name in ('bluetooth', 'btusb')))
+    (seed/'iwd.conf').write_text('[General]\nEnableNetworkConfiguration=false\n')
     (seed/'fanatec-access.rules').write_text('SUBSYSTEM=="usb", ATTR{idVendor}=="0eb7", GROUP="games", MODE="0660"\nSUBSYSTEM=="hidraw", ATTRS{idVendor}=="0eb7", GROUP="games", MODE="0660", TAG+="uaccess"\n')
     (seed/'makepad-provision.service').write_text('''[Unit]
 Description=Install the cached Makepad development stack
@@ -222,8 +269,8 @@ def assemble(args, output, iso):
         fs.lookup('/boot/vmlinuz-linux'); fs.lookup('/boot/initramfs-linux.img')
         stream.seek(efi_start*BLOCK); esp = stream.read((efi_end-efi_start+1)*BLOCK)
     masks = ' '.join('systemd.mask='+name for name in WAIT_UNITS)
-    config = f'''set timeout=2
-set timeout_style=menu
+    config = f'''set timeout=0
+set timeout_style=hidden
 set default=0
 terminal_input console
 terminal_output console
@@ -231,8 +278,8 @@ menuentry 'Makepad Arch - Ethernet / USB' {{
     insmod part_gpt
     insmod btrfs
     search --no-floppy --fs-uuid --set=root {fs.uuid}
-    echo 'Starting Arch. Bluetooth and Wi-Fi disabled. Login: arch'
-    linux /boot/vmlinuz-linux root=UUID={fs.uuid} rw net.ifnames=0 rootflags=compress=zstd:1 console=tty1 loglevel=3 module_blacklist=bluetooth,btusb,cfg80211,mac80211 systemd.show_status=auto {masks} nvidia_drm.modeset=1 nvidia_drm.fbdev=1
+    echo 'Starting Arch. Bluetooth disabled. Wi-Fi available after setup. Login: arch'
+    linux /boot/vmlinuz-linux root=UUID={fs.uuid} rw net.ifnames=0 rootflags=compress=zstd:1 console=tty1 loglevel=3 module_blacklist=bluetooth,btusb systemd.show_status=auto {masks} nvidia_drm.modeset=1 nvidia_drm.fbdev=1
     initrd /boot/initramfs-linux.img
 }}
 '''.encode()
@@ -338,9 +385,13 @@ def main():
     parser.add_argument('--device', required=True, help='Whole disk from diskutil list external physical (diskN)')
     parser.add_argument('--build-id', default='makepad-clean-'+time.strftime('%Y%m%d-%H%M%S'))
     parser.add_argument('--cached-source', action='store_true')
+    parser.add_argument('--include-checkout', action='append', default=[], type=Path, metavar='PATH',
+                        help='Optional nested git checkout to package (repeatable; e.g. apps/sandbox)')
     parser.add_argument('--cef-archive', type=Path, help='Cached Linux x86_64 CEF tar.bz2 (default: ASSETS/cef-linux.tar.bz2)')
     parser.add_argument('--writer-app', type=Path, nargs='?', const=Path.home()/'Applications/Makepad USB Writer.app')
     args = parser.parse_args()
+    if args.cached_source and args.include_checkout:
+        parser.error('--cached-source is incompatible with --include-checkout')
     args.assets = args.assets.expanduser().resolve(); output = args.output.expanduser().resolve()
     assert output != args.assets and args.assets not in output.parents and output not in args.assets.parents, 'Keep output separate from input assets'
     assert output != REPO and output not in REPO.parents, 'Keep output separate from the repository root'
