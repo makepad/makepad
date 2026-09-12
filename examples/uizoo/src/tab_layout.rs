@@ -4,13 +4,15 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    // Plain values: a `uniform(..)` inside a merge redeclares the input
+    // instead of setting it, and the boxes drew as nothing but their labels.
     let Box = RoundedView{
         show_bg: true
         draw_bg +: {
-            color: uniform(#x0F02)
-            border_size: uniform(1.)
-            border_radius: uniform(0.)
-            border_color: uniform(#xfff8)
+            color: #x3a4a3aff
+            border_size: 1.
+            border_radius: 0.
+            border_color: #xfff8
         }
         padding: 3.
         align: Align{x: 0.5 y: 0.5}
