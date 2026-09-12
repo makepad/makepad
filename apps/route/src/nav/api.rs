@@ -1,7 +1,7 @@
 //! Hosted navigation service and demo-profile controller.
 //!
-//! The controller intentionally registers `crate::script_mod`: the demo has
-//! no UI DSL of its own. Only data/service behavior differs from native.
+//! The controller puts the shared chrome (`RouteChrome{}`, chrome.rs) in a
+//! window of its own; only data/service behavior differs from native.
 
 use crate::{
     assistant::{AssistantController, AssistantService},
@@ -14,8 +14,8 @@ use crate::{
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
     location_error_status, show_location_status, ChatEntry, ChatState, EntryKind, LocationClick,
-    LocationFix, LocationState, ThemePreference, AMSTERDAM_CENTER,
-    LOCATION_FIX_TIMEOUT_SECONDS,
+    LocationFix, LocationState, ThemePreference, AMSTERDAM_CENTER, LOCATION_FIX_TIMEOUT_SECONDS,
+    THEME_STORAGE,
 };
 use makepad_map_nav::{
     geo::LonLat,
@@ -178,8 +178,8 @@ pub struct App {
 }
 
 impl App {
-    #[cfg(test)]
-    pub(crate) fn ui_ref(&self) -> &WidgetRef {
+    /// The window's widget tree, for the binary's parity test.
+    pub fn ui_ref(&self) -> &WidgetRef {
         &self.ui
     }
 
@@ -188,7 +188,8 @@ impl App {
             return;
         }
         self.started = true;
-        self.theme_preference.start(cx);
+        let storage = cx.storage(THEME_STORAGE);
+        self.theme_preference.start(cx, &storage);
         self.layers.tilt_shift = true;
         let map = self.ui.map_view(cx, ids!(map));
         self.provisioner.ensure_source(cx, &map);
@@ -547,12 +548,14 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             self.layers.theme = if on { 1 } else { 0 };
-            self.theme_preference.save(cx, self.layers.theme);
+            let storage = cx.storage(THEME_STORAGE);
+            self.theme_preference.save(cx, &storage, self.layers.theme);
             self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_circuit)).changed(actions) {
             self.layers.theme = if on { 2 } else { 0 };
-            self.theme_preference.save(cx, self.layers.theme);
+            let storage = cx.storage(THEME_STORAGE);
+            self.theme_preference.save(cx, &storage, self.layers.theme);
             self.apply_layers(cx);
         }
         let map = self.ui.map_view(cx, ids!(map));
@@ -562,12 +565,30 @@ impl MatchEvent for App {
     }
 }
 
+script_mod! {
+    use mod.prelude.widgets.*
+    use mod.widgets.*
+
+    startup() do #(App::script_component(vm)){
+        ui: Root{
+            main_window := Window{
+                window.inner_size: vec2(3400, 2050)
+                pass.clear_color: vec4(0.08, 0.10, 0.12, 1.0)
+                body +: {
+                    RouteChrome{}
+                }
+            }
+        }
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         crate::side_panel::script_mod(vm);
-        crate::script_mod(vm)
+        crate::chrome::script_mod(vm);
+        self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {

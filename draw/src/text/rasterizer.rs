@@ -30,6 +30,54 @@ pub struct Rasterizer {
 }
 
 impl Rasterizer {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.atlas_epoch
+    }
+
+    pub(crate) fn export_glyph(&self, glyph: RasterizedGlyph) -> Option<PublishedGlyph> {
+        let key = self.cached_slots.iter().find_map(|(key, slot)| {
+            (slot.rect == glyph.atlas_image_bounds && slot.plane.index() == glyph.atlas_plane)
+                .then(|| key.clone())
+        })?;
+        let mut pixels = Vec::with_capacity(key.size.width * key.size.height);
+        for y in 0..key.size.height {
+            for x in 0..key.size.width {
+                pixels.push(self.atlas.image()[glyph.atlas_image_bounds.origin + Size::new(x, y)]);
+            }
+        }
+        Some(PublishedGlyph { key, glyph, pixels })
+    }
+
+    /// Install worker-rasterized pixels; this path never loads an outline or shapes text.
+    pub(crate) fn import_glyph(&mut self, published: &PublishedGlyph) -> Option<RasterizedGlyph> {
+        let (slot, fresh) = if published.glyph.atlas_kind == AtlasKind::Grayscale {
+            self.allocate_sdf_slot(published.key.clone())?
+        } else {
+            self.allocate_shared_slot(published.key.clone())?
+        };
+        if fresh {
+            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+            let src_plane = AtlasPlane::from_index(published.glyph.atlas_plane as usize);
+            for y in 0..slot.rect.size.height {
+                for x in 0..slot.rect.size.width {
+                    let at = Point::new(x, y);
+                    let pixel = published.pixels[y * slot.rect.size.width + x];
+                    image[at] = if published.glyph.atlas_kind == AtlasKind::Grayscale {
+                        slot.plane.set(image[at], src_plane.get(pixel))
+                    } else {
+                        pixel
+                    };
+                }
+            }
+        }
+        Some(RasterizedGlyph {
+            atlas_size: self.atlas.size(),
+            atlas_image_bounds: slot.rect,
+            atlas_plane: slot.plane.index(),
+            ..published.glyph
+        })
+    }
+
     pub fn new(settings: Settings) -> Self {
         let atlas_size = settings.atlas_size;
         Self {
@@ -207,6 +255,7 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
+        let _phase = makepad_platform::thread::ui_phase(makepad_platform::thread::UiPhase::FontAtlas);
         if let Some(rasterized_glyph) =
             self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
         {
@@ -224,6 +273,7 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
+        let _phase = makepad_platform::thread::ui_phase(makepad_platform::thread::UiPhase::FontAtlas);
         if let Some(rasterized_glyph) =
             self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
         {
@@ -899,6 +949,13 @@ pub struct RasterizedGlyph {
     pub atlas_plane: u8,
     pub origin_in_dpxs: Point<f32>,
     pub dpxs_per_em: f32,
+}
+
+#[derive(Debug)]
+pub(crate) struct PublishedGlyph {
+    key: GlyphImageKey,
+    glyph: RasterizedGlyph,
+    pixels: Vec<Bgra>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

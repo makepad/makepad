@@ -51,7 +51,7 @@ use crate::{
     label::LabelWidgetRefExt,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{claim_escape, place, span_inboard, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{claim_escape, place_overlay, span_inboard, PlaceAlign, PlaceRequest, Placement, Side},
     view::*,
     widget::*,
     widget_async::ScriptAsyncResult,
@@ -320,7 +320,7 @@ fn card_side(hole: Rect, card: DVec2, bounds: Rect, gap: f64) -> Side {
 /// card with its buttons off the bottom of the window is a trap.
 fn place_card(hole: Rect, card: DVec2, bounds: Rect, gap: f64) -> Rect {
     let side = card_side(hole, card, bounds, gap);
-    let placed = place(&PlaceRequest {
+    let placed = place_overlay(&PlaceRequest {
         anchor: hole,
         size: card,
         bounds,

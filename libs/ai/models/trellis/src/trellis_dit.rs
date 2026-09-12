@@ -13,7 +13,7 @@
 //! SLAT) and the device-resident cond tensor.
 
 use crate::backend::{
-    gpu_add, gpu_attention_cross_fused_enabled, gpu_attention_packed, gpu_attention_packed_cross,
+    gpu_add, gpu_add_cols_broadcast, gpu_attention_cross_fused_enabled, gpu_attention_packed, gpu_attention_packed_cross,
     gpu_download, gpu_gated_residual_mod,
     gpu_gelu, gpu_layer_norm_mod, gpu_layer_norm_mul_add, gpu_linear_f32_resident,
     gpu_linear_nt_cached, gpu_rms_norm_mul_perhead, gpu_rope_interleaved, gpu_slice_cols,
@@ -62,6 +62,9 @@ pub struct T2Dit {
     cross_kn: Vec<Vec<f32>>,
     mlp0_b: Vec<Vec<f32>>,
     mlp2_b: Vec<Vec<f32>>,
+    pub projection_channels: Option<usize>,
+    projection_bias: Vec<GpuTensor>,
+    projection_bias_host: Vec<Vec<f32>>,
     final_norm_ones: Vec<f32>,
     final_norm_zeros: Vec<f32>,
 }
@@ -78,9 +81,34 @@ pub struct T2DitDebug {
 /// computed once per (stage, cond) instead of per forward — without this,
 /// 30 to_kv gemms + k-rms passes per forward are recomputed for identical
 /// inputs. One cache per cond tensor (pos and neg get their own).
-#[derive(Default)]
 pub struct T2CrossKv {
     layers: Vec<Option<(GpuTensor, GpuTensor)>>,
+    projections: Vec<Option<GpuTensor>>,
+    projection_budget: usize,
+    projection_bytes: usize,
+}
+
+impl Default for T2CrossKv {
+    fn default() -> Self {
+        Self::with_projection_budget(512 * 1024 * 1024)
+    }
+}
+
+impl T2CrossKv {
+    /// Per-stage bound on cached Pixal3D affine outputs, which are constant
+    /// across diffusion steps. No projected feature escapes this cache.
+    pub fn with_projection_budget(bytes: usize) -> Self {
+        Self { layers: Vec::new(), projections: Vec::new(),
+            projection_budget: bytes, projection_bytes: 0 }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum T2ProjectionInput<'a> {
+    None,
+    Conditional(&'a GpuTensor),
+    /// CFG zeroes the input features before the affine, retaining its bias.
+    Unconditional,
 }
 
 fn host_f32(weights: &TrellisWeights, name: &str, len: usize) -> Result<Vec<f32>> {
@@ -107,6 +135,15 @@ impl T2Dit {
         out_channels: usize,
     ) -> Result<Self> {
         let c = T2_MODEL_CHANNELS;
+        let projection_channels = if weights.has_tensor("blocks.0.cross_attn.proj_linear.weight") {
+            let (_, shape) = weights.tensor_dtype_shape("blocks.0.cross_attn.proj_linear.weight")?;
+            if shape.len() != 2 || shape[0] != c as u64 || ![1024, 2048].contains(&shape[1]) {
+                return Err(DiffusionError::model("unsupported Pixal3D projection shape"));
+            }
+            Some(shape[1] as usize)
+        } else { None };
+        let mut projection_bias = Vec::new();
+        let mut projection_bias_host = Vec::new();
         let mut block_modulation = Vec::with_capacity(T2_DEPTH);
         let mut norm2_w = Vec::with_capacity(T2_DEPTH);
         let mut norm2_b = Vec::with_capacity(T2_DEPTH);
@@ -130,11 +167,17 @@ impl T2Dit {
             self_out_b.push(host_f32(&weights, &format!("{p}.self_attn.to_out.bias"), c)?);
             self_qn.push(host_f32(&weights, &format!("{p}.self_attn.q_rms_norm.gamma"), c)?);
             self_kn.push(host_f32(&weights, &format!("{p}.self_attn.k_rms_norm.gamma"), c)?);
-            cross_q_b.push(host_f32(&weights, &format!("{p}.cross_attn.to_q.bias"), c)?);
-            cross_kv_b.push(host_f32(&weights, &format!("{p}.cross_attn.to_kv.bias"), 2 * c)?);
-            cross_out_b.push(host_f32(&weights, &format!("{p}.cross_attn.to_out.bias"), c)?);
-            cross_qn.push(host_f32(&weights, &format!("{p}.cross_attn.q_rms_norm.gamma"), c)?);
-            cross_kn.push(host_f32(&weights, &format!("{p}.cross_attn.k_rms_norm.gamma"), c)?);
+            let cross = if projection_channels.is_some() {
+                let b = host_f32(&weights, &format!("{p}.cross_attn.proj_linear.bias"), c)?;
+                projection_bias.push(gpu_upload(&b,1,c).map_err(DiffusionError::model)?);
+                projection_bias_host.push(b);
+                format!("{p}.cross_attn.cross_attn_block")
+            } else { format!("{p}.cross_attn") };
+            cross_q_b.push(host_f32(&weights, &format!("{cross}.to_q.bias"), c)?);
+            cross_kv_b.push(host_f32(&weights, &format!("{cross}.to_kv.bias"), 2 * c)?);
+            cross_out_b.push(host_f32(&weights, &format!("{cross}.to_out.bias"), c)?);
+            cross_qn.push(host_f32(&weights, &format!("{cross}.q_rms_norm.gamma"), c)?);
+            cross_kn.push(host_f32(&weights, &format!("{cross}.k_rms_norm.gamma"), c)?);
             mlp0_b.push(host_f32(&weights, &format!("{p}.mlp.mlp.0.bias"), T2_FFN_DIM)?);
             mlp2_b.push(host_f32(&weights, &format!("{p}.mlp.mlp.2.bias"), c)?);
         }
@@ -163,6 +206,9 @@ impl T2Dit {
             cross_kn,
             mlp0_b,
             mlp2_b,
+            projection_channels,
+            projection_bias,
+            projection_bias_host,
             final_norm_ones: vec![1.0; c],
             final_norm_zeros: vec![0.0; c],
             weights,
@@ -233,9 +279,23 @@ impl T2Dit {
         t1000: f32,
         cond: &GpuTensor,
         rope: &(GpuTensor, GpuTensor),
-        mut cross_kv: Option<&mut T2CrossKv>,
+        cross_kv: Option<&mut T2CrossKv>,
         debug_blocks: &[usize],
     ) -> Result<(Vec<f32>, T2DitDebug)> {
+        self.forward_projected(x,tokens,t1000,cond,rope,cross_kv,T2ProjectionInput::None,debug_blocks)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_projected(
+        &self, x: &[f32], tokens: usize, t1000: f32, cond: &GpuTensor,
+        rope: &(GpuTensor,GpuTensor), mut cross_kv: Option<&mut T2CrossKv>,
+        projection: T2ProjectionInput<'_>, debug_blocks: &[usize],
+    ) -> Result<(Vec<f32>, T2DitDebug)> {
+        match (self.projection_channels, projection) {
+            (None,T2ProjectionInput::None) | (Some(_),T2ProjectionInput::Unconditional) => {},
+            (Some(c),T2ProjectionInput::Conditional(p)) if p.rows()==tokens && p.cols()==c => {},
+            _ => return Err(DiffusionError::workflow("Pixal3D projection/model mismatch")),
+        }
         let c = T2_MODEL_CHANNELS;
         if x.len() != tokens * self.in_channels {
             return Err(DiffusionError::workflow("t2 dit input shape mismatch"));
@@ -324,6 +384,9 @@ impl T2Dit {
             drop(attn);
 
             // --- cross-attention (affine LN, ungated, unmodulated) ---
+            let cross_prefix = if self.projection_channels.is_some() {
+                format!("{p}.cross_attn.cross_attn_block")
+            } else { format!("{p}.cross_attn") };
             let normed = gpu_layer_norm_mul_add(
                 &hidden,
                 &self.norm2_w[layer],
@@ -333,7 +396,7 @@ impl T2Dit {
             .map_err(DiffusionError::model)?;
             let q = self.linear_cached(
                 &normed,
-                &format!("{p}.cross_attn.to_q.weight"),
+                &format!("{cross_prefix}.to_q.weight"),
                 c,
                 &self.cross_q_b[layer],
             )?;
@@ -343,7 +406,7 @@ impl T2Dit {
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
                 self.namespace,
-                &format!("{p}.cross_attn.q_rms_norm"),
+                &format!("{cross_prefix}.q_rms_norm"),
                 &self.cross_qn[layer],
                 0.0,
             )
@@ -357,7 +420,7 @@ impl T2Dit {
             if !cache_hit {
                 let kv = self.linear_cached(
                     cond,
-                    &format!("{p}.cross_attn.to_kv.weight"),
+                    &format!("{cross_prefix}.to_kv.weight"),
                     2 * c,
                     &self.cross_kv_b[layer],
                 )?;
@@ -369,7 +432,7 @@ impl T2Dit {
                     T2_HEAD_COUNT,
                     T2_HEAD_DIM,
                     self.namespace,
-                    &format!("{p}.cross_attn.k_rms_norm"),
+                    &format!("{cross_prefix}.k_rms_norm"),
                     &self.cross_kn[layer],
                     0.0,
                 )
@@ -414,10 +477,34 @@ impl T2Dit {
             drop(kv_local);
             let cross = self.linear_cached(
                 &cross,
-                &format!("{p}.cross_attn.to_out.weight"),
+                &format!("{cross_prefix}.to_out.weight"),
                 c,
                 &self.cross_out_b[layer],
             )?;
+            let cross = match projection {
+                T2ProjectionInput::None => cross,
+                T2ProjectionInput::Unconditional => gpu_add_cols_broadcast(
+                    &cross, &self.projection_bias[layer]).map_err(DiffusionError::model)?,
+                T2ProjectionInput::Conditional(features) => {
+                    if let Some(cached) = cross_kv.as_ref()
+                        .and_then(|cache| cache.projections.get(layer)).and_then(Option::as_ref) {
+                        gpu_add(&cross,cached).map_err(DiffusionError::model)?
+                    } else {
+                        let projected = self.linear_cached(features,
+                            &format!("{p}.cross_attn.proj_linear.weight"),c,&self.projection_bias_host[layer])?;
+                        let combined = gpu_add(&cross,&projected).map_err(DiffusionError::model)?;
+                        if let Some(cache)=cross_kv.as_mut() {
+                            let bytes=tokens*c*std::mem::size_of::<f32>();
+                            if bytes <= cache.projection_budget.saturating_sub(cache.projection_bytes) {
+                                cache.projections.resize_with(T2_DEPTH,||None);
+                                cache.projections[layer]=Some(projected);
+                                cache.projection_bytes+=bytes;
+                            }
+                        }
+                        combined
+                    }
+                }
+            };
             hidden = gpu_add(&hidden, &cross).map_err(DiffusionError::model)?;
             drop(cross);
 

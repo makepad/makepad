@@ -415,6 +415,7 @@ pub struct MpfThumb {
     view: View,
     #[rust]
     shown: Shown,
+    #[rust] kind_source: Option<Arc<str>>,
 }
 
 impl MpfThumb {
@@ -423,10 +424,20 @@ impl MpfThumb {
             return;
         }
         self.shown = Shown::Kind(kind);
-        let slot = self.view.image(cx, ids!(img));
-        if let Some(mut image) = slot.borrow_mut() {
-            let _ = image.load_svg_from_shared_data(cx, kind_svg(kind));
-        };
+        self.kind_source=None;
+        self.refresh_kind(cx,kind);
+    }
+
+    fn refresh_kind(&mut self,cx:&mut Cx,kind:FileKind) {
+        let style=cx.with_vm(makepad_widgets::desktop_style::current_style);
+        let name=match kind {FileKind::Folder=>"file-folder",FileKind::Image=>"file-image",FileKind::Text=>"file-text",FileKind::Code=>"file-code",FileKind::Audio=>"file-audio",FileKind::Video=>"file-video",FileKind::Archive=>"file-archive",FileKind::Pdf=>"file-pdf",_=>"file-generic"};
+        let source=makepad_widgets::app_icon::source(cx,style,name);
+        if self.kind_source.as_ref().is_some_and(|old|Arc::ptr_eq(old,&source)) {return;}
+        let slot=self.view.image(cx,ids!(img));
+        if let Some(mut image)=slot.borrow_mut() {
+            let _=image.load_svg_from_shared_data(cx,Arc::from(source.as_bytes()));
+        }
+        self.kind_source=Some(source);
     }
 
     /// Show nothing: an icon slot in a grid cell the folder does not fill.
@@ -449,6 +460,7 @@ impl MpfThumb {
 
 impl Widget for MpfThumb {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if let Shown::Kind(kind)=self.shown {self.refresh_kind(cx,kind);}
         self.view.draw_walk(cx, scope, walk)
     }
 

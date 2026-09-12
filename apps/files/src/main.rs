@@ -9,7 +9,7 @@
 //!
 //! Everything here is the shell — the entry model lives in `model`, the views
 //! in `contents`, thumbnails in `thumbs`, file operations in `ops`, the
-//! treemap's arithmetic in `treemap` and its widget in `treemap_view`.
+//! treemap's arithmetic and widget in `makepad_diskmap`.
 
 pub use makepad_widgets;
 
@@ -43,11 +43,8 @@ mod model;
 mod ops;
 mod preview;
 mod rename;
-mod sizecache;
 mod theme;
 mod thumbs;
-mod treemap;
-mod treemap_view;
 mod vfs;
 
 use crate::{
@@ -59,9 +56,9 @@ use crate::{
     preview::{Preview, PreviewHost},
     rename::BatchMode,
     theme::Palette,
-    treemap_view::MapProjection,
     vfs::vfs,
 };
+use makepad_diskmap::{treemap, MapProjection};
 
 #[cfg(feature = "chat")]
 use crate::{
@@ -88,31 +85,32 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    let ToolButton = View{
-        width: 28
-        height: 28
+    let ToolButton = RoundedView{
+        draw_bg +: {color: #0000 border_size: 0 border_radius: theme.corner_radius}
+        width: 30
+        height: 30
         flow: Overlay
         align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
-        btn_sel := SolidView{
+        btn_sel := RoundedView{
             visible: false
             width: Fill
             height: Fill
-            draw_bg +: {color: mod.mpf.sel}
+            draw_bg +: {color: mod.mpf.sel border_radius: theme.corner_radius}
         }
     }
 
     let SideItem = SolidView{
         width: Fill
-        height: 32
+        height: 34
         flow: Right
-        spacing: 12
+        spacing: 10
         padding: Inset{left: 18 right: 12}
         align: Align{y: 0.5}
         cursor: MouseCursor.Hand
         draw_bg +: {color: mod.mpf.bg_dark}
         side_icon := Icon{
-            icon_walk: Walk{width: 16 height: 16}
+            icon_walk: Walk{width: 18 height: 18}
             draw_icon +: {color: mod.mpf.fg_dim}
         }
         side_title := Label{
@@ -131,9 +129,9 @@ script_mod! {
     let BookmarkItem = SolidView{
         visible: false
         width: Fill
-        height: 32
+        height: 34
         flow: Right
-        spacing: 12
+        spacing: 10
         padding: Inset{left: 18 right: 8}
         align: Align{y: 0.5}
         cursor: MouseCursor.Hand
@@ -175,7 +173,7 @@ script_mod! {
         padding: Inset{left: 18 top: 8}
         draw_text +: {
             color: mod.mpf.fg_dim
-            text_style: theme.font_bold{font_size: 8.0}
+            text_style: theme.font_regular{font_size: 8.5}
         }
     }
 
@@ -321,7 +319,7 @@ script_mod! {
         prop_key := Label{
             draw_text +: {
                 color: mod.mpf.fg_dim
-                text_style: theme.font_bold{font_size: 8.0}
+                text_style: theme.font_regular{font_size: 8.5}
             }
         }
         prop_value := Label{
@@ -336,7 +334,8 @@ script_mod! {
     // The omarchy popup card: the theme background behind a 2px accent edge,
     // hard corners, 28pt rows, and a hover that is the foreground at 8% with
     // accent text. No fade — a menu that animates in is a menu you wait for.
-    let CtxRow = View{
+    let CtxRow = SolidView{
+        draw_bg +: {color: mod.mpf.bg}
         visible: false
         width: Fill
         height: Fit
@@ -375,15 +374,16 @@ script_mod! {
         }
     }
 
-    let CtxPanel = RectView{
+    let CtxPanel = RoundedView{
         width: 268
         height: Fit
         flow: Down
-        padding: Inset{top: 5 bottom: 5}
+        padding: Inset{left: 4 right: 4 top: 5 bottom: 5}
         draw_bg +: {
             color: mod.mpf.bg
-            border_color: mod.mpf.accent
-            border_size: 2.0
+            border_color: theme.color_bevel_outset_2
+            border_size: 0.75
+            border_radius: theme.corner_radius
         }
     }
 
@@ -415,7 +415,7 @@ script_mod! {
         field_key := Label{
             draw_text +: {
                 color: mod.mpf.fg_dim
-                text_style: theme.font_bold{font_size: 8.0}
+                text_style: theme.font_regular{font_size: 8.5}
             }
         }
         field_box := View{
@@ -441,30 +441,16 @@ script_mod! {
 
                         top_bar := SolidView{
                             width: Fill
-                            height: 38
+                            height: 48
                             flow: Right
                             spacing: 4
-                            padding: Inset{right: 10}
+                            padding: Inset{left: 12 right: 12}
                             align: Align{y: 0.5}
-                            draw_bg +: {color: mod.mpf.bg_light}
-
-                            title_box := View{
-                                width: 208
-                                height: Fill
-                                padding: Inset{left: 18}
-                                align: Align{y: 0.5}
-                                files_title := Label{
-                                    text: "Files"
-                                    draw_text +: {
-                                        color: mod.mpf.fg_bright
-                                        text_style: theme.font_bold{font_size: 11.0}
-                                    }
-                                }
-                            }
+                            draw_bg +: {color: theme.color_outset}
 
                             back_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
+                                tool_icon := Icon{
+                                    icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/back.svg")
                                         color: mod.mpf.fg
@@ -472,8 +458,8 @@ script_mod! {
                                 }
                             }
                             forward_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
+                                tool_icon := Icon{
+                                    icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/forward.svg")
                                         color: mod.mpf.fg
@@ -481,17 +467,18 @@ script_mod! {
                                 }
                             }
 
-                            path_box := RectView{
+                            path_box := RoundedView{
                                 width: Fill
-                                height: 28
+                                height: 34
                                 flow: Right
-                                margin: Inset{left: 4 right: 4}
+                                margin: Inset{left: 4 right: 8}
                                 padding: Inset{left: 5 right: 5}
                                 align: Align{y: 0.5}
                                 draw_bg +: {
                                     color: mod.mpf.bg
-                                    border_color: mod.mpf.muted
-                                    border_size: 1.0
+                                    border_color: theme.color_bevel_outset_2
+                                    border_size: 0.75
+                                    border_radius: theme.corner_radius
                                 }
                                 // The crumb box fills the plate so a click in
                                 // the empty space past the last crumb still
@@ -543,103 +530,69 @@ script_mod! {
                                 }
                             }
 
-                            icons_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/grid.svg")
-                                        color: mod.mpf.fg
+                            view_modes := View{
+                                width: Fit height: Fit flow: Right spacing: 2
+                                margin: Inset{left: 4 right: 4}
+                                icons_button := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/grid.svg")
+                                            color: mod.mpf.fg
+                                        }
                                     }
                                 }
-                            }
-                            list_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/list.svg")
-                                        color: mod.mpf.fg
+                                list_button := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/list.svg")
+                                            color: mod.mpf.fg
+                                        }
                                     }
                                 }
-                            }
-                            compact_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/compact.svg")
-                                        color: mod.mpf.fg
+                                compact_button := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/compact.svg")
+                                            color: mod.mpf.fg
+                                        }
                                     }
                                 }
-                            }
-                            treemap_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/treemap.svg")
-                                        color: mod.mpf.fg
+                                treemap_button := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/treemap.svg")
+                                            color: mod.mpf.fg
+                                        }
                                     }
                                 }
-                            }
 
-                            View{width: 6 height: 1}
-
-                            newfolder_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/newfolder.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            terminal_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/terminal.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            props_button := ToolButton{
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/info.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
                             }
                             search_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
+                                    icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/search.svg")
                                         color: mod.mpf.fg
                                     }
                                 }
                             }
-                            preview_button := ToolButton{
+                            storage_button := ToolButton{
+                                visible: false
                                 Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
+                                    icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/eye.svg")
-                                        color: mod.mpf.fg
-                                    }
-                                }
-                            }
-                            chat_button := ToolButton{
-                                visible: #(cfg!(feature = "chat"))
-                                Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
-                                    draw_icon +: {
-                                        svg: crate_resource("self://resources/icons/chat.svg")
+                                        svg: crate_resource("self://resources/icons/filter.svg")
                                         color: mod.mpf.fg
                                     }
                                 }
                             }
                             menu_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 15 height: 15}
+                                    icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/menu-dots.svg")
                                         color: mod.mpf.fg
@@ -648,6 +601,14 @@ script_mod! {
                             }
                         }
 
+                        phone_navigation := View{
+                            visible: false width: Fill height: Fit
+                            flow: Right{wrap: true} spacing: 6 padding: Inset{left: 12 right: 12 bottom: 8}
+                            phone_places := Button{text: "Browse" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
+                            phone_icons := Button{text: "Icons" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
+                            phone_list := Button{text: "List" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
+                            phone_map := Button{text: "Storage" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
+                        }
                         tab_strip := SolidView{
                             visible: false
                             width: Fill
@@ -672,7 +633,7 @@ script_mod! {
                             flow: Right
 
                             sidebar := SolidView{
-                                width: 208
+                                width: 196
                                 height: Fill
                                 flow: Down
                                 draw_bg +: {color: mod.mpf.bg_dark}
@@ -705,7 +666,7 @@ script_mod! {
                                     }
 
                                     Divider{}
-                                    SectionLabel{text: "PLACES"}
+                                    SectionLabel{text: "Places"}
 
                                     desktop_item := SideItem{
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
@@ -732,18 +693,10 @@ script_mod! {
                                         side_title +: {text: "Videos"}
                                     }
 
-                                    Divider{}
-                                    SectionLabel{text: "BOOKMARKS"}
-                                    bookmark_hint := Label{
-                                        width: Fill
-                                        height: 34
-                                        padding: Inset{left: 18 right: 12}
-                                        max_lines: 2
-                                        text: "Cmd+D bookmarks this folder, or drag one here"
-                                        draw_text +: {
-                                            color: mod.mpf.fg_dim
-                                            text_style: theme.font_regular{font_size: 8.0}
-                                        }
+                                    bookmark_heading := View{
+                                        width: Fill height: Fit flow: Down
+                                        Divider{}
+                                        SectionLabel{text: "Bookmarks"}
                                     }
                                     bm0 := BookmarkItem{}
                                     bm1 := BookmarkItem{}
@@ -758,16 +711,7 @@ script_mod! {
                                     bm10 := BookmarkItem{}
                                     bm11 := BookmarkItem{}
                                 }
-                                hidden_hint := Label{
-                                    width: Fill
-                                    height: 22
-                                    padding: Inset{left: 18}
-                                    text: "Ctrl+H  Show hidden files"
-                                    draw_text +: {
-                                        color: mod.mpf.fg_dim
-                                        text_style: theme.font_regular{font_size: 8.0}
-                                    }
-                                }
+
                             }
 
                             content_bg := SolidView{
@@ -776,30 +720,6 @@ script_mod! {
                                 flow: Down
                                 draw_bg +: {color: mod.mpf.bg}
 
-                                folder_header := View{
-                                    width: Fill
-                                    height: 44
-                                    flow: Right
-                                    padding: Inset{left: 20 right: 20}
-                                    align: Align{y: 0.5}
-                                    folder_title := Label{
-                                        width: Fill
-                                        max_lines: 1
-                                        text_overflow: TextOverflow.Ellipsis
-                                        text: "Home"
-                                        draw_text +: {
-                                            color: mod.mpf.fg_bright
-                                            text_style: theme.font_bold{font_size: 12.0}
-                                        }
-                                    }
-                                    item_count := Label{
-                                        text: "Loading…"
-                                        draw_text +: {
-                                            color: mod.mpf.fg_dim
-                                            text_style: theme.font_regular{font_size: 9.0}
-                                        }
-                                    }
-                                }
                                 empty_label := Label{
                                     visible: false
                                     width: Fill
@@ -812,102 +732,6 @@ script_mod! {
                                     }
                                 }
 
-                                // The map's own tool strip. It only exists in
-                                // the Treemap view, and everything on it acts
-                                // on the rectangle that is picked — which is
-                                // what a right-click used to be for.
-                                map_tools := SolidView{
-                                    visible: false
-                                    width: Fill
-                                    height: 30
-                                    flow: Right
-                                    spacing: 2
-                                    padding: Inset{left: 16 right: 16}
-                                    align: Align{y: 0.5}
-                                    draw_bg +: {color: mod.mpf.bg_dark}
-                                    // The render-mode switch: one block view,
-                                    // three ways of looking at it.
-                                    proj_flat := ToolButton{
-                                        Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/treemap.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
-                                    proj_ortho := ToolButton{
-                                        Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/treemap25.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
-                                    proj_persp := ToolButton{
-                                        Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/treemap3d.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
-                                    View{width: 10 height: 1}
-                                    map_rescan := ToolButton{
-                                        map_rescan_icon := Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/reload.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
-                                    View{width: 10 height: 1}
-                                    map_trash := ToolButton{
-                                        map_trash_icon := Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/trash.svg")
-                                                color: mod.mpf.muted
-                                            }
-                                        }
-                                    }
-                                    map_erase := ToolButton{
-                                        map_erase_icon := Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/delete-forever.svg")
-                                                color: mod.mpf.muted
-                                            }
-                                        }
-                                    }
-                                    View{width: 10 height: 1}
-                                    map_filter := ToolButton{
-                                        map_filter_icon := Icon{
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {
-                                                svg: crate_resource("self://resources/icons/filter.svg")
-                                                color: mod.mpf.fg
-                                            }
-                                        }
-                                    }
-                                    map_tools_hint := Label{
-                                        width: Fill
-                                        max_lines: 1
-                                        margin: Inset{left: 8}
-                                        text_overflow: TextOverflow.Ellipsis
-                                        text: "Click a rectangle to pick it"
-                                        draw_text +: {
-                                            color: mod.mpf.fg_dim
-                                            text_style: theme.font_regular{font_size: 8.5}
-                                        }
-                                    }
-                                    map_scan_all := CheckBox{
-                                        text: "ignore system"
-                                    }
-                                }
                                 map_row := View{
                                     width: Fill
                                     height: Fill
@@ -931,7 +755,7 @@ script_mod! {
                                                 text: "FILTER"
                                                 draw_text +: {
                                                     color: mod.mpf.fg_dim
-                                                    text_style: theme.font_bold{font_size: 8.0}
+                                                    text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
                                             filter_query := MpfInput{
@@ -1151,7 +975,7 @@ script_mod! {
                                 text: "COLUMNS"
                                 draw_text +: {
                                     color: mod.mpf.fg_dim
-                                    text_style: theme.font_bold{font_size: 8.0}
+                                    text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
                             menu_size := MenuRow{}
@@ -1220,7 +1044,7 @@ script_mod! {
                                 text: "Rename 0 files"
                                 draw_text +: {
                                     color: mod.mpf.fg_bright
-                                    text_style: theme.font_bold{font_size: 11.0}
+                                    text_style: theme.font_regular{font_size: 11.0}
                                 }
                             }
                             batch_find := DialogField{
@@ -1412,11 +1236,7 @@ const MODE_BUTTONS: [(&[LiveId], ViewMode); 4] = [
 
 /// The projection switch on the map's own strip: how the block view renders,
 /// not which view is open.
-const PROJ_BUTTONS: [(&[LiveId], MapProjection); 3] = [
-    (ids!(proj_flat), MapProjection::Flat),
-    (ids!(proj_ortho), MapProjection::Ortho),
-    (ids!(proj_persp), MapProjection::Persp),
-];
+
 
 /// The tab strip's slots. More tabs than this and the strip would be a
 /// horizontal scroll problem instead of a tab strip.
@@ -1530,6 +1350,9 @@ fn is_wake_input(event: &Event) -> bool {
 
 #[derive(Script, ScriptHook)]
 pub struct App {
+    #[rust] phone_layout: bool,
+    #[rust] phone_places_open: bool,
+    #[rust] layout_width: f64,
     #[live]
     ui: WidgetRef,
     /// What each crumb of the path bar stands for, root first. The trail
@@ -1703,7 +1526,6 @@ pub struct App {
     #[rust]
     chat_about: String,
     #[rust]
-    map_tools_note: String,
 
     // ------------------------------------------------------------- AI bus
     /// The app's service on the desktop's AI bus: open while the window
@@ -1795,7 +1617,7 @@ impl App {
         // just a bar that says nothing.
         let many = self.tabs.len() > 1;
         self.ui.widget(cx, ids!(tab_strip)).set_visible(cx, many);
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         let (on, off) = (
             Palette::vec4(&palette.bg_light),
             Palette::vec4(&palette.bg_dark),
@@ -1898,6 +1720,11 @@ impl App {
     // ---------------------------------------------------------- navigation
 
     fn navigate(&mut self, cx: &mut Cx, path: PathBuf, add_history: bool) {
+        if self.phone_layout && self.phone_places_open {
+            self.phone_places_open=false;
+            self.ui.view(cx,ids!(sidebar)).set_visible(cx,false);
+            self.ui.view(cx,ids!(content_bg)).set_visible(cx,true);
+        }
         let current = self.current_dir();
         if add_history && !current.as_os_str().is_empty() && current != path {
             let tab = self.tab_mut();
@@ -1918,7 +1745,6 @@ impl App {
         let show_hidden = self.show_hidden;
         self.update_path_ui(cx);
         self.refresh_tab_strip(cx);
-        self.ui.label(cx, ids!(item_count)).set_text(cx, "Loading…");
         let display = path.display().to_string();
         self.status(cx, &format!("Loading {}…", display));
         // The treemap is of a folder, so a new folder means a new map.
@@ -2011,10 +1837,6 @@ impl App {
                     self.ui
                         .label(cx, ids!(empty_label))
                         .set_text(cx, "This folder is empty");
-                    self.ui.label(cx, ids!(item_count)).set_text(
-                        cx,
-                        &format!("{} item{}", count, if count == 1 { "" } else { "s" }),
-                    );
                     self.report(cx);
                     self.apply_pending(cx);
                 }
@@ -2024,7 +1846,6 @@ impl App {
                     self.ui
                         .label(cx, ids!(empty_label))
                         .set_text(cx, "Folder unavailable");
-                    self.ui.label(cx, ids!(item_count)).set_text(cx, "0 items");
                     self.status(cx, &error);
                 }
             }
@@ -2079,8 +1900,12 @@ impl App {
 
     fn update_path_ui(&mut self, cx: &mut Cx) {
         let current = self.current_dir();
-        let title = display_name(&current);
-        self.ui.label(cx, ids!(folder_title)).set_text(cx, &title);
+        let palette=Palette::for_cx(cx);
+        for (id,enabled) in [(ids!(back_button),!self.tabs[self.tab].back.is_empty()),(ids!(forward_button),!self.tabs[self.tab].forward.is_empty())] {
+            let mut icon=self.ui.widget(cx,id).widget(cx,ids!(tool_icon));
+            let color=Palette::vec4(if enabled {&palette.fg}else{&palette.muted});
+            script_apply_eval!(cx,icon,{draw_icon +: {color: #(color)}});
+        }
         // The whole trail, root first — no six-slot ceiling. The widget
         // folds the middle when it will not fit and keeps the end, so a deep
         // path stops quietly claiming to be six deep.
@@ -2091,7 +1916,7 @@ impl App {
         // Light up the place the current folder belongs to. Recent and
         // Starred are Home shortcuts, not places of their own, so they never
         // claim the highlight.
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         let (on, off) = (Palette::vec4(&palette.sel), Palette::vec4(&palette.bg_dark));
         for (id, name) in PLACES {
             let lit = !matches!(name, "recent" | "starred") && self.place_path(name) == current;
@@ -2112,6 +1937,66 @@ impl App {
             "trash" => trash_dir(&self.home),
             folder => self.home.join(folder),
         }
+    }
+
+    /// Splash reapplies the widget defaults on an OS/theme change. Restore
+    /// the live navigation and view state on top of those themed defaults.
+    fn restore_presentation(&mut self, cx: &mut Cx) {
+        if self.tabs.is_empty() {return;}
+        let width = self.layout_width;
+        self.layout_width = 0.0;
+        self.responsive_layout(cx, width);
+        self.update_path_ui(cx);
+        self.apply_mode(cx, self.tabs[self.tab].mode);
+        self.ui.widget(cx,ids!(crumb_box)).set_visible(cx,!self.search_visible && !self.path_edit_open);
+        self.ui.widget(cx,ids!(search_box)).set_visible(cx,self.search_visible);
+        self.ui.widget(cx,ids!(path_edit_box)).set_visible(cx,self.path_edit_open);
+        self.ui.widget(cx,ids!(search_button)).widget(cx,ids!(btn_sel)).set_visible(cx,self.search_visible);
+        self.ui.widget(cx,ids!(props_panel)).set_visible(cx,self.props_open);
+        #[cfg(feature = "chat")]
+        self.ui.widget(cx,ids!(chat_panel)).set_visible(cx,self.chat_open);
+        self.ui.widget(cx,ids!(quick_look)).set_visible(cx,self.quick_look_open);
+        self.close_menu(cx);
+        self.set_column_menu(cx,false);
+        let palette=Palette::for_cx(cx);
+        let colors=contents::Colors {dim: Palette::vec4(&palette.fg_dim),selection: Palette::vec4(&palette.sel)};
+        self.with_contents(cx, |contents,cx|contents.set_colors(cx,colors));
+        self.refresh_tab_strip(cx);
+        self.report(cx);
+    }
+
+    fn responsive_layout(&mut self, cx: &mut Cx, width: f64) {
+        if width < 1.0 || self.layout_width == width {return;}
+        let narrow = width < 620.0;
+        self.layout_width = width;
+        self.phone_layout = narrow;
+        let mobile=cx.with_vm(makepad_widgets::desktop_style::current_style).mobile();
+        let bar_height=if mobile {56.0}else{48.0};
+        let field_height=if mobile {44.0}else{34.0};
+        let mut bar=self.ui.view(cx,ids!(top_bar));
+        script_apply_eval!(cx,bar,{height: #(bar_height)});
+        let hit_size=if mobile {44.0}else{30.0};
+        for id in [ids!(back_button),ids!(forward_button),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
+            let mut button=self.ui.view(cx,id);
+            script_apply_eval!(cx,button,{width: #(hit_size) height: #(hit_size)});
+        }
+        let mut field=self.ui.view(cx,ids!(path_box));
+        script_apply_eval!(cx,field,{height: #(field_height)});
+        self.phone_places_open = false;
+        self.ui.view(cx,ids!(content_bg)).set_visible(cx,true);
+        let mut side=self.ui.view(cx,ids!(sidebar));
+        script_apply_eval!(cx,side,{width: 196});
+        self.ui.view(cx, ids!(phone_navigation)).set_visible(cx, narrow);
+        self.ui.view(cx, ids!(sidebar)).set_visible(cx, !narrow);
+        self.ui.view(cx, ids!(view_modes)).set_visible(cx, !narrow);
+        for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button)] {
+            self.ui.widget(cx,path).set_visible(cx,!narrow);
+        }
+        if narrow {self.with_contents(cx,|contents,cx|contents.set_zoom(cx,0));}
+        if narrow && !self.tabs.is_empty() && self.tabs[self.tab].mode==ViewMode::Treemap {
+            self.set_mode(cx,ViewMode::Icons);
+        }
+        self.ui.redraw(cx);
     }
 
     fn go_back(&mut self, cx: &mut Cx) {
@@ -2173,12 +2058,10 @@ impl App {
                 .widget(cx, ids!(btn_sel))
                 .set_visible(cx, button_mode == mode);
         }
-        self.style_projection_buttons(cx);
-        // The map's tool strip and the filter sidebar belong to the map. The
-        // pick it acts on lives in the treemap widget and survives this, so
-        // coming back to the map finds the same rectangle still ringed.
+        // Storage options share the main toolbar. Preserve the map's pick
+        // and filter sidebar when changing views.
         self.ui
-            .widget(cx, ids!(map_tools))
+            .widget(cx, ids!(storage_button))
             .set_visible(cx, mode.is_treemap());
         self.ui
             .widget(cx, ids!(map_side))
@@ -2188,7 +2071,6 @@ impl App {
             // mode round-trip): the legend fills now, not on the next toggle.
             self.refresh_filter_popup(cx);
         }
-        self.map_tools_note.clear();
         self.refresh_chat(cx);
     }
 
@@ -2207,18 +2089,8 @@ impl App {
         self.with_contents(cx, |contents, cx| {
             contents.treemap(cx).set_projection(cx, projection);
         });
-        self.style_projection_buttons(cx);
         self.report(cx);
         self.ui.redraw(cx);
-    }
-
-    fn style_projection_buttons(&mut self, cx: &mut Cx) {
-        for (id, projection) in PROJ_BUTTONS {
-            self.ui
-                .widget(cx, id)
-                .widget(cx, ids!(btn_sel))
-                .set_visible(cx, projection == self.projection);
-        }
     }
 
     fn zoom(&mut self, cx: &mut Cx, delta: isize) {
@@ -2264,6 +2136,8 @@ impl App {
         } else {
             self.ui.text_input(cx, ids!(search_input)).set_text(cx, "");
             self.with_contents(cx, |contents, cx| contents.set_filter(cx, String::new()));
+            self.ui.text_input(cx,ids!(filter_query)).set_text(cx, "");
+            if self.tabs[self.tab].mode.is_treemap() {self.rebuild_filter(cx);}
             cx.set_key_focus(Area::Empty);
         }
         self.ui.redraw(cx);
@@ -2332,9 +2206,9 @@ impl App {
         let list: Vec<PathBuf> = self.bookmarks.list().to_vec();
         let current = self.current_dir();
         self.ui
-            .widget(cx, ids!(bookmark_hint))
-            .set_visible(cx, list.is_empty());
-        let palette = Palette::shared();
+            .widget(cx, ids!(bookmark_heading))
+            .set_visible(cx, !list.is_empty());
+        let palette = &Palette::for_cx(cx);
         let (on, off) = (Palette::vec4(&palette.sel), Palette::vec4(&palette.bg_dark));
         for (index, id) in BOOKMARK_IDS.iter().enumerate() {
             let mut item = self.ui.view(cx, *id);
@@ -2394,7 +2268,7 @@ impl App {
         let open = self.preview.showing().is_some() || self.preview.hosted_showing().is_some();
         if open {
             self.preview.close(cx);
-            self.set_preview_button(cx, false);
+
             self.status(cx, "Preview closed");
             return;
         }
@@ -2413,7 +2287,7 @@ impl App {
             Preview::Shown(message) => {
                 // Hosted, the button lights when `PreviewShown` arrives, not
                 // because we asked — see `handle_wm_event`.
-                self.set_preview_button(cx, self.preview.showing().is_some());
+
                 self.status(cx, &message);
             }
             // No viewer binary to show it: text and code still have a panel
@@ -2438,7 +2312,7 @@ impl App {
         self.ui.label(cx, ids!(ql_text)).set_text(cx, &text);
         self.ui.widget(cx, ids!(quick_look)).set_visible(cx, true);
         self.quick_look_open = true;
-        self.set_preview_button(cx, true);
+
         self.status(
             cx,
             &format!("Previewing {} — Space or Esc to close", entry.name),
@@ -2453,15 +2327,8 @@ impl App {
             self.ui.widget(cx, ids!(quick_look)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
-        self.set_preview_button(cx, false);
-        self.report(cx);
-    }
 
-    fn set_preview_button(&mut self, cx: &mut Cx, on: bool) {
-        self.ui
-            .widget(cx, ids!(preview_button))
-            .widget(cx, ids!(btn_sel))
-            .set_visible(cx, on);
+        self.report(cx);
     }
 
     /// The column picker: which columns the list view shows. The grid does
@@ -2486,9 +2353,9 @@ impl App {
             row.widget(cx, ids!(menu_gap)).set_visible(cx, !on);
             let text = column.label().to_string();
             let color = if on {
-                Palette::vec4(&Palette::shared().sel)
+                Palette::vec4(&Palette::for_cx(cx).sel)
             } else {
-                Palette::vec4(&Palette::shared().bg_dark)
+                Palette::vec4(&Palette::for_cx(cx).bg_dark)
             };
             script_apply_eval!(cx, row, {
                 draw_bg +: {color: #(color)}
@@ -2636,7 +2503,7 @@ impl App {
             return;
         }
         let showing = self.preview.hosted_showing().is_some();
-        self.set_preview_button(cx, showing);
+
         if !showing {
             self.report(cx);
         }
@@ -2666,6 +2533,22 @@ impl App {
         self.menu_hover = None;
         self.menu_open = true;
         self.close_submenu(cx);
+        self.fill_menu(cx);
+        self.place_menu(cx, ids!(context_menu), at, self.menu_rows.len(), &self.menu_rows.clone());
+        self.ui.widget(cx, ids!(context_menu)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn open_toolbar_menu(&mut self, cx: &mut Cx, at: DVec2, storage: bool) {
+        self.close_menu(cx);
+        self.set_column_menu(cx, false);
+        self.menu_target = None;
+        self.menu_rows = if storage {
+            menu::storage_menu(self.projection, self.filter_popup_open, model::scan_all())
+        } else {
+            menu::toolbar_menu(self.tabs[self.tab].mode, self.show_hidden, cfg!(feature = "chat"), !vfs().is_demo() || makepad_wm_api::hosted(cx))
+        };
+        self.menu_open = true;
         self.fill_menu(cx);
         self.place_menu(cx, ids!(context_menu), at, self.menu_rows.len(), &self.menu_rows.clone());
         self.ui.widget(cx, ids!(context_menu)).set_visible(cx, true);
@@ -2722,7 +2605,7 @@ impl App {
     /// Paint the rows the menu is currently offering into the slots.
     fn fill_menu(&mut self, cx: &mut Cx) {
         let rows = self.menu_rows.clone();
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         for (index, id) in CTX_IDS.iter().enumerate() {
             let slot = self.ui.view(cx, *id);
             let Some(row) = rows.get(index) else {
@@ -2765,7 +2648,7 @@ impl App {
 
     fn fill_submenu(&mut self, cx: &mut Cx) {
         let apps = self.submenu_apps.clone();
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         for (index, id) in CTX_SUB_IDS.iter().enumerate() {
             let slot = self.ui.view(cx, *id);
             let Some(app) = apps.get(index) else {
@@ -2860,6 +2743,19 @@ impl App {
             MenuAction::OpenInTerminal => self.open_terminal(cx),
             MenuAction::ShowHidden => self.toggle_hidden(cx),
             MenuAction::SetMode(mode) => self.set_mode(cx, mode),
+            MenuAction::SetProjection(projection) => self.set_projection_choice(cx, projection),
+            MenuAction::StorageFilter => self.set_filter_popup(cx, !self.filter_popup_open),
+            MenuAction::ScanSystem => {
+                model::set_scan_all(!model::scan_all());
+                self.with_contents(cx, |contents, cx| contents.treemap(cx).remap(cx));
+            }
+            MenuAction::Rescan => { self.with_contents(cx, |contents, cx| contents.treemap(cx).rescan(cx)); }
+            MenuAction::Columns => self.set_column_menu(cx, true),
+            MenuAction::EditPath => self.set_path_edit(cx, true),
+            MenuAction::Chat => {
+                #[cfg(feature = "chat")]
+                self.toggle_chat(cx);
+            }
             MenuAction::OpenWithApp(index) => {
                 let (Some(entry), Some(app)) = (target, self.submenu_apps.get(index).cloned())
                 else {
@@ -2938,14 +2834,6 @@ impl App {
 
     fn toggle_hidden(&mut self, cx: &mut Cx) {
         self.show_hidden = !self.show_hidden;
-        self.ui.label(cx, ids!(hidden_hint)).set_text(
-            cx,
-            if self.show_hidden {
-                "Ctrl+H  Hide hidden files"
-            } else {
-                "Ctrl+H  Show hidden files"
-            },
-        );
         self.request_directory(cx);
     }
 
@@ -2954,10 +2842,6 @@ impl App {
     fn set_props(&mut self, cx: &mut Cx, open: bool) {
         self.props_open = open;
         self.ui.widget(cx, ids!(props_panel)).set_visible(cx, open);
-        self.ui
-            .widget(cx, ids!(props_button))
-            .widget(cx, ids!(btn_sel))
-            .set_visible(cx, open);
         if open {
             self.refresh_props(cx);
         } else if let Some(cancel) = self.size_cancel.take() {
@@ -3371,6 +3255,7 @@ impl App {
     }
 
     fn new_folder(&mut self, cx: &mut Cx) {
+        if self.tabs[self.tab].mode.is_treemap() {self.set_mode(cx, ViewMode::Icons);}
         let name = ops::unique_path(&self.current_dir(), "untitled folder");
         let name = display_name(&name);
         // The new folder arrives selected with its name up for editing, which
@@ -3565,7 +3450,11 @@ impl App {
 
     fn open_terminal(&mut self, cx: &mut Cx) {
         if vfs().is_demo() {
-            self.status(cx, "Terminal is not in this demo");
+            // The WM supplies its generated demo home to an unqualified
+            // terminal launch; a virtual /Demo path is not a disk directory.
+            let request=makepad_wm_api::WmRequest::Launch {app: "terminal".into(),args: Vec::new()};
+            let sent=makepad_wm_api::send(cx,&request);
+            self.status(cx,if sent {"Opening Terminal"} else {"Open this demo in the window manager to use Terminal"});
             return;
         }
         let dir = self.current_dir();
@@ -4199,12 +4088,10 @@ impl App {
         out
     }
 
-    /// The one-line "about:" chip over the input, and the map strip's hint and
-    /// button states. Called from `report`, so it follows every selection
-    /// change — and only touches a widget when its text actually changed.
+    /// Keep the chat context on the current folder or selection.
     fn refresh_chat(&mut self, cx: &mut Cx) {
         self.refresh_ai_context(cx);
-        let mode = self.tabs[self.tab].mode;
+        #[cfg(feature = "chat")]
         let picked = self.chat_subject(cx);
         #[cfg(feature = "chat")]
         if self.chat_open {
@@ -4219,36 +4106,7 @@ impl App {
                     .set_text(cx, &about);
             }
         }
-        if !mode.is_treemap() {
-            return;
-        }
-        let note = match &picked {
-            Some(path) => format!("Rescan · act on {}", display_name(path)),
-            None => "Rescan · click a rectangle to pick what to delete".to_string(),
-        };
-        if note == self.map_tools_note {
-            return;
-        }
-        self.map_tools_note = note.clone();
-        self.ui
-            .label(cx, ids!(map_tools_hint))
-            .set_text(cx, &note);
-        // The two delete buttons go out when there is nothing under them: a
-        // button that looks live and does nothing is worse than a dim one.
-        let palette = Palette::shared();
-        let live = Palette::vec4(&palette.fg);
-        let danger = Palette::vec4(&palette.danger);
-        let dead = Palette::vec4(&palette.muted);
-        let has_pick = picked.is_some();
-        for (id, lit) in [
-            (ids!(map_trash_icon), if has_pick { live } else { dead }),
-            (ids!(map_erase_icon), if has_pick { danger } else { dead }),
-        ] {
-            let mut icon = self.ui.widget(cx, id);
-            script_apply_eval!(cx, icon, {
-                draw_icon +: {color: #(lit)}
-            });
-        }
+
     }
 
     /// Is the caret in the ask field? The panel stays open while its answer is
@@ -4498,58 +4356,6 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------- the map's tools
-
-    /// The map strip's buttons. They act on the picked rectangle through
-    /// exactly the paths the keyboard and the context menu already use — the
-    /// permanent delete included, which still asks once and acts on the second
-    /// press.
-    fn handle_map_tool_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if !self.tabs[self.tab].mode.is_treemap() {
-            return;
-        }
-        for (id, projection) in PROJ_BUTTONS {
-            if self.ui.view(cx, id).finger_down(actions).is_some() {
-                return self.set_projection_choice(cx, projection);
-            }
-        }
-        if self.ui.view(cx, ids!(map_rescan)).finger_down(actions).is_some() {
-            return self.rescan_map(cx);
-        }
-        if self.ui.view(cx, ids!(map_filter)).finger_down(actions).is_some() {
-            let open = !self.filter_popup_open;
-            return self.set_filter_popup(cx, open);
-        }
-        if let Some(ignore) = self.ui.check_box(cx, ids!(map_scan_all)).changed(actions) {
-            // Checked means today's behaviour: leave the system folders out.
-            crate::model::set_scan_all(!ignore);
-            self.status(
-                cx,
-                if ignore {
-                    "System folders excluded again — rescanning"
-                } else {
-                    "Measuring system folders too — macOS will ask permission per folder"
-                },
-            );
-            self.with_contents(cx, |contents, cx| contents.treemap(cx).remap(cx));
-            return;
-        }
-        let trash = self.ui.view(cx, ids!(map_trash)).finger_down(actions).is_some();
-        let erase = self.ui.view(cx, ids!(map_erase)).finger_down(actions).is_some();
-        if !trash && !erase {
-            return;
-        }
-        if self.chat_subject(cx).is_none() {
-            self.status(cx, "Click a rectangle on the map first");
-            return;
-        }
-        if trash {
-            self.trash_selection(cx);
-        } else {
-            self.delete_forever(cx);
-        }
-    }
-
     // ------------------------------------------------------- the map filter
 
     fn set_filter_popup(&mut self, cx: &mut Cx, open: bool) {
@@ -4585,7 +4391,7 @@ impl App {
             })
             .collect();
         classes.sort_by(|a, b| b.1.cmp(&a.1));
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         for (row, &(class, bytes)) in classes.iter().enumerate() {
             self.legend_rows[row] = class;
             let mut widget = self.ui.widget(cx, FILTER_KIND_IDS[row]);
@@ -4623,7 +4429,7 @@ impl App {
     }
 
     fn style_filter_age(&mut self, cx: &mut Cx) {
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         for (index, id) in FILTER_AGE_IDS.iter().enumerate() {
             let mut widget = self.ui.widget(cx, id);
             let on = index == self.filter_age;
@@ -4679,6 +4485,7 @@ impl App {
                 .fold(0u16, |mask, class| mask | class_kinds_mask(class));
             query.kinds = Some(mask);
         }
+        self.ui.widget(cx,ids!(storage_button)).widget(cx,ids!(btn_sel)).set_visible(cx,!query.is_empty());
         self.with_contents(cx, |contents, cx| {
             contents.treemap(cx).set_filter(cx, Some(query));
         });
@@ -4689,6 +4496,9 @@ impl App {
         self.filter_age = 0;
         self.filter_kinds = [false; 7];
         self.ui.text_input(cx, ids!(filter_query)).set_text(cx, "");
+        self.ui.text_input(cx, ids!(search_input)).set_text(cx, "");
+        self.with_contents(cx, |contents,cx|contents.set_filter(cx,String::new()));
+        self.ui.widget(cx,ids!(storage_button)).widget(cx,ids!(btn_sel)).set_visible(cx,false);
         self.ui.slider(cx, ids!(filter_size)).set_value(cx, 0.0);
         self.ui
             .label(cx, ids!(filter_size_label))
@@ -4703,12 +4513,9 @@ impl App {
             return;
         }
         let mut dirty = false;
-        if self
-            .ui
-            .text_input(cx, ids!(filter_query))
-            .changed(actions)
-            .is_some()
-        {
+        if let Some(text)=self.ui.text_input(cx, ids!(filter_query)).changed(actions) {
+            self.ui.text_input(cx,ids!(search_input)).set_text(cx,&text);
+            self.with_contents(cx, |contents,cx|contents.set_filter(cx,text));
             dirty = true;
         }
         if self.ui.slider(cx, ids!(filter_size)).slided(actions).is_some() {
@@ -4771,7 +4578,7 @@ const CLASS_NAMES: [&str; 7] =
     ["Video", "Images", "Audio", "Code", "Docs", "Archives", "Other"];
 
 /// The `FileKind`s behind one legend class — the exact inverse of
-/// `treemap_view::kind_class`, asserted so in a test below.
+/// `makepad_diskmap::kind_class`, asserted so in a test below.
 fn class_kind_values(class: usize) -> &'static [crate::model::FileKind] {
     use crate::model::FileKind::*;
     match class {
@@ -4851,6 +4658,9 @@ No markdown headings and no preamble — say the thing.";
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        for id in [ids!(ctx_panel),ids!(ctx_sub_panel),ids!(ql_panel)] {
+            if let Some(mut view)=self.ui.view(cx,id).borrow_mut() {view.set_optimize(cx,ViewOptimize::DrawList);}
+        }
         // Checked once: a warm-pool instance stays dormant until
         // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
         self.dormancy = Dormancy::start(makepad_wm_api::warm_start());
@@ -4859,11 +4669,7 @@ impl MatchEvent for App {
         if vfs::demo_requested() {
             vfs::install(Arc::new(demo::DemoVfs::new()));
         }
-        // The scan-scope checkbox shows the saved choice from the first
-        // frame; checked means the system folders stay out.
-        self.ui
-            .check_box(cx, ids!(map_scan_all))
-            .set_active(cx, !crate::model::scan_all(), Animate::No);
+        let _ = model::scan_all();
         // The block view's saved rendering and whether its filter sidebar
         // was left open — both come back exactly as they were left.
         self.projection = match model::pref_get("projection").as_deref() {
@@ -4872,7 +4678,6 @@ impl MatchEvent for App {
             _ => MapProjection::default(),
         };
         self.filter_popup_open = model::pref_get("filter_side").as_deref() == Some("1");
-        self.style_projection_buttons(cx);
         let (sender, receiver) = mpsc::channel();
         self.sender = Some(sender);
         self.receiver = Some(receiver);
@@ -4898,14 +4703,7 @@ impl MatchEvent for App {
         } else {
             Bookmarks::load(&crate::model::makepad_home())
         };
-        if vfs::is_demo() {
-            // Say so where it cannot be missed: a recording of the demo must
-            // never be mistaken for a recording of somebody's files.
-            self.ui.label(cx, ids!(files_title)).set_text(cx, "Files · Demo");
-            #[cfg(feature = "chat")]
-            self.ui.widget(cx, ids!(chat_button)).set_visible(cx, false);
-        }
-        let palette = Palette::shared();
+        let palette = &Palette::for_cx(cx);
         let colors = contents::Colors {
             dim: Palette::vec4(&palette.fg_dim),
             selection: Palette::vec4(&palette.sel),
@@ -4923,7 +4721,7 @@ impl MatchEvent for App {
             .unwrap_or_else(|| self.home.clone());
         // The first tab opens on the space view: where the bytes are is the
         // question a file manager gets asked first.
-        self.tabs = vec![Tab::new(start, ViewMode::Treemap)];
+        self.tabs = vec![Tab::new(start, if self.phone_layout {ViewMode::Icons}else{ViewMode::Treemap})];
         self.tab = 0;
         // Warm and still dormant: no disk scan and no thumbnails until
         // `wake` runs it — see `Dormancy`.
@@ -4935,6 +4733,25 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for id in [ids!(back_button),ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
+            let mut button=self.ui.view(cx,id);
+            let hover=button.finger_hover_in(actions).is_some();
+            if hover || button.finger_hover_out(actions).is_some() {
+                let color=if hover {Palette::vec4(&Palette::for_cx(cx).hover_soft)}else{Vec4f::default()};
+                script_apply_eval!(cx,button,{draw_bg +: {color: #(color)}});
+            }
+        }
+        if self.ui.button(cx,ids!(phone_places)).clicked(actions) {
+            self.phone_places_open=!self.phone_places_open;
+            self.ui.view(cx,ids!(sidebar)).set_visible(cx,self.phone_places_open);
+            self.ui.view(cx,ids!(content_bg)).set_visible(cx,!self.phone_places_open);
+            let mut side=self.ui.view(cx,ids!(sidebar));
+            let width=self.layout_width;
+            script_apply_eval!(cx,side,{width: #(width)});
+        }
+        for (path,mode) in [(ids!(phone_icons),ViewMode::Icons),(ids!(phone_list),ViewMode::Compact),(ids!(phone_map),ViewMode::Treemap)] {
+            if self.ui.button(cx,path).clicked(actions) {self.set_mode(cx,mode);}
+        }
         if self.menu_open && self.handle_menu_actions(cx, actions) {
             return;
         }
@@ -4952,34 +4769,6 @@ impl MatchEvent for App {
         if self.ui.view(cx, ids!(search_button)).finger_down(actions).is_some() {
             self.set_search(cx, !self.search_visible);
         }
-        if self
-            .ui
-            .view(cx, ids!(preview_button))
-            .finger_down(actions)
-            .is_some()
-        {
-            self.toggle_preview(cx);
-        }
-        if self
-            .ui
-            .view(cx, ids!(terminal_button))
-            .finger_down(actions)
-            .is_some()
-        {
-            self.open_terminal(cx);
-        }
-        if self
-            .ui
-            .view(cx, ids!(newfolder_button))
-            .finger_down(actions)
-            .is_some()
-        {
-            self.new_folder(cx);
-        }
-        if self.ui.view(cx, ids!(props_button)).finger_down(actions).is_some() {
-            let open = !self.props_open;
-            self.set_props(cx, open);
-        }
         if self.ui.view(cx, ids!(props_close)).finger_down(actions).is_some() {
             self.set_props(cx, false);
         }
@@ -4987,9 +4776,6 @@ impl MatchEvent for App {
         // ---- the ask panel
         #[cfg(feature = "chat")]
         {
-            if self.ui.view(cx, ids!(chat_button)).finger_down(actions).is_some() {
-                self.toggle_chat(cx);
-            }
             if self.chat_open {
                 if self.ui.view(cx, ids!(chat_close)).finger_down(actions).is_some() {
                     self.toggle_chat(cx);
@@ -5008,30 +4794,17 @@ impl MatchEvent for App {
                 }
             }
         }
-        self.handle_map_tool_actions(cx, actions);
         self.handle_filter_actions(cx, actions);
         for (id, mode) in MODE_BUTTONS {
             if self.ui.view(cx, id).finger_down(actions).is_some() {
                 self.set_mode(cx, mode);
             }
         }
-        if self.ui.view(cx, ids!(menu_button)).finger_down(actions).is_some() {
-            let open = !self.column_menu_open;
-            self.set_column_menu(cx, open);
-            let thumbs = self
-                .with_contents(cx, |contents, _| contents.thumbs_resident())
-                .unwrap_or(0);
-            let undo = self
-                .journal
-                .peek()
-                .map(|u| format!("Cmd+Z {}", u.describe().to_lowercase()))
-                .unwrap_or_else(|| "Cmd+Z undo".to_string());
-            self.status(
-                cx,
-                &format!(
-                    "Cmd+1/2/3/4 views · Cmd+T tab · Ctrl+L path · Cmd+D bookmark · F2 rename · Cmd+C/X/V · Cmd+Delete trash · {undo} · Cmd+I info · {thumbs} thumbnails cached"
-                ),
-            );
+        for (id, storage) in [(ids!(menu_button), false), (ids!(storage_button), true)] {
+            if self.ui.view(cx, id).finger_down(actions).is_some() {
+                let at = self.ui.view(cx, id).area().rect(cx);
+                self.open_toolbar_menu(cx, dvec2(at.pos.x + at.size.x - CTX_PANEL_W, at.pos.y + at.size.y), storage);
+            }
         }
         if self.column_menu_open {
             for (id, column) in COLUMN_ROWS {
@@ -5189,13 +4962,9 @@ impl MatchEvent for App {
         }
 
         if let Some(filter) = self.ui.text_input(cx, ids!(search_input)).changed(actions) {
+            self.ui.text_input(cx,ids!(filter_query)).set_text(cx,&filter);
             self.with_contents(cx, |contents, cx| contents.set_filter(cx, filter));
-            let shown = self.with_contents(cx, |contents, _| (contents.len(), contents.total()));
-            if let Some((shown, total)) = shown {
-                self.ui
-                    .label(cx, ids!(item_count))
-                    .set_text(cx, &format!("{} of {} items", shown, total));
-            }
+            if self.tabs[self.tab].mode.is_treemap() {self.rebuild_filter(cx);}
         }
 
         let body = self
@@ -5212,13 +4981,11 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         // The WM's theme, first into the stock widgets and then into `mod.mpf`
         // for our own chrome — both before anything reads a color.
-        if !vfs::demo_requested() {
-            makepad_wm_theme::apply(vm);
-        }
-        Palette::shared().publish(vm);
+        makepad_wm_theme::apply(vm);
+        Palette::for_vm(vm).publish(vm);
         crate::theme::script_mod(vm);
         crate::thumbs::script_mod(vm);
-        crate::treemap_view::script_mod(vm);
+        makepad_diskmap::script_mod(vm);
         crate::contents::script_mod(vm);
         #[cfg(feature = "chat")]
         crate::chat_panel::script_mod(vm);
@@ -5228,6 +4995,22 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event,Event::LiveEdit) {self.restore_presentation(cx);}
+        if self.with_contents(cx, |contents,cx|contents.poll_map_entry(cx)).unwrap_or(false) {
+            self.refresh_props(cx);
+            self.report(cx);
+        }
+        if let Event::WindowGeomChange(e)=event {self.responsive_layout(cx,e.new_geom.inner_size.x);}
+        if matches!(event,Event::BackPressed{..}) {
+            let can_back=self.menu_open || self.search_visible || self.phone_places_open || self.tabs.get(self.tab).is_some_and(|t|!t.back.is_empty());
+            if can_back && event.back_pressed() {
+                if self.menu_open {self.close_menu(cx);}
+                else if self.search_visible {self.set_search(cx,false);}
+                else if self.phone_places_open {self.phone_places_open=false;self.ui.view(cx,ids!(sidebar)).set_visible(cx,false);self.ui.view(cx,ids!(content_bg)).set_visible(cx,true);}
+                else {self.go_back(cx);}
+                return;
+            }
+        }
         self.match_event(cx, event);
         // Defensive fallback: a lost `Adopted` message must not leave a
         // visibly-adopted, actually-being-used instance dark and unscanned.
@@ -5376,7 +5159,7 @@ mod dormancy_tests {
             FileKind::Pdf,
             FileKind::Generic,
         ] {
-            let class = crate::treemap_view::kind_class(kind) as usize;
+            let class = makepad_diskmap::kind_class(kind) as usize;
             assert!(
                 class_kind_values(class).contains(&kind),
                 "{kind:?} paints as class {class} but the legend chip for it filters {:?}",
@@ -5385,4 +5168,9 @@ mod dormancy_tests {
             assert!(class_kinds_mask(class) & (1 << (kind as u16)) != 0);
         }
     }
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

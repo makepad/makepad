@@ -1,0 +1,26 @@
+// The console's own appearance, independent of the surrounding desktop.
+mod.vj_theme = {
+    background: #14171c
+    surface: #181e25
+    surface_raised: #222831
+    inset: #10141a
+    waveform_background: #0a0d12
+    waveform_text: #a6b1bd
+    waveform_grid: #ffffff1e
+    control: #272e38
+    control_hover: #2b3440
+    control_down: #1e232b
+    text: #e8eef4
+    text_secondary: #a6b1bd
+    text_muted: #657383
+    text_hover: #fffaf4
+    border: #ffffff26
+    border_strong: #ffffff40
+    separator: #ffffff12
+    accent: #ff5c39
+    accent_hover: #ff8f70
+    on_accent: #1c0b06
+    selection: #46312b
+    radius: 2.5
+    panel_radius: 8.0
+}

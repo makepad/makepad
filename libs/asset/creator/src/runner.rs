@@ -1,15 +1,12 @@
-//! The single-generation runner: pick a node, generate, publish (aicore §9).
+//! Single-generation Flow submission, validation and asset publication.
 //!
-//! One blocking function every creator surface shares — vj's plain rows and
-//! DREAM stages, the chat tool pack's `content.generate`, the headless
-//! runner — so "generate one thing and put it in the catalog" has exactly
-//! one implementation: ETA-ranked node pick over the live LAN fleet, the
-//! store-body → typed-request translation and publish dressing the worker
-//! shipped with (via the importer's exposed seams), cc0 rights, identical
-//! thumbnails/annotations/provenance.
+//! Production fleet calls submit a Gen graph to the configured flow-server,
+//! observe its result, then dress and publish through asset-client. Flow owns
+//! hub routing, admission and retries. Custom provider transports retain the
+//! compatibility path below. These blocking operations belong on workers.
 
 use crate::pipeline::StageSpec;
-use makepad_ai_hub::client::{ContentProvider, LocalService};
+use makepad_ai_hub::client::{ArtifactBytes, ContentProvider, LocalService};
 use makepad_ai_hub::error::AssetAiError;
 use makepad_ai_hub::protocol::GenerateRequestJson;
 use makepad_ai_hub::registry::Domain;
@@ -214,9 +211,17 @@ pub struct RoutedProvider {
 /// native implementation always uses the ordinary live capability/ETA gate.
 pub trait GenerationTransport {
     fn route(&self, domain: &str, request: &GenerateRequestJson) -> Result<RoutedProvider, CreateError>;
+    /// Production transports execute through Flow. The direct provider seam
+    /// remains for existing embedders and their deterministic fixtures.
+    #[cfg(not(target_arch="wasm32"))]
+    fn flow(&self) -> Option<Result<Arc<crate::flow::CreatorFlow>,CreateError>> { None }
 }
 pub struct FleetTransport;
 impl GenerationTransport for FleetTransport {
+    #[cfg(not(target_arch="wasm32"))]
+    fn flow(&self) -> Option<Result<Arc<crate::flow::CreatorFlow>,CreateError>> {
+        Some(crate::flow::CreatorFlow::shared().map_err(CreateError::Unavailable))
+    }
     fn route(&self, domain: &str, request: &GenerateRequestJson) -> Result<RoutedProvider, CreateError> {
         #[cfg(target_arch = "wasm32")]
         { let _ = (domain, request); Err(CreateError::Unavailable("LAN fleet unavailable on wasm".into())) }
@@ -254,6 +259,11 @@ pub fn generate_request(
     if kind.input != makepad_asset_importer::gen_kinds::InputNeed::None
         && wire.input_b64.is_none() && wire.inputs.is_none() {
         return Err(CreateError::Failed(format!("{} requires {} input bytes", kind.kind, kind.input.content_type())));
+    }
+    #[cfg(not(target_arch="wasm32"))]
+    if let Some(flow)=transport.flow() {
+        let flow=flow?;
+        return generate_request_in(&flow,request,wire,cancel,progress,poll_interval);
     }
     let routed = transport.route(kind.domain, &wire)?;
     if wire.model.is_empty() { wire.model = routed.model; }
@@ -294,6 +304,66 @@ pub fn generate_request(
         Ok(GeneratedBytes { kind, request, artifact, text: status.text, node: routed.node, job_id: remote.clone() })
     })();
     if result.is_err() { let _ = service.cancel(&remote); }
+    result
+}
+
+/// Run one primitive as its own Flow instance. Composite validation and
+/// publication consume this result through the existing creator contract.
+#[cfg(not(target_arch="wasm32"))]
+pub fn generate_request_in(
+    flow:&crate::flow::CreatorFlow,mut request:GenRequest,wire:GenerateRequestJson,
+    cancel:&dyn Cancellation,progress:&mut dyn FnMut(&str,u16),poll_interval:Duration,
+)->Result<GeneratedBytes,CreateError> {
+    check_cancel(cancel)?;
+    let stage=crate::pipeline::StageSpec{key:"generate".into(),domain:request.kind.domain.into(),deps:vec![],weight:10,seed:wire.seed.unwrap_or(0),on_fail_skip:false};
+    let spec=crate::pipeline::PipelineSpec{name:request.kind.kind.into(),stages:vec![stage.clone()]};
+    let graph=crate::flow_graph::compile(flow.client(),&spec,&[crate::engine::StageOrder{spec:stage,request:wire,splices:vec![]}]).map_err(CreateError::Failed)?;
+    flow.client().put_source(&graph.name,&graph.source).map_err(|e|CreateError::Failed(e.to_string()))?;
+    progress("submitting generation to Flow", 0);
+    let run=flow.submit(&graph.name,graph.inputs).map_err(CreateError::Failed)?;
+    let result=(|| {
+        loop {
+            check_cancel(cancel)?;
+            let row=flow.snapshot(&run).map_err(CreateError::Failed)?;
+            let stage=row.nodes.get("stage_0");
+            if let Some(stage)=stage {
+                let fallback = match stage.state {
+                    makepad_flow::NodeState::Pending => "queued; waiting for Flow scheduling",
+                    makepad_flow::NodeState::Running => "routing generation to a GPU worker",
+                    _ => "generation status updating",
+                };
+                progress(stage.stage.as_deref().unwrap_or(fallback),stage.progress.unwrap_or(0));
+            } else { progress("queued; waiting for Flow scheduling", 0); }
+            match row.state {
+                makepad_flow::RunState::Done=> {
+                    let stage=stage.ok_or_else(||CreateError::Failed("Flow completed without its generation stage".into()))?;
+                    let text_value=|name:&str|->Result<Option<String>,CreateError>{
+                        let Some(value)=stage.outputs.iter().find(|v|v.port==name) else {return Ok(None)};
+                        let bytes=flow.client().value(&value.value.digest).map_err(|e|CreateError::Failed(e.to_string()))?;
+                        String::from_utf8(bytes.bytes.to_vec()).map(Some).map_err(|e|CreateError::Failed(e.to_string()))
+                    };
+                    if let Some(model)=text_value("model_used")? {request.model=model;}
+                    if let Some(seed)=text_value("seed_used")? {request.seed=seed.parse().ok();}
+                    let mut artifact=None;
+                    let mut text=None;
+                    if let Some(value)=stage.outputs.iter().find(|v|v.port=="result") {
+                        let bytes=flow.client().value(&value.value.digest).map_err(|e|CreateError::Failed(e.to_string()))?;
+                        if let Some(shape)=request.kind.catalog() {
+                            if !shape.content_types.contains(&bytes.content_type.as_str()) {return Err(CreateError::Failed(format!("{} returned {}",request.kind.kind,bytes.content_type)));}
+                            artifact=Some(ArtifactBytes{content_type:bytes.content_type,bytes:bytes.bytes.to_vec()});
+                        } else {text=Some(String::from_utf8(bytes.bytes.to_vec()).map_err(|e|CreateError::Failed(e.to_string()))?);}
+                    }
+                    check_cancel(cancel)?;
+                    return Ok(GeneratedBytes{kind:request.kind,request,artifact,text,node:text_value("provider_url")?.unwrap_or_else(||"flow-server".into()),job_id:text_value("job_id")?.unwrap_or_else(||run.run_id.clone())});
+                }
+                makepad_flow::RunState::Failed=>return Err(CreateError::Failed(stage.and_then(|s|s.error.clone()).unwrap_or_else(||"Flow generation failed".into()))),
+                makepad_flow::RunState::Cancelled=>return Err(CreateError::Cancelled),
+                makepad_flow::RunState::Waiting=>return Err(CreateError::Failed("generation Flow requires an answer".into())),
+                _=>std::thread::sleep(poll_interval.max(Duration::from_millis(10))),
+            }
+        }
+    })();
+    if result.is_err() {let _=flow.cancel(&run);}
     result
 }
 

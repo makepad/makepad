@@ -85,6 +85,23 @@ impl LevelCollision {
     }
 
     pub fn from_positions(positions: Vec<Vec3f>, indices: Vec<u32>) -> LevelCollision {
+        // Only whole triangles over real vertices reach the grid. A caller
+        // handing indices past the vertex count (a part whose vertex stream
+        // was dropped after upload) gets an empty level, never an index
+        // panic on the UI thread.
+        let vertex_count = positions.len() as u32;
+        let indices: Vec<u32> = if indices.len() % 3 == 0
+            && indices.iter().all(|&i| i < vertex_count)
+        {
+            indices
+        } else {
+            indices
+                .chunks_exact(3)
+                .filter(|tri| tri.iter().all(|&i| i < vertex_count))
+                .flatten()
+                .copied()
+                .collect()
+        };
         let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
         let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
         for p in &positions {

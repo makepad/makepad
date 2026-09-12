@@ -21,8 +21,6 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_STORE: &str = "local/asset-ui/asset-server";
-
 struct Config {
     store: PathBuf,
     kit: Option<String>,
@@ -48,13 +46,14 @@ struct Config {
 }
 
 fn usage() -> ! {
+    let default_store = makepad_asset_client::paths::store_root().display().to_string();
     eprintln!(
         "usage: makepad-asset-annotate [options]
 
 Verbs (one required): --set-kind / --wipe / --verify-nondestructive /
 --list-kits. (The QUEUE verb left with the store's job queue.)
 
-  --store DIR         asset-server state dir (default {DEFAULT_STORE})
+  --store DIR         asset-server state dir (default {default_store})
   --kit NAME          queue/select only assets carrying this category label
   --kind K            select assets of this catalog kind (e.g. character)
   --alias A           select exactly this canon alias (repeatable)
@@ -74,7 +73,7 @@ Verbs (one required): --set-kind / --wipe / --verify-nondestructive /
 
 fn parse_config() -> Config {
     let mut c = Config {
-        store: PathBuf::from(DEFAULT_STORE),
+        store: makepad_asset_client::paths::store_root(),
         kit: None,
         kind: None,
         aliases: Vec::new(),

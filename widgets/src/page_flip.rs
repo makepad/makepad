@@ -23,7 +23,11 @@ pub struct PageFlip {
     #[live(false)]
     lazy_init: bool,
     #[live]
+    #[apply_state]
     active_page: LiveId,
+    #[live(true)]
+    #[apply_state]
+    visible: bool,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
     #[rust]
@@ -118,6 +122,10 @@ impl PageFlip {
 }
 
 impl WidgetNode for PageFlip {
+    fn visible(&self) -> bool { self.visible }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible { self.visible = visible; self.redraw(cx); }
+    }
     fn widget_uid(&self) -> WidgetUid {
         self.uid
     }
@@ -142,6 +150,7 @@ impl WidgetNode for PageFlip {
 
 impl Widget for PageFlip {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.visible && event.requires_visibility() { return; }
         let uid = self.widget_uid();
         if event.requires_visibility() {
             let active_page = self.active_page;
@@ -158,6 +167,7 @@ impl Widget for PageFlip {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible { return DrawStep::done(); }
         let active_page = self.active_page;
         if let Some(page) = self.page(cx, active_page) {
             if self.draw_state.begin_with(cx, &(), |cx, _| page.walk(cx)) {
@@ -194,5 +204,30 @@ impl PageFlipRef {
     pub fn set_active_page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
         let mut inner = self.borrow_mut()?;
         inner.set_active_page(cx, page_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn style_reapply_keeps_selected_page_and_visibility() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        cx.init_cx_os();
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value=crate::script_eval!(vm,{use mod.widgets.* PageFlip{
+                active_page: @one
+                one := View{}
+                two := View{}
+            }});
+            let mut pages=PageFlip::script_from_value(vm,value);
+            pages.set_active_page(vm.cx_mut(),live_id!(two)).unwrap();
+            pages.set_visible(vm.cx_mut(),false);
+            pages.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),value);
+            assert_eq!(pages.active_page,live_id!(two));
+            assert!(!pages.visible);
+            assert_eq!(pages.pages.len(),2);
+        });
     }
 }

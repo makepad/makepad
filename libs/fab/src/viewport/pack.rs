@@ -202,6 +202,7 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
             (*t as usize) < pngs.len() && pngs[*t as usize].is_some()
         });
         let pbr = PbrMaterial {
+                surface: None,
             metallic: mat.map(|m| m.metallic).unwrap_or(0.0),
             roughness: mat.map(|m| m.roughness).unwrap_or(1.0),
             orm_png: None,
@@ -295,6 +296,7 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
     let mut draw_layers: Vec<StaticDrawLayer> = Vec::new();
     let mut texture_png = None;
     let mut model_pbr = PbrMaterial {
+                surface: None,
         metallic: 0.0,
         roughness: 1.0,
         orm_png: None,

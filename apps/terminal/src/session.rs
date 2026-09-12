@@ -40,6 +40,9 @@ pub struct Session {
 }
 
 impl Session {
+    /// PID of this session’s shell, for exact host activity relationships.
+    pub fn child_pid(&self) -> i32 { self.pty.child_pid() }
+
     pub fn spawn(
         cols: usize,
         rows: usize,
@@ -138,6 +141,12 @@ impl Session {
             return;
         }
         let _ = self.writer.send(bytes.to_vec());
+    }
+
+    /// Whether the full input was accepted by this live PTY, for acknowledged
+    /// file drops. Does not infer that the application consumed the input.
+    pub fn try_write(&mut self, bytes: &[u8]) -> bool {
+        !self.exited && !bytes.is_empty() && self.writer.send(bytes.to_vec()).is_ok()
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {

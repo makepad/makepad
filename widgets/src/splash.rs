@@ -20,7 +20,7 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
+#[derive(Script, WidgetRef, WidgetRegister)]
 pub struct Splash {
     #[uid]
     uid: WidgetUid,
@@ -73,6 +73,27 @@ pub struct Splash {
     /// script by hand.
     #[rust]
     debug_name: String,
+    #[rust]
+    stylesheet: Option<crate::desktop_style::StyleSheet>,
+    #[rust]
+    style_pending: bool,
+    /// Script timers the body's top-level statements registered at its last
+    /// run. A style reapply runs those statements again, so these are stopped
+    /// first; timers a handler started later are left alone.
+    #[rust]
+    startup_timers: Vec<LiveId>,
+    /// `mod.*` entries the body introduced (its persistent models, e.g.
+    /// `mod.state`). A style reapply restores them after the body's re-run, as
+    /// `!vm.is_reload()`-guarded application state survives a style reload.
+    #[rust]
+    body_modules: Vec<LiveId>,
+}
+
+impl ScriptHook for Splash {
+    fn on_after_apply(&mut self,vm:&mut ScriptVm,_apply:&Apply,_scope:&mut Scope,_value:ScriptValue) {
+        let sheet=crate::desktop_style::current(vm);
+        if sheet!=self.stylesheet {self.stylesheet=sheet;self.style_pending=true;}
+    }
 }
 
 // `let fs = mod.fs` puts the jailed storage module (splash_storage.rs) in
@@ -108,6 +129,16 @@ impl Splash {
         self.debug_name = name.to_string();
     }
 
+    /// Host-selected presentation for an embedded surface with its own isolate.
+    /// The host's surrounding chrome can retain its own widget theme.
+    pub fn set_stylesheet(&mut self, cx: &mut Cx, sheet: crate::desktop_style::StyleSheet) {
+        if self.stylesheet.as_ref() != Some(&sheet) {
+            self.stylesheet = Some(sheet);
+            self.style_pending = true;
+            self.view.redraw(cx);
+        }
+    }
+
     /// The body's identity within its isolate, carried in `ScriptMod`'s
     /// `module_path`.
     ///
@@ -133,7 +164,9 @@ impl Splash {
         }
     }
 
-    fn eval_body(&mut self, cx: &mut Cx) {
+    fn eval_body(&mut self, cx: &mut Cx) {self.eval_styled_body(cx,false);}
+
+    fn eval_styled_body(&mut self,cx:&mut Cx,preserve:bool) {
         let body = self.body.as_ref();
         if body.is_empty() {
             return;
@@ -174,12 +207,58 @@ impl Splash {
         };
 
         let vm_id = self.vm_id;
-        let new_view = cx.with_script_vm_id(vm_id, |vm| {
+        let sheet=self.stylesheet.clone();
+        self.style_pending=false;
+        // A style reapply runs the body's top-level statements again: only the
+        // body defines the widget tree, and that tree has to be rebuilt on the
+        // restyled `mod.widgets` protos (reload mode allocates a fresh widgets
+        // module, so the existing instances' protos are stale). The re-run's
+        // side effects are contained here, not repeated:
+        // - timers the previous run registered are stopped first, so a
+        //   top-level `start_interval` is re-armed rather than stacked;
+        // - `mod.*` entries the body introduced (`mod.state`) are restored
+        //   after the run, so the app's data survives the way
+        //   `!vm.is_reload()`-guarded application state does.
+        // Timers a handler started later and `let` bindings are not touched.
+        if preserve {
+            stop_script_timers(cx, &std::mem::take(&mut self.startup_timers));
+        }
+        let timers_before = isolate_timer_ids(cx, heap_key);
+        let body_modules = std::mem::take(&mut self.body_modules);
+        let (new_view, body_modules) = cx.with_script_vm_id(vm_id, |vm| {
+            if let Some(sheet)=sheet {
+                if crate::desktop_style::current(vm).as_ref()!=Some(&sheet) {
+                    crate::desktop_style::install(vm,sheet);
+                    // Keep the isolate's existing prelude/resource handles and jail.
+                    vm.with_reload(|vm| {crate::widgets_mod(vm);crate::desktop_style::apply_widgets(vm);});
+                }
+            }
+            // Everything on `mod` that is not the body's own; whatever the run
+            // adds beyond this is the body's.
+            let mut known = module_keys(vm);
+            known.retain(|key| !body_modules.contains(key));
+            let saved = if preserve { snapshot_modules(vm, &body_modules) } else { Vec::new() };
             let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
-                vm.eval_with_append_source(script_mod, &code, NIL.into())
+                if preserve {
+                    vm.with_reload(|vm| vm.eval_with_append_source(script_mod, &code, NIL.into()))
+                } else {
+                    vm.eval_with_append_source(script_mod, &code, NIL.into())
+                }
             });
-            if !value.is_err() && !value.is_nil() {
-                Some(View::script_from_value(vm, value))
+            if preserve {
+                restore_modules(vm, saved);
+            }
+            let body_modules: Vec<LiveId> = module_keys(vm)
+                .into_iter()
+                .filter(|key| !known.contains(key))
+                .collect();
+            let view = if !value.is_err() && !value.is_nil() {
+                if preserve {
+                    let walk=self.view.walk;
+                    self.view.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),value);
+                    self.view.walk=walk;
+                    None
+                } else {Some(View::script_from_value(vm, value))}
             } else {
                 // A body that fails to evaluate leaves the Splash showing
                 // its previous view — or nothing at all. Say so: a silent
@@ -192,8 +271,14 @@ impl Splash {
                     log!("splash: script body evaluated to nothing (no root view)");
                 }
                 None
-            }
+            };
+            (view, body_modules)
         });
+        self.body_modules = body_modules;
+        self.startup_timers = isolate_timer_ids(cx, heap_key)
+            .into_iter()
+            .filter(|id| !timers_before.contains(id))
+            .collect();
 
         if let Some(mut view) = new_view {
             // The HOST owns this widget's slot in its tree: `Splash{width: Fill
@@ -234,12 +319,76 @@ impl Splash {
         }
         self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
         self.body_id = None;
+        self.startup_timers.clear();
+        self.body_modules.clear();
         crate::widget_async::mark_splash_isolate_dead(self.vm_id);
         self.vm_id = MAIN_SPLASH_VM_ID;
         // Reclaim now (Cx is in hand and nothing runs in the isolate) so the
         // timers stop immediately rather than lingering to the next pump.
         crate::widget_async::gc_dead_splash_isolates(cx);
         cx.widget_tree_mark_dirty(self.uid);
+    }
+}
+
+/// The script timers whose callbacks live in the isolate heap `heap_key`.
+fn isolate_timer_ids(cx: &Cx, heap_key: usize) -> Vec<LiveId> {
+    cx.script_data
+        .timers
+        .timers
+        .iter()
+        .filter(|t| t.callback.heap_key() == heap_key)
+        .map(|t| t.id)
+        .collect()
+}
+
+/// Stops and drops the script timers with these ids.
+fn stop_script_timers(cx: &mut Cx, ids: &[LiveId]) {
+    if ids.is_empty() {
+        return;
+    }
+    let stale: Vec<_> = cx
+        .script_data
+        .timers
+        .timers
+        .iter()
+        .filter(|t| ids.contains(&t.id))
+        .map(|t| (t.id, t.timer))
+        .collect();
+    for (id, timer) in stale {
+        cx.stop_timer(timer);
+        cx.script_data.timers.timers.retain(|t| t.id != id);
+    }
+}
+
+/// The entries of the isolate's `mod` namespace.
+fn module_keys(vm: &mut ScriptVm) -> Vec<LiveId> {
+    let modules = vm.bx.heap.modules;
+    vm.map_mut_with(modules, |_vm, map| {
+        map.iter().filter_map(|(key, _)| key.as_id()).collect()
+    })
+}
+
+/// The current values of these `mod` entries. Objects are rooted so a
+/// collection during the body's re-run cannot free one only the snapshot
+/// still refers to.
+fn snapshot_modules(
+    vm: &mut ScriptVm,
+    keys: &[LiveId],
+) -> Vec<(LiveId, ScriptValue, Option<ScriptObjectRef>)> {
+    let modules = vm.bx.heap.modules;
+    keys.iter()
+        .map(|key| {
+            let value = vm.bx.heap.value(modules, (*key).into(), NoTrap);
+            let root = value.as_object().map(|obj| vm.bx.heap.new_object_ref(obj));
+            (*key, value, root)
+        })
+        .collect()
+}
+
+fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<ScriptObjectRef>)>) {
+    let modules = vm.bx.heap.modules;
+    for (key, value, _root) in saved {
+        vm.bx.heap.set_value_def(modules, key.into(), value);
     }
 }
 
@@ -369,6 +518,7 @@ impl Widget for Splash {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID {self.eval_styled_body(cx,true);}
         //let tree = self.view.widget_tree();
         //cx.with_vm(|vm| {
         //    log!("{}", tree.display(vm.heap()));
@@ -633,5 +783,118 @@ impl SplashRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_script_global(cx, key, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+    use crate::desktop_style::{self, DesktopStyle, StyleSheet};
+    #[test]
+    fn embedded_splash_restyles_its_isolate_without_replacing_edits() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut splash=cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value=vm.eval(makepad_script::script! {use mod.widgets.* Splash{}});
+            Splash::script_from_value(vm,value)
+        });
+        splash.set_text(&mut cx,"field := TextInput{text: \"original\"}");
+        let field=splash.view.children.iter().find(|(id,_)|*id==id!(field)).unwrap().1.clone();
+        let uid=field.widget_uid();
+        field.clone().set_text(&mut cx,"edited document");
+        cx.with_vm(|vm| {
+            desktop_style::install(vm,StyleSheet::load_with_appearance(DesktopStyle::Macos,true));
+            let source=splash.script_source();
+            splash.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
+        });
+        splash.eval_styled_body(&mut cx,true);
+        let field=splash.view.children.iter().find(|(id,_)|*id==id!(field)).unwrap().1.clone();
+        assert_eq!(field.widget_uid(),uid);
+        assert_eq!(field.text(),"edited document");
+        cx.with_script_vm_id(splash.vm_id,|vm| {
+            let theme=vm.module(id!(theme));
+            assert_eq!(vm.bx.heap.value(theme,id!(color_bg_app).into(),NoTrap).as_color(),Some(0x28282aff));
+        });
+        splash.stop(&mut cx);
+    }
+
+    fn new_splash(cx: &mut Cx) -> Splash {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(makepad_script::script! {use mod.widgets.* Splash{}});
+            Splash::script_from_value(vm, value)
+        })
+    }
+
+    /// What a host does on a style change: install the sheet, reapply the
+    /// Splash (which notices the new sheet), then let it restyle its isolate.
+    fn restyle(cx: &mut Cx, splash: &mut Splash, style: DesktopStyle, dark: bool) {
+        cx.with_vm(|vm| {
+            desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark));
+            let source = splash.script_source();
+            splash.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
+        });
+        splash.eval_styled_body(cx, true);
+    }
+
+    #[test]
+    fn style_reapply_does_not_stack_startup_timers() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(
+            &mut cx,
+            "mod.std.start_interval(60.0, || {})\nlabel := Label{text: \"tick\"}",
+        );
+        let heap = splash.isolate_heap_key(&mut cx).unwrap();
+        let timers = |cx: &Cx| {
+            cx.script_data
+                .timers
+                .timers
+                .iter()
+                .filter(|t| t.callback.heap_key() == heap)
+                .count()
+        };
+        assert_eq!(timers(&cx), 1);
+        assert_eq!(splash.startup_timers.len(), 1);
+        restyle(&mut cx, &mut splash, DesktopStyle::Macos, true);
+        assert_eq!(
+            timers(&cx),
+            1,
+            "a style change re-arms the body's interval instead of stacking a second one"
+        );
+        restyle(&mut cx, &mut splash, DesktopStyle::Windows, false);
+        assert_eq!(timers(&cx), 1);
+        assert_eq!(splash.startup_timers.len(), 1);
+        splash.stop(&mut cx);
+        assert_eq!(timers(&cx), 0);
+    }
+
+    #[test]
+    fn style_reapply_keeps_body_module_state() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(
+            &mut cx,
+            "mod.state = {count: 0}\nfn bump() { mod.state.count += 1 }\nlabel := Label{text: \"x\"}",
+        );
+        let count = |cx: &mut Cx, splash: &mut Splash| {
+            cx.with_script_vm_id(splash.vm_id, |vm| {
+                let state = vm.module(id!(state));
+                vm.bx.heap.value(state, id!(count).into(), NoTrap).as_f64()
+            })
+        };
+        assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
+        assert_eq!(count(&mut cx, &mut splash), Some(1.0));
+        assert!(splash.body_modules.contains(&id!(state)), "{:?}", splash.body_modules);
+        restyle(&mut cx, &mut splash, DesktopStyle::Macos, true);
+        assert_eq!(
+            count(&mut cx, &mut splash),
+            Some(1.0),
+            "the body's `mod.state` must survive a style change, not restart at its literal"
+        );
+        // The re-run's redefined `fn` works against the restored state.
+        assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
+        assert_eq!(count(&mut cx, &mut splash), Some(2.0));
+        splash.stop(&mut cx);
     }
 }

@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["flow-host"]
+# Disable for a client-only creator that attaches to an existing flow-server.
+flow-host = ["makepad-flow/host", "makepad-flow/hub-chat"]
+
 [dependencies]
+makepad-micro-serde = { path = "../../micro_serde" }
+makepad-flow = { path = "../../flow", default-features = false, features = ["client"] }
 # The pipeline library drives compute through the hub…
 makepad-ai-hub = { path = "../../ai/hub", default-features = false }
 # …speaks strict JSON on every wire…

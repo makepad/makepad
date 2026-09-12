@@ -34,44 +34,12 @@ script_mod! {
         draw_bg +: {color: mod.sheets.muted}
     }
 
-    // Flat, square, no bevel: every `*_2*` slot is the "no gradient" sentinel
-    // and every state paints one solid colour.
+    // Compact toolbar controls inherit the active Splash style.
     let TBtn = Button{
         height: 24 width: Fit
         margin: 0
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
         align: Align{x: 0.5 y: 0.5}
-        draw_bg +: {
-            border_radius: uniform(0.0)
-            border_size: uniform(1.0)
-            color_dither: uniform(0.0)
-            gradient_border_horizontal: uniform(0.0)
-            gradient_fill_horizontal: uniform(0.0)
-
-            color: uniform(mod.sheets.bg_light)
-            color_hover: uniform(mod.sheets.muted)
-            color_down: uniform(mod.sheets.accent)
-            color_focus: uniform(mod.sheets.bg_light)
-            color_disabled: uniform(mod.sheets.bg)
-
-            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-
-            border_color: uniform(mod.sheets.muted)
-            border_color_hover: uniform(mod.sheets.accent)
-            border_color_down: uniform(mod.sheets.accent)
-            border_color_focus: uniform(mod.sheets.muted)
-            border_color_disabled: uniform(mod.sheets.muted)
-
-            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-        }
         draw_text +: {
             color: mod.sheets.fg
             color_hover: mod.sheets.fg_bright
@@ -88,43 +56,6 @@ script_mod! {
         height: 22
         margin: 0
         padding: Inset{left: 6 right: 5 top: 3 bottom: 2}
-        draw_bg +: {
-            border_radius: uniform(0.0)
-            border_size: uniform(1.0)
-            color_dither: uniform(0.0)
-            gradient_border_horizontal: uniform(0.0)
-            gradient_fill_horizontal: uniform(0.0)
-
-            // One flat fill in every state — no inset gradient, no gloss.
-            // `color` is an instance field on TextInput, not a uniform.
-            color: mod.sheets.bg_dark
-            color_hover: uniform(mod.sheets.bg_dark)
-            color_focus: uniform(mod.sheets.bg_dark)
-            color_down: uniform(mod.sheets.bg_dark)
-            color_empty: uniform(mod.sheets.bg_dark)
-            color_disabled: uniform(mod.sheets.bg_dark)
-
-            color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_empty: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-
-            border_color: uniform(mod.sheets.muted)
-            border_color_hover: uniform(mod.sheets.fg_dark)
-            border_color_focus: uniform(mod.sheets.accent)
-            border_color_down: uniform(mod.sheets.accent)
-            border_color_empty: uniform(mod.sheets.muted)
-            border_color_disabled: uniform(mod.sheets.muted)
-
-            border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_empty: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-            border_color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-        }
         draw_text +: {
             text_style: TextStyle{
                 font_family: FontFamily{
@@ -149,8 +80,10 @@ script_mod! {
         width: Fill height: Fill
         flow: Down
 
-        toolbar := SolidView{
-            width: Fill height: 32
+        toolbar := ScrollXView{
+            width: Fill height: Fit
+            min_height: 44
+            show_bg: true
             flow: Right spacing: 3
             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
             align: Align{y: 0.5}
@@ -200,35 +133,7 @@ script_mod! {
             fx_menu := DropDown{
                 width: 108 height: 24
                 labels: ["fx"]
-                draw_bg +: {
-                    border_radius: uniform(0.0)
-                    border_size: uniform(1.0)
-                    color_dither: uniform(0.0)
-                    gradient_border_horizontal: uniform(0.0)
-                    gradient_fill_horizontal: uniform(0.0)
-
-                    color: uniform(mod.sheets.bg_light)
-                    color_hover: uniform(mod.sheets.muted)
-                    color_down: uniform(mod.sheets.muted)
-                    color_focus: uniform(mod.sheets.bg_light)
-                    color_disabled: uniform(mod.sheets.bg)
-
-                    color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-
-                    border_color: uniform(mod.sheets.muted)
-                    border_color_hover: uniform(mod.sheets.accent)
-                    border_color_down: uniform(mod.sheets.accent)
-                    border_color_focus: uniform(mod.sheets.muted)
-                    border_color_disabled: uniform(mod.sheets.muted)
-
-                    border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                }
-                draw_text +: {
+                        draw_text +: {
                     text_style: theme.font_regular{font_size: 8.5}
                     color: mod.sheets.fg
                 }
@@ -236,7 +141,8 @@ script_mod! {
         }
 
         formula_bar := SolidView{
-            width: Fill height: 28
+            width: Fill height: Fit
+            min_height: 44
             flow: Right spacing: 6
             padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
             align: Align{y: 0.5}
@@ -314,42 +220,7 @@ script_mod! {
                 width: Fill height: Fill
                 margin: 0
                 padding: Inset{left: 5 right: 4 top: 3 bottom: 2}
-                draw_bg +: {
-                    border_radius: uniform(0.0)
-                    border_size: uniform(2.0)
-                    color_dither: uniform(0.0)
-                    gradient_border_horizontal: uniform(0.0)
-                    gradient_fill_horizontal: uniform(0.0)
-
-                    color: mod.sheets.bg_dark
-                    color_hover: uniform(mod.sheets.bg_dark)
-                    color_focus: uniform(mod.sheets.bg_dark)
-                    color_down: uniform(mod.sheets.bg_dark)
-                    color_empty: uniform(mod.sheets.bg_dark)
-                    color_disabled: uniform(mod.sheets.bg_dark)
-
-                    color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_empty: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-
-                    border_color: uniform(mod.sheets.accent)
-                    border_color_hover: uniform(mod.sheets.accent)
-                    border_color_focus: uniform(mod.sheets.accent)
-                    border_color_down: uniform(mod.sheets.accent)
-                    border_color_empty: uniform(mod.sheets.accent)
-                    border_color_disabled: uniform(mod.sheets.accent)
-
-                    border_color_2: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_hover: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_focus: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_down: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_empty: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                    border_color_2_disabled: uniform(vec4(-1.0 -1.0 -1.0 -1.0))
-                }
-                draw_text +: {
+                        draw_text +: {
                     text_style: TextStyle{
                         font_family: FontFamily{
                             latin := FontMember{
@@ -723,7 +594,7 @@ impl MpSheets {
         self.view.label(cx, ids!(status_msg)).set_text(cx, &msg);
 
         // Undo/Redo read as available only when they are.
-        let c = theme::colors();
+        let c = theme::colors(cx);
         for (id, live) in [
             (ids!(undo_btn), self.wb.can_undo()),
             (ids!(redo_btn), self.wb.can_redo()),
@@ -768,7 +639,7 @@ impl MpSheets {
     fn sync_tabs(&mut self, cx: &mut Cx) {
         let names: Vec<String> = self.wb.sheets.iter().map(|s| s.name.clone()).collect();
         let active = self.wb.active;
-        let c = theme::colors();
+        let c = theme::colors(cx);
         for i in 0..MAX_TABS {
             let w = self.tab_id(cx, i);
             match names.get(i) {
@@ -1151,7 +1022,7 @@ impl MpSheets {
 
 impl Widget for MpSheets {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let c = theme::colors();
+        let c = theme::colors(cx);
         self.cell_rects.clear();
         let mut handle = None;
         let editing = self.editing;

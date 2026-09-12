@@ -11,6 +11,7 @@
 //! selection silently moves to whatever file slid into that slot.
 
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -21,8 +22,8 @@ use crate::{
     model::{format_size, FileEntry, SortKey, SortSpec},
     theme::Palette,
     thumbs::{clear_thumb, fill_thumb, Thumbs},
-    treemap_view::{TreemapAction, TreemapViewRef, TreemapViewWidgetExt},
 };
+use makepad_diskmap::{DiskMapAction, DiskMapRef, DiskMapWidgetExt};
 
 /// Cells in a grid row. The row template carries this many; the ones past the
 /// column count for the current width are hidden, and hidden views take no
@@ -340,7 +341,11 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            treemap := MpfTreemap{}
+            treemap := DiskMap{
+                draw_bg +: {color: mod.mpf.bg}
+                draw_text +: {color: mod.mpf.fg}
+                draw_bold +: {color: mod.mpf.fg_bright}
+            }
         }
     }
 }
@@ -494,6 +499,16 @@ pub struct FileContents {
     /// describes, and Shift+click extends from.
     #[rust]
     anchor: Option<PathBuf>,
+    /// A Storage selection can be below the folder listing. Keep its entry
+    /// with the selection so Preview and Get Info act on the clicked file.
+    #[rust]
+    map_entry: Option<FileEntry>,
+    #[rust]
+    map_entry_pending: Option<PathBuf>,
+    #[rust]
+    map_entry_job: Option<(PathBuf, TaskHandle<Option<FileEntry>>)>,
+    #[rust]
+    map_entry_queue_full: bool,
     #[rust]
     mode: ViewMode,
     /// Tiles per row in the icons view, from the current width.
@@ -677,8 +692,8 @@ impl FileContents {
     }
 
     /// The treemap, for the shell to point at a folder and drain.
-    pub fn treemap(&self, cx: &mut Cx) -> TreemapViewRef {
-        self.view.treemap_view(cx, ids!(treemap))
+    pub fn treemap(&self, cx: &mut Cx) -> DiskMapRef {
+        self.view.disk_map(cx, ids!(treemap))
     }
 
     pub fn set_colors(&mut self, cx: &mut Cx, colors: Colors) {
@@ -754,6 +769,45 @@ impl FileContents {
 
     // ---------------------------------------------------------- selection
 
+    /// Resolve metadata for a deep Storage pick on the pool. Even the demo
+    /// backend can be busy scanning; pointer handling never waits for it.
+    pub fn poll_map_entry(&mut self, cx: &mut Cx) -> bool {
+        let mut changed = false;
+        let result = self.map_entry_job.as_mut().and_then(|(_, job)| job.try_take());
+        if let Some(result) = result {
+            let (path, _) = self.map_entry_job.take().unwrap();
+            if self.anchor.as_ref() == Some(&path) {
+                match result {
+                    Ok(entry) => {self.map_entry = entry; changed = true;}
+                    Err(error) => log!("files: selection metadata failed: {error}"),
+                }
+            }
+        }
+        if self.map_entry_job.is_none() {
+            if let Some(path) = self.map_entry_pending.clone() {
+                if self.anchor.as_ref() != Some(&path) {
+                    self.map_entry_pending = None;
+                } else {
+                    let lookup = path.clone();
+                    match cx.task_pool().submit(Lane::Light, move || crate::model::entry_at(&lookup)) {
+                        Ok(job) => {
+                            self.map_entry_job = Some((path, job));
+                            self.map_entry_pending = None;
+                            self.map_entry_queue_full = false;
+                        }
+                        Err(error) if !self.map_entry_queue_full => {
+                            log!("files: selection metadata queue full, retrying: {error}");
+                            self.map_entry_queue_full = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        if self.map_entry_pending.is_some() || self.map_entry_job.is_some() {let _ = cx.new_next_frame();}
+        changed
+    }
+
     /// The entry the shell acts on: the one the user last landed on.
     pub fn selected_entry(&self) -> Option<FileEntry> {
         let anchor = self.anchor.as_ref()?;
@@ -761,16 +815,19 @@ impl FileContents {
             .iter()
             .find(|r| &r.entry.path == anchor)
             .map(|r| r.entry.clone())
+            .or_else(||self.map_entry.as_ref().filter(|e| &e.path==anchor).cloned())
     }
 
     /// Everything selected, in display order — what copy, trash and batch
     /// rename operate on.
     pub fn selected_entries(&self) -> Vec<FileEntry> {
-        self.rows
-            .iter()
+        let mut entries: Vec<_> = self.rows.iter()
             .filter(|r| self.selected.contains(&r.entry.path))
-            .map(|r| r.entry.clone())
-            .collect()
+            .map(|r| r.entry.clone()).collect();
+        if let Some(entry)=&self.map_entry {
+            if self.selected.contains(&entry.path) && !entries.iter().any(|e|e.path==entry.path) {entries.push(entry.clone());}
+        }
+        entries
     }
 
     pub fn selection_count(&self) -> usize {
@@ -1374,10 +1431,10 @@ impl FileContents {
                 // batch, and dropping either would lose the menu or the
                 // selection.
                 let map_uid = self.treemap(cx).widget_uid();
-                let map_actions: Vec<TreemapAction> = actions
+                let map_actions: Vec<DiskMapAction> = actions
                     .iter()
                     .filter_map(|a| a.as_widget_action().filter(|wa| wa.widget_uid == map_uid))
-                    .map(|wa| wa.cast::<TreemapAction>())
+                    .map(|wa| wa.cast::<DiskMapAction>())
                     .collect();
                 for action in map_actions {
                     match action {
@@ -1385,9 +1442,13 @@ impl FileContents {
                     // current listing means "go there" — made a single click
                     // on any rectangle below the top level throw the whole
                     // browser somewhere else, which is the opposite of what a
-                    // map is for. Deeper picks live on the map's own readout;
-                    // only the ones the listing also holds reach the shell.
-                    TreemapAction::Selected(path) => {
+                    // map is for. Deeper picks resolve their metadata on the
+                    // worker pool so the same shell actions can use them.
+                    DiskMapAction::Selected(path) => {
+                        self.map_entry = None;
+                        self.map_entry_job = None;
+                        self.map_entry_pending = (!self.rows.iter().any(|r| r.entry.path == path)).then(|| path.clone());
+                        if self.map_entry_pending.is_some() {let _ = cx.new_next_frame();}
                         self.selected.clear();
                         self.selected.insert(path.clone());
                         self.anchor = Some(path.clone());
@@ -1409,20 +1470,21 @@ impl FileContents {
                     // more — deleted by something other than this app since
                     // the folder was measured. It has already dropped it; the
                     // listing should hear about it too.
-                    TreemapAction::Vanished(path) => {
+                    DiskMapAction::Opened(_) => {}
+                    DiskMapAction::Vanished(path) => {
                         self.selected.remove(&path);
                         out.push(FileContentsAction::Restated);
                     }
-                    TreemapAction::FilterCleared => {
+                    DiskMapAction::FilterCleared => {
                         out.push(FileContentsAction::MapFilterCleared);
                     }
                     // A secondary click that stayed a click: the menu opens
                     // exactly as it would have on the press, only now it is
                     // certain no pan was meant.
-                    TreemapAction::Context(at) => {
+                    DiskMapAction::Context(at) => {
                         self.open_context(cx, at);
                     }
-                    TreemapAction::None => {}
+                    DiskMapAction::None => {}
                     }
                 }
             }
@@ -1565,6 +1627,10 @@ impl Widget for FileContents {
         self.grid_columns = Self::columns_for(self.last_width.max(tile_width), tile_width);
         self.body_rect = cx.turtle().rect();
         self.hit_rects.clear();
+        if self.mode.is_treemap() {
+            self.treemap(cx)
+                .apply_palette(Palette::for_cx(cx).map_palette());
+        }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             // Only the page for `mode` is visible, so whatever list this is,
             // `mode` says which one.

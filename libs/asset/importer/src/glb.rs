@@ -132,8 +132,7 @@ mod tests {
     /// measured `vertices >= 3` and `triangles > 0`.
     #[test]
     fn static_glb_reports_measured_vertices_and_triangles() {
-        let glb = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../local/ai_content_library/lib-6.glb");
+        let glb = makepad_asset_client::paths::library_root().join("lib-6.glb");
         let Ok(bytes) = std::fs::read(&glb) else {
             return; // fixture only present on a dev box with the library
         };

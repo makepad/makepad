@@ -45,7 +45,7 @@ use crate::{
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceRequest, Placement, Side},
+    overlay_place::{place_overlay, PlaceRequest, Placement, Side},
     text_input::TextInputAction,
     widget::*,
     widget_tree::CxWidgetExt,
@@ -1352,7 +1352,7 @@ impl TreeSelect {
     /// down, and pulled back inboard of the window edge.
     fn panel_offset(&self, face: Rect) -> DVec2 {
         let size = self.panel_size();
-        let placed = place(&PlaceRequest {
+        let placed = place_overlay(&PlaceRequest {
             anchor: face,
             size,
             bounds: Rect {

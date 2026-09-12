@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)]
-#![cfg(headless)]
+#![cfg(gpusim)]
 
 use makepad_xr::makepad_widgets::*;
 use makepad_xr::{net::*, scene::*};
@@ -15,7 +15,7 @@ use std::{
 
 const TEST_DRAW_CYCLES: usize = 320;
 const TEST_DRAW_CYCLE_SLACK: usize = 120;
-// Peer discovery is wall-clock driven, while the no-draw headless loop is cycle bounded.
+// Peer discovery is wall-clock driven, while the no-draw gpusim loop is cycle bounded.
 // Leave generous real-time slack for loopback networking so the suite stays stable when warm.
 const TEST_DRAW_CYCLE_NETWORK_SLACK: usize = 1500;
 const TEST_IO_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1302,7 +1302,7 @@ fn run_test_app_with_limits(
                 ),
         )
     });
-    Cx::headless_no_draw_event_loop_for_draw_cycles(cx.clone(), draw_cycles);
+    Cx::gpusim_no_draw_event_loop_for_draw_cycles(cx.clone(), draw_cycles);
 
     match report_rx.recv_timeout(io_timeout) {
         Ok(report) => report,
@@ -1313,16 +1313,16 @@ fn run_test_app_with_limits(
                 if let Some(app) = app_ref_borrow.as_mut() {
                     app.debug_state(&mut cx_ref)
                 } else {
-                    "app missing after bounded headless loop".to_string()
+                    "app missing after bounded gpusim loop".to_string()
                 }
             };
-            panic!("test app should report before the bounded headless loop exits: {debug_state}");
+            panic!("test app should report before the bounded gpusim loop exits: {debug_state}");
         }
     }
 }
 
 #[test]
-fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
+fn single_gpusim_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1355,7 +1355,7 @@ fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
 }
 
 #[test]
-fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_tip_bit() {
+fn single_gpusim_shooter_app_emits_projectiles_from_openxr_aim_point_without_tip_bit() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1388,7 +1388,7 @@ fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_t
 }
 
 #[test]
-fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
+fn single_gpusim_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1419,7 +1419,7 @@ fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
 }
 
 #[test]
-fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_hold() {
+fn single_gpusim_shooter_app_keeps_emitting_and_advancing_physics_during_long_hold() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1454,7 +1454,7 @@ fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_
 }
 
 #[test]
-fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_hands() {
+fn single_gpusim_shooter_app_keeps_emitting_when_alternating_left_and_right_hands() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1488,7 +1488,7 @@ fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_ha
 }
 
 #[test]
-fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
+fn single_gpusim_shooter_app_survives_repeated_sparse_close_open_cycles() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
@@ -1522,7 +1522,7 @@ fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
 }
 
 #[test]
-fn two_headless_shooter_apps_emit_and_replicate_projectiles_over_loopback() {
+fn two_gpusim_shooter_apps_emit_and_replicate_projectiles_over_loopback() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -1660,7 +1660,7 @@ fn two_headless_shooter_apps_emit_and_replicate_projectiles_over_loopback() {
 }
 
 #[test]
-fn two_headless_shooter_apps_replicate_projectiles_to_desktop_like_observer() {
+fn two_gpusim_shooter_apps_replicate_projectiles_to_desktop_like_observer() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -1731,7 +1731,7 @@ fn two_headless_shooter_apps_replicate_projectiles_to_desktop_like_observer() {
 }
 
 #[test]
-fn two_headless_shooter_apps_replicate_wall_bounces_to_desktop_like_observer() {
+fn two_gpusim_shooter_apps_replicate_wall_bounces_to_desktop_like_observer() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -1806,7 +1806,7 @@ fn two_headless_shooter_apps_replicate_wall_bounces_to_desktop_like_observer() {
 }
 
 #[test]
-fn two_headless_shooter_apps_ignore_observer_only_wall_and_follow_authority() {
+fn two_gpusim_shooter_apps_ignore_observer_only_wall_and_follow_authority() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -1885,7 +1885,7 @@ fn two_headless_shooter_apps_ignore_observer_only_wall_and_follow_authority() {
 
 #[test]
 #[ignore = "process-local loopback discovery remains flaky in the full ui_shooter_loopback binary; run this stress alone when needed"]
-fn two_headless_shooter_apps_keep_replicating_projectiles_during_long_hold() {
+fn two_gpusim_shooter_apps_keep_replicating_projectiles_during_long_hold() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -1994,7 +1994,7 @@ fn two_headless_shooter_apps_keep_replicating_projectiles_during_long_hold() {
 }
 
 #[test]
-fn two_headless_shooter_apps_emit_and_replicate_projectiles_from_openxr_aim_point() {
+fn two_gpusim_shooter_apps_emit_and_replicate_projectiles_from_openxr_aim_point() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app(ShooterUiAppConfig {
@@ -2136,8 +2136,8 @@ fn two_headless_shooter_apps_emit_and_replicate_projectiles_from_openxr_aim_poin
 }
 
 #[test]
-#[ignore = "long-hold regression coverage for observer projectile sync in headless multiplayer"]
-fn two_headless_shooter_apps_repro_frozen_observer_projectiles() {
+#[ignore = "long-hold regression coverage for observer projectile sync in gpusim multiplayer"]
+fn two_gpusim_shooter_apps_repro_frozen_observer_projectiles() {
     let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
     let emitter_thread = thread::spawn(|| {
         run_test_app_with_limits(

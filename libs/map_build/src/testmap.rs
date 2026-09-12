@@ -28,6 +28,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use makepad_micro_serde::*;
+
+/// `bake.complete`: the commit record of a finished first-run bake.
+#[derive(SerJson)]
+struct BakeCompleteMarker {
+    format: String,
+    source: String,
+    archive: String,
+    graph: String,
+    search: String,
+}
 
 const BAKE_COMPLETE_MARKER: &str = "bake.complete.json";
 const BAKE_LOCK: &str = ".bake.lock";
@@ -368,15 +379,14 @@ fn write_bake_complete(options: &BakeOptions) -> Result<(), String> {
     if let Some(parent) = paths.archive.parent() {
         sync_dir(parent)?;
     }
-    let marker = serde_json::json!({
-        "format": "makepad-testmap-bake-v1",
-        "source": paths.pbf.display().to_string(),
-        "archive": paths.archive.display().to_string(),
-        "graph": paths.graph().display().to_string(),
-        "search": paths.search().display().to_string(),
-    });
-    let bytes = serde_json::to_vec_pretty(&marker)
-        .map_err(|err| format!("serialize bake completion marker: {err}"))?;
+    let marker = BakeCompleteMarker {
+        format: "makepad-testmap-bake-v1".to_string(),
+        source: paths.pbf.display().to_string(),
+        archive: paths.archive.display().to_string(),
+        graph: paths.graph().display().to_string(),
+        search: paths.search().display().to_string(),
+    };
+    let bytes = marker.serialize_json_pretty().into_bytes();
     let path = paths.bake_complete();
     let partial = paths.store.join("bake.complete.partial");
     let mut file = fs::OpenOptions::new()

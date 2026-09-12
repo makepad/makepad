@@ -457,7 +457,7 @@ impl MpVideoView {
     }
 
     fn draw_bar(&mut self, cx: &mut Cx2d, scope: &mut Scope, rect: Rect) {
-        let palette = Palette::shared();
+        let palette = Palette::for_cx(cx);
         let layout = BarLayout::of(rect);
 
         self.draw_flat.color = palette.bar_vec4();

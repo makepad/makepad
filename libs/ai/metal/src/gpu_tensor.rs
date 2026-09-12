@@ -4,7 +4,7 @@
 //! goal is a working Metal path we can then keep cutting copies.
 
 use crate::gpu_types::{fresh_tensor_id, GpuLinearPart, GpuTensor};
-use makepad_ai_cuda::quant::GGML_TYPE_F32;
+use makepad_ai_loader::quant::GGML_TYPE_F32;
 pub use crate::shim::{DecAttnRef, DecLinearRef, TwoWayLayerRef, VitLayerRef, VitLinearRef};
 use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,

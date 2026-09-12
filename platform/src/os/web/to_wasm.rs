@@ -19,6 +19,7 @@ use {
 #[derive(ToWasm)]
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
+    pub float_color_targets: bool,
     pub vendor: String,
     pub renderer: String,
 }
@@ -584,8 +585,12 @@ pub struct ToWasmStorageResult {
 #[derive(ToWasm)]
 pub struct ToWasmRenderTextureCapture {
     pub texture_id: usize,
+    pub ticket_lo: u32,
+    pub ticket_hi: u32,
     pub width: usize,
     pub height: usize,
+    pub offset: usize,
+    pub complete: bool,
     pub data: WasmDataU8,
     pub error: String,
 }
@@ -730,6 +735,13 @@ pub struct ToWasmVideoTextureUpdated {
 pub struct ToWasmVideoPlaybackCompleted {
     pub video_id_lo: u32,
     pub video_id_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmGpuCompletion {
+    pub serial_lo: u32,
+    pub serial_hi: u32,
+    pub success: bool,
 }
 
 #[derive(ToWasm)]

@@ -323,3 +323,8 @@ mod tests {
         assert!(errors.is_empty(), "score application DSL errors: {errors:#?}");
     }
 }
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
+}

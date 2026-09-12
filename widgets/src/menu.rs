@@ -40,7 +40,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{claim_escape, place, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{claim_escape, place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
     widget::*,
 };
 
@@ -802,7 +802,7 @@ impl MenuLayer {
             MenuPlace::At => Rect { pos: anchor.pos, size: dvec2(0.0, 0.0) },
             _ => anchor,
         };
-        let placed = place(&PlaceRequest {
+        let placed = place_overlay(&PlaceRequest {
             anchor,
             size,
             bounds,
@@ -855,7 +855,7 @@ impl MenuLayer {
             pos: dvec2(parent.pos.x, anchor.pos.y - MENU_PAD),
             size: dvec2(parent.size.x - 3.0, 0.0),
         };
-        let placed = place(&PlaceRequest {
+        let placed = place_overlay(&PlaceRequest {
             anchor: flyout_anchor,
             size,
             bounds: self.window,
@@ -1091,7 +1091,7 @@ impl Widget for MenuLayer {
             let need = need.ceil();
             if (need - self.levels[li].rect.size.x).abs() > 0.5 {
                 let rect = self.levels[li].rect;
-                let placed = place(&PlaceRequest {
+                let placed = place_overlay(&PlaceRequest {
                     anchor: Rect { pos: rect.pos, size: dvec2(0.0, 0.0) },
                     size: dvec2(need, rect.size.y),
                     bounds: window,

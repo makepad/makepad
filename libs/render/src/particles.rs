@@ -7,14 +7,14 @@
 //! and this system owns everything after that — including its own RNG.
 //!
 //! That is the whole rng-isolation argument, and it is structural rather
-//! than disciplinary: `GameWorld` cannot advance its RNG for a particle
-//! because `GameWorld` never sees one. A device may run fewer particles
+//! than disciplinary: `World` cannot advance its RNG for a particle
+//! because `World` never sees one. A device may run fewer particles
 //! than its peers (a Quest cap vs a PC cap) with no risk of divergence,
 //! because there is nothing to diverge.
 
 use makepad_draw::*;
 
-pub use makepad_game_sim::{EmitterAnchor, ParticleKind, ParticleRequest, ParticleSpec};
+pub use makepad_scene::{EmitterAnchor, ParticleKind, ParticleRequest, ParticleSpec};
 
 #[derive(Clone, Copy)]
 struct Particle {

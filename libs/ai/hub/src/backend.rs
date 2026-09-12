@@ -118,6 +118,7 @@ pub struct GenerateParams {
     pub decimation_target: Option<u32>,
     /// Baked texture atlas size; `None` = backend default.
     pub texture_size: Option<u32>,
+    pub pixal: Option<crate::protocol::PixalOptionsJson>,
 
     // Splat domain (triposplat backend).
     /// Target gaussian count; `None` = backend default (262144). Clamped and
@@ -394,6 +395,7 @@ impl GenerateParams {
                 .decimation_target
                 .map(|v| v.clamp(1_000, 2_000_000)),
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
+            pixal: request.pixal.clone(),
             gaussians: request
                 .gaussians
                 .map(|v| v.clamp(SPLAT_GAUSSIANS_MIN, SPLAT_GAUSSIANS_MAX)),

@@ -166,7 +166,7 @@ script_mod! {
 // ---------------------------------------------------------------------------
 
 /// One of the five marks a run either carries or does not. A link is not in
-/// here because it carries a target; see [`Marks::link`].
+/// here because it carries a target; see [`RichMarks::link`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mark {
     Bold,
@@ -195,19 +195,19 @@ impl Mark {
 /// the link target is part of the identity: two links that happen to sit
 /// side by side stay two runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Marks {
+pub struct RichMarks {
     bits: u8,
     link: Option<String>,
 }
 
-impl Marks {
-    pub fn none() -> Marks {
-        Marks::default()
+impl RichMarks {
+    pub fn none() -> RichMarks {
+        RichMarks::default()
     }
 
     /// A set built from a list, for callers and tests that want one line.
-    pub fn of(marks: &[Mark]) -> Marks {
-        let mut m = Marks::default();
+    pub fn of(marks: &[Mark]) -> RichMarks {
+        let mut m = RichMarks::default();
         for mark in marks {
             m.add(*mark);
         }
@@ -239,7 +239,7 @@ impl Marks {
         self.set(mark, !on);
     }
 
-    pub fn with(mut self, mark: Mark) -> Marks {
+    pub fn with(mut self, mark: Mark) -> RichMarks {
         self.add(mark);
         self
     }
@@ -252,15 +252,15 @@ impl Marks {
         self.link = href.map(|h| h.to_string());
     }
 
-    pub fn with_link(mut self, href: &str) -> Marks {
+    pub fn with_link(mut self, href: &str) -> RichMarks {
         self.set_link(Some(href));
         self
     }
 
     /// The same marks with the link taken off. What typing at the right edge
     /// of a link inherits: text written after a link is not part of it.
-    pub fn without_link(&self) -> Marks {
-        Marks {
+    pub fn without_link(&self) -> RichMarks {
+        RichMarks {
             bits: self.bits,
             link: None,
         }
@@ -273,21 +273,21 @@ impl Marks {
 
 /// A piece of text and the marks over the whole of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Run {
+pub struct RichRun {
     pub text: String,
-    pub marks: Marks,
+    pub marks: RichMarks,
 }
 
-impl Run {
-    pub fn new(text: &str, marks: Marks) -> Run {
-        Run {
+impl RichRun {
+    pub fn new(text: &str, marks: RichMarks) -> RichRun {
+        RichRun {
             text: text.to_string(),
             marks,
         }
     }
 
-    pub fn plain(text: &str) -> Run {
-        Run::new(text, Marks::none())
+    pub fn plain(text: &str) -> RichRun {
+        RichRun::new(text, RichMarks::none())
     }
 }
 
@@ -334,7 +334,7 @@ impl BlockKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub kind: BlockKind,
-    pub runs: Vec<Run>,
+    pub runs: Vec<RichRun>,
 }
 
 impl Block {
@@ -348,7 +348,7 @@ impl Block {
     pub fn plain(kind: BlockKind, text: &str) -> Block {
         let mut block = Block::new(kind);
         if !text.is_empty() {
-            block.runs.push(Run::plain(text));
+            block.runs.push(RichRun::plain(text));
         }
         block
     }
@@ -391,7 +391,7 @@ impl Block {
             if byte < acc + len {
                 let tail = self.runs[i].text.split_off(byte - acc);
                 let marks = self.runs[i].marks.clone();
-                self.runs.insert(i + 1, Run { text: tail, marks });
+                self.runs.insert(i + 1, RichRun { text: tail, marks });
                 return i + 1;
             }
             acc += len;
@@ -426,7 +426,7 @@ impl Block {
 
     /// Change the marks of everything between two offsets, splitting the runs
     /// at both ends first and merging whatever comes out identical.
-    pub fn apply(&mut self, from: usize, to: usize, f: &dyn Fn(&mut Marks)) {
+    pub fn apply(&mut self, from: usize, to: usize, f: &dyn Fn(&mut RichMarks)) {
         let from = self.floor(from);
         let to = self.floor(to);
         if from >= to {
@@ -440,7 +440,7 @@ impl Block {
         self.normalize();
     }
 
-    pub fn insert(&mut self, byte: usize, text: &str, marks: &Marks) {
+    pub fn insert(&mut self, byte: usize, text: &str, marks: &RichMarks) {
         if text.is_empty() {
             return;
         }
@@ -448,7 +448,7 @@ impl Block {
         let i = self.split_run_at(byte);
         self.runs.insert(
             i,
-            Run {
+            RichRun {
                 text: text.to_string(),
                 marks: marks.clone(),
             },
@@ -469,7 +469,7 @@ impl Block {
     }
 
     /// Take everything from `byte` on out of the block.
-    fn split_runs_off(&mut self, byte: usize) -> Vec<Run> {
+    fn split_runs_off(&mut self, byte: usize) -> Vec<RichRun> {
         let byte = self.floor(byte);
         let i = self.split_run_at(byte);
         self.runs.split_off(i)
@@ -477,7 +477,7 @@ impl Block {
 
     /// The run the byte sits in, leaning right at a boundary: what a click
     /// at that point landed on.
-    pub fn run_at(&self, byte: usize) -> Option<&Run> {
+    pub fn run_at(&self, byte: usize) -> Option<&RichRun> {
         let mut acc = 0;
         for run in &self.runs {
             let end = acc + run.text.len();
@@ -618,7 +618,7 @@ impl RichDoc {
     }
 
     /// The run a point landed in — the one a link click reads.
-    pub fn run_at(&self, pos: Pos) -> Option<&Run> {
+    pub fn run_at(&self, pos: Pos) -> Option<&RichRun> {
         self.blocks.get(pos.block)?.run_at(pos.byte)
     }
 
@@ -629,12 +629,12 @@ impl RichDoc {
     /// which is dropped: writing on after a link is not part of the link, and
     /// an editor that grew the link every time somebody typed past it would
     /// have to be fought.
-    pub fn marks_at(&self, pos: Pos) -> Marks {
+    pub fn marks_at(&self, pos: Pos) -> RichMarks {
         let Some(block) = self.blocks.get(pos.block) else {
-            return Marks::none();
+            return RichMarks::none();
         };
         if block.runs.is_empty() {
-            return Marks::none();
+            return RichMarks::none();
         }
         let byte = block.floor(pos.byte);
         if byte == 0 {
@@ -655,7 +655,7 @@ impl RichDoc {
     }
 
     /// Walk the marks of every piece of text the span covers.
-    fn for_each_piece(&self, span: Span, f: &mut dyn FnMut(&Marks)) {
+    fn for_each_piece(&self, span: Span, f: &mut dyn FnMut(&RichMarks)) {
         let span = self.clamp_span(span);
         for bi in span.from.block..=span.to.block {
             let Some(block) = self.blocks.get(bi) else {
@@ -687,7 +687,7 @@ impl RichDoc {
         }
         let mut any = false;
         let mut all = true;
-        self.for_each_piece(span, &mut |marks: &Marks| {
+        self.for_each_piece(span, &mut |marks: &RichMarks| {
             any = true;
             if !marks.has(mark) {
                 all = false;
@@ -703,7 +703,7 @@ impl RichDoc {
         }
         let mut first = true;
         let mut common: Option<String> = None;
-        self.for_each_piece(span, &mut |marks: &Marks| {
+        self.for_each_piece(span, &mut |marks: &RichMarks| {
             let here = marks.link().map(|h| h.to_string());
             if first {
                 common = here;
@@ -715,7 +715,7 @@ impl RichDoc {
         common
     }
 
-    fn apply(&mut self, span: Span, f: &dyn Fn(&mut Marks)) {
+    fn apply(&mut self, span: Span, f: &dyn Fn(&mut RichMarks)) {
         let span = self.clamp_span(span);
         if span.is_empty() {
             return;
@@ -735,7 +735,7 @@ impl RichDoc {
     }
 
     pub fn set_mark(&mut self, span: Span, mark: Mark, on: bool) {
-        self.apply(span, &|marks: &mut Marks| marks.set(mark, on));
+        self.apply(span, &|marks: &mut RichMarks| marks.set(mark, on));
     }
 
     /// Put the mark on unless the whole span already has it. Returns what the
@@ -748,7 +748,7 @@ impl RichDoc {
 
     /// Make the span a link, or take the link off it.
     pub fn set_link(&mut self, span: Span, href: Option<&str>) {
-        self.apply(span, &|marks: &mut Marks| marks.set_link(href));
+        self.apply(span, &|marks: &mut RichMarks| marks.set_link(href));
     }
 
     /// Change the kind of every block the span touches.
@@ -810,7 +810,7 @@ impl RichDoc {
     /// Replace the span with text carrying `marks`, and say where the caret
     /// ends up. A line break in the text splits the block, except inside a
     /// code block, which keeps its breaks.
-    pub fn replace(&mut self, span: Span, text: &str, marks: &Marks) -> Pos {
+    pub fn replace(&mut self, span: Span, text: &str, marks: &RichMarks) -> Pos {
         let mut at = self.delete(span);
         if text.is_empty() {
             return at;
@@ -998,15 +998,15 @@ fn next_word(text: &str, byte: usize) -> usize {
 }
 
 /// One list of runs per line, marks kept.
-fn split_runs_on_newlines(runs: Vec<Run>) -> Vec<Vec<Run>> {
-    let mut out: Vec<Vec<Run>> = vec![Vec::new()];
+fn split_runs_on_newlines(runs: Vec<RichRun>) -> Vec<Vec<RichRun>> {
+    let mut out: Vec<Vec<RichRun>> = vec![Vec::new()];
     for run in runs {
         for (n, line) in run.text.split('\n').enumerate() {
             if n > 0 {
                 out.push(Vec::new());
             }
             if !line.is_empty() {
-                out.last_mut().unwrap().push(Run::new(line, run.marks.clone()));
+                out.last_mut().unwrap().push(RichRun::new(line, run.marks.clone()));
             }
         }
     }
@@ -1243,8 +1243,8 @@ fn compose(
     strike: usize,
     code: bool,
     link: &Option<String>,
-) -> Marks {
-    let mut marks = Marks::none();
+) -> RichMarks {
+    let mut marks = RichMarks::none();
     marks.set(Mark::Bold, bold > 0);
     marks.set(Mark::Italic, italic > 0);
     marks.set(Mark::Underline, under > 0);
@@ -1254,12 +1254,12 @@ fn compose(
     marks
 }
 
-fn push_run(open: &mut Option<Block>, kind: BlockKind, text: &str, marks: Marks) {
+fn push_run(open: &mut Option<Block>, kind: BlockKind, text: &str, marks: RichMarks) {
     if text.is_empty() {
         return;
     }
     let block = open.get_or_insert_with(|| Block::new(kind));
-    block.runs.push(Run::new(text, marks));
+    block.runs.push(RichRun::new(text, marks));
 }
 
 fn flush(doc: &mut RichDoc, open: &mut Option<Block>) {
@@ -1269,7 +1269,7 @@ fn flush(doc: &mut RichDoc, open: &mut Option<Block>) {
     }
 }
 
-fn write_run(out: &mut String, run: &Run) {
+fn write_run(out: &mut String, run: &RichRun) {
     let marks = &run.marks;
     if marks.link().is_some() {
         out.push('[');
@@ -1500,7 +1500,7 @@ pub struct RichTextEditor {
     /// Marks a toggle put on with nothing selected: the next thing typed
     /// carries them. Cleared by anything that moves the caret.
     #[rust]
-    pending: Option<Marks>,
+    pending: Option<RichMarks>,
     #[rust]
     selecting: bool,
 
@@ -1555,7 +1555,7 @@ impl RichTextEditor {
 
     /// What the caret carries: the marks of the selection, or the ones a
     /// toggle put on for the next keystroke.
-    pub fn marks_at_caret(&self) -> Marks {
+    pub fn marks_at_caret(&self) -> RichMarks {
         if let Some(pending) = &self.pending {
             return pending.clone();
         }
@@ -1774,7 +1774,7 @@ impl RichTextEditor {
             .map(|href| href.to_string())
     }
 
-    fn marks_for_input(&self) -> Marks {
+    fn marks_for_input(&self) -> RichMarks {
         if let Some(pending) = &self.pending {
             return pending.clone();
         }
@@ -1997,7 +1997,7 @@ impl RichTextEditor {
     }
 }
 
-fn push_marks(tf: &mut TextFlow, marks: &Marks, link_color: Vec4f, in_code_block: bool) -> Pushed {
+fn push_marks(tf: &mut TextFlow, marks: &RichMarks, link_color: Vec4f, in_code_block: bool) -> Pushed {
     let mut pushed = Pushed::default();
     if marks.has(Mark::Bold) {
         tf.bold.push();
@@ -2273,7 +2273,7 @@ impl RichTextEditorRef {
 
     /// What a toolbar shows as pressed: the marks the selection carries, or
     /// the ones armed for the next keystroke.
-    pub fn marks_at_caret(&self) -> Marks {
+    pub fn marks_at_caret(&self) -> RichMarks {
         self.borrow().map(|inner| inner.marks_at_caret()).unwrap_or_default()
     }
 
@@ -2335,7 +2335,7 @@ mod tests {
         RichDoc::from_markup(text)
     }
 
-    fn runs(doc: &RichDoc, block: usize) -> Vec<(String, Marks)> {
+    fn runs(doc: &RichDoc, block: usize) -> Vec<(String, RichMarks)> {
         doc.blocks[block]
             .runs
             .iter()
@@ -2359,15 +2359,15 @@ mod tests {
         doc.set_mark(span(6, 11), Mark::Bold, true);
         let r = runs(&doc, 0);
         assert_eq!(r.len(), 2, "the head and the marked tail");
-        assert_eq!(r[0], ("hello ".to_string(), Marks::none()));
-        assert_eq!(r[1], ("world".to_string(), Marks::of(&[Mark::Bold])));
+        assert_eq!(r[0], ("hello ".to_string(), RichMarks::none()));
+        assert_eq!(r[1], ("world".to_string(), RichMarks::of(&[Mark::Bold])));
 
         let mut doc = one("hello world");
         doc.set_mark(span(2, 5), Mark::Italic, true);
         let r = runs(&doc, 0);
         assert_eq!(r.len(), 3, "a mark in the middle cuts the run in three");
         assert_eq!(r[0].0, "he");
-        assert_eq!(r[1], ("llo".to_string(), Marks::of(&[Mark::Italic])));
+        assert_eq!(r[1], ("llo".to_string(), RichMarks::of(&[Mark::Italic])));
         assert_eq!(r[2].0, " world");
     }
 
@@ -2379,7 +2379,7 @@ mod tests {
         let r = runs(&doc, 0);
         assert_eq!(r.len(), 3);
         assert!(r[0].1.has(Mark::Bold));
-        assert_eq!(r[1], (" ".to_string(), Marks::none()), "the hole in the middle");
+        assert_eq!(r[1], (" ".to_string(), RichMarks::none()), "the hole in the middle");
         assert!(r[2].1.has(Mark::Bold));
     }
 
@@ -2415,7 +2415,7 @@ mod tests {
         // Taking it off again has to leave the block as it started, or the
         // model grows a run for every edit ever made to it.
         doc.set_mark(span(2, 4), Mark::Bold, false);
-        assert_eq!(runs(&doc, 0), vec![("abcdef".to_string(), Marks::none())]);
+        assert_eq!(runs(&doc, 0), vec![("abcdef".to_string(), RichMarks::none())]);
     }
 
     #[test]
@@ -2451,12 +2451,12 @@ mod tests {
             Mark::Bold,
             true,
         );
-        assert_eq!(runs(&doc, 0)[0], ("o".to_string(), Marks::none()));
+        assert_eq!(runs(&doc, 0)[0], ("o".to_string(), RichMarks::none()));
         assert!(runs(&doc, 0)[1].1.has(Mark::Bold));
         assert!(runs(&doc, 1)[0].1.has(Mark::Bold), "the whole middle block");
         assert_eq!(runs(&doc, 1).len(), 1);
         assert!(runs(&doc, 2)[0].1.has(Mark::Bold));
-        assert_eq!(runs(&doc, 2)[1], ("ree".to_string(), Marks::none()));
+        assert_eq!(runs(&doc, 2)[1], ("ree".to_string(), RichMarks::none()));
     }
 
     #[test]

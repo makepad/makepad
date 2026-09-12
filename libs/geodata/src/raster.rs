@@ -9,6 +9,7 @@
 use crate::geo::tile_order_key;
 use crate::png::{self, PngFormat};
 use makepad_mbtile_reader::MbtilesWriter;
+use makepad_micro_serde::*;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -39,8 +40,24 @@ pub struct RasterConfig {
     /// lon/lat bbox to cover.
     pub bounds: (f64, f64, f64, f64),
     pub encoding: RasterEncoding,
-    /// For ClassIndex: JSON array describing each class (index 1..).
-    pub classmap: Option<serde_json::Value>,
+    /// For ClassIndex: one entry per class (index 1..), shipped as a JSON
+    /// array in the `geodata_classmap` metadata.
+    pub classmap: Option<Vec<ClassEntry>>,
+}
+
+/// One row of a class-index layer's legend.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ClassEntry {
+    pub class: u8,
+    pub label: String,
+    /// `#rrggbb` or `#rrggbbaa`.
+    pub color: String,
+}
+
+impl ClassEntry {
+    pub fn new(class: u8, label: &str, color: &str) -> Self {
+        Self { class, label: label.to_string(), color: color.to_string() }
+    }
 }
 
 pub struct RasterStats {
@@ -104,7 +121,7 @@ pub fn build_raster(
     );
     writer.set_metadata("geodata_encoding", config.encoding.as_str());
     if let Some(classmap) = &config.classmap {
-        writer.set_metadata("geodata_classmap", classmap.to_string());
+        writer.set_metadata("geodata_classmap", classmap.serialize_json());
     }
     writer.set_metadata(
         "geodata_built_unix",

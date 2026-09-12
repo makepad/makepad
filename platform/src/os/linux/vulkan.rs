@@ -1,4 +1,33 @@
-#![cfg(target_os = "android")]
+#![cfg(any(target_os = "android", target_os = "linux"))]
+
+#[cfg(target_os = "linux")]
+#[path = "vulkan_linux.rs"]
+mod desktop;
+#[cfg(target_os = "linux")]
+#[path = "vulkan_shared.rs"]
+mod shared;
+#[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_dma_buf.rs"]
+mod dma_buf;
+#[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_gpu_bridge.rs"]
+mod gpu_bridge;
+#[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_migrate.rs"]
+mod migrate;
+#[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_transition.rs"]
+mod transition;
+#[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_hosted_route.rs"]
+mod hosted_route;
+#[cfg(target_os = "linux")]
+#[path = "vulkan_profile.rs"]
+mod vulkan_profile;
+// Only the direct (DRM/KMS) event loop paces on this; windowed Linux builds
+// never ask.
+#[cfg(all(target_os = "linux", linux_direct))]
+pub(crate) use desktop::DirectWait;
 
 use crate::{
     cx::Cx,
@@ -8,29 +37,38 @@ use crate::{
     geometry::GeometryId,
     makepad_live_id::*,
     makepad_script::shader::TextureType,
-    os::linux::{
+    texture::{TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
+};
+#[cfg(target_os = "android")]
+use crate::os::linux::{
         android::ndk_sys,
         openxr_sys::{
             LibOpenXr, VkDeviceCreateInfo, VkInstanceCreateInfo, XrInstance, XrResult, XrSystemId,
             XrVulkanDeviceCreateInfoKHR, XrVulkanGraphicsDeviceGetInfoKHR,
             XrVulkanInstanceCreateInfoKHR,
         },
-    },
-    texture::{TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
-};
-use ash::vk::{self, Handle};
+    };
+use ash::vk;
+#[cfg(target_os = "android")]
+use ash::vk::Handle;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
+#[cfg(target_os = "android")]
+use std::os::raw::c_char;
 use std::time::Instant;
 
+#[cfg(target_os = "android")]
 #[link(name = "nativewindow")]
 extern "C" {
     fn ANativeWindow_acquire(window: *mut ndk_sys::ANativeWindow);
 }
 
+#[cfg(target_os = "android")]
 const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
+#[cfg(target_os = "android")]
 const XR_MAX_FRAMES_IN_FLIGHT: u32 = 3;
+#[cfg(target_os = "android")]
 const XR_MAX_FRAMES_IN_FLIGHT_LIMIT: u32 = 8;
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -71,6 +109,24 @@ fn vulkan_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<
         .pfn_user_callback(Some(vulkan_debug_callback))
 }
 
+// Device migration preserves resident GPU data, including data whose CPU
+// staging has been discarded. Transfer access must be declared at allocation.
+fn migration_image_usage() -> vk::ImageUsageFlags {
+    if cfg!(all(target_os = "linux", linux_direct)) {
+        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST
+    } else {
+        vk::ImageUsageFlags::empty()
+    }
+}
+
+fn migration_buffer_usage() -> vk::BufferUsageFlags {
+    if cfg!(all(target_os = "linux", linux_direct)) {
+        vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST
+    } else {
+        vk::BufferUsageFlags::empty()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct VulkanBuffer {
     buffer: vk::Buffer,
@@ -88,11 +144,16 @@ struct VulkanGeometryResource {
 struct FrameResources {
     buffers: Vec<VulkanBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
+    descriptor_pool_cursor: usize,
+    framebuffers: Vec<vk::Framebuffer>,
+    render_passes: Vec<vk::RenderPass>,
     packet_buffer: Option<VulkanBuffer>,
     packet_buffer_used: vk::DeviceSize,
 }
 
+#[cfg(target_os = "android")]
 struct VulkanXrInFlightFrame {
+    serial: u64,
     frame_resources: FrameResources,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
@@ -109,17 +170,25 @@ struct VulkanPipeline {
     sampler_handles: Vec<vk::Sampler>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum VulkanRenderPassKind {
+    Main,
+    Offscreen,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct VulkanRenderPassKey {
     color_formats: Vec<i32>,
     depth_format: Option<i32>,
+    kind: VulkanRenderPassKind,
 }
 
 impl VulkanRenderPassKey {
-    fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>) -> Self {
+    fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>, kind: VulkanRenderPassKind) -> Self {
         Self {
             color_formats: color_formats.iter().map(|format| format.as_raw()).collect(),
             depth_format: depth_format.map(|format| format.as_raw()),
+            kind,
         }
     }
 
@@ -152,9 +221,11 @@ struct VulkanDrawPacket {
     alpha_blend: bool,
     backface_culling: bool,
     instances: Vec<f32>,
+    instance_ranges: Vec<std::ops::Range<u32>>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
     scope_uniforms: Vec<f32>,
+    custom_uniforms: Vec<(u32, Vec<u8>)>,
     uniform_bindings: Vec<(LiveId, usize)>,
     dyn_uniform_binding: u32,
     scope_uniform_binding: Option<usize>,
@@ -173,6 +244,7 @@ struct VulkanTextureResource {
     is_cube: bool,
     format: vk::Format,
     layout: vk::ImageLayout,
+    #[cfg(target_os = "android")]
     hardware_buffer: Option<*mut ndk_sys::AHardwareBuffer>,
     sampler: Option<vk::Sampler>,
     ycbcr_conversion: Option<vk::SamplerYcbcrConversion>,
@@ -180,6 +252,7 @@ struct VulkanTextureResource {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(target_os = "android")]
 struct ImportedYuvPlaneLayout {
     biplanar: bool,
     plane0_view_format: vk::Format,
@@ -196,8 +269,26 @@ struct VulkanTextureUpload {
     layers: u32,
 }
 
-type VulkanTextureKey = usize;
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VulkanTextureKey(TextureId);
 
+impl Eq for VulkanTextureKey {}
+
+impl std::hash::Hash for VulkanTextureKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Slot generations compare through TextureId::eq. Hash collisions for
+        // successive occupants of a slot are harmless and avoid exposing its internals.
+        std::hash::Hash::hash(&self.0.0, state);
+    }
+}
+
+impl std::fmt::Display for VulkanTextureKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:?}", self.0)
+    }
+}
+
+#[cfg(target_os = "android")]
 pub(crate) struct CxVulkanOpenXrMultiviewTarget {
     framebuffer: vk::Framebuffer,
     color_view: vk::ImageView,
@@ -205,22 +296,26 @@ pub(crate) struct CxVulkanOpenXrMultiviewTarget {
     fragment_density_view: vk::ImageView,
 }
 
+#[cfg(target_os = "android")]
 pub(crate) struct CxVulkanOpenXrSwapchainImage {
     image: vk::Image,
     target: CxVulkanOpenXrMultiviewTarget,
 }
 
 #[derive(Clone, Copy)]
+#[cfg(target_os = "android")]
 pub(crate) struct CxVulkanOpenXrFoveationImageInfo {
     pub image: vk::Image,
 }
 
+#[cfg(target_os = "android")]
 pub(crate) struct CxVulkanOpenXrDepthImage {
     image: vk::Image,
     views: [vk::ImageView; 2],
     multiview_view: vk::ImageView,
 }
 
+#[cfg(target_os = "android")]
 pub(crate) struct CxVulkanOpenXrSessionData {
     width: u32,
     height: u32,
@@ -234,6 +329,7 @@ pub(crate) struct CxVulkanOpenXrSessionData {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg(target_os = "android")]
 pub(crate) struct OpenXrVulkanRepaintStats {
     pub wait_inflight_ms: f64,
     pub prepare_textures_ms: f64,
@@ -254,6 +350,7 @@ pub(crate) struct OpenXrVulkanRepaintStats {
 
 #[derive(Default)]
 struct VulkanDrawStats {
+    consumed: Vec<(DrawListId, usize)>,
     draw_items: usize,
     draw_calls: usize,
     packets_recorded: usize,
@@ -269,17 +366,72 @@ struct VulkanDrawStats {
     skipped_zero_instances: usize,
     skipped_no_geometry_id: usize,
     skipped_empty_geometry: usize,
+    /// Geometry whose physical vertex layout is not the shader's (logged
+    /// once per geometry by `geometry_layout_matches_shader`).
+    skipped_layout_mismatch: usize,
+    /// Geometry whose resident index width is neither 2 nor 4 bytes.
+    skipped_bad_index_width: usize,
+}
+
+impl VulkanDrawStats {
+    /// A draw that was skipped without an error line would otherwise be
+    /// invisible: report every non-zero skip counter of a pass under the
+    /// `drawlist` trace topic.
+    fn trace_skips(&self, draw_pass_id: DrawPassId) {
+        if !crate::makepad_error_log::trace_enabled("drawlist") {
+            return;
+        }
+        let skipped = self.skipped_non_draw_call
+            + self.skipped_no_os_shader
+            + self.skipped_no_vulkan_shader
+            + self.skipped_missing_spirv
+            + self.skipped_no_instance_slots
+            + self.skipped_no_instances_buffer
+            + self.skipped_instances_too_short
+            + self.skipped_zero_instances
+            + self.skipped_no_geometry_id
+            + self.skipped_empty_geometry
+            + self.skipped_layout_mismatch
+            + self.skipped_bad_index_width;
+        if skipped == 0 {
+            return;
+        }
+        crate::trace!(
+            "drawlist",
+            "vulkan pass {:?}: recorded {} packets, skipped {} draws (no_os_shader {}, no_vulkan_shader {}, missing_spirv {}, no_instance_slots {}, no_instances_buffer {}, instances_too_short {}, zero_instances {}, no_geometry_id {}, empty_geometry {}, layout_mismatch {}, bad_index_width {})",
+            draw_pass_id,
+            self.packets_recorded,
+            skipped,
+            self.skipped_no_os_shader,
+            self.skipped_no_vulkan_shader,
+            self.skipped_missing_spirv,
+            self.skipped_no_instance_slots,
+            self.skipped_no_instances_buffer,
+            self.skipped_instances_too_short,
+            self.skipped_zero_instances,
+            self.skipped_no_geometry_id,
+            self.skipped_empty_geometry,
+            self.skipped_layout_mismatch,
+            self.skipped_bad_index_width
+        );
+    }
 }
 
 pub struct CxVulkan {
+    // Keep libvulkan loaded until all instance/device function pointers are gone.
+    _entry: ash::Entry,
+    #[cfg(target_os = "linux")]
+    desktop: desktop::DesktopState,
     instance: ash::Instance,
     surface_loader: ash::khr::surface::Instance,
+    #[cfg(target_os = "android")]
     android_surface_loader: ash::khr::android_surface::Instance,
     surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     min_uniform_buffer_offset_alignment: vk::DeviceSize,
     device: ash::Device,
+    #[cfg(target_os = "android")]
     external_memory_android_hardware_buffer:
         ash::android::external_memory_android_hardware_buffer::Device,
     queue: vk::Queue,
@@ -303,8 +455,14 @@ pub struct CxVulkan {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    acquired_image_pending: bool,
     in_flight_fence: vk::Fence,
+    /// The repaint whose submission `in_flight_fence` covers: once the fence
+    /// signals, the frame-serial frontier advances to it (contract §3.3) —
+    /// before this, Vulkan never completed a serial and no receipt could.
+    frame_serial_in_flight: u64,
+    #[cfg(target_os = "android")]
     window: *mut ndk_sys::ANativeWindow,
     requested_width: u32,
     requested_height: u32,
@@ -317,19 +475,33 @@ pub struct CxVulkan {
     debug_utils_enabled: bool,
     debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
+    #[cfg(target_os = "android")]
     xr_multiview_enabled: bool,
+    #[cfg(target_os = "android")]
     xr_fragment_density_map_enabled: bool,
+    #[cfg(target_os = "android")]
     xr_render_pass_uses_fragment_density_map: bool,
     xr_depth_dummy: Option<VulkanTextureResource>,
+    #[cfg(target_os = "android")]
     xr_depth_dummy_multiview: Option<VulkanTextureResource>,
+    #[cfg(target_os = "android")]
     xr_timestamp_period_ns: f64,
+    #[cfg(target_os = "android")]
     xr_gpu_timestamps_supported: bool,
+    #[cfg(target_os = "android")]
     xr_last_gpu_frame_time_ms: Option<f64>,
+    #[cfg(target_os = "android")]
     xr_in_flight_frames: Vec<VulkanXrInFlightFrame>,
+    #[cfg(target_os = "android")]
     xr_in_flight_index: usize,
+    #[cfg(target_os = "linux")]
+    profile: vulkan_profile::VulkanProfile,
+    #[cfg(target_os = "linux")]
+    recycle_pass_resources: bool,
 }
 
 impl CxVulkan {
+    #[cfg(target_os = "android")]
     pub(crate) fn has_drawable_surface(&self) -> bool {
         !self.window.is_null()
             && self.surface != vk::SurfaceKHR::null()
@@ -347,6 +519,8 @@ impl CxVulkan {
     }
 
     fn prune_stale_geometry_resources(&mut self, cx: &Cx) {
+        #[cfg(target_os = "linux")]
+        self.trace_shared_leases(cx);
         let stale_keys = self
             .geometries
             .keys()
@@ -358,8 +532,26 @@ impl CxVulkan {
                 self.destroy_geometry_resource(resource);
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            // The desktop renderer has one submit fence shared by all windows;
+            // callers poll/wait it before reclaiming cached resources. Including
+            // the pool generation prevents a reused slot sampling an old image.
+            let stale = self.textures.keys().copied().filter(|key| {
+                cx.textures.0.pool.get(key.0.0).is_none_or(|slot| {
+                    TextureId::from_pool_slot(key.0.0, slot.generation) != key.0 || cx.textures.0.is_free(key.0.0)
+                })
+            }).collect::<Vec<_>>();
+            for key in stale {
+                self.retire_shared_texture(key);
+                if let Some(resource) = self.textures.remove(&key) {
+                    self.destroy_texture_resource(resource);
+                }
+            }
+        }
     }
 
+    #[cfg(target_os = "android")]
     pub fn new(
         window: *mut ndk_sys::ANativeWindow,
         width: u32,
@@ -592,6 +784,7 @@ impl CxVulkan {
         };
 
         let mut vulkan = Self {
+            _entry: entry,
             instance,
             surface_loader,
             android_surface_loader,
@@ -628,7 +821,9 @@ impl CxVulkan {
             command_pool,
             command_buffer,
             image_available_semaphore,
-            render_finished_semaphore,
+            render_finished_semaphores: vec![render_finished_semaphore],
+            acquired_image_pending: false,
+            frame_serial_in_flight: 0,
             in_flight_fence,
             window,
             requested_width: width.max(1),
@@ -660,11 +855,13 @@ impl CxVulkan {
             ));
         }
 
-        vulkan.try_enable_debug_messenger(&entry);
+        vulkan.try_enable_debug_messenger();
+        vulkan.initialize_depth_dummies()?;
 
         Ok(vulkan)
     }
 
+    #[cfg(target_os = "android")]
     pub fn new_from_openxr(
         xr: &LibOpenXr,
         xr_instance: XrInstance,
@@ -989,6 +1186,7 @@ impl CxVulkan {
         };
 
         let mut vulkan = Self {
+            _entry: entry,
             instance,
             surface_loader,
             android_surface_loader,
@@ -1025,7 +1223,9 @@ impl CxVulkan {
             command_pool,
             command_buffer,
             image_available_semaphore,
-            render_finished_semaphore,
+            render_finished_semaphores: vec![render_finished_semaphore],
+            acquired_image_pending: false,
+            frame_serial_in_flight: 0,
             in_flight_fence,
             window,
             requested_width: width.max(1),
@@ -1053,16 +1253,17 @@ impl CxVulkan {
 
         vulkan.xr_in_flight_frames = vulkan.create_xr_in_flight_frames(XR_MAX_FRAMES_IN_FLIGHT)?;
 
-        vulkan.try_enable_debug_messenger(&entry);
+        vulkan.try_enable_debug_messenger();
+        vulkan.initialize_depth_dummies()?;
 
         Ok(vulkan)
     }
 
-    fn try_enable_debug_messenger(&mut self, entry: &ash::Entry) {
+    fn try_enable_debug_messenger(&mut self) {
         if !self.debug_utils_enabled {
             return;
         }
-        let debug_loader = ash::ext::debug_utils::Instance::new(entry, &self.instance);
+        let debug_loader = ash::ext::debug_utils::Instance::new(&self._entry, &self.instance);
         let create_info = vulkan_debug_messenger_create_info();
         match unsafe { debug_loader.create_debug_utils_messenger(&create_info, None) } {
             Ok(messenger) => {
@@ -1075,6 +1276,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn create_xr_timestamp_query_pool(&self) -> vk::QueryPool {
         if !self.xr_gpu_timestamps_supported {
             return vk::QueryPool::null();
@@ -1091,6 +1293,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn create_xr_in_flight_frames(
         &self,
         frame_count: u32,
@@ -1126,6 +1329,7 @@ impl CxVulkan {
                 }
             };
             frames.push(VulkanXrInFlightFrame {
+                serial: 0,
                 frame_resources: FrameResources::default(),
                 command_buffer,
                 fence,
@@ -1138,6 +1342,12 @@ impl CxVulkan {
 
     fn destroy_owned_frame_resources(device: &ash::Device, frame_resources: &mut FrameResources) {
         unsafe {
+            for framebuffer in frame_resources.framebuffers.drain(..) {
+                device.destroy_framebuffer(framebuffer, None);
+            }
+            for render_pass in frame_resources.render_passes.drain(..) {
+                device.destroy_render_pass(render_pass, None);
+            }
             for pool in frame_resources.descriptor_pools.drain(..) {
                 device.destroy_descriptor_pool(pool, None);
             }
@@ -1151,8 +1361,10 @@ impl CxVulkan {
             }
         }
         frame_resources.packet_buffer_used = 0;
+        frame_resources.descriptor_pool_cursor = 0;
     }
 
+    #[cfg(target_os = "android")]
     fn recycle_owned_frame_resources(
         &self,
         frame_resources: &mut FrameResources,
@@ -1169,6 +1381,7 @@ impl CxVulkan {
             }
         }
         frame_resources.packet_buffer_used = 0;
+        frame_resources.descriptor_pool_cursor = 0;
         Ok(())
     }
 
@@ -1190,7 +1403,10 @@ impl CxVulkan {
             .unwrap_or(true);
         if needs_grow {
             if let Some(old_buffer) = self.frame_resources.packet_buffer.take() {
-                self.destroy_buffer(old_buffer);
+                // Earlier draws in this command buffer still reference this
+                // allocation. Retire it with the frame, after its fence, not
+                // while recording the draw that grows the arena.
+                self.frame_resources.buffers.push(old_buffer);
             }
             let new_size = required_size.next_power_of_two().max(64 * 1024);
             let buffer = self.create_host_buffer(usage, new_size)?;
@@ -1206,6 +1422,7 @@ impl CxVulkan {
         Ok((buffer, offset))
     }
 
+    #[cfg(target_os = "android")]
     fn xr_in_flight_frame_is_ready(&self, frame: &VulkanXrInFlightFrame) -> Result<bool, String> {
         if frame.fence == vk::Fence::null() {
             return Ok(true);
@@ -1217,6 +1434,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn append_xr_in_flight_frames(&mut self, frame_count: u32) -> Result<(), String> {
         if frame_count == 0 {
             return Ok(());
@@ -1226,6 +1444,7 @@ impl CxVulkan {
         Ok(())
     }
 
+    #[cfg(target_os = "android")]
     fn recycle_xr_in_flight_frame(
         &mut self,
         frame: &mut VulkanXrInFlightFrame,
@@ -1282,11 +1501,13 @@ impl CxVulkan {
         Ok(())
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn wait_for_openxr_idle(&mut self) -> Result<(), String> {
         for index in 0..self.xr_in_flight_frames.len() {
             let mut frame = std::mem::replace(
                 &mut self.xr_in_flight_frames[index],
                 VulkanXrInFlightFrame {
+                    serial: 0,
                     frame_resources: FrameResources::default(),
                     command_buffer: vk::CommandBuffer::null(),
                     fence: vk::Fence::null(),
@@ -1305,6 +1526,7 @@ impl CxVulkan {
         Ok(())
     }
 
+    #[cfg(target_os = "android")]
     fn destroy_xr_in_flight_frames(&mut self) {
         for mut frame in self.xr_in_flight_frames.drain(..) {
             Self::destroy_owned_frame_resources(&self.device, &mut frame.frame_resources);
@@ -1321,6 +1543,7 @@ impl CxVulkan {
         self.xr_in_flight_index = 0;
     }
 
+    #[cfg(target_os = "android")]
     pub fn update_surface(
         &mut self,
         window: *mut ndk_sys::ANativeWindow,
@@ -1355,32 +1578,39 @@ impl CxVulkan {
         self.destroy_swapchain();
         self.destroy_surface();
 
+        #[cfg(target_os = "android")]
         if !self.window.is_null() {
             unsafe { ndk_sys::ANativeWindow_release(self.window) };
             self.window = std::ptr::null_mut();
         }
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn swapchain_format(&self) -> vk::Format {
         self.swapchain_format
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn instance_handle(&self) -> vk::Instance {
         self.instance.handle()
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn physical_device_handle(&self) -> vk::PhysicalDevice {
         self.physical_device
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn device_handle(&self) -> vk::Device {
         self.device.handle()
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn queue_family_index(&self) -> u32 {
         self.queue_family_index
     }
 
+    #[cfg(target_os = "android")]
     fn query_multiview_support(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
@@ -1401,6 +1631,7 @@ impl CxVulkan {
         multiview_features.multiview == vk::TRUE && multiview_props.max_multiview_view_count >= 2
     }
 
+    #[cfg(target_os = "android")]
     fn query_fragment_density_map_support(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
@@ -1446,14 +1677,17 @@ impl CxVulkan {
             .contains(vk::FormatFeatureFlags::FRAGMENT_DENSITY_MAP_EXT)
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn supports_openxr_fixed_foveation(&self) -> bool {
         self.xr_fragment_density_map_enabled
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn last_openxr_gpu_frame_time_ms(&self) -> Option<f64> {
         self.xr_last_gpu_frame_time_ms
     }
 
+    #[cfg(target_os = "android")]
     fn ensure_xr_render_pass_for_format(
         &mut self,
         color_format: vk::Format,
@@ -1582,6 +1816,7 @@ impl CxVulkan {
         Ok(())
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn create_openxr_session_data(
         &mut self,
         color_images: &[vk::Image],
@@ -1697,6 +1932,7 @@ impl CxVulkan {
         })
     }
 
+    #[cfg(target_os = "android")]
     fn create_openxr_multiview_target(
         &self,
         image: vk::Image,
@@ -1791,6 +2027,7 @@ impl CxVulkan {
         })
     }
 
+    #[cfg(target_os = "android")]
     fn create_openxr_fragment_density_view(
         &self,
         image: vk::Image,
@@ -1815,6 +2052,7 @@ impl CxVulkan {
         .map_err(|e| format!("create_image_view(openxr fragment density map) failed: {e:?}"))
     }
 
+    #[cfg(target_os = "android")]
     fn create_openxr_depth_view(
         &self,
         image: vk::Image,
@@ -1841,6 +2079,7 @@ impl CxVulkan {
         .map_err(|e| format!("create_image_view(openxr depth eye {eye}) failed: {e:?}"))
     }
 
+    #[cfg(target_os = "android")]
     fn create_openxr_depth_array_view(
         &self,
         image: vk::Image,
@@ -1866,6 +2105,7 @@ impl CxVulkan {
         .map_err(|e| format!("create_image_view(openxr depth multiview) failed: {e:?}"))
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn destroy_openxr_session_data(&mut self, session: CxVulkanOpenXrSessionData) {
         if let Err(err) = self.wait_for_openxr_idle() {
             crate::warning!(
@@ -1925,6 +2165,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn read_openxr_depth_image(
         &mut self,
         session: &CxVulkanOpenXrSessionData,
@@ -1970,6 +2211,8 @@ impl CxVulkan {
         }
 
         let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::SHADER_READ)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .old_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
@@ -2001,6 +2244,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_read_only = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -2015,6 +2260,8 @@ impl CxVulkan {
                     .layer_count(1),
             );
         let buffer_ready = vk::BufferMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)
             .buffer(staging.buffer)
@@ -2075,6 +2322,7 @@ impl CxVulkan {
         Ok(depth)
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn read_openxr_color_image_rgba(
         &mut self,
         session: &CxVulkanOpenXrSessionData,
@@ -2115,6 +2363,8 @@ impl CxVulkan {
         }
 
         let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -2146,6 +2396,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_color_attachment = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ)
             .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -2160,6 +2412,8 @@ impl CxVulkan {
                     .layer_count(1),
             );
         let buffer_ready = vk::BufferMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)
             .buffer(staging.buffer)
@@ -2250,6 +2504,12 @@ impl CxVulkan {
             .swapchain_images
             .get(image_index)
             .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
+        self.read_readback_buffer_rgba()
+    }
+
+    /// The host-visible readback buffer as RGBA, sized by the main target
+    /// extent. Valid after the copy that filled it completed (fence waited).
+    fn read_readback_buffer_rgba(&mut self) -> Result<Vec<u8>, String> {
         let staging = self
             .swapchain_readback_buffer
             .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
@@ -2288,6 +2548,7 @@ impl CxVulkan {
         Ok(rgba)
     }
 
+    #[cfg(target_os = "android")]
     pub(crate) fn draw_openxr_view(
         &mut self,
         cx: &mut Cx,
@@ -2330,6 +2591,7 @@ impl CxVulkan {
             let frame = std::mem::replace(
                 &mut self.xr_in_flight_frames[frame_index],
                 VulkanXrInFlightFrame {
+                    serial: 0,
                     frame_resources: FrameResources::default(),
                     command_buffer: vk::CommandBuffer::null(),
                     fence: vk::Fence::null(),
@@ -2348,6 +2610,8 @@ impl CxVulkan {
                 self.xr_in_flight_frames[frame_index] = frame;
                 return Err(err);
             }
+            cx.textures.1.serials.complete(frame.serial);
+            std::mem::swap(&mut self.frame_serial_in_flight, &mut frame.serial);
             std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
             std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
             std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
@@ -2479,6 +2743,7 @@ impl CxVulkan {
                 &mut draw_stats,
                 xr_depth_view,
             )?;
+            draw_stats.trace_skips(draw_pass_id);
             stats.record_draw_ms = record_draw_started.elapsed().as_secs_f64() * 1000.0;
 
             let submit_started = Instant::now();
@@ -2503,11 +2768,13 @@ impl CxVulkan {
                     )
                     .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
             }
+            self.publish_draw_submission(cx, &draw_stats);
             stats.submit_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
             Ok(())
         })();
 
         if let Some((frame_index, mut frame)) = xr_frame {
+            std::mem::swap(&mut self.frame_serial_in_flight, &mut frame.serial);
             std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
             std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
             std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
@@ -2540,6 +2807,64 @@ impl CxVulkan {
         cx: &mut Cx,
         draw_pass_id: DrawPassId,
     ) -> Result<bool, String> {
+        self.draw_pass_and_present_with_callback(cx, draw_pass_id, || {})
+    }
+
+    pub fn draw_pass_and_present_with_callback(
+        &mut self,
+        cx: &mut Cx,
+        draw_pass_id: DrawPassId,
+        before_present: impl FnOnce(),
+    ) -> Result<bool, String> {
+        let result = self.draw_pass_and_present_inner(cx, draw_pass_id, before_present);
+        if result.is_err() && self.acquired_image_pending {
+            // Recording may fail after acquisition. Consume its semaphore before
+            // retiring the acquired image so the next frame can acquire safely.
+            let waits = [self.image_available_semaphore];
+            let stages = [vk::PipelineStageFlags::TOP_OF_PIPE];
+            let submit = vk::SubmitInfo::default()
+                .wait_semaphores(&waits)
+                .wait_dst_stage_mask(&stages);
+            unsafe {
+                if self.device.queue_submit(self.queue, &[submit], vk::Fence::null()).is_ok() {
+                    self.device_wait_idle();
+                    self.destroy_swapchain();
+                    // No work references this fence after device idle, including a
+                    // failed submission which had already reset it.
+                    self.device.destroy_fence(self.in_flight_fence, None);
+                    self.in_flight_fence = vk::Fence::null();
+                    self.in_flight_fence = self.device.create_fence(
+                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None,
+                    ).map_err(|e| format!("restore Vulkan frame fence: {e:?}"))?;
+                }
+            }
+            self.acquired_image_pending = false;
+        }
+        if !matches!(result, Ok(true)) {
+            cx.passes[draw_pass_id].paint_dirty = true;
+        }
+        result
+    }
+
+    fn draw_pass_and_present_inner(
+        &mut self,
+        cx: &mut Cx,
+        draw_pass_id: DrawPassId,
+        before_present: impl FnOnce(),
+    ) -> Result<bool, String> {
+        if self.in_flight_fence == vk::Fence::null() {
+            return Err("Vulkan frame synchronization is unavailable".into());
+        }
+        // Direct display: the main target is a sampled composition image that
+        // every acquired connector presents independently.
+        #[cfg(all(target_os = "linux", linux_direct))]
+        if self.desktop.direct.is_some() || self.desktop.routed.is_some() {
+            return self.direct_draw_pass_and_present(cx, draw_pass_id, before_present);
+        }
+        if self.surface != vk::SurfaceKHR::null() && self.swapchain == vk::SwapchainKHR::null()
+            && self.requested_width > 0 && self.requested_height > 0 {
+            self.recreate_swapchain()?;
+        }
         if self.surface == vk::SurfaceKHR::null() || self.swapchain == vk::SwapchainKHR::null() {
             return Ok(false);
         }
@@ -2563,7 +2888,6 @@ impl CxVulkan {
         let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
-            pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
                 pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
@@ -2580,25 +2904,37 @@ impl CxVulkan {
         };
 
         unsafe {
+            #[cfg(target_os = "linux")]
+            if !self.device.get_fence_status(self.in_flight_fence)
+                .map_err(|e| format!("get_fence_status failed: {e:?}"))? {
+                return Ok(false);
+            }
+            #[cfg(target_os = "android")]
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences failed: {e:?}"))?;
-            self.device
-                .reset_fences(&[self.in_flight_fence])
-                .map_err(|e| format!("reset_fences failed: {e:?}"))?;
         }
+        // The fence proved the previous submission complete: every receipt
+        // and delivery proof marked with that repaint may now read
+        // `completed` (the frontier this backend never advanced before).
+        if self.frame_serial_in_flight != 0 {
+            cx.textures.1.serials.complete(self.frame_serial_in_flight);
+        }
+        #[cfg(target_os = "linux")]
+        self.profile.collect_pending(&self.device);
 
         self.destroy_frame_resources();
 
         let (image_index, acquire_suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                u64::MAX,
+                if cfg!(target_os = "linux") { 0 } else { u64::MAX },
                 self.image_available_semaphore,
                 vk::Fence::null(),
             )
         } {
             Ok(v) => v,
+            Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) => return Ok(false),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_swapchain()?;
                 return Ok(false);
@@ -2611,11 +2947,13 @@ impl CxVulkan {
                 return Err(format!("acquire_next_image failed: {err:?}"));
             }
         };
+        self.acquired_image_pending = true;
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
-        let screenshot_request_ids = cx.take_studio_screenshot_request_ids(0);
-        let run_view_request = cx.take_studio_run_view_frame_request(0);
+        let window_id = cx.get_pass_window_id(draw_pass_id).map(|window| window.id()).unwrap_or(0);
+        let screenshot_request_ids = cx.take_studio_screenshot_request_ids_for_window(0, Some(window_id));
+        let run_view_request = cx.take_studio_run_view_frame_request(window_id);
         // A continuous capture sink (the ScreenCap recorder) is standing
         // permission rather than a queued request, so it is asked separately.
         let capture_window_id = cx.get_pass_window_id(draw_pass_id).map(|w| w.id());
@@ -2644,6 +2982,7 @@ impl CxVulkan {
 
         self.texture_upload_count_this_frame = 0;
         self.texture_upload_bytes_this_frame = 0;
+        self.prune_stale_geometry_resources(cx);
         self.prepare_draw_list_textures(cx, draw_list_id)?;
 
         let mut zbias = 0.0f32;
@@ -2718,6 +3057,7 @@ impl CxVulkan {
             &mut draw_stats,
             xr_depth_view,
         )?;
+        draw_stats.trace_skips(draw_pass_id);
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
@@ -2731,6 +3071,8 @@ impl CxVulkan {
                 .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
             let image = self.swapchain_images[image_index as usize];
             let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
@@ -2762,6 +3104,8 @@ impl CxVulkan {
                     depth: 1,
                 });
             let to_present = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .dst_access_mask(vk::AccessFlags::empty())
                 .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -2776,6 +3120,8 @@ impl CxVulkan {
                         .layer_count(1),
                 );
             let buffer_ready = vk::BufferMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)
                 .buffer(staging.buffer)
@@ -2818,7 +3164,7 @@ impl CxVulkan {
         }
 
         let wait_semaphores = [self.image_available_semaphore];
-        let signal_semaphores = [self.render_finished_semaphore];
+        let signal_semaphores = [self.render_finished_semaphores[image_index as usize]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let cmd_buffers = [self.command_buffer];
         let submit_info = vk::SubmitInfo::default()
@@ -2827,33 +3173,9 @@ impl CxVulkan {
             .command_buffers(&cmd_buffers)
             .signal_semaphores(&signal_semaphores);
 
-        unsafe {
-            self.device
-                .queue_submit(self.queue, &[submit_info], self.in_flight_fence)
-                .map_err(|e| format!("queue_submit failed: {e:?}"))?;
-        }
-
-        if capture_swapchain {
-            unsafe {
-                self.device
-                    .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
-                    .map_err(|e| format!("wait_for_fences(swapchain capture) failed: {e:?}"))?;
-            }
-            let width = self.swapchain_extent.width.max(1);
-            let height = self.swapchain_extent.height.max(1);
-            let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
-
-            crate::screen_capture::deliver_capture_frame(capture_window_id, width, height, &rgba);
-
-            if !screenshot_request_ids.is_empty() {
-                let png = Cx::encode_rgba_as_png(width, height, &rgba)?;
-                Cx::send_studio_screenshot_response(screenshot_request_ids, width, height, png);
-            }
-
-            if let Some(request) = run_view_request {
-                cx.encode_studio_run_view_frame_async(request, width, height, rgba);
-            }
-        }
+        self.submit_frame(&submit_info)?;
+        self.publish_draw_submission(cx, &draw_stats);
+        self.acquired_image_pending = false;
 
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
@@ -2862,6 +3184,7 @@ impl CxVulkan {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
+        before_present();
         let present_suboptimal = match unsafe {
             self.swapchain_loader
                 .queue_present(self.queue, &present_info)
@@ -2876,14 +3199,48 @@ impl CxVulkan {
                 return Ok(false);
             }
             Err(err) => {
+                self.device_wait_idle();
+                self.destroy_swapchain();
                 return Err(format!("queue_present failed: {err:?}"));
             }
         };
+
+        if capture_swapchain {
+            let capture_result = (|| -> Result<(), String> {
+                unsafe {
+                    self.device
+                        .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                        .map_err(|e| format!("wait_for_fences(swapchain capture) failed: {e:?}"))?;
+                }
+                let width = self.swapchain_extent.width.max(1);
+                let height = self.swapchain_extent.height.max(1);
+                let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
+
+                crate::screen_capture::deliver_capture_frame(capture_window_id, width, height, &rgba);
+
+                if !screenshot_request_ids.is_empty() {
+                    let png = Cx::encode_rgba_as_png(width, height, &rgba)?;
+                    Cx::send_studio_screenshot_response(screenshot_request_ids, width, height, png);
+                }
+
+                if let Some(request) = run_view_request {
+                    cx.encode_studio_run_view_frame_async(request, width, height, rgba);
+                }
+                Ok(())
+            })();
+            if let Err(err) = capture_result {
+                crate::warning!("Vulkan frame capture failed: {err}");
+            }
+        }
 
         if acquire_suboptimal || present_suboptimal {
             self.recreate_swapchain()?;
         }
 
+        crate::trace!("gpu.present", "present time={:.6}", crate::cx_api::CxOsApi::seconds_since_app_start(cx));
+        cx.passes[draw_pass_id].paint_dirty = false;
+        // The bake transaction's paint receipt, after all selected ranges.
+        cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(true)
     }
 
@@ -2895,6 +3252,15 @@ impl CxVulkan {
         height: usize,
     ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
+        #[cfg(target_os = "linux")]
+        if self.is_shared_image(texture_id) {
+            let resource = &self.textures[&texture_key];
+            if width > resource.width as usize || height > resource.height as usize {
+                return Err("hosted frame exceeds its shared allocation".into());
+            }
+            cx.textures[texture_id].alloc_render(width, height);
+            return Ok(());
+        }
         let (alloc_changed, alloc) = {
             let cxtexture = &mut cx.textures[texture_id];
             let alloc_changed = cxtexture.alloc_render(width, height);
@@ -2990,14 +3356,15 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_depth_target(target_width, target_height, format)?;
+            let resource = self.create_depth_target_layers_usage(target_width, target_height, format, 1,
+                cx.textures[texture_id].format.is_sampled_depth())?;
             self.textures.insert(texture_key, resource);
         }
         Ok(())
     }
 
     fn main_render_pass_key(&self) -> VulkanRenderPassKey {
-        VulkanRenderPassKey::new(&[self.swapchain_format], Some(self.depth_format))
+        VulkanRenderPassKey::new(&[self.swapchain_format], Some(self.depth_format), VulkanRenderPassKind::Main)
     }
 
     fn get_or_create_pipeline_render_pass(
@@ -3107,6 +3474,9 @@ impl CxVulkan {
         cx: &mut Cx,
         draw_pass_id: DrawPassId,
     ) -> Result<(), String> {
+        if self.in_flight_fence == vk::Fence::null() {
+            return Err("Vulkan frame synchronization is unavailable".into());
+        }
         let draw_list_id = if let Some(id) = cx.passes[draw_pass_id].main_draw_list_id {
             id
         } else {
@@ -3126,7 +3496,6 @@ impl CxVulkan {
         let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
-            pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
                 pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
@@ -3155,6 +3524,7 @@ impl CxVulkan {
             format: vk::Format,
             old_layout: vk::ImageLayout,
             should_clear: bool,
+            sampled: bool,
         }
 
         let pass_dont_clear = cx.passes[draw_pass_id].dont_clear;
@@ -3180,6 +3550,38 @@ impl CxVulkan {
             DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
+        #[cfg(target_os = "linux")]
+        let profile_cpu_start = self.profile.enabled().then(Instant::now);
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(offscreen) failed: {e:?}"))?;
+        }
+        cx.textures.1.serials.complete(self.frame_serial_in_flight);
+        #[cfg(target_os = "linux")]
+        let profile_prewait_ms = profile_cpu_start
+            .map(|start| start.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        #[cfg(target_os = "linux")]
+        self.profile.collect_pending(&self.device);
+        #[cfg(target_os = "linux")]
+        let mut profile_sample = self.profile.begin_sample(
+            cx,
+            draw_pass_id,
+            false,
+            target_width as u32,
+            target_height as u32,
+            profile_prewait_ms,
+        );
+        #[cfg(target_os = "linux")]
+        let profile_encode_start = profile_sample.is_some().then(Instant::now);
+
+        #[cfg(target_os = "linux")]
+        self.recycle_completed_frame_resources()?;
+        #[cfg(not(target_os = "linux"))]
+        self.destroy_frame_resources();
+        self.prune_stale_geometry_resources(cx);
+
         for (texture_id, _, _) in &color_targets {
             self.ensure_pass_color_target(cx, *texture_id, target_width, target_height)?;
         }
@@ -3187,16 +3589,21 @@ impl CxVulkan {
             self.ensure_pass_depth_target(cx, texture_id, target_width, target_height)?;
         }
 
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
-                .map_err(|e| format!("wait_for_fences(offscreen) failed: {e:?}"))?;
-            self.device
-                .reset_fences(&[self.in_flight_fence])
-                .map_err(|e| format!("reset_fences(offscreen) failed: {e:?}"))?;
+        // Fixed-size targets can be smaller than the pass's pixel-rounded
+        // rectangle (the tile-progress pass deliberately uses one texel).
+        // Vulkan requires the framebuffer and render area to fit every
+        // attachment. Keep the viewport's projection, and clip to storage.
+        let mut framebuffer_width = target_width as u32;
+        let mut framebuffer_height = target_height as u32;
+        for texture_id in color_targets.iter().map(|target| target.0).chain(depth_target) {
+            let resource = &self.textures[&Self::texture_key(texture_id)];
+            framebuffer_width = framebuffer_width.min(resource.width);
+            framebuffer_height = framebuffer_height.min(resource.height);
         }
+        crate::trace!("gpu.pass", "offscreen pass={:?} list={:?} target={}x{} framebuffer={}x{} colors={:?}",
+            draw_pass_id, draw_list_id, target_width, target_height, framebuffer_width, framebuffer_height,
+            color_targets.iter().map(|target| target.0).collect::<Vec<_>>());
 
-        self.destroy_frame_resources();
         unsafe {
             self.device
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
@@ -3208,6 +3615,16 @@ impl CxVulkan {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(|e| format!("begin_command_buffer(offscreen) failed: {e:?}"))?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(sample) = profile_sample.as_mut() {
+            sample.wrote_timestamps = self.profile.begin_timestamps(
+                &self.device,
+                &self.instance,
+                self.physical_device,
+                self.queue_family_index,
+                self.command_buffer,
+            );
         }
 
         self.texture_upload_count_this_frame = 0;
@@ -3279,12 +3696,15 @@ impl CxVulkan {
                 format: resource.format,
                 old_layout: resource.layout,
                 should_clear,
+                sampled: cx.textures[texture_id].format.is_sampled_depth(),
             })
         } else {
             None
         };
 
         for attachment in &color_attachments {
+            #[cfg(target_os = "linux")]
+            self.acquire_shared_write(attachment.texture_id);
             self.transition_image_layout(
                 attachment.image,
                 vk::ImageAspectFlags::COLOR,
@@ -3344,7 +3764,7 @@ impl CxVulkan {
                     } else {
                         vk::AttachmentLoadOp::LOAD
                     })
-                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .store_op(if depth.sampled { vk::AttachmentStoreOp::STORE } else { vk::AttachmentStoreOp::DONT_CARE })
                     .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                     .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                     .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -3388,6 +3808,7 @@ impl CxVulkan {
             .dependencies(&dependencies);
         let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(offscreen) failed: {e:?}"))?;
+        self.frame_resources.render_passes.push(render_pass);
 
         let mut framebuffer_attachments: Vec<vk::ImageView> = color_attachments
             .iter()
@@ -3399,11 +3820,12 @@ impl CxVulkan {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&framebuffer_attachments)
-            .width(target_width as u32)
-            .height(target_height as u32)
+            .width(framebuffer_width)
+            .height(framebuffer_height)
             .layers(1);
         let framebuffer = unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
             .map_err(|e| format!("create_framebuffer(offscreen) failed: {e:?}"))?;
+        self.frame_resources.framebuffers.push(framebuffer);
 
         unsafe {
             self.device.cmd_begin_render_pass(
@@ -3414,8 +3836,8 @@ impl CxVulkan {
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
-                            width: target_width as u32,
-                            height: target_height as u32,
+                            width: framebuffer_width,
+                            height: framebuffer_height,
                         },
                     })
                     .clear_values(&clear_values),
@@ -3453,6 +3875,7 @@ impl CxVulkan {
                 .map(|attachment| attachment.format)
                 .collect::<Vec<_>>(),
             depth_attachment.map(|depth| depth.format),
+            VulkanRenderPassKind::Offscreen,
         );
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
@@ -3467,8 +3890,14 @@ impl CxVulkan {
             &mut draw_stats,
             xr_depth_view,
         )?;
+        draw_stats.trace_skips(draw_pass_id);
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
+        }
+        if let Some(depth) = depth_attachment.filter(|depth| depth.sampled) {
+            self.transition_image_layout(depth.image, vk::ImageAspectFlags::DEPTH, 1,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
         }
         for attachment in &color_attachments {
             self.transition_image_layout(
@@ -3478,24 +3907,53 @@ impl CxVulkan {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             );
+            #[cfg(target_os = "linux")]
+            self.release_shared_write(attachment.texture_id);
+        }
+        #[cfg(target_os = "linux")]
+        if profile_sample
+            .as_ref()
+            .is_some_and(|sample| sample.wrote_timestamps)
+        {
+            self.profile.end_timestamps(&self.device, self.command_buffer);
         }
         unsafe {
             self.device
                 .end_command_buffer(self.command_buffer)
                 .map_err(|e| format!("end_command_buffer(offscreen) failed: {e:?}"))?;
-            self.device
-                .queue_submit(
-                    self.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
-                    self.in_flight_fence,
-                )
-                .map_err(|e| format!("queue_submit(offscreen) failed: {e:?}"))?;
+        }
+        #[cfg(target_os = "linux")]
+        let profile_encode_ms = profile_encode_start
+            .map(|start| start.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let command_buffers = [self.command_buffer];
+        #[cfg(target_os = "linux")]
+        let profile_submit_start = profile_sample.is_some().then(Instant::now);
+        self.submit_frame(&vk::SubmitInfo::default().command_buffers(&command_buffers))?;
+        self.publish_draw_submission(cx, &draw_stats);
+        #[cfg(target_os = "linux")]
+        if let Some(mut sample) = profile_sample.take() {
+            sample.encode_ms = profile_encode_ms;
+            sample.submit_ms = profile_submit_start
+                .map(|start| start.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            self.profile.admit_pending(sample);
+        }
+        #[cfg(target_os = "linux")]
+        let profile_post_start = self.profile.enabled().then(Instant::now);
+        unsafe {
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences(offscreen submit) failed: {e:?}"))?;
-            self.device.destroy_framebuffer(framebuffer, None);
-            self.device.destroy_render_pass(render_pass, None);
         }
+        cx.textures.1.serials.complete(self.frame_serial_in_flight);
+        #[cfg(target_os = "linux")]
+        self.profile.complete_after_fence(
+            &self.device,
+            profile_post_start
+                .map(|start| start.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        );
 
         for attachment in &color_attachments {
             if let Some(resource) = self
@@ -3503,14 +3961,21 @@ impl CxVulkan {
                 .get_mut(&Self::texture_key(attachment.texture_id))
             {
                 resource.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+                #[cfg(target_os = "linux")]
+                if self.desktop.shared.enabled && self.is_external_shared_image(attachment.texture_id) {
+                    self.textures.get_mut(&Self::texture_key(attachment.texture_id)).unwrap().layout = vk::ImageLayout::GENERAL;
+                }
             }
         }
         if let Some(depth) = depth_attachment {
             if let Some(resource) = self.textures.get_mut(&Self::texture_key(depth.texture_id)) {
-                resource.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                resource.layout = if depth.sampled { vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL }
+                    else { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
             }
         }
 
+        cx.passes[draw_pass_id].paint_dirty = false;
+        cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(())
     }
 
@@ -3519,6 +3984,8 @@ impl CxVulkan {
         cx: &mut Cx,
         draw_list_id: DrawListId,
     ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        self.release_retired_shared_frames();
         let mut seen = HashSet::<VulkanTextureKey>::new();
         self.prepare_draw_list_textures_inner(cx, draw_list_id, &mut seen)
     }
@@ -3576,6 +4043,8 @@ impl CxVulkan {
             for texture_id in texture_ids {
                 if seen.insert(Self::texture_key(texture_id)) {
                     self.ensure_texture_uploaded(cx, texture_id)?;
+                    #[cfg(target_os = "linux")]
+                    self.acquire_shared_sample(texture_id);
                 }
             }
         }
@@ -3886,7 +4355,7 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | migration_image_usage())
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -3982,6 +4451,7 @@ impl CxVulkan {
             is_cube,
             format,
             layout: vk::ImageLayout::UNDEFINED,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -4006,6 +4476,13 @@ impl CxVulkan {
         format: vk::Format,
         is_cube: bool,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_color_target_resource_with_usage(width, height, format, is_cube, vk::ImageUsageFlags::empty())
+    }
+
+    fn create_color_target_resource_with_usage(
+        &self, width: u32, height: u32, format: vk::Format, is_cube: bool,
+        extra_usage: vk::ImageUsageFlags,
+    ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -4018,7 +4495,7 @@ impl CxVulkan {
             .array_layers(if is_cube { 6 } else { 1 })
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC | extra_usage | migration_image_usage())
             .flags(if is_cube {
                 vk::ImageCreateFlags::CUBE_COMPATIBLE
             } else {
@@ -4118,6 +4595,7 @@ impl CxVulkan {
             is_cube,
             format,
             layout: vk::ImageLayout::UNDEFINED,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -4136,6 +4614,8 @@ impl CxVulkan {
         let (src_stage, src_access) = Self::layout_stage_access(old_layout);
         let (dst_stage, dst_access) = Self::layout_stage_access(new_layout);
         let barrier = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .old_layout(old_layout)
             .new_layout(new_layout)
             .src_access_mask(src_access)
@@ -4206,6 +4686,12 @@ impl CxVulkan {
         format: vk::Format,
         layers: u32,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_depth_target_layers_usage(width, height, format, layers, false)
+    }
+
+    fn create_depth_target_layers_usage(
+        &self, width: u32, height: u32, format: vk::Format, layers: u32, sampled: bool,
+    ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -4218,7 +4704,8 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | migration_image_usage()
+                | if sampled { vk::ImageUsageFlags::SAMPLED } else { vk::ImageUsageFlags::empty() })
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -4298,6 +4785,7 @@ impl CxVulkan {
             is_cube: false,
             format,
             layout: vk::ImageLayout::UNDEFINED,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -4333,7 +4821,7 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -4409,6 +4897,7 @@ impl CxVulkan {
             is_cube: false,
             format,
             layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -4424,6 +4913,100 @@ impl CxVulkan {
         Ok(self.xr_depth_dummy.as_ref().unwrap().view)
     }
 
+    fn initialize_depth_dummies(&mut self) -> Result<(), String> {
+        // Every shader descriptor set includes the fallback depth binding. Its
+        // image must have real initialized contents and a valid sampled layout,
+        // even on a desktop without XR. Do this once before drawing starts.
+        self.ensure_xr_depth_dummy()?;
+        #[cfg(target_os = "android")]
+        self.ensure_xr_depth_dummy_multiview()?;
+        unsafe {
+            self.device.begin_command_buffer(self.command_buffer,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .map_err(|e| format!("begin dummy depth initialization: {e:?}"))?;
+        }
+        let resources = std::iter::once(self.xr_depth_dummy.as_ref().unwrap());
+        #[cfg(target_os = "android")]
+        let resources = resources.chain(self.xr_depth_dummy_multiview.as_ref());
+        for resource in resources {
+            self.transition_image_layout(resource.image, vk::ImageAspectFlags::DEPTH, resource.layers,
+                vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH)
+                .level_count(1).layer_count(resource.layers);
+            unsafe {
+                self.device.cmd_clear_depth_stencil_image(self.command_buffer, resource.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 }, &[range]);
+            }
+            self.transition_image_layout(resource.image, vk::ImageAspectFlags::DEPTH, resource.layers,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        }
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end dummy depth initialization: {e:?}"))?;
+        }
+        let buffers = [self.command_buffer];
+        self.submit_frame(&vk::SubmitInfo::default().command_buffers(&buffers))?;
+        unsafe {
+            self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait for dummy depth initialization: {e:?}"))?;
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset dummy depth command buffer: {e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// Publish consumption only after the command buffer was submitted.
+    /// Several passes can share one repaint id; each queue submission needs
+    /// its own serial so completing a tile bake cannot complete a later pass.
+    fn publish_draw_submission(&mut self, cx: &mut Cx, draws: &VulkanDrawStats) {
+        let serial = cx.textures.1.serials.submit();
+        self.frame_serial_in_flight = serial;
+        for &(list, index) in &draws.consumed {
+            let item = &mut cx.draw_lists[list].draw_items[index];
+            let Some(call) = item.kind.draw_call_mut() else { continue };
+            item.instance_upload_pending = false;
+            item.retained_gpu_evicted = false;
+            item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
+            item.resident_schema = item.retained_schema;
+            item.consumed_instance_id = item.retained_instance_id;
+            item.consumed_schema = item.resident_schema;
+            item.consumed_serial = serial;
+            item.consumed_uniforms_gen = call.uniforms_gen;
+            call.instance_dirty = false;
+            call.uniforms_dirty = false;
+            if let Some((block, _)) = item.shared.as_ref() {
+                let receipt = block.receipt();
+                receipt.mark_encoded(serial);
+                receipt.mark_submitted(serial, call.uniforms_gen);
+            }
+        }
+    }
+
+    fn submit_frame(&mut self, info: &vk::SubmitInfo<'_>) -> Result<(), String> {
+        unsafe {
+            self.device.reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset Vulkan frame fence: {e:?}"))?;
+            #[cfg(target_os = "linux")]
+            let result = self.shared_submit(info);
+            #[cfg(not(target_os = "linux"))]
+            let result = self.device.queue_submit(self.queue, &[*info], self.in_flight_fence);
+            if let Err(err) = result {
+                // An unsuccessful submission does not signal its reset fence.
+                // Restore it so retrying a recoverable allocation error cannot hang.
+                self.device_wait_idle();
+                self.device.destroy_fence(self.in_flight_fence, None);
+                self.in_flight_fence = vk::Fence::null();
+                self.in_flight_fence = self.device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None,
+                ).map_err(|e| format!("Vulkan submit failed ({err:?}); fence recovery failed: {e:?}"))?;
+                return Err(format!("Vulkan queue submission failed: {err:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
     fn ensure_xr_depth_dummy_multiview(&mut self) -> Result<vk::ImageView, String> {
         if self.xr_depth_dummy_multiview.is_none() {
             self.xr_depth_dummy_multiview =
@@ -4456,6 +5039,7 @@ impl CxVulkan {
                 self.device.free_memory(resource.memory, None);
             }
             if resource.owns_image {
+                #[cfg(target_os = "android")]
                 if let Some(hardware_buffer) = resource.hardware_buffer {
                     if !hardware_buffer.is_null() {
                         ndk_sys::AHardwareBuffer_release(hardware_buffer);
@@ -4465,6 +5049,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn create_imported_hardware_buffer_texture_resource(
         &mut self,
         hardware_buffer: *mut ndk_sys::AHardwareBuffer,
@@ -4625,6 +5210,7 @@ impl CxVulkan {
         Ok(resource)
     }
 
+    #[cfg(target_os = "android")]
     fn create_imported_external_hardware_buffer_texture_resource(
         &mut self,
         hardware_buffer: *mut ndk_sys::AHardwareBuffer,
@@ -4842,6 +5428,7 @@ impl CxVulkan {
         })
     }
 
+    #[cfg(target_os = "android")]
     fn imported_yuv_plane_layout(vk_format: vk::Format) -> Option<ImportedYuvPlaneLayout> {
         match vk_format {
             vk::Format::G8_B8_R8_3PLANE_420_UNORM => Some(ImportedYuvPlaneLayout {
@@ -4860,6 +5447,7 @@ impl CxVulkan {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn create_imported_hardware_buffer_plane_view(
         &self,
         image: vk::Image,
@@ -4882,6 +5470,7 @@ impl CxVulkan {
             .map_err(|e| format!("Android Vulkan camera import failed: create_plane_view: {e:?}"))
     }
 
+    #[cfg(target_os = "android")]
     pub fn update_video_yuv_hardware_buffer_textures(
         &mut self,
         tex_y_id: TextureId,
@@ -5127,6 +5716,7 @@ impl CxVulkan {
             is_cube: false,
             format: plane_layout.plane1_view_format,
             layout: vk::ImageLayout::GENERAL,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -5145,6 +5735,7 @@ impl CxVulkan {
                 .plane2_view_format
                 .unwrap_or(plane_layout.plane1_view_format),
             layout: vk::ImageLayout::GENERAL,
+            #[cfg(target_os = "android")]
             hardware_buffer: None,
             sampler: None,
             ycbcr_conversion: None,
@@ -5175,6 +5766,7 @@ impl CxVulkan {
         })
     }
 
+    #[cfg(target_os = "android")]
     pub fn update_video_external_hardware_buffer_texture(
         &mut self,
         texture_id: TextureId,
@@ -5203,6 +5795,7 @@ impl CxVulkan {
         Ok(crate::event::video_playback::VideoYuvMetadata::disabled())
     }
 
+    #[cfg(target_os = "android")]
     pub fn update_video_rgba_hardware_buffer_texture(
         &mut self,
         texture_id: TextureId,
@@ -5239,7 +5832,7 @@ impl CxVulkan {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::TRANSFER_WRITE,
             ),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL | vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::VERTEX_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
@@ -5265,7 +5858,7 @@ impl CxVulkan {
     }
 
     fn texture_key(texture_id: TextureId) -> VulkanTextureKey {
-        texture_id.0
+        VulkanTextureKey(texture_id)
     }
 
     fn ensure_texture_uploaded(
@@ -5347,6 +5940,8 @@ impl CxVulkan {
         let (src_stage, src_access) = Self::layout_stage_access(old_layout);
 
         let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(src_access)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .old_layout(old_layout)
@@ -5382,6 +5977,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_shader = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -5538,22 +6135,46 @@ impl CxVulkan {
                     draw_stats.skipped_no_instance_slots += 1;
                     continue;
                 }
-                let instances = if let Some(instances) = draw_item.instances.as_ref() {
-                    instances.clone()
+                // Keep original instance indices: the shader uses them to
+                // address sidecar/filter tables. Compacting selected ranges
+                // silently renumbers those lookups. Upload the backing prefix
+                // and select each range with Vulkan's firstInstance instead.
+                let slots = sh.mapping.instances.total_slots;
+                let (data, count, default_range) = if let Some(block) = draw_item.retained_instances.as_ref() {
+                    let data = block.data();
+                    let count = draw_item.retained_instance_count.min(data.len() / slots);
+                    (data, count, 0..count as u32)
+                } else if let Some((block, range)) = draw_item.shared.as_ref() {
+                    (block.data(), block.data().len() / slots, range.start as u32..range.end as u32)
+                } else if let Some(instances) = draw_item.instances.as_ref() {
+                    let count = instances.len() / slots;
+                    (instances.as_slice(), count, 0..count as u32)
                 } else {
                     draw_stats.skipped_no_instances_buffer += 1;
                     continue;
                 };
-                if instances.len() < sh.mapping.instances.total_slots {
+                if data.len() < slots {
                     draw_stats.skipped_instances_too_short += 1;
                     continue;
                 }
-                let instance_count = instances.len() / sh.mapping.instances.total_slots;
+                let requested = if draw_item.instance_ranges.is_empty() {
+                    std::slice::from_ref(&default_range)
+                } else {
+                    &draw_item.instance_ranges
+                };
+                let instance_ranges: Vec<_> = requested.iter().filter_map(|range| {
+                    let start = range.start.min(count as u32);
+                    let end = range.end.min(count as u32);
+                    (start < end).then_some(start..end)
+                }).collect();
+                let instance_count: u64 = instance_ranges.iter().map(|range| (range.end - range.start) as u64).sum();
                 if instance_count == 0 {
                     draw_stats.skipped_zero_instances += 1;
                     continue;
                 }
-                draw_stats.instances += instance_count as u64;
+                draw_stats.instances += instance_count;
+                let uploaded_count = instance_ranges.iter().map(|range| range.end as usize).max().unwrap();
+                let instances = data[..uploaded_count * slots].to_vec();
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {
@@ -5567,8 +6188,6 @@ impl CxVulkan {
 
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
-                draw_call.instance_dirty = false;
-                draw_call.uniforms_dirty = false;
                 let texture_ids = (0..sh.mapping.textures.len())
                     .map(|i| {
                         draw_call.texture_slots[i]
@@ -5596,6 +6215,7 @@ impl CxVulkan {
                     alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     instances,
+                    instance_ranges,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
                         .mapping
@@ -5604,6 +6224,16 @@ impl CxVulkan {
                         .min(draw_call.dyn_uniforms.len())]
                         .to_vec(),
                     scope_uniforms: sh.mapping.scope_uniforms_buf.clone(),
+                    // Custom uniform blocks are part of the shader's layout
+                    // too: CodeView supplies its per-file and font tables here.
+                    // Preserve their raw bytes, including integer fields.
+                    custom_uniforms: sh.mapping.uniform_buffers.iter().enumerate().map(|(slot, input)| {
+                        let mut data = draw_call.uniform_buffer_slots[slot].as_ref()
+                            .map(|buffer| cx.uniform_buffers[buffer.uniform_buffer_id()].data.clone())
+                            .unwrap_or_default();
+                        data.resize(data.len().max(input.size).max(16), 0);
+                        (input.buffer_index as u32, data)
+                    }).collect(),
                     uniform_bindings: sh.mapping.uniform_buffer_bindings.bindings.clone(),
                     dyn_uniform_binding: vk_shader.dyn_uniform_binding,
                     scope_uniform_binding: sh
@@ -5626,20 +6256,27 @@ impl CxVulkan {
                 .geometries
                 .clone();
             let geometry = &mut cx.geometries[packet.geometry_id];
-            if !crate::geometry::geometry_backend_supports_typed(
-                geometry,
-                "vulkan",
-                shader_layout.has_compact(),
-            ) {
-                continue;
-            }
+            // Typed geometry (a byte layout with a signature, u16 indices)
+            // uploads as-is below; the shader's physical layout is the only
+            // gate (`geometry_layout_matches_shader` logs a mismatch once).
             if !crate::geometry::geometry_layout_matches_shader(geometry, &shader_layout) {
+                draw_stats.skipped_layout_mismatch += 1;
                 continue;
             }
             if geometry.index_count == 0 || geometry.vertex_count == 0 {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
             }
+            // The resident index width outlives the CPU staging vectors, so
+            // the bind type comes from the geometry, not from the upload.
+            let index_type = match geometry.index_width {
+                2 => vk::IndexType::UINT16,
+                4 => vk::IndexType::UINT32,
+                _ => {
+                    draw_stats.skipped_bad_index_width += 1;
+                    continue;
+                }
+            };
             self.ensure_geometry_resource(packet.geometry_id, geometry)?;
             let geometry_resource = self
                 .geometries
@@ -5659,17 +6296,20 @@ impl CxVulkan {
                 .as_slice()
                 .to_vec();
 
-            self.record_draw_packet(
+            if self.record_draw_packet(
                 cx,
                 &packet,
                 render_pass_key,
                 geometry_resource,
+                index_type,
                 index_count,
                 &pass_uniforms,
                 &draw_list_uniforms,
                 xr_depth_view,
-            )?;
-            draw_stats.packets_recorded += 1;
+            )? {
+                draw_stats.consumed.push((draw_list_id, draw_item_id));
+                draw_stats.packets_recorded += 1;
+            }
         }
         Ok(())
     }
@@ -5680,11 +6320,12 @@ impl CxVulkan {
         packet: &VulkanDrawPacket,
         render_pass_key: &VulkanRenderPassKey,
         geometry_resource: VulkanGeometryResource,
+        index_type: vk::IndexType,
         index_count: u32,
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.ensure_pipeline(
             cx,
             packet.shader_index,
@@ -5723,6 +6364,8 @@ impl CxVulkan {
             )
         };
 
+        crate::trace!("gpu.packet", "shader={} textures={:?} ranges={:?}",
+            packet.shader_index, packet.texture_ids, packet.instance_ranges);
         let sh = &cx.draw_shaders.shaders[packet.shader_index];
         let os_shader_id = sh
             .os_shader_id
@@ -5731,25 +6374,32 @@ impl CxVulkan {
         let vk_shader = os_shader.vulkan_shader[packet.shader_variant]
             .as_ref()
             .ok_or_else(|| format!("shader {} missing Vulkan binary", packet.shader_index))?;
-        let geometry_stride =
-            (sh.mapping.geometries.total_slots * std::mem::size_of::<f32>()) as u64;
-        let instance_stride =
-            (sh.mapping.instances.total_slots * std::mem::size_of::<f32>()) as u64;
+        // Physical record sizes: a typed layout's `stride_bytes` (a Packed
+        // member is one 32-bit word, not its logical slot count); 0 means
+        // the f32-lane path, whose stride is the slot count.
+        let geometry_stride = Self::layout_stride_bytes(&sh.mapping.geometries) as u64;
+        let instance_stride = Self::layout_stride_bytes(&sh.mapping.instances) as u64;
         if geometry_stride == 0 || instance_stride == 0 {
-            return Ok(());
+            return Ok(false);
         }
         let instance_count = (packet.instances.len() as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
         if instance_count == 0 || index_count == 0 {
-            return Ok(());
+            return Ok(false);
         }
 
         struct UniformUpload<'a> {
             binding: u32,
-            src: &'a [f32],
+            src: &'a [u8],
             offset: vk::DeviceSize,
             size: vk::DeviceSize,
+        }
+
+        fn uniform_bytes(values: &[f32]) -> &[u8] {
+            // f32 has no padding, and the returned view shares the slice's
+            // lifetime. Do not numerically convert packed uniform words.
+            unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
         }
 
         let mut uniform_uploads: Vec<UniformUpload<'_>> = Vec::new();
@@ -5768,7 +6418,7 @@ impl CxVulkan {
             }
             uniform_uploads.push(UniformUpload {
                 binding: *binding_idx as u32,
-                src,
+                src: uniform_bytes(src),
                 offset: 0,
                 size: 0,
             });
@@ -5776,7 +6426,7 @@ impl CxVulkan {
         if !packet.dyn_uniforms.is_empty() {
             uniform_uploads.push(UniformUpload {
                 binding: packet.dyn_uniform_binding,
-                src: packet.dyn_uniforms.as_slice(),
+                src: uniform_bytes(&packet.dyn_uniforms),
                 offset: 0,
                 size: 0,
             });
@@ -5785,11 +6435,19 @@ impl CxVulkan {
             if !packet.scope_uniforms.is_empty() {
                 uniform_uploads.push(UniformUpload {
                     binding: scope_binding as u32,
-                    src: packet.scope_uniforms.as_slice(),
+                    src: uniform_bytes(&packet.scope_uniforms),
                     offset: 0,
                     size: 0,
                 });
             }
+        }
+        for (binding, data) in &packet.custom_uniforms {
+            uniform_uploads.push(UniformUpload {
+                binding: *binding,
+                src: data,
+                offset: 0,
+                size: 0,
+            });
         }
         uniform_uploads.sort_by_key(|uniform| uniform.binding);
         uniform_uploads.dedup_by_key(|uniform| uniform.binding);
@@ -5880,7 +6538,7 @@ impl CxVulkan {
                 .get(&Self::texture_key(*texture_id))
                 .or(fallback);
             let Some(resource) = resource else {
-                return Ok(());
+                return Ok(false);
             };
             let sampler_index = sh
                 .mapping
@@ -6009,13 +6667,18 @@ impl CxVulkan {
                 self.command_buffer,
                 geometry_resource.index_buffer.buffer,
                 0,
-                vk::IndexType::UINT32,
+                index_type,
             );
-            self.device
-                .cmd_draw_indexed(self.command_buffer, index_count, instance_count, 0, 0, 0);
+            for range in &packet.instance_ranges {
+                let start = range.start.min(instance_count);
+                let end = range.end.min(instance_count);
+                if start < end {
+                    self.device.cmd_draw_indexed(self.command_buffer, index_count, end - start, 0, 0, start);
+                }
+            }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn ensure_pipeline(
@@ -6055,20 +6718,26 @@ impl CxVulkan {
             .as_ref()
             .ok_or_else(|| format!("shader {} missing fragment SPIR-V", shader_index))?;
 
-        if vk_shader.geometry_slots != sh.mapping.geometries.total_slots
-            || vk_shader.instance_slots != sh.mapping.instances.total_slots
+        // The WGSL vertex inputs are packed vec4f lanes over the PHYSICAL
+        // record (stride_bytes / 4 words): a Packed member is one word and
+        // is unpacked in the shader, while `total_slots` counts its logical
+        // components. Both sides must agree on the word count.
+        let geometry_words = Self::layout_words(&sh.mapping.geometries);
+        let instance_words = Self::layout_words(&sh.mapping.instances);
+        if vk_shader.geometry_slots != geometry_words || vk_shader.instance_slots != instance_words
         {
             crate::warning!(
-                "Android Vulkan slot mismatch: shader={}, wgsl_geom_slots={}, map_geom_slots={}, wgsl_inst_slots={}, map_inst_slots={}",
+                "Vulkan vertex word mismatch: shader={}, wgsl_geom_words={}, layout_geom_words={}, wgsl_inst_words={}, layout_inst_words={}",
                 shader_index,
                 vk_shader.geometry_slots,
-                sh.mapping.geometries.total_slots,
+                geometry_words,
                 vk_shader.instance_slots,
-                sh.mapping.instances.total_slots
+                instance_words
             );
         }
 
         let has_descriptors = !sh.mapping.uniform_buffer_bindings.bindings.is_empty()
+            || !sh.mapping.uniform_buffers.is_empty()
             || !sh.mapping.dyn_uniforms.inputs.is_empty()
             || !sh.mapping.scope_uniforms.inputs.is_empty()
             || !sh.mapping.textures.is_empty()
@@ -6078,6 +6747,9 @@ impl CxVulkan {
         let mut descriptor_bindings: Vec<(u32, vk::DescriptorType)> = Vec::new();
         for (_, idx) in &sh.mapping.uniform_buffer_bindings.bindings {
             descriptor_bindings.push((*idx as u32, vk::DescriptorType::UNIFORM_BUFFER));
+        }
+        for input in &sh.mapping.uniform_buffers {
+            descriptor_bindings.push((input.buffer_index as u32, vk::DescriptorType::UNIFORM_BUFFER));
         }
         if !sh.mapping.dyn_uniforms.inputs.is_empty() {
             descriptor_bindings.push((
@@ -6185,33 +6857,33 @@ impl CxVulkan {
                 .name(&fs_entry),
         ];
 
-        let geometry_formats =
-            Self::collect_attribute_chunk_formats(sh.mapping.geometries.total_slots);
-        let instance_formats =
-            Self::collect_attribute_chunk_formats(sh.mapping.instances.total_slots);
+        // Vertex fetch is 32-bit bit-carrier lanes over the physical record:
+        // `stride_bytes` per vertex/instance, one vec4 location per four
+        // words (a shorter tail for the remainder). The shader unpacks any
+        // compact (f16/i16/unorm8) member from its word itself.
+        let geometry_words = Self::layout_words(&sh.mapping.geometries);
+        let instance_words = Self::layout_words(&sh.mapping.instances);
+        let geometry_formats = Self::collect_attribute_chunk_formats(geometry_words);
+        let instance_formats = Self::collect_attribute_chunk_formats(instance_words);
 
         let mut vertex_bindings = Vec::new();
         vertex_bindings.push(
             vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride((sh.mapping.geometries.total_slots * std::mem::size_of::<f32>()) as u32)
+                .stride(Self::layout_stride_bytes(&sh.mapping.geometries) as u32)
                 .input_rate(vk::VertexInputRate::VERTEX),
         );
         vertex_bindings.push(
             vk::VertexInputBindingDescription::default()
                 .binding(1)
-                .stride((sh.mapping.instances.total_slots * std::mem::size_of::<f32>()) as u32)
+                .stride(Self::layout_stride_bytes(&sh.mapping.instances) as u32)
                 .input_rate(vk::VertexInputRate::INSTANCE),
         );
 
         let mut vertex_attributes = Vec::new();
         let mut location = 0u32;
         for (chunk_index, format) in geometry_formats.iter().enumerate() {
-            let remaining = sh
-                .mapping
-                .geometries
-                .total_slots
-                .saturating_sub(chunk_index * 4);
+            let remaining = geometry_words.saturating_sub(chunk_index * 4);
             let components = remaining.min(4);
             vertex_attributes.push(
                 vk::VertexInputAttributeDescription::default()
@@ -6223,11 +6895,7 @@ impl CxVulkan {
             location += 1;
         }
         for (chunk_index, format) in instance_formats.iter().enumerate() {
-            let remaining = sh
-                .mapping
-                .instances
-                .total_slots
-                .saturating_sub(chunk_index * 4);
+            let remaining = instance_words.saturating_sub(chunk_index * 4);
             let components = remaining.min(4);
             vertex_attributes.push(
                 vk::VertexInputAttributeDescription::default()
@@ -6271,7 +6939,7 @@ impl CxVulkan {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA);
-        let color_blend_attachments = [color_blend_attachment];
+        let color_blend_attachments = vec![color_blend_attachment; render_pass_key.color_formats.len()];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let has_depth = render_pass_key.depth_format.is_some();
@@ -6387,7 +7055,8 @@ impl CxVulkan {
                 .address_mode_w(address_mode)
                 .border_color(border_color)
                 .unnormalized_coordinates(false)
-                .compare_enable(false)
+                .compare_enable(sampler_desc.compare)
+                .compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .min_lod(0.0)
                 .max_lod(vk::LOD_CLAMP_NONE);
             if sampler_desc.coord == crate::makepad_script::shader::SamplerCoord::Pixel {
@@ -6429,6 +7098,23 @@ impl CxVulkan {
 
     fn collect_attribute_chunk_formats(total_slots: usize) -> Vec<DrawShaderAttrFormat> {
         vec![DrawShaderAttrFormat::F32x4; (total_slots + 3) / 4]
+    }
+
+    /// Bytes per vertex/instance record of a layout: its typed
+    /// `stride_bytes`, or the f32-lane slot count when the layout carries
+    /// no byte stride (0).
+    fn layout_stride_bytes(layout: &crate::draw_shader::DrawShaderInputs) -> usize {
+        if layout.stride_bytes != 0 {
+            layout.stride_bytes
+        } else {
+            layout.total_slots * std::mem::size_of::<f32>()
+        }
+    }
+
+    /// 32-bit words per record: what the vertex input fetches and what
+    /// the WGSL packed vec4f inputs cover.
+    fn layout_words(layout: &crate::draw_shader::DrawShaderInputs) -> usize {
+        Self::layout_stride_bytes(layout) / std::mem::size_of::<f32>()
     }
 
     fn vk_vertex_format(attr_format: DrawShaderAttrFormat, components: usize) -> vk::Format {
@@ -6563,29 +7249,46 @@ impl CxVulkan {
         let index_needs_upload = existing.is_none() || geometry.dirty_indices;
 
         let new_vertex_buffer = if vertex_needs_upload {
-            let vertices = geometry.vertices.as_f32().ok_or_else(|| {
-                "vulkan: compact vertex formats are not implemented".to_string()
-            })?;
+            // A typed layout arrives as bytes with the shader's stride (a
+            // multiple of 4); the f32-lane path is the same bytes.
+            let vertices = geometry.vertices.as_bytes();
             let buffer = self.create_host_buffer_with_data(
-                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::BufferUsageFlags::VERTEX_BUFFER | migration_buffer_usage(),
                 vertices,
             )?;
-            self.xr_geometry_upload_bytes_this_frame +=
-                std::mem::size_of_val(vertices) as u64;
+            self.xr_geometry_upload_bytes_this_frame += vertices.len() as u64;
             Some(buffer)
         } else {
             None
         };
 
         let new_index_buffer = if index_needs_upload {
-            let indices = match geometry.indices.as_u32() {
-                Some(i) => i,
-                None => return Err("vulkan: u16 index buffers are not implemented".to_string()),
+            let usage = vk::BufferUsageFlags::INDEX_BUFFER | migration_buffer_usage();
+            let (created, uploaded_bytes) = match &geometry.indices {
+                crate::geometry::IndexData::U32(indices) => (
+                    self.create_host_buffer_with_data(usage, indices),
+                    std::mem::size_of_val(indices.as_slice()) as u64,
+                ),
+                // An odd u16 count is padded to a four-byte buffer size: the
+                // draw reads `index_count` elements, and renderer migration
+                // copies geometry buffers in whole words.
+                crate::geometry::IndexData::U16(indices) if indices.len() % 2 == 1 => {
+                    let mut padded = Vec::with_capacity(indices.len() + 1);
+                    padded.extend_from_slice(indices);
+                    padded.push(0);
+                    (
+                        self.create_host_buffer_with_data(usage, &padded),
+                        std::mem::size_of_val(padded.as_slice()) as u64,
+                    )
+                }
+                crate::geometry::IndexData::U16(indices) => (
+                    self.create_host_buffer_with_data(usage, indices),
+                    std::mem::size_of_val(indices.as_slice()) as u64,
+                ),
             };
-            match self.create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, indices) {
+            match created {
                 Ok(buffer) => {
-                    self.xr_geometry_upload_bytes_this_frame +=
-                        std::mem::size_of_val(indices) as u64;
+                    self.xr_geometry_upload_bytes_this_frame += uploaded_bytes;
                     Some(buffer)
                 }
                 Err(err) => {
@@ -6660,10 +7363,6 @@ impl CxVulkan {
         &mut self,
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> Result<vk::DescriptorSet, String> {
-        if self.frame_resources.descriptor_pools.is_empty() {
-            let pool = self.create_frame_descriptor_pool()?;
-            self.frame_resources.descriptor_pools.push(pool);
-        }
         let try_alloc = |device: &ash::Device, pool: vk::DescriptorPool| {
             let set_layouts = [descriptor_set_layout];
             let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -6672,21 +7371,36 @@ impl CxVulkan {
             unsafe { device.allocate_descriptor_sets(&alloc_info) }.map(|sets| sets[0])
         };
 
-        let pool = *self.frame_resources.descriptor_pools.last().unwrap();
-        match try_alloc(&self.device, pool) {
-            Ok(set) => {
-                self.xr_descriptor_set_count_this_frame += 1;
-                Ok(set)
-            }
-            Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
+        let mut created_pool = false;
+        loop {
+            if self.frame_resources.descriptor_pool_cursor
+                >= self.frame_resources.descriptor_pools.len()
+            {
+                if created_pool {
+                    return Err(
+                        "allocate_descriptor_sets failed: ERROR_OUT_OF_POOL_MEMORY".into(),
+                    );
+                }
                 let pool = self.create_frame_descriptor_pool()?;
                 self.frame_resources.descriptor_pools.push(pool);
-                let set = try_alloc(&self.device, pool)
-                    .map_err(|e| format!("allocate_descriptor_sets failed: {e:?}"))?;
-                self.xr_descriptor_set_count_this_frame += 1;
-                Ok(set)
+                created_pool = true;
             }
-            Err(e) => Err(format!("allocate_descriptor_sets failed: {e:?}")),
+            let pool =
+                self.frame_resources.descriptor_pools[self.frame_resources.descriptor_pool_cursor];
+            match try_alloc(&self.device, pool) {
+                Ok(set) => {
+                    self.xr_descriptor_set_count_this_frame += 1;
+                    return Ok(set);
+                }
+                Err(err @ vk::Result::ERROR_OUT_OF_POOL_MEMORY)
+                | Err(err @ vk::Result::ERROR_FRAGMENTED_POOL) => {
+                    if created_pool {
+                        return Err(format!("allocate_descriptor_sets failed: {err:?}"));
+                    }
+                    self.frame_resources.descriptor_pool_cursor += 1;
+                }
+                Err(e) => return Err(format!("allocate_descriptor_sets failed: {e:?}")),
+            }
         }
     }
 
@@ -6741,6 +7455,7 @@ impl CxVulkan {
         ))
     }
 
+    #[cfg(target_os = "android")]
     fn create_surface(
         android_surface_loader: &ash::khr::android_surface::Instance,
         window: *mut ndk_sys::ANativeWindow,
@@ -6750,6 +7465,7 @@ impl CxVulkan {
             .map_err(|e| format!("create_android_surface failed: {e:?}"))
     }
 
+    #[cfg(target_os = "android")]
     fn pick_device_and_queue_family(
         instance: &ash::Instance,
         surface_loader: &ash::khr::surface::Instance,
@@ -6772,6 +7488,7 @@ impl CxVulkan {
         Err("No Vulkan physical device with graphics+present support found".to_string())
     }
 
+    #[cfg(target_os = "android")]
     fn pick_queue_family_for_device(
         instance: &ash::Instance,
         surface_loader: &ash::khr::surface::Instance,
@@ -6799,6 +7516,7 @@ impl CxVulkan {
         Err("No Vulkan queue family with graphics+present support found".to_string())
     }
 
+    #[cfg(target_os = "android")]
     fn pick_graphics_queue_family_for_device(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
@@ -6814,6 +7532,15 @@ impl CxVulkan {
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), String> {
+        let result = self.recreate_swapchain_inner();
+        if result.is_err() {
+            self.device_wait_idle();
+            self.destroy_swapchain();
+        }
+        result
+    }
+
+    fn recreate_swapchain_inner(&mut self) -> Result<(), String> {
         if self.surface == vk::SurfaceKHR::null() {
             return Ok(());
         }
@@ -6833,7 +7560,7 @@ impl CxVulkan {
             return Err("No Vulkan surface formats available".to_string());
         }
 
-        let format = formats
+        let mut format = formats
             .iter()
             .copied()
             .find(|f| {
@@ -6841,6 +7568,9 @@ impl CxVulkan {
                     && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .unwrap_or(formats[0]);
+        if format.format == vk::Format::UNDEFINED {
+            format.format = vk::Format::B8G8R8A8_UNORM;
+        }
 
         let extent = if capabilities.current_extent.width == u32::MAX {
             vk::Extent2D {
@@ -6857,7 +7587,13 @@ impl CxVulkan {
             capabilities.current_extent
         };
 
-        let mut image_count = capabilities.min_image_count + 1;
+        if extent.width == 0 || extent.height == 0 {
+            self.device_wait_idle();
+            self.destroy_swapchain();
+            return Ok(());
+        }
+
+        let mut image_count = capabilities.min_image_count.saturating_add(1);
         if capabilities.max_image_count > 0 {
             image_count = image_count.min(capabilities.max_image_count);
         }
@@ -6881,8 +7617,8 @@ impl CxVulkan {
             return Err("Vulkan surface does not support COLOR_ATTACHMENT usage".to_string());
         }
         let mut image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
-        if usage.contains(vk::ImageUsageFlags::TRANSFER_DST) {
-            image_usage |= vk::ImageUsageFlags::TRANSFER_DST;
+        if usage.contains(vk::ImageUsageFlags::TRANSFER_SRC) {
+            image_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
         }
 
         let pre_transform = if capabilities
@@ -6904,7 +7640,13 @@ impl CxVulkan {
         .find(|mode| capabilities.supported_composite_alpha.contains(*mode))
         .unwrap_or(vk::CompositeAlphaFlagsKHR::OPAQUE);
 
-        let old_swapchain = self.swapchain;
+        // Presentation can still reference these targets after the submit fence signals.
+        // This uses the conventional idle-and-retire KHR_swapchain fallback.
+        // Strict presentation-engine retirement needs swapchain_maintenance1
+        // present fences, which are not required by our Vulkan 1.1 baseline.
+        self.device_wait_idle();
+        let old_swapchain = std::mem::take(&mut self.swapchain);
+        self.swapchain_images.clear();
         self.destroy_swapchain_targets();
         self.destroy_pipelines();
 
@@ -6925,17 +7667,14 @@ impl CxVulkan {
             .clipped(true)
             .old_swapchain(old_swapchain);
 
-        let new_swapchain = unsafe { self.swapchain_loader.create_swapchain(&create_info, None) }
-            .map_err(|e| format!("create_swapchain failed: {e:?}"))?;
-        let new_images = unsafe { self.swapchain_loader.get_swapchain_images(new_swapchain) }
-            .map_err(|e| format!("get_swapchain_images failed: {e:?}"))?;
-
+        let new_swapchain = unsafe { self.swapchain_loader.create_swapchain(&create_info, None) };
+        // oldSwapchain is retired by vkCreateSwapchainKHR even if creation fails.
         if old_swapchain != vk::SwapchainKHR::null() {
             unsafe { self.swapchain_loader.destroy_swapchain(old_swapchain, None) };
         }
-
-        self.swapchain = new_swapchain;
-        self.swapchain_images = new_images;
+        self.swapchain = new_swapchain.map_err(|e| format!("create_swapchain failed: {e:?}"))?;
+        self.swapchain_images = unsafe { self.swapchain_loader.get_swapchain_images(self.swapchain) }
+            .map_err(|e| format!("get_swapchain_images failed: {e:?}"))?;
         self.swapchain_format = format.format;
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
@@ -7001,7 +7740,14 @@ impl CxVulkan {
             .dependencies(&dependencies);
         self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
-        self.xr_render_pass_uses_fragment_density_map = false;
+        #[cfg(target_os = "android")]
+        { self.xr_render_pass_uses_fragment_density_map = false; }
+
+        for _ in &self.swapchain_images {
+            self.render_finished_semaphores.push(unsafe {
+                self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }.map_err(|e| format!("create_semaphore(present) failed: {e:?}"))?);
+        }
 
         for image in &self.swapchain_images {
             let view_info = vk::ImageViewCreateInfo::default()
@@ -7032,7 +7778,8 @@ impl CxVulkan {
             self.swapchain_depth_targets.push(depth_target);
         }
 
-        self.swapchain_readback_buffer = if self.swapchain_readback_supported()
+        self.swapchain_readback_buffer = if image_usage.contains(vk::ImageUsageFlags::TRANSFER_SRC)
+            && self.swapchain_readback_supported()
             && self.swapchain_extent.width > 0
             && self.swapchain_extent.height > 0
         {
@@ -7071,6 +7818,42 @@ impl CxVulkan {
         Self::destroy_owned_frame_resources(&self.device, &mut self.frame_resources);
     }
 
+    #[cfg(target_os = "linux")]
+    fn recycle_completed_frame_resources(&mut self) -> Result<(), String> {
+        if !self.recycle_pass_resources {
+            self.destroy_frame_resources();
+            return Ok(());
+        }
+        Self::recycle_completed_owned_frame_resources(&self.device, &mut self.frame_resources)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recycle_completed_owned_frame_resources(
+        device: &ash::Device,
+        frame_resources: &mut FrameResources,
+    ) -> Result<(), String> {
+        unsafe {
+            for framebuffer in frame_resources.framebuffers.drain(..) {
+                device.destroy_framebuffer(framebuffer, None);
+            }
+            for render_pass in frame_resources.render_passes.drain(..) {
+                device.destroy_render_pass(render_pass, None);
+            }
+            for buffer in frame_resources.buffers.drain(..) {
+                device.destroy_buffer(buffer.buffer, None);
+                device.free_memory(buffer.memory, None);
+            }
+            for &pool in &frame_resources.descriptor_pools {
+                device
+                    .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
+                    .map_err(|e| format!("reset_descriptor_pool(completed frame) failed: {e:?}"))?;
+            }
+        }
+        frame_resources.packet_buffer_used = 0;
+        frame_resources.descriptor_pool_cursor = 0;
+        Ok(())
+    }
+
     fn destroy_pipelines(&mut self) {
         unsafe {
             for (_, pipeline) in self.pipelines.drain() {
@@ -7092,6 +7875,9 @@ impl CxVulkan {
 
     fn destroy_swapchain_targets(&mut self) {
         unsafe {
+            for semaphore in self.render_finished_semaphores.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
             for framebuffer in self.framebuffers.drain(..) {
                 self.device.destroy_framebuffer(framebuffer, None);
             }
@@ -7143,6 +7929,7 @@ impl CxVulkan {
         if let Some(resource) = self.xr_depth_dummy.take() {
             self.destroy_texture_resource(resource);
         }
+        #[cfg(target_os = "android")]
         if let Some(resource) = self.xr_depth_dummy_multiview.take() {
             self.destroy_texture_resource(resource);
         }
@@ -7173,20 +7960,37 @@ impl CxVulkan {
 
 impl Drop for CxVulkan {
     fn drop(&mut self) {
+        #[cfg(all(target_os = "linux", linux_direct))]
+        self.destroy_gpu_transition();
+        #[cfg(all(target_os = "linux", linux_direct))]
+        self.destroy_hosted_route();
         self.device_wait_idle();
+        #[cfg(target_os = "linux")]
+        self.profile.destroy(&self.device);
+        #[cfg(target_os = "linux")]
+        self.destroy_desktop_windows();
         self.destroy_swapchain();
+        // Direct outputs and the composition need the device; their surfaces
+        // and displays are released with `desktop.direct` below, before the
+        // instance goes. A direct fence the presentation engine never
+        // signaled makes the device and instance un-destroyable: they are
+        // abandoned to process exit (see destroy_direct_device_resources).
+        #[cfg(all(target_os = "linux", linux_direct))]
+        let destroy_parents = self.destroy_direct_device_resources();
+        #[cfg(not(all(target_os = "linux", linux_direct)))]
+        let destroy_parents = true;
+        #[cfg(target_os = "android")]
         self.destroy_xr_in_flight_frames();
         self.destroy_geometry_resources();
+        #[cfg(target_os = "linux")]
+        self.destroy_shared_state();
         self.destroy_texture_resources();
 
         unsafe {
             if self.in_flight_fence != vk::Fence::null() {
                 self.device.destroy_fence(self.in_flight_fence, None);
             }
-            if self.render_finished_semaphore != vk::Semaphore::null() {
-                self.device
-                    .destroy_semaphore(self.render_finished_semaphore, None);
-            }
+
             if self.image_available_semaphore != vk::Semaphore::null() {
                 self.device
                     .destroy_semaphore(self.image_available_semaphore, None);
@@ -7194,9 +7998,20 @@ impl Drop for CxVulkan {
             if self.command_pool != vk::CommandPool::null() {
                 self.device.destroy_command_pool(self.command_pool, None);
             }
-            self.device.destroy_device(None);
+            if destroy_parents {
+                self.device.destroy_device(None);
+            }
         }
 
+        if !destroy_parents {
+            // Device, instance, messenger and surface stay alive until exit.
+            #[cfg(target_os = "android")]
+            if !self.window.is_null() {
+                unsafe { ndk_sys::ANativeWindow_release(self.window) };
+                self.window = std::ptr::null_mut();
+            }
+            return;
+        }
         self.destroy_surface();
         if let Some(loader) = &self.debug_utils_loader {
             if self.debug_messenger != vk::DebugUtilsMessengerEXT::null() {
@@ -7204,8 +8019,11 @@ impl Drop for CxVulkan {
                 self.debug_messenger = vk::DebugUtilsMessengerEXT::null();
             }
         }
+        #[cfg(all(target_os = "linux", linux_direct))]
+        drop(self.desktop.direct.take());
         unsafe { self.instance.destroy_instance(None) };
 
+        #[cfg(target_os = "android")]
         if !self.window.is_null() {
             unsafe { ndk_sys::ANativeWindow_release(self.window) };
             self.window = std::ptr::null_mut();

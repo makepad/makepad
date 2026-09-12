@@ -329,25 +329,26 @@ fn fetch(cx: &mut Cx, src: &Option<ScriptHandleRef>) -> Fetch {
         return Fetch::Failed;
     };
     let handle = handle_ref.as_handle();
-    if let Some(data) = cx.get_resource(handle) {
-        return arrived(cx, handle, data);
+    let heap_key = handle_ref.heap_key();
+    if let Some(data) = cx.get_resource(heap_key, handle) {
+        return arrived(cx, heap_key, handle, data);
     }
-    cx.load_script_resource(handle);
-    if let Some(data) = cx.get_resource(handle) {
-        return arrived(cx, handle, data);
+    cx.load_script_resource(heap_key, handle);
+    if let Some(data) = cx.get_resource(heap_key, handle) {
+        return arrived(cx, heap_key, handle, data);
     }
     // No bytes. Either the request is still in flight (an http resource on
     // the web), or the load already failed — a file that is not there is an
     // error, not a wait — or there is no such resource at all.
     let resources = cx.script_data.resources.resources.borrow();
-    match resources.iter().find(|res| res.has_handle(handle)) {
+    match resources.iter().find(|res| res.has_handle(heap_key, handle)) {
         Some(res) if !res.is_error() => Fetch::Waiting,
         _ => Fetch::Failed,
     }
 }
 
-fn arrived(cx: &Cx, handle: ScriptHandle, data: Rc<Vec<u8>>) -> Fetch {
-    let path = cx.get_resource_abs_path(handle).unwrap_or_default();
+fn arrived(cx: &Cx, heap_key: usize, handle: ScriptHandle, data: Rc<Vec<u8>>) -> Fetch {
+    let path = cx.get_resource_abs_path(heap_key, handle).unwrap_or_default();
     Fetch::Arrived(PathBuf::from(path), data)
 }
 

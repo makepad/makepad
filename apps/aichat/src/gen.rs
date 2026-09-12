@@ -7,8 +7,8 @@
 //! fetch), streams the node's progress into the card, writes the picture
 //! under the makepad home's `gen` folder and answers with the path — the
 //! model then hands that path to `photos.add`, which puts it on the wall.
-//! Nothing goes through the asset store. Without the `engine` feature (the
-//! web page) the service still exists and says it cannot.
+//! Nothing goes through the asset store. Compiled only with the `gen`
+//! feature; a build without it does not advertise this service.
 
 use makepad_ai_services::engine::ServiceRegistry;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
@@ -106,31 +106,23 @@ impl GenService {
                 return;
             }
         };
-        #[cfg(not(feature = "engine"))]
-        {
-            let _ = args;
-            self.port.reply(ToolResult::unavailable(&id, "this build has no pipeline runtime; pictures need the native app"));
-        }
-        #[cfg(feature = "engine")]
-        {
-            use makepad_widgets::makepad_platform::thread::SignalToUI;
-            let cancel = Arc::new(AtomicBool::new(false));
-            let (tx, rx) = std::sync::mpsc::channel();
-            let worker_cancel = cancel.clone();
-            let spawned = std::thread::Builder::new().name("gen-image".into()).spawn(move || {
-                let progress_tx = tx.clone();
-                let mut progress = |note: &str, permille: u16| {
-                    let _ = progress_tx.send(GenMsg::Progress(note.to_string(), permille));
-                    SignalToUI::set_ui_signal();
-                };
-                let result = run_image(&args, &worker_cancel, &mut progress);
-                let _ = tx.send(GenMsg::Done(result));
+        use makepad_widgets::makepad_platform::thread::SignalToUI;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_cancel = cancel.clone();
+        let spawned = std::thread::Builder::new().name("gen-image".into()).spawn(move || {
+            let progress_tx = tx.clone();
+            let mut progress = |note: &str, permille: u16| {
+                let _ = progress_tx.send(GenMsg::Progress(note.to_string(), permille));
                 SignalToUI::set_ui_signal();
-            });
-            match spawned {
-                Ok(_) => self.jobs.push(Job { call_id: id, cancel, rx }),
-                Err(e) => self.port.reply(ToolResult::failed(&id, format!("could not start the generation: {e}"))),
-            }
+            };
+            let result = run_image(&args, &worker_cancel, &mut progress);
+            let _ = tx.send(GenMsg::Done(result));
+            SignalToUI::set_ui_signal();
+        });
+        match spawned {
+            Ok(_) => self.jobs.push(Job { call_id: id, cancel, rx }),
+            Err(e) => self.port.reply(ToolResult::failed(&id, format!("could not start the generation: {e}"))),
         }
     }
 
@@ -238,7 +230,6 @@ fn json_string(s: &str) -> String {
     makepad_strict_json::s(s.to_string()).to_json()
 }
 
-#[cfg(feature = "engine")]
 fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(&str, u16)) -> Result<GenDone, String> {
     use makepad_asset_creator::makepad_ai_hub::home::makepad_home;
     use makepad_asset_creator::makepad_strict_json as json;

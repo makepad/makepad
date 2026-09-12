@@ -107,6 +107,11 @@ path = "tests/http/service_http.rs"
 required-features = ["native"]
 
 [[test]]
+name = "alias_cas"
+path = "tests/alias_cas.rs"
+required-features = ["native"]
+
+[[test]]
 name = "auth"
 path = "tests/auth.rs"
 required-features = ["native"]

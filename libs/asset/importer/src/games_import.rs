@@ -1004,6 +1004,7 @@ mod tests {
                     newest: false,
                     page_size: 50,
                     facets: 0,
+                    newest: false,
                 },
                 None,
             )

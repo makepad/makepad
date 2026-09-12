@@ -134,11 +134,13 @@ pub fn extract(text: &str) -> Extract {
 /// </tool_call>
 /// ```
 ///
-/// Parameter values are raw text lines: they coerce to JSON when they
-/// parse as JSON (numbers, arrays, objects, booleans) and stay strings
-/// otherwise — multi-line values (a splash source) stay intact. Function
-/// names map through the same underscore→dotted table native providers
-/// use; dotted names are accepted as-is.
+/// Parameter values are raw text lines. Declared string parameters retain
+/// their literal text (including exact decimal seeds); quoted JSON strings
+/// still decode escapes. Other parameters parse as JSON when possible and
+/// stay strings otherwise. Multi-line values (a splash source) stay intact.
+/// Function names map through the same underscore→dotted table native
+/// providers use; dotted names are accepted as-is. JSON argument objects
+/// bypass this XML-specific decoding and retain their original types.
 fn extract_native(text: &str) -> Extract {
     const OPEN: &str = "<tool_call>";
     let Some(at) = text.find(OPEN) else {
@@ -204,6 +206,11 @@ fn extract_native(text: &str) -> Extract {
             }
         }
     }
+    let parameters = crate::tools::definitions()
+        .into_iter()
+        .chain(crate::tools::sandbox_definitions())
+        .find(|def| def.name == name)
+        .map(|def| def.parameters);
     let mut pairs: Vec<(String, Value)> = Vec::new();
     // Bound the parameter scan to THIS call's block: the model often emits
     // several <tool_call> blocks back to back, and an unbounded scan walked
@@ -232,10 +239,20 @@ fn extract_native(text: &str) -> Extract {
         let raw = value_body[..v_end]
             .strip_prefix('\n')
             .unwrap_or(&value_body[..v_end]);
-        let raw = raw.strip_suffix('\n').unwrap_or(raw).to_string();
-        let value = match json::parse(raw.as_bytes()) {
-            Ok(v) => v,
-            Err(_) => json::s(raw),
+        let raw = raw.strip_suffix('\n').unwrap_or(raw);
+        let is_string = parameters.as_ref()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get(&key))
+            .and_then(|property| property.get("type"))
+            .and_then(Value::as_str) == Some("string");
+        // XML has no string delimiters. In particular, never round an
+        // exact seed through a JSON number before converting it to text.
+        // Unknown fields keep their prior decoding and still fail closed
+        // at the typed tool boundary; nested JSON is never coerced.
+        let value = if is_string && !raw.trim_start().starts_with('"') {
+            json::s(raw)
+        } else {
+            json::parse(raw.as_bytes()).unwrap_or_else(|_| json::s(raw))
         };
         // The model sometimes repeats a parameter to sneak two calls into
         // one block; first wins, deterministically (one call per block is
@@ -381,8 +398,10 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
              request is an instruction, and the player is holding a controller, not a \
              chat. Decide every open detail yourself, build it NOW in this turn, and say \
              what you built afterwards in one or two sentences. Never end a turn with a \
-             question or an offer to build. If a request is impossible as asked, build \
-             the nearest thing the tools can and say what changed.\n\
+             question or an offer to build. Preserve the requested identity and image \
+             reference. If generation fails, repair it or use the editable model tools \
+             for the same subject; if blocked, report the failed stage and keep the \
+             current player. Never swap in an unrelated catalog character as a fallback.\n\
              If you reason, put ALL reasoning inside <think>...</think>. \
              After </think>, emit exactly ONE tool call and STOP. \
              Never put a tool call, backticks, or JSON examples inside thinking.\n",

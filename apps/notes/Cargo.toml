@@ -1,0 +1,32 @@
+# notes — part of the Makepad app family: standalone window, and a module
+# (src/module.rs) the window manager seats in-process. Spec of record:
+# local/agent_state/wm-all/apps/notes-redesign.md; contract: .../CONTRACT.md.
+
+[package]
+name = "makepad-notes"
+version = "0.1.0"
+edition = "2021"
+default-run = "notes"
+
+[lib]
+name = "makepad_notes"
+path = "src/lib.rs"
+
+[[bin]]
+name = "notes"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[features]
+default = ["standalone"]
+# The standalone window (src/main.rs); a host that links the module leaves it off.
+standalone = []
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-app-module = { path = "../../libs/app_module" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-civil-time = { path = "../../libs/civil_time" }
+

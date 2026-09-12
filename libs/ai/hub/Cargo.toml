@@ -11,33 +11,10 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [features]
-# Native backends only. Python/Torch oracles stay off unless a box
-# explicitly enables `python-backends`.
-default = [
-    "flux",
-    "paint",
-    "paint-cuda",
-    "llm",
-    "tts",
-    "indextts",
-    "speech",
-    "stt",
-    "video",
-    "interpolate",
-    "audio",
-    "mesh",
-    "matte-native",
-    "depth-native",
-    "segment-native",
-    "body-native",
-    "upscale-native",
-    "motion-native",
-    "rig-native",
-    "splat-native",
-    "beats-native",
-    "stems-native",
-    "notes-native",
-]
+# In-app default: what a desktop application embedding the hub needs —
+# the local LLM and Whisper speech-to-text. The standalone service
+# (apps/ai-hub) lists every backend in its own default feature set.
+default = ["llm", "stt"]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
 # service must not advertise or instantiate a Python runtime.
@@ -46,11 +23,12 @@ python-backends = []
 flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured
 # GLB + semantic maps + provenance manifest. Ships the deterministic
-# "paint-test" tier everywhere. Default also enables `paint-cuda`, so a
+# "paint-test" tier everywhere. The standalone service default (apps/ai-hub)
+# also enables `paint-cuda`, so a
 # Windows/Linux fleet box advertises Hunyuan Paint and downloads weights
 # like any other registry model.
 paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
-# Windows/Linux CUDA Hunyuan executor (in default).
+# Windows/Linux CUDA Hunyuan executor (in the standalone service default).
 paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]

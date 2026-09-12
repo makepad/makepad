@@ -396,6 +396,21 @@ pub fn assemble_chat_prompt_with_think(
     out
 }
 
+/// Settings specific to pixel-aligned image-to-3D conditioning.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct PixalOptionsJson {
+    /// Cascade output resolution: 1024 or 1536 (default 1024).
+    pub resolution: Option<u32>,
+    /// Horizontal camera field of view in degrees; default 49.13.
+    pub camera_fov: Option<f64>,
+    /// Override the sparse-structure noise stream independently.
+    pub structure_seed: Option<u64>,
+    /// Override texture noise independently of the shape request seed.
+    pub texture_seed: Option<u64>,
+    /// High-resolution shape sampling steps (default 20).
+    pub shape_steps: Option<u32>,
+}
+
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
 pub struct GenerateRequestJson {
     pub model: String,
@@ -588,6 +603,9 @@ pub struct GenerateRequestJson {
     pub decimation_target: Option<u32>,
     /// Baked texture atlas size in texels. Default 1024, clamped 256..=4096.
     pub texture_size: Option<u32>,
+
+    /// Native Pixal3D projection and cascade controls.
+    pub pixal: Option<PixalOptionsJson>,
 
     // -- splat domain (triposplat backend) --
     /// Target gaussian count for the splat PLY. Default 262144 (the model's

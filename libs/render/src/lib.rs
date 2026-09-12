@@ -11,8 +11,19 @@
 // Shader/live literals intentionally use their source-language spelling.
 #![allow(clippy::approx_constant)]
 
+pub mod asset_lights;
+pub mod asset_morph;
+pub mod asset_rigid;
+pub mod asset_animation;
+pub mod asset_sockets;
+pub mod asset_metadata;
+pub mod asset_lod;
 pub mod ao;
 pub mod custom_material;
+pub mod clustered;
+pub mod fast_gi;
+pub mod entity_lights;
+pub mod local_shadows;
 pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
@@ -26,6 +37,7 @@ pub mod hud;
 pub mod light_grid;
 pub mod lightmap;
 pub mod model;
+pub mod material_surface;
 pub mod player_nav;
 pub mod renderer;
 pub mod scene;
@@ -46,6 +58,9 @@ pub mod thermometer;
 
 pub use bake::*;
 pub use custom_material::DrawSceneCustom;
+pub use clustered::{ClusterConfig, ClusterStats};
+pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug};
+pub use local_shadows::{LocalShadowConfig, LocalShadowStats};
 pub use gpu_lightmap::{
     dynamic_shadow_tiers, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
     GpuLmSkin, DEFAULT_CSM_CONFIG,
@@ -77,6 +92,13 @@ use makepad_draw::*;
 /// `makepad_widgets::script_mod` (the shader block uses the widgets prelude)
 /// and before any widget that declares these draw types.
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    local_shadows::sampling::script_mod(vm);
+    if local_shadows::hardware_shadow_maps() {
+        local_shadows::hardware_sampling::script_mod(vm);
+    }
+    clustered::script_mod(vm);
+    fast_gi::script_mod(vm);
     ssao::script_mod(vm);
-    shaders::script_mod(vm)
+    shaders::script_mod(vm);
+    local_shadows::script_mod(vm)
 }

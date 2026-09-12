@@ -220,6 +220,7 @@ pub struct WTextureInput {
 impl DrawShaderTextureInput {
     pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
         let ty = match self.tex_type {
+            TextureType::TextureDepth => "sampler2DShadow",
             TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
             _ => "sampler2D",
         };
@@ -293,6 +294,21 @@ pub struct FromWasmAllocArrayBuffer {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmRetainedArrayBuffer {
+    pub buffer_id: usize,
+    pub data: WasmPtrF32,
+    pub first_slot: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WCustomUniformBuffer {
+    pub block_name: String,
+    pub data: WasmPtrU8,
+    pub generation_lo: u32,
+    pub generation_hi: u32,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmAllocIndexBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrU32,
@@ -319,6 +335,12 @@ pub struct FromWasmFreeWebGLResources {
     pub vao_ids: Vec<usize>,
     pub texture_ids: Vec<usize>,
     pub framebuffer_ids: Vec<usize>,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmPollGpuCompletion {
+    pub serial_lo: u32,
+    pub serial_hi: u32,
 }
 
 #[derive(FromWasm, Default)]
@@ -381,8 +403,8 @@ pub struct WColorTarget {
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_color: WColor,
-    /// Attachment pixel format: 0 = RGBA8 (default), 1 = R32F
-    /// (`TextureFormat::RenderRf32`, needs EXT_color_buffer_float).
+    /// Attachment format: 0 RGBA8, 1 R32F, 2 RGBA32F, 3 RGBA16F.
+    /// Float color attachments require EXT_color_buffer_float.
     pub format: u32,
 }
 
@@ -411,6 +433,11 @@ pub struct FromWasmBeginRenderTexture {
 #[derive(FromWasm)]
 pub struct FromWasmRequestRenderTextureCapture {
     pub texture_id: usize,
+    pub register_only: bool,
+    pub ticket_lo: u32,
+    pub ticket_hi: u32,
+    pub width: usize,
+    pub height: usize,
 }
 
 #[derive(FromWasm)]
@@ -424,10 +451,12 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {}
 
 #[derive(FromWasm)]
 pub struct FromWasmDrawCall {
+    pub custom_uniforms: Vec<WCustomUniformBuffer>,
     pub vao_id: usize,
     pub shader_id: usize,
     pub index_width: u32,
     pub depth_write: bool,
+    pub alpha_blend: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub pass_uniforms_gen_lo: u32,

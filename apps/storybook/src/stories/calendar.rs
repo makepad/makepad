@@ -28,7 +28,7 @@ script_mod! {
         StoryNote{text: "In Multiple every press is a toggle, and the widget keeps the set in date order so a host reading it never has to sort."}
         StoryRow{
             many := Calendar{
-                mode: CalendarMode.Multiple
+                mode: CalendarPickMode.Multiple
                 year: 2026
                 month: 9
                 selected: "2026-09-03,2026-09-04,2026-09-17"
@@ -40,7 +40,7 @@ script_mod! {
         StoryNote{text: "In Range the first press anchors an end and the second finishes it. Between the two, moving the pointer shows the span that press would make — without it there is nothing on screen to say which end is held. The ends come out earliest first however they were pressed, and Escape puts a half-made range down again."}
         StoryRow{
             span := Calendar{
-                mode: CalendarMode.Range
+                mode: CalendarPickMode.Range
                 year: 2026
                 month: 9
                 selected: "2026-09-07,2026-09-18"
@@ -203,9 +203,9 @@ Nothing stops at the edge of the drawn month: the arrows walk into the next one 
             kind: ControlKind::Choice {
                 prop: "mode",
                 options: &[
-                    "CalendarMode.Single",
-                    "CalendarMode.Multiple",
-                    "CalendarMode.Range",
+                    "CalendarPickMode.Single",
+                    "CalendarPickMode.Multiple",
+                    "CalendarPickMode.Range",
                 ],
                 default: 0,
             },

@@ -6,11 +6,15 @@ description = "GGUF LLM family (Qwen). Graph builders + Metal/CUDA exec. Was lib
 license = "MIT"
 
 [dependencies]
+makepad-ai-loader = { path = "../loader" }
 # Bake the metallib at build time. Without this, MetalRuntime::new() compiles
 # the 13k-line shader source on the GPU and can stall WindowServer.
-makepad-ai-loader = { path = "../loader" }
-makepad-ai-cuda = { path = "../cuda" }
 makepad-ai-metal = { path = "../metal", features = ["metal-precompile"] }
+
+# The CUDA executor (cuda_exec/real.rs) and its canary need the CUDA store;
+# it is Linux/Windows-only, so a macOS build never compiles it.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../cuda" }
 
 [[bin]]
 name = "llama-load"
@@ -26,7 +30,7 @@ path = "src/bin/llama_graph_census.rs"
 
 [[bin]]
 name = "llama-cuda-canary"
-path = "src/bin/llama_cuda_canary.rs"
+path = "src/bin/llama_cuda_canary/main.rs"
 
 [[bin]]
 name = "llama-compare"

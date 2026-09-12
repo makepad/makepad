@@ -108,17 +108,6 @@ pub fn define_macos_timer_delegate() -> *const Class {
         }));
     }
 
-    extern "C" fn metal_display_link_needs_update(
-        _this: &Object,
-        _: Sel,
-        link: ObjcId,
-        update: ObjcId,
-    ) {
-        shielded("metal-display-link", std::panic::AssertUnwindSafe(|| {
-            MacosApp::send_metal_display_link_update(link, update);
-        }));
-    }
-
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
 
@@ -135,11 +124,6 @@ pub fn define_macos_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedDisplayLink:),
             received_display_link as extern "C" fn(&Object, Sel, ObjcId),
-        );
-        decl.add_method(
-            sel!(metalDisplayLink:needsUpdate:),
-            metal_display_link_needs_update
-                as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
@@ -683,6 +667,10 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn mouse_moved(this: &Object, _sel: Sel, event: ObjcId) {
+        // no button is held during `mouseMoved:` (a held button moves as
+        // `mouseDragged:`): a button the window still counts down lost its up
+        let cw = get_cocoa_window(this);
+        cw.release_lost_buttons(get_event_key_modifier(event));
         mouse_motion(this, event);
     }
 

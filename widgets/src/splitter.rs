@@ -276,9 +276,14 @@ pub struct Splitter {
     #[apply_default]
     animator: Animator,
 
+    // Runtime state: a dragged split and a host-set axis (`set_axis`, e.g. a
+    // compact-mode relayout) must survive a stylesheet `ScriptReapply`, which
+    // walks the same DSL source again. Explicit edits and source reloads still apply.
     #[live(SplitterAxis::Horizontal)]
+    #[apply_state]
     pub axis: SplitterAxis,
     #[live(SplitterAlign::Weighted(0.5))]
+    #[apply_state]
     pub align: SplitterAlign,
     /// Which pane is folded away, if either. Kept apart from `align` so
     /// unfolding restores the bar the user left, with nobody remembering it.
@@ -795,5 +800,38 @@ mod tests {
         // And the layout pass still refuses a pane wider than the window,
         // which is the case that made a clamp there worth having at all.
         assert_eq!(2000.0_f64.clamp(0.0, room), room);
+    }
+}
+
+#[cfg(test)]
+mod style_reapply_tests {
+    use super::*;
+    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+
+    #[test]
+    fn style_reapply_preserves_dragged_split_and_axis() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let original = crate::script_eval!(vm, {use mod.widgets.* Splitter{}});
+            let mut splitter = Splitter::script_from_value(vm, original);
+            assert!(matches!(splitter.align(), SplitterAlign::Weighted(w) if w == 0.5));
+            assert!(matches!(splitter.axis(), SplitterAxis::Horizontal));
+            // A drag and a host relayout (compact mode) happened at runtime.
+            splitter.set_align(SplitterAlign::FromA(120.0));
+            splitter.set_axis(SplitterAxis::Vertical);
+            for (style, dark) in [(DesktopStyle::Windows, false), (DesktopStyle::Macos, true), (DesktopStyle::Omarchy, false)] {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(crate::script_mod);
+                splitter.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
+                assert!(
+                    matches!(splitter.align(), SplitterAlign::FromA(p) if p == 120.0),
+                    "{}: a dragged split must survive a style change, got {:?}",
+                    style.id(),
+                    splitter.align()
+                );
+                assert!(matches!(splitter.axis(), SplitterAxis::Vertical), "{}", style.id());
+            }
+        });
     }
 }

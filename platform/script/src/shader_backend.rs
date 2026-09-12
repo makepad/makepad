@@ -1293,6 +1293,7 @@ impl ShaderBackend {
                 id_lut!(_mp_unpack4u8);
             }
             Self::Wgsl => {
+                id_lut!(_mp_type_shared);
                 id_lut!(_mp_unpack2f16);
                 id_lut!(_mp_unpack4u8);
                 // Builtin function names
@@ -1489,7 +1490,13 @@ impl ShaderBackend {
                     x => x,
                 }
             }
-            Self::Wgsl | Self::Rust => name_in,
+            Self::Wgsl => match name_in {
+                // Inline uniform structs can inherit their field's name.
+                // `shared` is legal Splash, but reserved by WGSL.
+                id!(shared) => id!(_mp_type_shared),
+                name => name,
+            },
+            Self::Rust => name_in,
         }
     }
 

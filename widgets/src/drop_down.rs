@@ -538,6 +538,7 @@ pub struct DropDown {
     popup_global: PopupMenuGlobal,
 
     #[live]
+    #[apply_state]
     selected_item: usize,
 
     #[layout]

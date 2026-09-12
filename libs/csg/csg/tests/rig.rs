@@ -6,7 +6,7 @@ const SPRIGLET: &str = include_str!("../examples/spriglet.splash");
 
 fn build(source: &str) -> (MeshedModel, Vec<u8>) {
     let doc = evaluate_program(source, CsgBudgets::default()).unwrap();
-    let model = mesh_document(doc, |partial| assert!(partial.model.rig.is_none())).unwrap();
+    let model = mesh_document(doc, |partial| assert!(!partial.part.mesh.triangles.is_empty())).unwrap();
     let glb = model.rig.as_ref().unwrap().to_glb(&model).unwrap();
     (model, glb)
 }
@@ -194,7 +194,7 @@ fn rig_budgets_and_post_mesh_failure_never_return_a_final_skin() {
     assert_eq!(previews, 0);
     let source = SPRIGLET.replace("vec3(0.16, 0.7, 0.16)", "vec3(50, 50, 50)").replace("vec3(0, 0.8, 0))", "vec3(0, 49, 0))");
     let doc = evaluate_program(&source, CsgBudgets::default()).unwrap();
-    assert!(mesh_document(doc, |p| assert!(p.model.rig.is_none())).unwrap_err().to_string().contains("mesh must be finite"));
+    assert!(mesh_document(doc, |p| assert!(!p.part.mesh.triangles.is_empty())).unwrap_err().to_string().contains("mesh must be finite"));
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn cancellation_after_the_last_preview_still_refuses_final_binding() {
         let doc = evaluate_program(SPRIGLET, CsgBudgets::default()).unwrap();
         mesh_document(doc, |partial| {
             previews += 1;
-            assert!(partial.model.rig.is_none());
+            assert!(!partial.part.mesh.triangles.is_empty());
             if partial.completed == partial.total { token.cancel(); }
         })
     });

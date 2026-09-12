@@ -86,6 +86,17 @@ impl std::fmt::Debug for FlowClient {
 }
 
 impl FlowClient {
+    /// Attach using a server's published root files. Identity and token
+    /// verification are identical to an explicit remote connection.
+    pub fn connect_root(root: impl AsRef<std::path::Path>) -> ClientResult<Self> {
+        let files=super::read_root_files(root.as_ref());
+        Self::connect(
+            files.endpoints.ok_or_else(||ClientError::Protocol("flow-server has no published endpoints".into()))?,
+            files.token.ok_or_else(||ClientError::Protocol("flow-server token is missing".into()))?,
+            files.server_id,
+        )
+    }
+
     pub fn connect(
         endpoints: Endpoints,
         token: String,
@@ -499,6 +510,27 @@ impl FlowClient {
         let target = format!("/v1/instances/{}", route_id(id, "instance")?);
         let _ = self.call(Method::Delete, &target, None, true, None)?;
         Ok(())
+    }
+
+    /// Upload media on the data plane; instance inputs carry its digest.
+    pub fn put_value(&self, ty: crate::PortType, content_type: &str, bytes: &[u8]) -> ClientResult<crate::PutValueResponse> {
+        if !ty.is_media() || bytes.is_empty() || bytes.len() > DATA_BODY_CAP {
+            return Err(ClientError::Protocol("value must be nonempty media within the data-plane limit".into()));
+        }
+        // The bounded server intentionally refuses percent-encoded targets.
+        // MIME tokens such as image/png are legal literally in the query.
+        if content_type.is_empty() || content_type.bytes().any(|b| b <= b' ' || b >= 127 || b"%&#?".contains(&b)) {
+            return Err(ClientError::Protocol("content type must be a literal MIME token without query delimiters".into()));
+        }
+        let target = format!("/v1/values?type={}&content_type={content_type}", ty.as_str());
+        let response = self.data.call(Method::Put, &target, Some(self.token.as_str()), Some(bytes), None)?;
+        match response.status {
+            200..=299 => crate::PutValueResponse::deserialize_json(std::str::from_utf8(&response.body)
+                .map_err(|e| ClientError::Protocol(e.to_string()))?)
+                .map_err(|e| ClientError::Protocol(format!("{e:?}"))),
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
     }
 
     pub fn value(&self, digest: &str) -> ClientResult<ValueBytes> {

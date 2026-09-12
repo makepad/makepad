@@ -1,4 +1,4 @@
-use osmpbf::{Element, ElementReader};
+use makepad_map_build::osm_pbf::{Element, ElementReader};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();

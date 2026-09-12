@@ -17,4 +17,4 @@ makepad-splat = { path = "../libs/splat", version = "1.0.0" }
 makepad-box3d = { path = "../libs/box3d", version = "0.1.0" }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(headless)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(gpusim)"] }

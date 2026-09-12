@@ -10,6 +10,7 @@ struct IdPoolFreeState {
     generations: Vec<u64>,
     retirement_pending: VecDeque<usize>,
     retirement_queued: Vec<bool>,
+    reuse_cursor: usize,
 }
 
 #[derive(Default, Debug)]
@@ -102,6 +103,14 @@ where
         self.free.0.borrow().free.clone()
     }
 
+    /// Validate a handle using dense UI-owned metadata, without touching the
+    /// potentially large resource stored in each pool slot.
+    pub fn is_live_generation(&self, id: usize, generation: u64) -> bool {
+        let state = self.free.0.borrow();
+        state.generations.get(id) == Some(&generation)
+            && !state.is_free.get(id).copied().unwrap_or(true)
+    }
+
     pub fn live_count(&self) -> usize {
         self.slot_count().saturating_sub(self.free_count())
     }
@@ -111,6 +120,38 @@ where
         !self.free.0.borrow().retirement_pending.is_empty()
     }
 
+    /// Reuse an existing allocation without first constructing a replacement.
+    /// Bounded scans rotate across retries so a large free pool cannot hide a
+    /// suitable warm slot or force one frame to fault its entire inventory.
+    pub fn try_alloc_reusing(
+        &mut self,
+        limit: usize,
+        mut suitable: impl FnMut(&T) -> bool,
+    ) -> Option<PoolId> {
+        let mut state = self.free.0.borrow_mut();
+        let count = state.free.len();
+        if count == 0 {
+            return None;
+        }
+        for _ in 0..count.min(limit) {
+            let index = state.reuse_cursor % count;
+            state.reuse_cursor = state.reuse_cursor.wrapping_add(1);
+            let id = state.free[index];
+            if !suitable(&self.pool[id].item) {
+                continue;
+            }
+            state.free.swap_remove(index);
+            state.is_free[id] = false;
+            self.pool[id].generation += 1;
+            state.generations[id] = self.pool[id].generation;
+            return Some(PoolId {
+                id,
+                generation: self.pool[id].generation,
+                free: self.free.clone(),
+            });
+        }
+        None
+    }
     pub fn alloc(&mut self) -> PoolId {
         let last_from_free_pool = {
             let mut state = self.free.0.borrow_mut();
@@ -140,6 +181,16 @@ where
             item: item.unwrap_or_else(|| T::default()),
         });
         let mut state = self.free.0.borrow_mut();
+        // Returning a UI-owned handle must not allocate. Both queues are
+        // coalesced per slot, so their maximum occupancy is the slot count.
+        // Grow geometrically with cold slot construction, before any drop.
+        let slots = id + 1;
+        let free_len = state.free.len();
+        state.free.reserve(slots.saturating_sub(free_len));
+        let pending_len = state.retirement_pending.len();
+        state
+            .retirement_pending
+            .reserve(slots.saturating_sub(pending_len));
         state.is_free.push(false);
         state.generations.push(0);
         state.retirement_queued.push(false);
@@ -202,15 +253,19 @@ where
     /// free at this safe point.
     /// Drops are coalesced per slot, so pending metadata is bounded by the
     /// pool's slot count and allocation never needs to search it.
-    pub(crate) fn take_free_retirements(&mut self, limit: usize) -> Vec<usize> {
+    pub(crate) fn take_free_retirement(&mut self) -> Option<usize> {
         let mut state = self.free.0.borrow_mut();
-        let mut retired = Vec::with_capacity(limit.min(state.retirement_pending.len()));
+        let id = state.retirement_pending.pop_front()?;
+        state.retirement_queued[id] = false;
+        state.is_free[id].then_some(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_free_retirements(&mut self, limit: usize) -> Vec<usize> {
+        let mut retired =
+            Vec::with_capacity(limit.min(self.free.0.borrow().retirement_pending.len()));
         for _ in 0..limit {
-            let Some(id) = state.retirement_pending.pop_front() else {
-                break;
-            };
-            state.retirement_queued[id] = false;
-            if state.is_free[id] {
+            if let Some(id) = self.take_free_retirement() {
                 retired.push(id);
             }
         }

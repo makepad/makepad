@@ -28,7 +28,7 @@ use crate::{
     badge::{BadgeIntent, BadgePalette},
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
     view::*,
     widget::*,
 };
@@ -578,7 +578,7 @@ impl Widget for TipLayer {
         // inside the window. The room is the WHOLE PASS, which is what a
         // tooltip may cover, and it is the space the anchor rects are
         // measured in.
-        let placed = place(&PlaceRequest {
+        let placed = place_overlay(&PlaceRequest {
             anchor,
             size: dvec2(w, h),
             bounds: Rect {

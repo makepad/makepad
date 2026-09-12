@@ -16,7 +16,7 @@ const WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT: usize = 32;
 impl Cx {
     pub(crate) fn has_pending_webgl_resource_retirements(&self) -> bool {
         self.geometries.0.has_pending_retirements()
-            || self.draw_lists.0.has_pending_retirements()
+            || self.draw_lists.has_pending_instance_retirements()
             || self.passes.0.has_pending_retirements()
             || self.textures.0.has_pending_retirements()
     }
@@ -25,17 +25,25 @@ impl Cx {
     /// candidate is produced only by the last owning handle being dropped;
     /// allocation cancels it, so no draw-age heuristic is involved.
     pub(crate) fn retire_webgl_resources(&mut self) {
+        self.draw_lists.1.allocations.collect_for_frame(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+
         let mut array_buffer_ids = Vec::new();
         let mut index_buffer_ids = Vec::new();
         let mut vao_ids = Vec::new();
         let mut texture_ids = Vec::new();
         let mut framebuffer_ids = Vec::new();
 
-        for slot in self
-            .geometries
-            .0
-            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
-        {
+        for _ in 0..WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT {
+            let Some(slot) = self.geometries.0.take_free_retirement() else {
+                continue;
+            };
             let geometry = &mut self.geometries.0.pool[slot].item;
             if let Some(id) = geometry.os.vb_id {
                 array_buffer_ids.push(id);
@@ -52,18 +60,13 @@ impl Cx {
             geometry.dirty_indices = true;
         }
 
-        for slot in self
-            .draw_lists
-            .0
-            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
-        {
-            let draw_list = &mut self.draw_lists.0.pool[slot].item;
-            for item in &mut draw_list.draw_items.buffer {
-                if let Some(id) = item.os.inst_vb_id {
+        self.draw_lists
+            .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
+                if let Some(id) = os.inst_vb_id {
                     array_buffer_ids.push(id);
-                    item.os.inst_vb_generation = item.os.inst_vb_generation.wrapping_add(1);
+                    os.inst_vb_generation = os.inst_vb_generation.wrapping_add(1);
                 }
-                if let Some(vao) = &mut item.os.vao {
+                if let Some(vao) = &mut os.vao {
                     vao_ids.push(vao.vao_id);
                     // Preserve the id high-water mark while ensuring reuse
                     // emits FromWasmAllocVao and recreates its two UBOs.
@@ -72,22 +75,17 @@ impl Cx {
                     vao.geom_vb_id = None;
                     vao.geom_ib_id = None;
                 }
-                item.os.uniforms_recording_gen = None;
-                item.os.draw_call_uniforms_gen = None;
-                item.os.user_uniforms_gen = None;
-                item.kind = crate::draw_list::CxDrawKind::Empty;
-                if let Some(instances) = &mut item.instances {
-                    instances.clear();
-                }
-            }
-            draw_list.draw_items.clear();
-        }
+                os.uniforms_recording_gen = None;
+                os.draw_call_uniforms_gen = None;
+                os.user_uniforms_gen = None;
+                os.inst_capacity = 0;
+                os.inst_charge.take()
+            });
 
-        for slot in self
-            .passes
-            .0
-            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
-        {
+        for _ in 0..WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT {
+            let Some(slot) = self.passes.0.take_free_retirement() else {
+                continue;
+            };
             framebuffer_ids.push(slot);
             let pass = &mut self.passes.0.pool[slot].item;
             // Release only small owning handles and stale graph edges. Large
@@ -104,11 +102,10 @@ impl Cx {
         }
 
         // Draw-list and pass cleanup above can release their final Texture Rc.
-        for slot in self
-            .textures
-            .0
-            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
-        {
+        for _ in 0..WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT {
+            let Some(slot) = self.textures.0.take_free_retirement() else {
+                continue;
+            };
             texture_ids.push(slot);
         }
 
@@ -136,6 +133,18 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
     ) {
+        if !self.draw_lists.1.allocations.has_device_limit() {
+            // WebGL deliberately exposes no VRAM query. Use the browser's
+            // conservative process allowance and identify this fallback.
+            let allowance = self.memory_budget();
+            self.draw_lists
+                .1
+                .allocations
+                .set_device_limit(allowance / 4);
+            // The one derived limit of the publication registry (contract §7).
+            self.publications.set_envelope(allowance / 4);
+            crate::log!("retained-upload budgets: process_allowance={} allocation_limit={} source=web_process_allowance_fallback", allowance, allowance / 4);
+        }
         let shaders_pending = self.os.webgl_shaders_pending != 0;
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
@@ -187,7 +196,8 @@ impl Cx {
                     self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
                 }
             } else {
-                let draw_list = &mut self.draw_lists[draw_list_id];
+                let (draw_list, upload_budget) =
+                    self.draw_lists.list_and_upload_budget(draw_list_id);
                 let draw_list_recording_gen = draw_list.recording_gen;
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -207,19 +217,72 @@ impl Cx {
                     self.demo_time_repaint = true;
                 }
 
-                if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
+                if (draw_call.instance_dirty
+                    || draw_item.os.inst_vb_id.is_none()
+                    || draw_item.retained_gpu_evicted)
+                    && !(draw_item.retained_gpu_evicted
+                        && draw_item.retained_instances.is_some()
+                        && draw_item.retained_instance_count == 0)
+                {
+                    upload_budget.allocations.collect_for_frame(
+                        self.repaint_id,
+                        self.textures
+                            .1
+                            .serials
+                            .completed
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    );
+                    let bytes = draw_item.retained_instances.as_ref().map_or_else(
+                        || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
+                        |p| p.byte_len(),
+                    );
+                    let replaces = draw_item.retained_instances.is_none()
+                        || draw_item.retained_upload_range.start == 0
+                        || draw_item.os.inst_vb_id.is_none()
+                        || bytes > draw_item.os.inst_capacity;
+                    if replaces {
+                        let capacity = if draw_item.retained_instances.is_some() {
+                            bytes.next_power_of_two().max(256)
+                        } else {
+                            bytes
+                        };
+                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
+                            draw_item.instance_upload_pending = true;
+                            self.demo_time_repaint = true;
+                            continue;
+                        };
+                        draw_item.os.inst_capacity = capacity;
+                        draw_item.os.inst_charge = Some(charge);
+                    }
+                    draw_item.instance_upload_pending = false;
                     draw_call.instance_dirty = false;
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    draw_item.resident_schema = draw_item.retained_schema;
+                    draw_item.retained_gpu_evicted = false;
                     if draw_item.os.inst_vb_id.is_none() {
                         draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
 
-                    self.os.from_wasm(FromWasmAllocArrayBuffer {
-                        buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                        data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap()),
-                        byte_data: WasmPtrU8::new(&[]),
-                    });
+                    if let Some(retained) = &draw_item.retained_instances {
+                        self.os.from_wasm(FromWasmRetainedArrayBuffer {
+                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
+                            data: WasmPtrF32::new(retained.data()),
+                            first_slot: draw_item.retained_upload_range.start,
+                        });
+                    } else {
+                        self.os.from_wasm(FromWasmAllocArrayBuffer {
+                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
+                            data: WasmPtrF32::new(draw_item.instances.as_deref().unwrap()),
+                            byte_data: WasmPtrU8::new(&[]),
+                        });
+                    }
                     draw_call.instance_dirty = false;
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    draw_item.resident_schema = draw_item.retained_schema;
+                    draw_item.retained_gpu_evicted = false;
                 }
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
@@ -247,7 +310,10 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
+                                        data: WasmPtrU32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
                                     });
                                 }
                                 // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
@@ -262,7 +328,10 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
+                                        data: WasmPtrU32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
                                     });
                                 }
                                 TextureFormat::VecRu8 {
@@ -275,7 +344,10 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU8::new(match data { Some(data) => data, None => continue }),
+                                        data: WasmPtrU8::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
                                     });
                                 }
                                 TextureFormat::VecRGBAf32 {
@@ -288,7 +360,10 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrF32::new(match data { Some(data) => data, None => continue }),
+                                        data: WasmPtrF32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
                                     });
                                 }
                                 TextureFormat::VecCubeBGRAu8_32 {
@@ -301,7 +376,10 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
+                                        data: WasmPtrU32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
                                     });
                                 }
                                 _ => continue,
@@ -364,7 +442,9 @@ impl Cx {
                     match geometry.index_width {
                         4 => {
                             let Some(v) = geometry.indices.as_u32() else {
-                                crate::error!("u32 index staging does not match resident index width");
+                                crate::error!(
+                                    "u32 index staging does not match resident index width"
+                                );
                                 continue;
                             };
                             self.os.from_wasm(FromWasmAllocIndexBuffer {
@@ -376,17 +456,16 @@ impl Cx {
                         }
                         2 => {
                             let Some(v) = geometry.indices.as_u16() else {
-                                crate::error!("u16 index staging does not match resident index width");
+                                crate::error!(
+                                    "u16 index staging does not match resident index width"
+                                );
                                 continue;
                             };
                             self.os.from_wasm(FromWasmAllocIndexBuffer {
                                 buffer_id: geometry.os.ib_id.unwrap(),
                                 data: WasmPtrU32::new(&[]),
                                 byte_data: WasmPtrU8::new(unsafe {
-                                    std::slice::from_raw_parts(
-                                        v.as_ptr() as *const u8,
-                                        v.len() * 2,
-                                    )
+                                    std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2)
                                 }),
                                 index_width: 2,
                             });
@@ -453,18 +532,27 @@ impl Cx {
                 };
                 let instances = if sh.mapping.instances.total_slots == 0 {
                     0
+                } else if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count
                 } else {
                     draw_item.instances.as_ref().map_or(0, |instances| {
                         instances.len() / sh.mapping.instances.total_slots
                     })
                 };
-                if sh.mapping.flags.debug_draw && instances > 0 {
+                if instances == 0 {
+                    continue;
+                }
+                if sh.mapping.flags.debug_draw {
                     CxDrawShaderMapping::debug_dump_shader_draw_call(
                         "webgl",
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances,
                     );
                 }
@@ -512,10 +600,28 @@ impl Cx {
                 debug_assert_ne!(live_uniforms_gen, 0);
 
                 self.os.from_wasm(FromWasmDrawCall {
+                    custom_uniforms: sh
+                        .mapping
+                        .uniform_buffers
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, input)| {
+                            let uniform = draw_call.uniform_buffer_slots[slot]
+                                .as_ref()
+                                .map(|b| &self.uniform_buffers[b.uniform_buffer_id()]);
+                            WCustomUniformBuffer {
+                                block_name: input.block_name.clone(),
+                                data: WasmPtrU8::new(uniform.map_or(&[], |b| b.data.as_slice())),
+                                generation_lo: uniform.map_or(0, |b| b.generation as u32),
+                                generation_hi: uniform.map_or(0, |b| (b.generation >> 32) as u32),
+                            }
+                        })
+                        .collect(),
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
+                    alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     pass_uniforms_gen_lo: pass_uniforms_gen as u32,
@@ -536,6 +642,35 @@ impl Cx {
                     const_table: WasmPtrF32::new(&[]),
                     textures,
                 });
+                draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                draw_item.consumed_schema = draw_item.resident_schema;
+                draw_item.consumed_serial = if self.os.webgl_shaders_pending == 0 {
+                    self.textures
+                        .1
+                        .serials
+                        .submitted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        + 1
+                } else {
+                    0
+                };
+                if let Some(charge) = &draw_item.os.inst_charge {
+                    charge.submitted(draw_item.consumed_serial);
+                }
+                if let Some((block, _)) = draw_item.shared.as_ref() {
+                    // The lease's receipt under the pass's serial; the frame
+                    // frontier (`poll_texture_lifetimes`) completes it.
+                    let receipt = block.receipt();
+                    receipt.mark_encoded(draw_item.consumed_serial);
+                    receipt.mark_submitted(
+                        draw_item.consumed_serial,
+                        draw_item.kind.draw_call().map_or(0, |call| call.uniforms_gen),
+                    );
+                }
+                draw_item.consumed_uniforms_gen = draw_item
+                    .kind
+                    .draw_call()
+                    .map_or(0, |call| call.uniforms_gen);
             }
         }
         /*
@@ -548,6 +683,8 @@ impl Cx {
 
     pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        self.passes[draw_pass_id].painted_serial = self.repaint_id;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let dpi_uniforms_gen = self.next_uniform_gen();
@@ -648,6 +785,8 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(draw_pass_id, serial);
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
@@ -686,6 +825,8 @@ impl Cx {
             // different texImage2D (and EXT_color_buffer_float).
             let format = match &self.textures[color_texture.texture.texture_id()].format {
                 TextureFormat::RenderRf32 { .. } => 1,
+                TextureFormat::RenderRGBAf32 { .. } => 2,
+                TextureFormat::RenderRGBAf16 { .. } => 3,
                 _ => 0,
             };
             match color_texture.clear_color {
@@ -746,6 +887,11 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(draw_pass_id, serial);
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.web_capture_texture_readbacks(Some(draw_pass_id));
+        }
     }
 
     fn webgl_collect_draw_list_shaders(
@@ -789,7 +935,16 @@ impl Cx {
                 continue;
             }
 
-            let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code, geom_attribs, inst_attribs) = {
+            let (
+                vertex,
+                pixel,
+                geometry_slots,
+                instance_slots,
+                textures,
+                debug_code,
+                geom_attribs,
+                inst_attribs,
+            ) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
@@ -903,6 +1058,7 @@ impl CxOsDrawShader {
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -919,6 +1075,7 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 #define VIEW_ID 0
 precision highp float;
 precision highp int;
+precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -979,9 +1136,19 @@ pub struct CxOsDrawCall {
     pub vao: Option<CxOsDrawCallVao>,
     pub inst_vb_id: Option<usize>,
     pub inst_vb_generation: u64,
+    pub inst_capacity: usize,
+    pub inst_charge: Option<crate::retained_instances::RetainedAllocation>,
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
     pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -1015,4 +1182,83 @@ pub fn spawn_process_command(
     _current_dir: &str,
 ) -> Result<Child, std::io::Error> {
     Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
+}
+
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        None
+    }
+}
+impl Cx {
+    pub(crate) fn texture_allocation_bytes(&self, _id: crate::texture::TextureId) -> Option<u64> {
+        // JS can reject uploads and scale render targets to hardware/safety
+        // limits. Rust TextureAlloc is a request, not an allocation receipt.
+        // Reporting it as actual bytes would let consumers under-budget.
+        None
+    }
+
+    pub(crate) fn release_texture_allocation(&mut self, id: crate::texture::TextureId) {
+        if !(self.textures[id].format.is_render()
+            || self.textures[id].format.is_vec()
+            || self.textures[id].format.is_depth())
+        {
+            return;
+        }
+        let framebuffer_ids = self
+            .passes
+            .0
+            .pool
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let pass = &slot.item;
+                (pass
+                    .color_textures
+                    .iter()
+                    .any(|color| color.texture.texture_id() == id)
+                    || pass
+                        .depth_texture
+                        .as_ref()
+                        .is_some_and(|depth| depth.texture_id() == id))
+                .then_some(index)
+            })
+            .collect();
+        // WebGL deletion releases the table name now; the driver retains the
+        // actual object until previously queued commands are done. Delete all
+        // FBO references too. Future use creates a new WebGL object at this id.
+        self.os.from_wasm(FromWasmFreeWebGLResources {
+            texture_ids: vec![id.0],
+            framebuffer_ids,
+            array_buffer_ids: Vec::new(),
+            index_buffer_ids: Vec::new(),
+            vao_ids: Vec::new(),
+        });
+        self.textures[id].reset_allocation();
+        self.textures[id].os = Default::default();
+        self.textures[id].previous_platform_resource = None;
+    }
+
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // The adapter draws attached blocks here (no per-publication
+        // backing): dropped blocks release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
+        let completed = self
+            .textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+        let submitted = self.frame_submission_serial();
+        if submitted > completed && self.os.completion_pending == 0 {
+            self.os.completion_pending = submitted;
+            self.os.from_wasm(FromWasmPollGpuCompletion {
+                serial_lo: submitted as u32,
+                serial_hi: (submitted >> 32) as u32,
+            });
+        }
+        self.textures
+            .1
+            .retired
+            .retain(|retired| retired.serial > completed);
+    }
 }

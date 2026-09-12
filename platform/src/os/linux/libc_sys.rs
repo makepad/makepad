@@ -64,6 +64,7 @@ extern "C" {
     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     pub fn free(arg1: *mut c_void);
     pub fn pipe(fds: *mut c_int) -> c_int;
     pub fn select(
@@ -85,7 +86,7 @@ extern "C" {
     pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     pub fn ftruncate(fd: c_int, length: off_t) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
-    pub fn write(fd: c_int, buf: *const c_void, count: size_t) -> c_int;
+    pub fn write(fd: c_int, buf: *const c_void, count: size_t) -> isize;
     pub fn syscall(num: c_long, ...) -> c_long;
 }
 

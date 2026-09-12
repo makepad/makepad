@@ -17,6 +17,7 @@
 //! container can later be swapped for a custom single-file format without
 //! touching emission or generalization code.
 
+use makepad_micro_serde::*;
 use super::geom::TILE_BUFFER;
 use super::mvt::{
     encode_tile, encode_tile_with_profile, read_protobuf_bytes, read_protobuf_key,
@@ -228,7 +229,7 @@ fn validate_store(options: &BaseOptions) -> Result<bool, String> {
         return validate_live_store(options);
     }
     let marker = read_store_marker(&marker_path, "makepad-native-detail-spool-v1")?;
-    check_marker_identity(options, &marker, &marker_path)?;
+    check_marker_identity(options, &marker)?;
     Ok(false)
 }
 
@@ -252,7 +253,7 @@ fn validate_live_store(options: &BaseOptions) -> Result<bool, String> {
         ));
     }
     let stamp = read_store_marker(&stamp_path, "makepad-native-detail-pass-stamp-v1")?;
-    check_marker_identity(options, &stamp, &stamp_path)?;
+    check_marker_identity(options, &stamp)?;
     let frontier_path = options.store.join("spool-frontier.txt");
     let frontier_text = fs::read_to_string(&frontier_path).map_err(|err| {
         format!(
@@ -298,26 +299,30 @@ fn bbox_far_corner_distance(bbox: GeoBounds) -> f64 {
     far
 }
 
-fn read_store_marker(path: &Path, format: &str) -> Result<serde_json::Value, String> {
+/// The fields every scratch-store marker carries, whichever pass wrote it;
+/// the rest of the marker is skipped.
+#[derive(Debug, DeJson)]
+struct MarkerIdentity {
+    format: String,
+    zoom: u8,
+    source_bytes: u64,
+}
+
+fn read_store_marker(path: &Path, format: &str) -> Result<MarkerIdentity, String> {
     let bytes = fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    let marker: serde_json::Value = serde_json::from_slice(&bytes)
+    let text = std::str::from_utf8(&bytes)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
-    if marker.get("format").and_then(|value| value.as_str()) != Some(format) {
+    let marker = MarkerIdentity::deserialize_json_lenient(text)
+        .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    if marker.format != format {
         return Err(format!("{} has an unsupported marker format", path.display()));
     }
     Ok(marker)
 }
 
-fn check_marker_identity(
-    options: &BaseOptions,
-    marker: &serde_json::Value,
-    path: &Path,
-) -> Result<(), String> {
-    let marker_zoom = marker
-        .get("zoom")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no zoom", path.display()))?;
-    if marker_zoom != u64::from(DETAIL_ZOOM) {
+fn check_marker_identity(options: &BaseOptions, marker: &MarkerIdentity) -> Result<(), String> {
+    let marker_zoom = marker.zoom;
+    if marker_zoom != DETAIL_ZOOM {
         return Err(format!(
             "store detail zoom {marker_zoom} is not {DETAIL_ZOOM}; pbf-base requires a z{DETAIL_ZOOM} store"
         ));
@@ -327,10 +332,7 @@ fn check_marker_identity(
         .metadata()
         .map_err(|err| format!("stat {}: {err}", options.source.display()))?
         .len();
-    let marker_source_bytes = marker
-        .get("source_bytes")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no source_bytes", path.display()))?;
+    let marker_source_bytes = marker.source_bytes;
     if marker_source_bytes != source_bytes {
         return Err(format!(
             "store was built from a {marker_source_bytes}-byte PBF but {} is {source_bytes} bytes",

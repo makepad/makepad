@@ -101,6 +101,7 @@ impl ClientProfile {
                     | C::WorldRemove { .. }
                     | C::WorldMove { .. }
                     | C::WorldList
+                    | C::WorldRender { .. }
                     | C::WorldGetSource
                     | C::WorldApi { .. }
                     | C::WorldGetPlan
@@ -113,6 +114,7 @@ impl ClientProfile {
                     | C::WorldAddAddon { .. }
                     | C::ModelBuild { .. }
                     | C::ModelFetch { .. }
+                    | C::ModelDocument { .. }
             ),
             ClientProfile::Gen => matches!(
                 call,

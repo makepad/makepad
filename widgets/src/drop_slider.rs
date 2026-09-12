@@ -18,7 +18,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceRequest, Placement},
+    overlay_place::{place_overlay, PlaceRequest, Placement},
     widget::*,
 };
 
@@ -158,7 +158,7 @@ impl DropSlider {
     /// shifted, and giving it the pass would change where it lands. Both
     /// the draw and the event side read this one function.
     fn panel_rect(chip: Rect) -> Rect {
-        place(&PlaceRequest {
+        place_overlay(&PlaceRequest {
             anchor: chip,
             size: dvec2(PANEL_W, PANEL_H),
             bounds: Rect::default(),

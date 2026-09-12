@@ -13,11 +13,15 @@
 #[cfg(feature = "tts")]
 use makepad_ai_hub::speech::{TtsConfig, TtsEngine, TtsEvent, TtsHandle, TtsSession};
 use makepad_widgets::makepad_draw::audio::AudioBuffer;
-use makepad_widgets::makepad_draw::thread::{ThreadOptions, ThreadSpawner};
+#[cfg(feature = "tts")]
+use makepad_widgets::makepad_draw::thread::ThreadOptions;
+use makepad_widgets::makepad_draw::thread::ThreadSpawner;
 #[cfg(feature = "tts")]
 use makepad_widgets::log;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "tts")]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 /// The buffer the audio callback plays from. Written by the pump thread,
 /// read by the audio thread.
@@ -74,6 +78,7 @@ const MIN_SPOKEN_CHARS: usize = 16;
 /// Speech output: a hub TTS session plus the buffer it fills.
 pub struct SpeechOutput {
     /// Kokoro voice pack name (or any [`makepad_ai_hub::speech::Voice`] id).
+    #[cfg(feature = "tts")]
     voice: String,
     /// Auto keeps the general conversation fallback; a feature that promises
     /// Kokoro can opt out of silently becoming a system voice.
@@ -99,8 +104,9 @@ impl SpeechOutput {
     /// `.mkvoice` is tolerated). Nothing loads until something is said.
     pub fn new(voice: &str, spawner: ThreadSpawner) -> Self {
         #[cfg(not(feature = "tts"))]
-        let _ = spawner;
+        let _ = (voice, spawner);
         Self {
+            #[cfg(feature = "tts")]
             voice: voice.strip_suffix(".mkvoice").unwrap_or(voice).to_string(),
             #[cfg(feature = "tts")]
             engine: TtsEngine::Auto,
@@ -118,11 +124,9 @@ impl SpeechOutput {
     /// Create a Kokoro-only output. If Kokoro is unavailable, the session
     /// reports failure instead of substituting an unrelated system voice.
     pub fn new_kokoro(voice: &str, spawner: ThreadSpawner) -> Self {
-        let mut output = Self::new(voice, spawner);
+        let output = Self::new(voice, spawner);
         #[cfg(feature = "tts")]
-        {
-            output.engine = TtsEngine::Kokoro;
-        }
+        let output = SpeechOutput { engine: TtsEngine::Kokoro, ..output };
         output
     }
 

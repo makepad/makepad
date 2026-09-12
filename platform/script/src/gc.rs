@@ -241,6 +241,7 @@ impl ScriptHeap {
     }
 
     pub fn new_handle_ref(&mut self, handle: ScriptHandle) -> ScriptHandleRef {
+        let heap_key = self.heap_key();
         let mut roots = self.root_handles.borrow_mut();
         match roots.entry(handle) {
             Entry::Occupied(mut occ) => {
@@ -248,6 +249,7 @@ impl ScriptHeap {
                 ScriptHandleRef {
                     roots: self.root_handles.clone(),
                     handle: handle,
+                    heap_key,
                 }
             }
             Entry::Vacant(vac) => {
@@ -255,6 +257,7 @@ impl ScriptHeap {
                 ScriptHandleRef {
                     roots: self.root_handles.clone(),
                     handle: handle,
+                    heap_key,
                 }
             }
         }

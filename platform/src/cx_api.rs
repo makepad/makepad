@@ -25,8 +25,8 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::{CxWindow, WindowId},
         window::WindowVisuals,
+        window::{CxWindow, WindowId},
     },
     std::{
         any::{Any, TypeId},
@@ -44,6 +44,8 @@ pub enum OpenUrlInPlace {
 pub enum CxThreadPriority {
     #[default]
     Normal,
+    UserInteractive,
+    UserInitiated,
     Utility,
     Background,
     Idle,
@@ -134,10 +136,12 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn history_go(&mut self, delta: i32) {
-        self.cx.platform_ops.push_back(CxOsOp::SystemBrowserHistoryGo {
-            browser_id: self.id.0,
-            delta,
-        });
+        self.cx
+            .platform_ops
+            .push_back(CxOsOp::SystemBrowserHistoryGo {
+                browser_id: self.id.0,
+                delta,
+            });
     }
 
     pub fn close(&mut self) {
@@ -240,6 +244,31 @@ impl std::fmt::Debug for AccessibilityUpdatePayload {
     }
 }
 
+/// A set of screen edges, for [`Cx::defer_system_gestures`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScreenEdges(u8);
+
+impl ScreenEdges {
+    pub const NONE: ScreenEdges = ScreenEdges(0);
+    pub const TOP: ScreenEdges = ScreenEdges(1);
+    pub const LEFT: ScreenEdges = ScreenEdges(2);
+    pub const BOTTOM: ScreenEdges = ScreenEdges(4);
+    pub const RIGHT: ScreenEdges = ScreenEdges(8);
+    pub const ALL: ScreenEdges = ScreenEdges(15);
+
+    pub const fn with(self, other: ScreenEdges) -> ScreenEdges {
+        ScreenEdges(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: ScreenEdges) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
@@ -290,6 +319,10 @@ pub enum CxOsOp {
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
+    /// Asks the OS to defer its own edge gestures (the home-indicator swipe,
+    /// the status-bar and control-centre pulls) on these screen edges, so
+    /// the first swipe from such an edge reaches the app. Honored on iOS.
+    DeferSystemGestures(ScreenEdges),
 
     // The `Rect` is the caret/composition line's bounding box (top-left + size,
     // line height included), so each backend can ask the OS to place the IME
@@ -478,6 +511,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
+            Self::DeferSystemGestures(..) => write!(f, "DeferSystemGestures"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
@@ -594,6 +628,13 @@ impl Cx {
     /// buffers, user-typed text in widgets that don't early-return on
     /// LiveEdit), so prefer `request_script_reapply` when the change can be
     /// modeled as a shared-heap-object mutation instead.
+    /// Re-evaluate application Splash with a new stylesheet, preserving text and
+    /// other imperative state through `Apply::ScriptReapply`.
+    pub fn request_style_reload(&mut self) {
+        self.pending_style_reload = true;
+        self.pending_live_edit_request = true;
+    }
+
     pub fn request_live_edit(&mut self) {
         self.pending_live_edit_request = true;
     }
@@ -716,12 +757,106 @@ impl Cx {
         self.textures.0.live_count()
     }
 
-    pub fn set_thread_priority(priority: CxThreadPriority) {
-        #[cfg(target_os = "android")]
-        crate::os::linux::android::android::set_current_thread_priority(priority);
-
-        #[cfg(not(target_os = "android"))]
-        let _ = priority;
+    /// Apply to the calling thread and read the OS setting back. `Applied`
+    /// confirms the requested class/nice value, not a scheduling guarantee.
+    pub fn set_thread_priority(priority: CxThreadPriority) -> crate::thread::PriorityStatus {
+        use crate::thread::PriorityStatus;
+        #[cfg(target_vendor = "apple")]
+        {
+            unsafe extern "C" {
+                fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+                fn pthread_self() -> *mut std::ffi::c_void;
+                fn pthread_get_qos_class_np(
+                    thread: *mut std::ffi::c_void,
+                    class: *mut u32,
+                    relative: *mut i32,
+                ) -> i32;
+            }
+            let (class, relative) = match priority {
+                CxThreadPriority::UserInteractive => (0x21, 0),
+                CxThreadPriority::UserInitiated => (0x19, 0),
+                CxThreadPriority::Normal => (0x15, 0),
+                CxThreadPriority::Utility => (0x11, 0),
+                CxThreadPriority::Background => (0x09, 0),
+                CxThreadPriority::Idle => (0x09, -15),
+            };
+            let mut actual_class = 0;
+            let mut actual_relative = 0;
+            let applied = unsafe {
+                pthread_set_qos_class_self_np(class, relative) == 0
+                    && pthread_get_qos_class_np(
+                        pthread_self(),
+                        &mut actual_class,
+                        &mut actual_relative,
+                    ) == 0
+                    && actual_class == class
+                    && actual_relative == relative
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            unsafe extern "C" {
+                fn setpriority(which: i32, who: u32, priority: i32) -> i32;
+                fn getpriority(which: i32, who: u32) -> i32;
+            }
+            // Linux PRIO_PROCESS, who=0 addresses the current task/thread,
+            // not the whole process. Keep SCHED_OTHER; no realtime privilege.
+            // Interactive uses nice 0 (unprivileged), light 1 and utility 5.
+            let nice = match priority {
+                CxThreadPriority::Normal | CxThreadPriority::UserInteractive => 0,
+                CxThreadPriority::UserInitiated => 1,
+                CxThreadPriority::Utility => 5,
+                CxThreadPriority::Background => 10,
+                CxThreadPriority::Idle => 15,
+            };
+            let applied = unsafe { setpriority(0, 0, nice) == 0 && getpriority(0, 0) == nice };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentThread() -> *mut std::ffi::c_void;
+                fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+                fn GetThreadPriority(thread: *mut std::ffi::c_void) -> i32;
+            }
+            let value = match priority {
+                CxThreadPriority::UserInteractive => 2, // HIGHEST, not realtime
+                CxThreadPriority::UserInitiated => 1,   // ABOVE_NORMAL
+                CxThreadPriority::Normal => 0,
+                CxThreadPriority::Utility => -1,
+                CxThreadPriority::Background => -2,
+                CxThreadPriority::Idle => -15,
+            };
+            let applied = unsafe {
+                let thread = GetCurrentThread();
+                SetThreadPriority(thread, value) != 0 && GetThreadPriority(thread) == value
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "windows"
+        )))]
+        {
+            let _ = priority;
+            PriorityStatus::BestEffortUnsupported
+        }
     }
 
     pub fn get_ref(&self) -> CxRef {
@@ -794,9 +929,10 @@ impl Cx {
         Err(format!("Dependency not loaded {}", path))
     }
 
-    /// Get loaded resource data by ScriptHandle
-    pub fn get_resource(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
-        if let Some(data) = self.script_data.resources.get_data(handle) {
+    /// Get loaded resource data by the handle's owning heap and value
+    /// (`ScriptHandleRef::heap_key` / `as_handle`).
+    pub fn get_resource(&self, heap_key: usize, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
+        if let Some(data) = self.script_data.resources.get_data(heap_key, handle) {
             return Some(data);
         }
 
@@ -805,7 +941,7 @@ impl Cx {
         // Loaded yet, allow direct dependency lookup as a synchronous fallback.
         if self.os_type().is_web() {
             let resources = self.script_data.resources.resources.borrow();
-            if let Some(res) = resources.iter().find(|res| res.has_handle(handle)) {
+            if let Some(res) = resources.iter().find(|res| res.has_handle(heap_key, handle)) {
                 if let Some(dep_path) = res.dependency_path.as_deref() {
                     if let Ok(data) = self.get_dependency(dep_path) {
                         return Some(data);
@@ -817,12 +953,13 @@ impl Cx {
         None
     }
 
-    /// Get the absolute path registered for a script resource handle.
-    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+    /// Get the absolute path registered for a script resource handle of
+    /// the given heap.
+    pub fn get_resource_abs_path(&self, heap_key: usize, handle: ScriptHandle) -> Option<String> {
         let resources = self.script_data.resources.resources.borrow();
         resources
             .iter()
-            .find(|res| res.has_handle(handle))
+            .find(|res| res.has_handle(heap_key, handle))
             .map(|res| res.abs_path.clone())
     }
 
@@ -830,22 +967,26 @@ impl Cx {
     ///
     /// This reads local file-backed resources directly, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
-    pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
-        let resource_path = {
-            let resources = self.script_data.resources.resources.borrow();
-            resources
-                .iter()
-                .find(|res| res.has_handle(handle))
-                .map(|res| res.abs_path.clone())
-        };
+    pub fn get_resource_font_bytes(&mut self, heap_key: usize, handle: ScriptHandle) -> Option<SharedBytes> {
+        let path = self.get_resource_abs_path(heap_key, handle)?;
+        self.get_resource_font_bytes_by_path(&path)
+    }
 
-        if let Some(path) = resource_path {
-            if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(&path) {
-                return Some(bytes);
-            }
+    /// Font identity captured in its owning script heap. A local handle alone
+    /// cannot identify a resource once a draw object leaves that heap.
+    pub fn get_resource_font_bytes_by_path(&self, path: &str) -> Option<SharedBytes> {
+        if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(path) {
+            return Some(bytes);
         }
-
-        self.get_resource(handle).map(SharedBytes::from_owned)
+        let resources = self.script_data.resources.resources.borrow();
+        let res = resources.iter().find(|res| res.abs_path == path)?;
+        if let crate::script::res::CxScriptResourceData::Loaded(data) = &res.data {
+            return Some(SharedBytes::from_owned(data.clone()));
+        }
+        res.dependency_path
+            .as_deref()
+            .and_then(|path| self.get_dependency(path).ok())
+            .map(SharedBytes::from_owned)
     }
 
     pub fn null_texture(&self) -> Texture {
@@ -885,6 +1026,25 @@ impl Cx {
         &self.gpu_info
     }
 
+    /// GL maps clip-space z/w from [-1, 1] to window depth [0, 1].
+    /// Metal, Vulkan and D3D use [0, 1] clip depth directly.
+    pub fn clip_depth_scale_bias(&self) -> (f32, f32) {
+        if cfg!(all(
+            not(gpusim),
+            not(use_vulkan),
+            any(
+                target_arch = "wasm32",
+                target_os = "linux",
+                target_os = "android",
+                target_env = "ohos"
+            )
+        )) {
+            (0.5, 0.5)
+        } else {
+            (1.0, 0.0)
+        }
+    }
+
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
@@ -898,15 +1058,18 @@ impl Cx {
     }
 
     pub fn xr_advertise_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push_back(CxOsOp::XrAdvertiseAnchor(anchor));
+        self.platform_ops
+            .push_back(CxOsOp::XrAdvertiseAnchor(anchor));
     }
 
     pub fn xr_set_local_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push_back(CxOsOp::XrSetLocalAnchor(anchor));
+        self.platform_ops
+            .push_back(CxOsOp::XrSetLocalAnchor(anchor));
     }
 
     pub fn xr_set_local_floor(&mut self, floor_y: f32) {
-        self.platform_ops.push_back(CxOsOp::XrSetLocalFloor(floor_y));
+        self.platform_ops
+            .push_back(CxOsOp::XrSetLocalFloor(floor_y));
     }
 
     pub fn xr_discover_anchor(&mut self, id: u8) {
@@ -1018,6 +1181,22 @@ impl Cx {
     pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
         self.display_context.system_bar_appearance = appearance;
     }
+
+    /// Ask the OS to defer its own gestures on these screen edges, so the
+    /// FIRST swipe from such an edge reaches the app (an app-owned home
+    /// gesture, an edge-dragged drawer); the OS then shows its indicator and
+    /// takes the next one — the immersive/game behaviour. [`ScreenEdges::NONE`]
+    /// gives the edges back. One call on every platform: honored on iOS
+    /// (`preferredScreenEdgesDeferringSystemGestures`), nothing where the OS
+    /// has no such gesture.
+    pub fn defer_system_gestures(&mut self, edges: ScreenEdges) {
+        if !matches!(self.os_type(), OsType::Ios(_)) {
+            return;
+        }
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::DeferSystemGestures(_)));
+        self.platform_ops.push_back(CxOsOp::DeferSystemGestures(edges));
+    }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push_back(op);
@@ -1055,6 +1234,18 @@ impl Cx {
     ) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
+            let rect = area.rect(self);
+            self.publish_hosted_ime(crate::ime::HostedImeState {
+                visible: !config.is_read_only
+                    && config.soft_keyboard.input_mode != crate::ime::InputMode::None,
+                input_mode: config.soft_keyboard.input_mode,
+                return_key: config.soft_keyboard.return_key_type,
+                multiline: config.is_multiline,
+                x: rect.pos.x,
+                y: rect.pos.y,
+                width: rect.size.x,
+                height: rect.size.y,
+            });
             self.platform_ops
                 .push_back(CxOsOp::ShowTextIME(area, cursor_rect, config));
         }
@@ -1074,13 +1265,31 @@ impl Cx {
     }
 
     pub fn hide_text_ime(&mut self) {
+        self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.reset_text_ime_dismissed();
         self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
     pub fn text_ime_was_dismissed(&mut self) {
+        self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.set_text_ime_dismissed();
         self.platform_ops.push_back(CxOsOp::HideTextIME);
+    }
+
+    pub fn hosted_ime_state(&self) -> crate::ime::HostedImeState {
+        self.get_global_ref::<crate::ime::HostedImeState>()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn publish_hosted_ime(&mut self, state: crate::ime::HostedImeState) {
+        if self.get_global_ref::<crate::ime::HostedImeState>() == Some(&state) {
+            return;
+        }
+        if self.in_makepad_studio {
+            Self::send_studio_message(crate::studio::AppToStudio::Custom(state.to_json()));
+        }
+        *self.global::<crate::ime::HostedImeState>() = state;
     }
 
     /// Set or clear a window's `dpi_override` at runtime.
@@ -1090,11 +1299,7 @@ impl Cx {
     /// physically fixed: inner/outer size, safe-area insets, and native chrome
     /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
     /// this can be called from inside normal event/action handlers.
-    pub fn set_window_dpi_override(
-        &mut self,
-        window_id: WindowId,
-        dpi_override: Option<f64>,
-    ) {
+    pub fn set_window_dpi_override(&mut self, window_id: WindowId, dpi_override: Option<f64>) {
         let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
         let window = &mut self.windows[window_id];
         let current_dpi = window.effective_dpi_factor();
@@ -1211,12 +1416,12 @@ impl Cx {
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
         {
-        self.platform_ops.iter().for_each(|p| {
-            if let CxOsOp::StartDragging { .. } = p {
-                panic!("start drag twice");
-            }
-        });
-        self.platform_ops.push_back(CxOsOp::StartDragging(items));
+            self.platform_ops.iter().for_each(|p| {
+                if let CxOsOp::StartDragging { .. } = p {
+                    panic!("start drag twice");
+                }
+            });
+            self.platform_ops.push_back(CxOsOp::StartDragging(items));
         }
     }
 
@@ -1240,6 +1445,7 @@ impl Cx {
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
+        self.mouse_cursor = cursor;
         // down cursor overrides the hover cursor
         if let Some(p) = self.platform_ops.iter_mut().find(|p| match p {
             CxOsOp::SetCursor(_) => true,
@@ -1249,6 +1455,10 @@ impl Cx {
         } else {
             self.platform_ops.push_back(CxOsOp::SetCursor(cursor))
         }
+    }
+
+    pub fn mouse_cursor(&self) -> MouseCursor {
+        self.mouse_cursor
     }
 
     /// Take the sweep lock for `value`: until it is released, `Event::hits`
@@ -1484,6 +1694,27 @@ impl Cx {
         }
     }
 
+    /// What one texel of a BGRA8 render target costs on this backend: the
+    /// GPU backends allocate 4 bytes, the gpusim raster keeps float colour
+    /// (16 bytes). Caches that budget render targets charge this.
+    pub fn render_target_bytes_per_texel(&self) -> usize {
+        if cfg!(gpusim) { 16 } else { 4 }
+    }
+
+    /// What one texel of a `DepthD32` attachment costs (4 bytes everywhere).
+    pub fn depth_target_bytes_per_texel(&self) -> usize {
+        4
+    }
+
+    /// Whether a pass's depth attachment lives in its colour target's
+    /// storage: the gpusim raster keeps a depth plane per framebuffer, so
+    /// a retained render target painted with depth holds it for good; the
+    /// GPU backends keep one `TextureSize::Auto` depth texture per handle,
+    /// sized to the largest pass it served.
+    pub fn depth_target_rides_with_render_target(&self) -> bool {
+        cfg!(gpusim)
+    }
+
     pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
         &self.passes[draw_pass_id].debug_name
     }
@@ -1492,6 +1723,18 @@ impl Cx {
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
         cxpass.repaint_requested = true;
+    }
+
+    /// An external grab/input-frame request is work even for an idle, hidden
+    /// window. Repaint its pass tree without invalidating tweaked draw buffers.
+    /// Standalone macOS first records any already-pending Draw, then submits
+    /// this window before later input, without advancing NextFrame. Other
+    /// backends service this work on their ordinary next-render path.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
+        if let Some(pass) = self.windows[window_id].main_pass_id {
+            self.repaint_pass_and_child_passes(pass);
+        }
     }
 
     /// Parent `child` under `parent` for painting order on behalf of
@@ -1506,8 +1749,7 @@ impl Cx {
         parent: DrawPassId,
         attached_by: Option<DrawListId>,
     ) {
-        let attached_by =
-            attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
+        let attached_by = attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
         let cxpass = &mut self.passes[child];
         cxpass.parent = CxDrawPassParent::DrawPass(parent);
         cxpass.attached_by = attached_by;
@@ -1873,11 +2115,12 @@ impl Cx {
     }
 
     pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
-        self.platform_ops.push_back(CxOsOp::UpdateCameraNativePreview {
-            video_id,
-            area,
-            visible,
-        });
+        self.platform_ops
+            .push_back(CxOsOp::UpdateCameraNativePreview {
+                video_id,
+                area,
+                visible,
+            });
     }
 
     pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
@@ -1887,14 +2130,16 @@ impl Cx {
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push_back(CxOsOp::BeginVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::BeginVideoPlayback(video_id));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
         // Last-wins coalescing: one frame should apply a single play/pause
         // intent even though the queue is FIFO.
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push_back(CxOsOp::PauseVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::PauseVideoPlayback(video_id));
     }
 
     pub fn resume_video_playback(&mut self, video_id: LiveId) {
@@ -1905,7 +2150,8 @@ impl Cx {
 
     pub fn mute_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_mute(video_id);
-        self.platform_ops.push_back(CxOsOp::MuteVideoPlayback(video_id));
+        self.platform_ops
+            .push_back(CxOsOp::MuteVideoPlayback(video_id));
     }
 
     pub fn unmute_video_playback(&mut self, video_id: LiveId) {
@@ -2003,7 +2249,8 @@ impl Cx {
     /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
         self.file_dialogs.begin(&dialog);
-        self.platform_ops.push_back(CxOsOp::SelectFileDialog(dialog));
+        self.platform_ops
+            .push_back(CxOsOp::SelectFileDialog(dialog));
     }
 
     /// Set the maximum bytes accepted for one virtual file and for one
@@ -2084,17 +2331,30 @@ mod stale_window_tests {
         let window = WindowHandle::new(&mut cx);
         let window_id = window.window_id();
         cx.windows[window_id].is_created = true;
-        let native = crate::event::WindowGeom { dpi_factor: 2.0, inner_size: dvec2(930.0, 848.0), ..Default::default() };
-        let first = cx.windows.stdin_apply_native_geom(window_id, native.clone());
+        let native = crate::event::WindowGeom {
+            dpi_factor: 2.0,
+            inner_size: dvec2(930.0, 848.0),
+            ..Default::default()
+        };
+        let first = cx
+            .windows
+            .stdin_apply_native_geom(window_id, native.clone());
         assert_eq!(first.new_geom.inner_size, dvec2(930.0, 848.0));
         cx.windows[window_id].dpi_override = Some(1.6);
         let again = cx.windows.stdin_apply_native_geom(window_id, native);
-        assert!((again.new_geom.inner_size.x - 1162.5).abs() < 1e-9, "{:?}", again.new_geom.inner_size);
+        assert!(
+            (again.new_geom.inner_size.x - 1162.5).abs() < 1e-9,
+            "{:?}",
+            again.new_geom.inner_size
+        );
         assert!((again.new_geom.inner_size.y - 1060.0).abs() < 1e-9);
         assert_eq!(again.new_geom.dpi_factor, 1.6);
         let mut pos = dvec2(100.0, 100.0);
         cx.dpi_override_scale(&mut pos, window_id);
-        assert!((pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9, "{pos:?}");
+        assert!(
+            (pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9,
+            "{pos:?}"
+        );
         // The host's point (900, 800) is still inside the window: containment is in host points.
         let (hit, origin) = cx.windows.window_id_contains(dvec2(900.0, 800.0));
         assert_eq!(hit, window_id);
@@ -2137,7 +2397,7 @@ fn can_play_type_impl(mime: &str) -> &'static str {
 
 #[cfg(all(
     any(target_os = "macos", target_os = "ios", target_os = "tvos"),
-    not(headless)
+    not(gpusim)
 ))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::apple::apple_video_playback::can_play_type(mime)
@@ -2145,7 +2405,7 @@ fn can_play_type_impl(mime: &str) -> &'static str {
 
 #[cfg(all(
     any(target_os = "macos", target_os = "ios", target_os = "tvos"),
-    headless
+    gpusim
 ))]
 fn can_play_type_impl(_mime: &str) -> &'static str {
     ""
@@ -2284,5 +2544,184 @@ mod tests {
         cx.unblock_scrolling();
         assert_eq!(cx.sweep_lock_area(), None);
         assert_eq!(cx.fingers.blocked_scrolling_exception_area(), None);
+    }
+}
+
+impl Cx {
+    /// Drain completed tickets without waiting. Call on Event::Signal, also
+    /// when no pass needs repainting. Returned Arc payloads belong to the
+    /// caller and are no longer charged to the platform's result budget.
+    pub fn try_take_texture_readbacks(&mut self) -> Vec<crate::texture::TextureReadback> {
+        self.take_texture_readback_results(false)
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect()
+    }
+
+    pub(crate) fn take_texture_readback_results(
+        &mut self,
+        legacy: bool,
+    ) -> Vec<(TextureId, crate::texture::TextureReadback)> {
+        use crate::texture::ReadbackError;
+        if self.textures.1.readbacks.slots.is_empty() {
+            return Vec::new();
+        }
+        self.validate_pending_readbacks();
+        self.poll_texture_readbacks();
+        let state = &mut self.textures.1.readbacks;
+        let mut results = Vec::new();
+        let mut index = 0;
+        while index < state.slots.len() {
+            let slot = &mut state.slots[index];
+            if slot.legacy != legacy {
+                index += 1;
+                continue;
+            }
+            if let Some(receive) = &slot.receive {
+                match receive.try_recv() {
+                    Ok(result) => {
+                        slot.result.data = result;
+                        slot.receive = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        slot.result.data = Err(ReadbackError::DeviceLost);
+                        slot.receive = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if !slot.pending && slot.receive.is_none() {
+                let mut slot = state.slots.remove(index);
+                state.reserved_bytes -= slot.reserved_bytes;
+                if slot.cancelled {
+                    slot.result.data = Err(ReadbackError::Cancelled);
+                }
+                results.push((slot.texture.texture_id(), slot.result));
+            } else {
+                index += 1;
+            }
+        }
+        results
+    }
+
+    /// Cancel publication. An in-flight allocation stays pinned until its
+    /// copy/lease finishes; the ticket then yields Cancelled instead of bytes.
+    pub fn cancel_texture_readback(&mut self, ticket: crate::texture::ReadbackTicket) -> bool {
+        let Some(slot) = self
+            .textures
+            .1
+            .readbacks
+            .slots
+            .iter_mut()
+            .find(|slot| slot.result.ticket == ticket)
+        else {
+            return false;
+        };
+        slot.cancelled = true;
+        if slot.pending {
+            slot.pending = false;
+        }
+        crate::thread::SignalToUI::set_ui_signal();
+        true
+    }
+
+    pub fn texture_readback_usage(&self) -> crate::texture::TextureReadbackUsage {
+        crate::texture::TextureReadbackUsage {
+            requests: self.textures.1.readbacks.slots.len(),
+            reserved_bytes: self.textures.1.readbacks.reserved_bytes,
+        }
+    }
+
+    /// Last submitted renderer serial. Recording a Draw event does not advance
+    /// this value. See `Texture` for backend units and ordering guarantees.
+    pub fn frame_submission_serial(&self) -> u64 {
+        self.textures
+            .1
+            .serials
+            .submitted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Publish an immutable block of instance data (stride `slots`) as a
+    /// shared publication. The block is charged against the device envelope
+    /// and refused with `PublishError::NoRoom` when it does not fit; the
+    /// receipt starts `Pending` and the backend marks it ready once the
+    /// backing copy landed. Draw items reference `(block, first, count)`.
+    pub fn publish_instances(
+        &self,
+        slots: usize,
+        data: std::sync::Arc<[f32]>,
+        hints: crate::shared_instances::PublishHints,
+    ) -> Result<crate::shared_instances::SharedInstances, crate::shared_instances::PublishError> {
+        self.publications.publish(slots, data, hints)
+    }
+
+    /// The context's publication totals: charged, pending retirement, the
+    /// derived envelope and the live count.
+    pub fn publication_accounting(&self) -> crate::shared_instances::PublicationAccounting {
+        self.publications.accounting()
+    }
+
+    /// The producer's pacing input for this frame: room under the envelope
+    /// plus the backend's last copy observation (recorded by the backend
+    /// through `Publications::record_observation`), against the time the
+    /// caller still has in the frame.
+    pub fn publish_backpressure(
+        &self,
+        frame_remaining_ns: u64,
+    ) -> crate::shared_instances::PublishBackpressure {
+        self.publications.backpressure(frame_remaining_ns)
+    }
+
+    /// Set the publication envelope from the machine's numbers
+    /// (`retained_instances::retained_device_envelope`), once the backend
+    /// knows them. Zero (unknown) refuses nothing.
+    pub fn set_publication_envelope(&self, bytes: usize) {
+        self.publications.set_envelope(bytes);
+    }
+
+    /// Last observed completed prefix, without polling the backend. Progress
+    /// timers use `frame_completion_serial` to refresh this nonblocking snapshot.
+    pub fn frame_completed_serial(&self) -> u64 {
+        self.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Poll without waiting, collect finished texture retirements, and return
+    /// the greatest serial whose entire prefix has completed. Call again while
+    /// pending, even when the application does not need to repaint.
+    pub fn frame_completion_serial(&mut self) -> u64 {
+        self.poll_texture_lifetimes();
+        self.textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Allocated texture bytes, including free pool slots and pending releases.
+    /// Unknown externally owned allocations are omitted. This is an on-demand
+    /// O(pool size) measurement; ordinary rendering does not scan the pool.
+    pub fn texture_pool_bytes(&self) -> u64 {
+        self.textures.0.pool.iter().enumerate().fold(
+            self.textures.1.retired.iter().fold(0u64, |sum, retired| {
+                sum.saturating_add(retired.os.allocated_bytes(self).unwrap_or(retired.bytes))
+            }),
+            |sum, (index, slot)| {
+                sum.saturating_add(
+                    self.texture_allocation_bytes(TextureId::from_pool_slot(
+                        index,
+                        slot.generation,
+                    ))
+                    .unwrap_or(0),
+                )
+                .saturating_add(
+                    slot.item
+                        .previous_platform_resource
+                        .as_ref()
+                        .and_then(|os| os.allocated_bytes(self))
+                        .unwrap_or(0),
+                )
+            },
+        )
     }
 }

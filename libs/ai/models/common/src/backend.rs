@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 pub use crate::accel::*;
 pub use crate::gpu as cuda;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use makepad_ai_cuda::llm_ops;
-pub use makepad_ai_cuda::prof;
+pub use makepad_ai_loader::prof;
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
 
 pub mod metal {

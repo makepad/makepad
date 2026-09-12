@@ -7,8 +7,7 @@
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
-#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
-pub use makepad_ai_cuda::launch::GemmPrecision;
+pub use makepad_ai_loader::accel::GemmPrecision;
 
 /// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
 /// a ggml dtype, its output width and its bias (empty for none).
@@ -115,7 +114,7 @@ pub fn gpu_vit_backbone_resident(
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
     use super::GemmPrecision;
-    use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+    use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
     pub struct CudaMappedHostU32Buffer;
@@ -2137,6 +2136,20 @@ mod imp {
             Err(GPU_UNAVAILABLE.to_string())
         }
     }
+
+    pub fn gpu_pixal_naf_sample(
+        _q: &GpuTensor, _k: &GpuTensor, _v: &GpuTensor, _uv: &GpuTensor,
+        _width: usize, _height: usize, _low_width: usize, _low_height: usize,
+        _heads: usize, _kernel: usize,
+    ) -> Result<GpuTensor, String> { Err(GPU_UNAVAILABLE.to_string()) }
+
+    pub fn gpu_pixal_rope(_x: &GpuTensor, _periods: &GpuTensor, _width: usize, _height: usize) -> Result<GpuTensor,String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_pixal_pool(
+        _x: &GpuTensor, _width: usize, _height: usize, _out_width: usize, _out_height: usize,
+    ) -> Result<GpuTensor,String> { Err(GPU_UNAVAILABLE.to_string()) }
 
     pub fn gpu_skintokens_michelangelo_fourier(
         _condition: &GpuTensor,

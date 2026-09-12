@@ -41,7 +41,7 @@ impl ContentProvider for Provider {
 }
 
 #[test]
-fn shipping_runner_uses_pending_seam_and_cancels_accepted_jobs_without_resubmitting() {
+fn custom_transport_uses_pending_seam_and_cancels_accepted_jobs_without_resubmitting() {
     for when in 0..3 {
         let cancel = Arc::new(AtomicBool::new(false));
         let state = Rc::new(RefCell::new(State { cancel_during_post: when == 1, ..Default::default() }));

@@ -3,7 +3,7 @@ use {
         animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::*,
-        overlay_place::{place, span_inboard, PlaceRequest, Placement},
+        overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement},
         widget::*,
     },
 };
@@ -351,7 +351,7 @@ pub fn layout_covering_popup(
     // popups — never narrower than the trigger, never wider than the pass,
     // pulled inboard with the left edge winning — so the request is bounded
     // in x only and the vertical answer is not read.
-    let placed = place(&PlaceRequest {
+    let placed = place_overlay(&PlaceRequest {
         anchor: trigger,
         size: dvec2(content_w.max(40.0), height),
         bounds: Rect {
