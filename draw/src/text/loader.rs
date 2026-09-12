@@ -325,3 +325,77 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod system_font_tests {
+    use super::{FontDefinition, Loader};
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{font::FontId, layouter},
+    };
+
+    fn load_font(path: &str) -> Option<std::rc::Rc<crate::text::font::Font>> {
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let font_id: FontId = 0xFEED_0001_u64.into();
+        let data = SharedBytes::from_file_mmap_or_read(path).ok()?;
+        loader.define_font(
+            font_id,
+            FontDefinition {
+                data,
+                index: 0,
+                ascender_fudge_in_ems: 0.0,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        Some(loader.get_or_load_font(font_id).clone())
+    }
+
+    fn outline_works(path: &str, ch: char) -> Option<bool> {
+        let font = load_font(path)?;
+        let gid = font.with_ttf_parser_face(|face| face.glyph_index(ch).map(|g| g.0))?;
+        Some(font.glyph_outline(gid).is_some())
+    }
+
+    /// San Francisco is a 4-axis variable font whose glyphs carry more than
+    /// 32 gvar tuples (54 on current macOS). Without ttf-parser's
+    /// `gvar-alloc` feature the tuple store cannot grow past its stack
+    /// capacity and EVERY outline silently fails, rendering variable-font
+    /// text blank. This is the regression test for enabling that feature.
+    #[test]
+    fn macos_san_francisco_variable_font_outlines() {
+        match outline_works("/System/Library/Fonts/SFNS.ttf", 'A') {
+            None => eprintln!("SFNS.ttf not present, skipping"),
+            Some(ok) => assert!(ok, "SF 'A' outline should extract (gvar-alloc enabled?)"),
+        }
+    }
+
+    /// Hiragino Sans GB is the CFF-outline system Chinese sans that apps fall
+    /// back to on macOS 26+, where PingFangUI.ttc is `hvgl`-only.
+    #[test]
+    fn macos_hiragino_sans_gb_outlines() {
+        match outline_works("/System/Library/Fonts/Hiragino Sans GB.ttc", '性') {
+            None => eprintln!("Hiragino Sans GB not present, skipping"),
+            Some(ok) => assert!(ok, "Hiragino '性' outline should extract"),
+        }
+    }
+
+    /// On macOS 26+ PingFangUI.ttc has no glyf/CFF tables at all — outlines
+    /// live only in Apple's proprietary `hvgl` table, which ttf_parser
+    /// cannot read (cmap lookups succeed but ttf outlines are None). The
+    /// CoreText fallback in `text::coretext` fills the gap through the full
+    /// `Font::glyph_outline` path; this is its end-to-end regression test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pingfang_ui_hvgl_outlines_via_coretext_fallback() {
+        const PINGFANG: &str = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
+        match outline_works(PINGFANG, '性') {
+            None => eprintln!("PingFangUI.ttc not present, skipping"),
+            Some(ok) => assert!(
+                ok,
+                "hvgl PingFang '性' should outline through the CoreText fallback"
+            ),
+        }
+    }
+}
