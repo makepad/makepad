@@ -19,29 +19,38 @@
 //! * `/tweak/final` answers the coalesced end state so the AI integrates
 //!   once instead of tracking every intermediate edit.
 //!
-//! # The note card — the human's side of the channel
+//! # The Spec tab and the prompt strip — the human's side of the channel
 //!
-//! Everything above is the AI reading the app. A NOTE is the person writing
-//! back: a small card pinned to one widget, carrying whatever they want done
-//! to it in their own words. `Insert` or `Ctrl+Shift+N` opens it on the
-//! selection (the panel's `note` button does the same for keyboards without
-//! an Insert), the header strip drags it, the bottom-right grip resizes it,
-//! and a leader line in the selection colour runs between the two closest
-//! points of card and widget whenever they are far enough apart to need one.
-//! The card is opaque and picking never reaches through it.
+//! Everything above is the AI reading the app. The SPEC tab is the person
+//! writing back. It carries three fields: NOTES, what a widget is about,
+//! written for whoever reads it next; RULES, what must stay true of it; and
+//! under a divider the rules that stand over the whole APP. A note describes
+//! and a rule constrains, and they are kept apart so that an agent reading
+//! the state can tell "here is context" from "do not break this". The
+//! app-wide field is why the tab works with nothing selected at all.
 //!
-//! Its three buttons are — close (far left, where a window's close control
-//! lives) and, at the right, Send and Pin — labelled, because an icon alone
-//! is a guess about what a button does to what you just wrote. Enter and
-//! Shift+Enter make a new line (a note is prose), and Tab pins. Sending
-//! (`Ctrl+Enter` or ✦) does not push anything — the bridge is a server — it
-//! raises the note's `sent` count, which `/tweak/state` reports as
-//! `"ask": N` and the log ring carries as `TWEAK ask #N`. A polling agent
-//! reads either and knows the difference between a note left lying around
-//! and one it is being asked to act on NOW.
+//! `Insert` or `Ctrl+Shift+N` shows the tab on the selection (the panel's
+//! `note` button does the same for keyboards without an Insert), and so does
+//! a click on a pin badge or a right click on a widget. A badge means
+//! something is written about that widget.
 //!
-//! Pinning writes the note to `.makepad-notes.txt` beside the running app —
-//! plain tab-separated text — so it survives the process and is readable
+//! The PROMPT is one box pinned below the tabs, outside them, so whichever
+//! tab is up the box is in the same place and the tab body scrolls above it.
+//! One box for the whole panel, not one per widget: a send attributes what
+//! is in it to whatever is selected at that moment, and with nothing
+//! selected the ask is about the app. `Ctrl+Enter` sends, `Alt+Enter`
+//! queues a message to go out with the next send, and Up and Down walk what
+//! was sent before while the box is empty.
+//!
+//! Sending does not push anything — the bridge is a server — it raises the
+//! record's `sent` count, which `/tweak/state` reports as `"ask": N` and the
+//! log ring carries as `TWEAK ask #N`. A polling agent reads either and
+//! knows the difference between a note left lying around and one it is being
+//! asked to act on NOW.
+//!
+//! Notes and rules are written to `.makepad-notes.txt` beside the running
+//! app and the app-wide document to `.makepad-rules.txt` — plain
+//! tab-separated text — so both survive the process and are readable
 //! without it.
 //!
 //! Typing `@` into a note arms a widget pick: the hover turns amber and the
@@ -183,26 +192,6 @@ pub struct TweakNote {
     /// state must be able to tell "here is context" from "do not break
     /// this". Saved beside the note.
     pub rules: String,
-    /// The PROMPT: one instruction, on its way out. Sending or queueing
-    /// empties it, because a message you have sent is not a message you
-    /// still have. In memory only — a note is worth keeping across runs, a
-    /// half-typed instruction is not.
-    pub prompt: String,
-    pub dx: f64,
-    pub dy: f64,
-    pub w: f64,
-    pub h: f64,
-    /// Pinned: the text survives the process — written to the note store
-    /// (`.makepad-notes.txt` beside the running app) and read back at the
-    /// first note of the next session.
-    pub pinned: bool,
-    /// Everything ever sent or queued from this note, oldest first. Sending
-    /// CLEARS the field — the note is a message box, not a document — so the
-    /// history is where a message goes to stay recallable, with Up.
-    pub history: Vec<String>,
-    /// How far back through `history` Up has walked. `history.len()` is the
-    /// empty draft the person is typing now.
-    pub history_at: usize,
     /// Bumped every time the human sends the note to the AI (the sparkle
     /// button / Ctrl+Enter). `/tweak/state` reports the note as `ask` while
     /// this is above the count the AI last acknowledged, so a polling agent
@@ -210,25 +199,6 @@ pub struct TweakNote {
     pub sent: u64,
 }
 
-/// The card's size when it is first opened.
-const NOTE_W: f64 = 230.0;
-const NOTE_H: f64 = 96.0;
-/// The card never shrinks below this — the button row needs the width.
-const NOTE_MIN_W: f64 = 140.0;
-const NOTE_MIN_H: f64 = 56.0;
-/// The bottom-right resize grip, in points.
-const NOTE_GRIP: f64 = 14.0;
-/// How long the card's border says "that went" after a send or a queue.
-const NOTE_FLASH_LINGER: f64 = 0.55;
-
-/// What the card's border is confirming right now.
-#[derive(Clone, Copy, PartialEq, Default)]
-enum NoteFlash {
-    #[default]
-    None,
-    Queued,
-    Sent,
-}
 
 /// How much one wheel notch changes the magnification.
 const ZOOM_WHEEL_STEP: f32 = 0.15;
@@ -241,9 +211,6 @@ const BADGE_SIZE: f64 = 13.0;
 /// How often the badge targets are re-resolved (a whole-tree walk).
 const BADGE_REFRESH: f64 = 0.5;
 
-/// How far the card has to be from its widget's outline before the leader
-/// line is drawn at all. Under this the two read as one object already.
-const NOTE_LEADER_MIN_GAP: f64 = 30.0;
 /// How far the pinned widget's dashed ring stands off the widget itself.
 /// The leader measures to THAT — the outline is what the eye sees as the
 /// edge of the selection.
@@ -255,14 +222,6 @@ impl TweakNote {
             path,
             text: String::new(),
             rules: String::new(),
-            prompt: String::new(),
-            dx: 8.0,
-            dy: -(NOTE_H + 12.0),
-            w: NOTE_W,
-            h: NOTE_H,
-            pinned: false,
-            history: Vec::new(),
-            history_at: 0,
             sent: 0,
         }
     }
@@ -555,16 +514,8 @@ fn note_store_load() -> Vec<TweakNote> {
         };
         out.push(TweakNote {
             path: path.to_string(),
-            dx: 8.0,
-            dy: -(NOTE_H + 12.0),
-            w: NOTE_W,
-            h: NOTE_H,
             text,
             rules,
-            prompt: String::new(),
-            pinned: true,
-            history: Vec::new(),
-            history_at: 0,
             sent: 0,
         });
     }
@@ -643,11 +594,6 @@ pub(crate) struct TweakSession {
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
     hover: Option<TweakPick>,
-    /// The card is showing the NOTE rather than the prompt. Stored inverted
-    /// so the derived default is prompt mode — writing an instruction is what
-    /// the card is opened for, and leaving a note for yourself is the
-    /// deliberate step aside.
-    note_mode: bool,
     /// The "isolated" toggle is OFF: an "all" edit reaches the whole app
     /// even while a branch is isolated. Stored inverted so the derived
     /// default is the confined one — with the rest of the app covered,
@@ -1649,10 +1595,6 @@ pub fn window_intercept(
     // however much of the app it covers — and while it is being dragged or
     // resized the gesture owns the pointer wherever it wanders.
     {
-        let (note_rect, note_gesture) = tweaker
-            .borrow::<Tweaker>()
-            .map(|tw| (tw.note_rect, tw.note_drag.is_some() || tw.note_resize.is_some()))
-            .unwrap_or((None, false));
         // A SCRUB leaves the control it started on within a few pixels, and
         // from then on the moves have to keep reaching it — otherwise the
         // value follows the pointer for three pixels and then stops dead,
@@ -1683,8 +1625,7 @@ pub fn window_intercept(
                 tw.spread_drag = false;
             }
         }
-        let note_hit = hits(note_rect) || on_spread;
-        if note_hit || note_gesture || spread_drag {
+        if on_spread || spread_drag {
             if kind == PointerKind::Down {
                 log!("TWEAK press {:.0},{:.0} on the tweaker's chrome: not a pick", abs.x, abs.y);
             }
@@ -2038,12 +1979,26 @@ pub fn window_intercept(
                 // was opened on; the mention is what it points AT.
                 if session().lock().unwrap().mention {
                     session().lock().unwrap().mention = false;
-                    let note_ui = tweaker
+                    // The field a mention lands in is whichever one the @
+                    // was typed into: the Spec tab's notes while that tab is
+                    // up, the prompt strip's box otherwise. A pick made for
+                    // a mention never moves the selection (this arm returns
+                    // before `commit_pick`), so the tab stays on the widget
+                    // the note is about.
+                    let into_notes = tweaker
                         .borrow::<Tweaker>()
-                        .filter(|tw| tw.note_open)
-                        .and_then(|tw| tw.note_ui.clone());
-                    match (note_ui, &pick) {
-                        (Some(ui), Some(pick)) => {
+                        .is_some_and(|tw| tw.panel_tab == PanelTab::Spec);
+                    let field = tweaker.borrow::<Tweaker>().and_then(|tw| {
+                        tw.sidebar.as_ref().map(|sidebar| {
+                            if into_notes {
+                                sidebar.child(live_id!(spec_col)).child(live_id!(spec_notes))
+                            } else {
+                                sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field))
+                            }
+                        })
+                    });
+                    match (field, &pick) {
+                        (Some(field), Some(pick)) => {
                             // The reference is the mentioned widget's INDEXED
                             // path — the only form that names one widget —
                             // written relative to the note's own widget when
@@ -2073,32 +2028,25 @@ pub fn window_intercept(
                                 .chain(std::iter::once(target.clone()))
                                 .min_by_key(|form| form.len())
                                 .unwrap_or_else(|| target.clone());
-                            let field = ui.child(live_id!(note_text));
                             let text = insert_mention(&field.text(), &reference);
                             field.set_text(cx, &text);
                             log!("TWEAK @mention {reference} -> {target} ({})", pick.ty);
-                            let notes = {
-                                let mut s = session().lock().unwrap();
-                                let note_mode = s.note_mode;
-                                if let Some(note) =
-                                    s.notes.iter_mut().find(|n| n.path == base)
-                                {
-                                    // Into whichever side is on screen: a
-                                    // mention typed into a prompt is part of
-                                    // the instruction, not of the note.
-                                    if note_mode {
+                            // Into whichever side is on screen: a mention
+                            // typed into the prompt is part of the
+                            // instruction, not of the note.
+                            if into_notes {
+                                let notes = {
+                                    let mut s = session().lock().unwrap();
+                                    if let Some(note) =
+                                        s.notes.iter_mut().find(|n| n.path == base)
+                                    {
                                         note.text = text;
-                                    } else {
-                                        note.prompt = text;
                                     }
-                                }
-                                s.notes.clone()
-                            };
-                            note_store_save(&notes);
-                            // The caret goes back into the note: the mention
-                            // is part of a sentence still being written.
-                            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
-                                tw.note_focus_pending = true;
+                                    s.notes.clone()
+                                };
+                                note_store_save(&notes);
+                            } else {
+                                session().lock().unwrap().prompt = text;
                             }
                         }
                         _ => log!("TWEAK @mention: nothing under the click"),
@@ -5189,7 +5137,7 @@ pub fn tweak_callback(
                             )
                         };
                         out.push_str(&format!(
-                            "{{\"path\":{},\"text\":{}{}{}{}{}}}",
+                            "{{\"path\":{},\"text\":{}{}{}{}}}",
                             json_str(&note.path),
                             json_str(&note.text),
                             // A rule is not a note: an agent reading this
@@ -5205,7 +5153,6 @@ pub fn tweak_callback(
                             // sparkle on this note — act on it, do not just
                             // read it. The count rises with every send.
                             if note.sent > 0 { format!(",\"ask\":{}", note.sent) } else { String::new() },
-                            if note.pinned { ",\"pinned\":1" } else { "" }
                         ));
                     }
                     out.push(']');
@@ -6343,7 +6290,7 @@ pub struct Tweaker {
     /// the viewport (estimates and clamping cannot diverge it).
     #[rust]
     tree_scroll_tries: Option<u8>,
-    /// Set by the note button; the next event opens the card.
+    /// Set by the note button; the next event shows the Spec tab.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
     /// renderer; until then this is the mode flag + visual state).
@@ -6419,25 +6366,6 @@ pub struct Tweaker {
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     vibe_prompt_uid: u64,
-    /// The note card: visible for the current selection.
-    #[rust]
-    note_open: bool,
-    #[rust]
-    note_ui: Option<WidgetRef>,
-    /// The card's on-screen rect (intercept exemption + grip dragging).
-    #[rust]
-    note_rect: Option<Rect>,
-    /// A grip drag in flight: pointer offset from the card origin.
-    #[rust]
-    note_drag: Option<Vec2d>,
-    /// A corner-grip resize in flight: (pointer at press, size at press).
-    #[rust]
-    note_resize: Option<(Vec2d, Vec2d)>,
-    /// The header's drag band as DRAWN — the stretch between the close
-    /// button and the send/pin pair. Read at draw so the band never has to
-    /// be guessed from button counts.
-    #[rust]
-    note_grip_rect: Option<Rect>,
     #[rust]
     note_text_uid: u64,
     /// The identity row's name field.
@@ -6474,30 +6402,6 @@ pub struct Tweaker {
     /// every frame that reads it.
     #[rust]
     sel_ref: (u64, String),
-    /// The card's four icon buttons.
-    #[rust]
-    note_queue_uid: u64,
-    /// The prompt/note checkbox on the card's strip.
-    #[rust]
-    note_mode_uid: u64,
-    #[rust]
-    note_send_uid: u64,
-    #[rust]
-    note_pin_uid: u64,
-    #[rust]
-    note_shut_uid: u64,
-    /// The chrome colours currently applied: (focused, pinned). Reapplying
-    /// them every frame would fight the shader cache for nothing.
-    #[rust]
-    note_focus_style: Option<(bool, bool, usize)>,
-    /// The flash confirming a send or a queue is up until this time.
-    #[rust]
-    note_flash_until: f64,
-    #[rust]
-    note_flash_kind: NoteFlash,
-    /// The field must be emptied at the next draw: a message went out.
-    #[rust]
-    note_clear_field: bool,
     /// The strip's box has been emptied by a send: clear the TextInput on
     /// the next draw rather than fighting it mid-keystroke.
     #[rust]
@@ -6506,23 +6410,21 @@ pub struct Tweaker {
     prompt_queue_uid: u64,
     #[rust]
     prompt_send_uid: u64,
+    /// The prompt box's own uid, so an `@` typed into it arms a pick the
+    /// same way one typed into the notes field does.
+    #[rust]
+    prompt_field_uid: u64,
     /// Something in the Spec tab was typed into and is not on disk yet.
     /// Flushed when the caret leaves the tab's fields -- a write per
     /// keystroke would be a file write per frame.
     #[rust]
     spec_dirty: bool,
-    /// Put the caret in the card the frame after it opens.
-    #[rust]
-    note_focus_pending: bool,
-    /// Which note the card's field is actually SHOWING. The card follows the
+    /// Which note the Spec tab is actually SHOWING. The tab follows the
     /// selection, so the note being saved to and the text on screen can drift
     /// apart for a frame — and a save in that window would write one note's
     /// text over another's. Nothing is written unless these agree.
     #[rust]
     note_key_shown: String,
-    /// Seed the card's TextInput once per open (never clobber typing).
-    #[rust]
-    note_seed_pending: bool,
     /// Previous tweak-mode state, to detect the on edge.
     #[rust]
     was_on: bool,
@@ -7690,207 +7592,6 @@ impl Tweaker {
         self.spread_ui = Some(ui);
     }
 
-    fn ensure_note_ui(&mut self, cx: &mut Cx) {
-        if self.note_ui.is_some() {
-            return;
-        }
-        let ui = cx.with_vm(|vm| {
-            let value = script_eval!(vm, {
-                use mod.prelude.widgets.*
-                use mod.widgets.*
-                // Every button is icon-only, so ButtonIcon with a centred
-                // align: a bare Button parks the glyph off to one side.
-                let NoteBtn = ButtonIcon {
-                    width: 15
-                    height: 15
-                    padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                    margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
-                    align: Align{x: 0.5 y: 0.5}
-                    icon_walk: Walk{width: 9 height: Fit}
-                    draw_bg +: {
-                        color: #x00000000
-                    }
-                }
-                // The two buttons that DO something to the note say what:
-                // an icon alone is a guess, and there is room on the strip.
-                // (Close keeps its bare glyph — the meaning of a — in a
-                // title bar is not in doubt.)
-                let NoteBtnLabelled = Button {
-                    width: Fit
-                    height: 15
-                    padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
-                    margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
-                    spacing: 3
-                    align: Align{x: 0.5 y: 0.5}
-                    icon_walk: Walk{width: 9 height: Fit}
-                    draw_bg +: {
-                        color: #x00000000
-                    }
-                    draw_text +: {
-                        color: #xc8c8d4
-                        text_style +: { font_size: 7.5 }
-                    }
-                }
-                // The card's own body has NO background: a plain `View`'s
-                // draw_bg is a bare DrawQuad whose default pixel fn returns
-                // #0000, so `show_bg` plus a `color` paints nothing at all —
-                // which is why the card used to be a ghost you could read
-                // the app through. The opaque backdrop is drawn in Rust
-                // (`draw_note_backdrop`) right under this walk instead, so
-                // the field and the header composite onto something solid.
-                View {
-                    width: Fill
-                    height: Fill
-                    flow: Down
-                    // No inset under the field: the resize grip is allowed
-                    // to sit on its bottom-right corner rather than claim a
-                    // strip of card the note could have been written in.
-                    padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
-                    head := View {
-                        width: Fill
-                        height: 16
-                        flow: Right
-                        align: Align{x: 0.0 y: 0.5}
-                        show_bg: true
-                        draw_bg +: {
-                            color: instance(#x444452ff)
-                            pixel: fn() {
-                                return vec4(self.color.rgb * self.color.a, self.color.a)
-                            }
-                        }
-                        // Close sits far left, on its own, where a window's
-                        // close control lives.
-                        shut := NoteBtn {
-                            margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                            draw_icon +: {
-                                color: #xc8c8d4
-                                svg: crate_resource("self:resources/icons/note_close.svg")
-                            }
-                        }
-                        // The drag handle IS the empty stretch of the strip
-                        // between the two ends: grab anywhere the buttons
-                        // are not. Its drawn rect is what the drag hit-tests
-                        // against, so the band never has to be guessed at.
-                        grip := View {
-                            width: Fill
-                            height: Fill
-                        }
-                        // The card is two things behind one strip: a NOTE
-                        // for yourself, and a PROMPT on its way to the agent.
-                        // The checkbox says which one the field is showing,
-                        // and the buttons beside it change with it — Send
-                        // and Queue belong to the prompt, Pin to the note.
-                        prompt_mode := CheckBox {
-                            width: Fit
-                            height: Fit
-                            padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                            margin: Inset{left: 0 right: 6 top: 0 bottom: 0}
-                            // The label rides its own walk, and the default
-                            // leaves it sitting below the box on a 15-point
-                            // strip. Centre it against the mark instead.
-                            align: Align{x: 0.0 y: 0.5}
-                            label_walk +: {
-                                margin: Inset{left: 14 right: 0 top: 0 bottom: 0}
-                            }
-                            text: "prompt"
-                            draw_text +: {
-                                color: #xc8c8d4
-                                text_style +: { font_size: 7.5 }
-                            }
-                        }
-                        queue := NoteBtnLabelled {
-                            text: "Queue"
-                            draw_icon +: {
-                                color: #xc8c8d4
-                                svg: crate_resource("self:resources/icons/note_queue.svg")
-                            }
-                        }
-                        send := NoteBtnLabelled {
-                            text: "Send"
-                            draw_icon +: {
-                                color: #x8fd8ff
-                                svg: crate_resource("self:resources/icons/note_send.svg")
-                            }
-                        }
-                        pin := NoteBtnLabelled {
-                            text: "Pin"
-                            draw_icon +: {
-                                color: #xc8c8d4
-                                svg: crate_resource("self:resources/icons/note_pin.svg")
-                            }
-                        }
-                    }
-                    note_text := TextInput {
-                        width: Fill
-                        height: Fill
-                        // A note is prose: Enter and Shift+Enter both make a
-                        // new line. Ctrl+Enter sends it (TextInput submits on
-                        // the primary modifier, and our own arm claims it
-                        // first regardless).
-                        is_multiline: true
-                        empty_text: ""
-                        draw_bg +: {
-                            color: #x22222aff
-                        }
-                        draw_text +: {
-                            color: #xe8e8d0
-                            text_style +: { font_size: 8.5 }
-                        }
-                    }
-                }
-            });
-            WidgetRef::script_from_value(vm, value)
-        });
-        self.note_mode_uid = ui.child(live_id!(head)).child(live_id!(prompt_mode)).widget_uid().0;
-        self.note_queue_uid = ui.child(live_id!(head)).child(live_id!(queue)).widget_uid().0;
-        self.note_send_uid = ui.child(live_id!(head)).child(live_id!(send)).widget_uid().0;
-        self.note_pin_uid = ui.child(live_id!(head)).child(live_id!(pin)).widget_uid().0;
-        self.note_shut_uid = ui.child(live_id!(head)).child(live_id!(shut)).widget_uid().0;
-        cx.widget_tree_insert_child(self.uid, live_id!(note), ui.clone());
-        self.note_ui = Some(ui);
-    }
-
-    /// The pin button lights up while the note is pinned to disk — the one
-    /// piece of card chrome that is script-side. Opacity lives on the
-    /// backdrop instead (see `draw_note_backdrop`).
-    fn note_style(&mut self, cx: &mut Cx2d, focused: bool, pinned: bool) {
-        let queued = session().lock().unwrap().outbox.len();
-        if self.note_focus_style == Some((focused, pinned, queued)) {
-            return;
-        }
-        self.note_focus_style = Some((focused, pinned, queued));
-        let Some(ui) = self.note_ui.clone() else { return };
-        let pin_color: Vec4f = if pinned {
-            vec4(1.0, 0.78, 0.29, 1.0)
-        } else {
-            vec4(0.784, 0.784, 0.831, 1.0)
-        };
-        let mut pin_ref = ui.child(live_id!(head)).child(live_id!(pin));
-        script_apply_eval!(cx, pin_ref, { draw_icon +: { color: #(pin_color) } });
-        // The Queue button carries the count, because a queue you cannot see
-        // is a queue you forget to send — and its icon lights up when THIS
-        // note is one of the queued ones.
-        let queue = ui.child(live_id!(head)).child(live_id!(queue));
-        queue.set_text(
-            cx,
-            &if queued > 0 { format!("Queue {queued}") } else { "Queue".to_string() },
-        );
-        let mine = !self.note_key_shown.is_empty()
-            && session()
-                .lock()
-                .unwrap()
-                .outbox
-                .iter()
-                .any(|(path, _)| *path == self.note_key_shown);
-        let queue_color: Vec4f = if mine {
-            vec4(1.0, 0.78, 0.29, 1.0)
-        } else {
-            vec4(0.784, 0.784, 0.831, 1.0)
-        };
-        let mut queue_ref = queue.clone();
-        script_apply_eval!(cx, queue_ref, { draw_icon +: { color: #(queue_color) } });
-    }
-
     /// Record a rename the person asked for: `/tweak/state` reports it as a
     /// `rename` alongside the selection, and the log ring carries it, so the
     /// AI can do it in the source where it belongs.
@@ -7994,17 +7695,14 @@ impl Tweaker {
             s.pinned = Some(pick);
             // The badge callers always have a note already; the right click
             // may be the first thing ever said about this widget, so make
-            // one — without it the card had nothing to show and simply did
-            // not appear.
+            // one — without it the tab had nothing to show at all.
             s.load_notes();
             if !s.notes.iter().any(|n| n.path == path) {
                 s.notes.push(TweakNote::new(path));
             }
         }
         cx.set_key_focus(Area::Empty);
-        self.note_open = true;
-        self.note_seed_pending = true;
-        self.note_focus_pending = true;
+        self.panel_tab = PanelTab::Spec;
         self.rows_uid = 0;
         self.redraw_sidebar(cx);
         self.redraw_overlay(cx);
@@ -8012,7 +7710,7 @@ impl Tweaker {
 
     /// Open or close the note card on the item we are IN — the pinned
     /// selection, else the widget under the hover (which becomes the
-    /// selection, so the card has something to ride with).
+    /// selection, so the tab has something to be about).
     fn toggle_note(&mut self, cx: &mut Cx) {
         let sel_uid = {
             let mut s = session().lock().unwrap();
@@ -8025,24 +7723,20 @@ impl Tweaker {
         };
         let Some(uid) = sel_uid else { return };
         let path = self.sel_ref(cx, uid);
-        self.note_open = !self.note_open;
-        if self.note_open {
+        // There is nothing to open or shut any more: writing about a widget
+        // is a tab, so this toggles between that tab and the one before it.
+        if self.panel_tab == PanelTab::Spec {
+            self.panel_tab = PanelTab::Props;
+            self.note_key_shown.clear();
+            let mut s = session().lock().unwrap();
+            s.notes.retain(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty());
+        } else {
+            self.panel_tab = PanelTab::Spec;
             let mut s = session().lock().unwrap();
             s.load_notes();
             if !s.notes.iter().any(|n| n.path == path) {
                 s.notes.push(TweakNote::new(path));
             }
-            drop(s);
-            self.note_seed_pending = true;
-            self.note_focus_pending = true;
-        } else {
-            self.note_rect = None;
-            self.note_grip_rect = None;
-            self.note_focus_style = None;
-            self.note_key_shown.clear();
-            let mut s = session().lock().unwrap();
-            s.notes
-                .retain(|n| n.pinned || !n.text.trim().is_empty() || !n.prompt.trim().is_empty());
         }
         self.redraw_overlay(cx);
     }
@@ -8062,9 +7756,10 @@ impl Tweaker {
             fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
             fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
             fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
-        }
-        if let Some(note) = self.note_ui.as_ref() {
-            fields.push(note.child(live_id!(note_text)).area());
+            let spec = sidebar.child(live_id!(spec_col));
+            for id in [live_id!(spec_notes), live_id!(spec_rules), live_id!(spec_app)] {
+                fields.push(spec.child(id).area());
+            }
         }
         // The property rows' own inputs come and go with the selection, so
         // ask the live ones rather than keeping a list.
@@ -8086,9 +7781,9 @@ impl Tweaker {
         self.sel_ref.1.clone()
     }
 
-    /// The open card's note key, by the current selection.
+    /// The Spec tab's note key, by the current selection.
     fn note_path(&mut self, cx: &Cx) -> Option<String> {
-        if !self.note_open {
+        if self.panel_tab != PanelTab::Spec {
             return None;
         }
         let uid = session().lock().unwrap().pinned.as_ref().map(|p| p.uid)?;
@@ -8097,40 +7792,6 @@ impl Tweaker {
 
     /// Take the card's live text into the session (the TextInput only
     /// reports on commit, and a send must carry what is on screen).
-    /// What the field is showing right now: the note's path, tagged with the
-    /// side of the card it is on. The tag is what makes a flip of the
-    /// checkbox reseed, and what stops a prompt being written into a note.
-    fn note_field_key(&mut self, cx: &mut Cx) -> Option<String> {
-        let path = self.note_path(cx)?;
-        let note_mode = session().lock().unwrap().note_mode;
-        Some(format!("{}{}", if note_mode { "n:" } else { "p:" }, path))
-    }
-
-    fn note_sync_text(&mut self, cx: &mut Cx) {
-        let (Some(path), Some(ui)) = (self.note_path(cx), self.note_ui.clone()) else {
-            return;
-        };
-        if self.note_field_key(cx).as_deref() != Some(self.note_key_shown.as_str()) {
-            return; // the field is still showing another note: not ours to save
-        }
-        let text = ui.child(live_id!(note_text)).text();
-        let note_mode = session().lock().unwrap().note_mode;
-        let mut s = session().lock().unwrap();
-        if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
-            let slot = if note_mode { &mut note.text } else { &mut note.prompt };
-            if *slot != text {
-                *slot = text;
-                // Only the NOTE is worth writing to disk; a prompt is on its
-                // way out of the process, not into it.
-                if note_mode && note.pinned {
-                    let notes = s.notes.clone();
-                    drop(s);
-                    note_store_save(&notes);
-                }
-            }
-        }
-        let _ = cx;
-    }
 
     /// The Spec tab: what is written ABOUT the selection, and the rules
     /// that stand over the whole app.
@@ -8162,6 +7823,11 @@ impl Tweaker {
         }
         col.child(live_id!(notes_head)).set_visible(cx, have);
         col.child(live_id!(rules_head)).set_visible(cx, have);
+        // Which path the tab is SHOWING. An @mention writes relative to this
+        // rather than to whatever is pinned: the two can differ for a frame,
+        // and writing one widget's text into another's is how a note is lost.
+        self.note_key_shown = path.clone().unwrap_or_default();
+        self.note_text_uid = col.child(live_id!(spec_notes)).widget_uid().0;
 
         if let Some(path) = path {
             let (mut notes, mut rules) = {
@@ -8409,183 +8075,16 @@ impl Tweaker {
         self.redraw_sidebar(cx);
     }
 
-    /// The sparkle: hand this note to the AI driving the session. There is
-    /// no push channel — the bridge is a server — so "sending" means the
-    /// note goes into `/tweak/state` as an *ask* (`"ask":1` on the note,
-    /// with a bumped `sent` count) and a `TWEAK ask` line lands in the log
-    /// ring. A polling agent reads either one and acts.
-    fn note_send(&mut self, cx: &mut Cx) {
-        self.note_sync_text(cx);
-        let Some(path) = self.note_path(cx) else { return };
-        // The draft joins the queue, then the whole queue goes out at once.
-        // That is the point of queueing: write against four widgets in the
-        // order they occur to you, then release the lot as one batch of
-        // instructions instead of four interruptions.
-        self.note_take_draft(&path);
-        let sent: Vec<(String, String)> = {
-            let mut s = session().lock().unwrap();
-            std::mem::take(&mut s.outbox)
-        };
-        if sent.is_empty() {
-            session().lock().unwrap().vibe_status =
-                "nothing to send: the note is empty".to_string();
-        } else {
-            for (note_path, text) in &sent {
-                let seq = {
-                    let mut s = session().lock().unwrap();
-                    match s.notes.iter_mut().find(|n| n.path == *note_path) {
-                        Some(note) => {
-                            note.sent += 1;
-                            note.sent
-                        }
-                        None => 0,
-                    }
-                };
-                log!("TWEAK ask #{seq} {note_path}: {text}");
-            }
-            session().lock().unwrap().vibe_status = if sent.len() == 1 {
-                "sent to the AI".to_string()
-            } else {
-                format!("{} messages sent to the AI", sent.len())
-            };
-            self.note_flash(cx, NoteFlash::Sent);
-        }
-        self.note_focus_pending = true;
-        self.redraw_sidebar(cx);
-        self.redraw_overlay(cx);
-    }
-
-    /// Alt+Enter: put this message in the queue and wake nobody. It goes out
-    /// with the next Ctrl+Enter — deliberately NOT logged as an ask, because
-    /// an ask is what an agent watching the log acts on.
-    fn note_queue(&mut self, cx: &mut Cx) {
-        self.note_sync_text(cx);
-        let Some(path) = self.note_path(cx) else { return };
-        if !self.note_take_draft(&path) {
-            session().lock().unwrap().vibe_status =
-                "nothing to queue: the note is empty".to_string();
-            return;
-        }
-        let count = session().lock().unwrap().outbox.len();
-        log!("TWEAK note queued {path} \u{00b7} {count} waiting");
-        session().lock().unwrap().vibe_status = match count {
-            1 => "1 message queued \u{00b7} Ctrl+Enter sends the queue".to_string(),
-            n => format!("{n} messages queued \u{00b7} Ctrl+Enter sends the queue"),
-        };
-        self.note_flash(cx, NoteFlash::Queued);
-        self.note_focus_pending = true;
-        self.redraw_sidebar(cx);
-        self.redraw_overlay(cx);
-    }
-
-    /// Take what is written into the outbox and EMPTY the field, the way a
-    /// message box empties when you press send. The text is not lost: it goes
-    /// into the note's history, where Up brings it back.
-    ///
-    /// Returns false when there was nothing written.
-    fn note_take_draft(&mut self, path: &str) -> bool {
-        let text = {
-            let mut s = session().lock().unwrap();
-            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
-                return false;
-            };
-            // The PROMPT, always — and it always empties. The note beside it
-            // is never touched by a send: that is the whole point of the two
-            // being separate things.
-            let text = note.prompt.trim().to_string();
-            if text.is_empty() {
-                return false;
-            }
-            note.history.push(text.clone());
-            note.history_at = note.history.len();
-            note.prompt.clear();
-            text
-        };
-        session().lock().unwrap().outbox.push((path.to_string(), text));
-        self.note_clear_field = true;
-        true
-    }
-
-    /// Up / Down in an EMPTY field walks the note's history, the way a shell
-    /// prompt does — so a message just sent is one keypress from being sent
-    /// again, or edited and sent again. Only while the field is empty, or Up
-    /// would be fighting the caret in a note being written.
-    fn note_recall(&mut self, cx: &mut Cx, back: bool) {
-        if session().lock().unwrap().note_mode {
-            return;
-        }
-        let Some(path) = self.note_path(cx) else { return };
-        let text = {
-            let mut s = session().lock().unwrap();
-            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
-                return;
-            };
-            if note.history.is_empty() {
-                return;
-            }
-            if back {
-                note.history_at = note.history_at.saturating_sub(1);
-            } else if note.history_at < note.history.len() {
-                note.history_at += 1;
-            }
-            // The history is a history of things SENT, so Up recalls into
-            // the prompt. A note has no history: it just stays written.
-            note.prompt = note.history.get(note.history_at).cloned().unwrap_or_default();
-            note.prompt.clone()
-        };
-        if let Some(ui) = self.note_ui.clone() {
-            ui.child(live_id!(note_text)).set_text(cx, &text);
-        }
-        self.redraw_overlay(cx);
-    }
-
-    /// Say that it went: the card's border flashes for a beat. Sending is
-    /// instant, so there is nothing to load — but a message box that empties
-    /// with no other sign is a message box you are not sure you pressed.
-    fn note_flash(&mut self, cx: &mut Cx, kind: NoteFlash) {
-        self.note_flash_kind = kind;
-        self.note_flash_until = cx.seconds_since_app_start() + NOTE_FLASH_LINGER;
-        self.next_frame = cx.new_next_frame();
-    }
-
-    /// The pin: keep this note across runs. Pinning writes the store at
-    /// once, so the text survives even a crash.
-    fn note_pin_toggle(&mut self, cx: &mut Cx) {
-        self.note_sync_text(cx);
-        let Some(path) = self.note_path(cx) else { return };
-        let (pinned, notes) = {
-            let mut s = session().lock().unwrap();
-            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
-                return;
-            };
-            note.pinned = !note.pinned;
-            (note.pinned, s.notes.clone())
-        };
-        note_store_save(&notes);
-        log!(
-            "TWEAK note {} {path} ({NOTE_STORE})",
-            if pinned { "pinned" } else { "unpinned" }
-        );
-        self.note_focus_style = None;
-        self.note_focus_pending = true;
-        self.redraw_overlay(cx);
-    }
-
-    /// The close: put the card away, keeping the text.
+    /// Leaving the tab: put what was typed on disk, keeping the text.
     fn note_close(&mut self, cx: &mut Cx) {
-        self.note_sync_text(cx);
-        // A card opened and closed without a word written in it is not a
+        self.spec_flush();
+        // A record opened and left without a word written in it is not a
         // note. Dropping the empties keeps /tweak/state a list of things the
         // person actually said, rather than everywhere they pressed Insert.
         {
             let mut s = session().lock().unwrap();
-            s.notes
-                .retain(|n| n.pinned || !n.text.trim().is_empty() || !n.prompt.trim().is_empty());
+            s.notes.retain(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty());
         }
-        self.note_open = false;
-        self.note_rect = None;
-        self.note_grip_rect = None;
-        self.note_focus_style = None;
         self.note_key_shown.clear();
         session().lock().unwrap().mention = false;
         // Nothing is being typed into any more, so the arrows go back to
@@ -8679,10 +8178,6 @@ impl Tweaker {
         });
         log!("TWEAK walk {dir:?} \u{2192} {} ({})", pick.path, pick.ty);
         session().lock().unwrap().pinned = Some(pick);
-        // The card follows the selection: a new path means a new note.
-        if self.note_open {
-            self.note_seed_pending = true;
-        }
         self.rows_uid = 0;
         self.redraw_sidebar(cx);
         self.redraw_overlay(cx);
@@ -9375,7 +8870,7 @@ impl Tweaker {
         }
         {
             let note = sidebar.child(live_id!(filter_row)).child(live_id!(note));
-            set_button_fill(cx, note, self.note_open);
+            set_button_fill(cx, note, self.panel_tab == PanelTab::Spec);
         }
         self.note_uid = sidebar
             .child(live_id!(filter_row))
@@ -9465,6 +8960,7 @@ impl Tweaker {
                 let status = session().lock().unwrap().prompt_status.clone();
                 bar.child(live_id!(prompt_status)).set_text(cx, &status);
                 let field = row.child(live_id!(prompt_field));
+                self.prompt_field_uid = field.widget_uid().0;
                 if self.prompt_clear_field {
                     // A send emptied the box. Clear it here rather than in
                     // the send, so the field is written exactly once a frame
@@ -11230,7 +10726,10 @@ impl Tweaker {
                 }
                 continue;
             }
-            if self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid {
+            if (self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid)
+                || (self.prompt_field_uid != 0
+                    && widget_action.widget_uid.0 == self.prompt_field_uid)
+            {
                 if let TextInputAction::Changed(text) = widget_action.cast::<TextInputAction>() {
                     // A fresh `@` arms a widget pick: the next click in the
                     // app names something INTO the note. Counted rather than
@@ -11246,20 +10745,20 @@ impl Tweaker {
                         self.redraw_overlay(cx);
                     }
                     self.note_at_count = ats;
-                    let showing = self.note_field_key(cx).as_deref()
+                    // The notes field is the only one whose text belongs to a
+                    // record; the prompt's box belongs to nobody until it is
+                    // sent. Guard on the tab SHOWING the path, because the
+                    // selection and the field can differ for a frame.
+                    let showing = self.note_path(cx).as_deref()
                         == Some(self.note_key_shown.as_str());
-                    let path = self.note_path(cx).filter(|_| showing);
+                    let is_notes = widget_action.widget_uid.0 == self.note_text_uid;
+                    let path = self.note_path(cx).filter(|_| showing && is_notes);
                     if let Some(path) = path {
-                        let note_mode = session().lock().unwrap().note_mode;
                         let mut s = session().lock().unwrap();
                         let mut pinned = false;
                         if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
-                            if note_mode {
-                                note.text = text.clone();
-                                pinned = note.pinned;
-                            } else {
-                                note.prompt = text.clone();
-                            }
+                            note.text = text.clone();
+                            pinned = !note.text.trim().is_empty();
                         }
                         if pinned {
                             let notes = s.notes.clone();
@@ -11592,57 +11091,6 @@ impl Tweaker {
                     cx.redraw_all();
                 }
                 continue;
-            }
-            // The note card's own strip.
-            if self.note_open && action_uid != 0 {
-                if action_uid == self.note_mode_uid {
-                    if let CheckBoxAction::Change(on) = widget_action.cast::<CheckBoxAction>() {
-                        // Whatever is in the box belongs to the side it was
-                        // typed on: save it before the field is reseeded from
-                        // the other one.
-                        self.note_sync_text(cx);
-                        session().lock().unwrap().note_mode = !on;
-                        self.note_focus_pending = true;
-                        self.redraw_overlay(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.prompt_queue_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.prompt_queue(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.prompt_send_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.prompt_send(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.note_queue_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.note_queue(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.note_send_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.note_send(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.note_pin_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.note_pin_toggle(cx);
-                    }
-                    continue;
-                }
-                if action_uid == self.note_shut_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.note_close(cx);
-                    }
-                    continue;
-                }
             }
             if self.shader_fold_uid != 0 && action_uid == self.shader_fold_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
@@ -12107,72 +11555,6 @@ impl Tweaker {
         Rect { pos: tl, size: br - tl }
     }
 
-    /// Where a widget's rect lands on screen in the EXPLODED view: on its
-    /// own plane, not at its layout coordinates.
-    ///
-    /// The outlines go into the body pass as marks and are drawn there, but
-    /// the note card is flat chrome on the window pass and stays where the
-    /// layout puts it. So the leader line is the one thing that has to cross
-    /// between the two, and aiming it at the layout rect pointed it at bare
-    /// canvas — the widget having moved a plane's worth away. A rect on a
-    /// tilted plane is a parallelogram; its bounding box is close enough to
-    /// aim a line at, and the line stops at the edge either way.
-    fn plane_quad(&self, cx: &mut Cx2d, pick: &TweakPick) -> Option<[Vec2d; 4]> {
-        if !cx.sploded_active() || pick.rect.size.x <= 0.0 {
-            return None;
-        }
-        let level = cx.sploded_depth_of(pick.uid).unwrap_or(pick.level) as f32;
-        let pass = cx.current_pass_size();
-        let r = pick.rect;
-        Some(
-            [
-                r.pos,
-                dvec2(r.pos.x + r.size.x, r.pos.y),
-                dvec2(r.pos.x + r.size.x, r.pos.y + r.size.y),
-                dvec2(r.pos.x, r.pos.y + r.size.y),
-            ]
-            .map(|p| cx.sploded_project(pass, p, level).unwrap_or(p)),
-        )
-    }
-
-    /// The axis-aligned box around four points.
-    fn quad_bounds(quad: &[Vec2d; 4]) -> Rect {
-        let min_x = quad.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-        let max_x = quad.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-        let min_y = quad.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-        let max_y = quad.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-        Rect {
-            pos: dvec2(min_x, min_y),
-            size: dvec2(max_x - min_x, max_y - min_y),
-        }
-    }
-
-    /// Where the segment `from` -> `to` first crosses the quad's outline.
-    ///
-    /// The bounding box is what picks the direction, and for a tilted plane
-    /// its corners are nowhere near the drawn edge — a line that stopped at
-    /// the box would stop in mid-air beside the outline. Walking on to the
-    /// real edge is what makes it touch.
-    fn quad_edge_hit(quad: &[Vec2d; 4], from: Vec2d, to: Vec2d) -> Option<Vec2d> {
-        let d = to - from;
-        let mut best: Option<f64> = None;
-        for i in 0..4 {
-            let (p, q) = (quad[i], quad[(i + 1) % 4]);
-            let e = q - p;
-            let denom = d.x * e.y - d.y * e.x;
-            if denom.abs() < 1.0e-9 {
-                continue;
-            }
-            let w = p - from;
-            let t = (w.x * e.y - w.y * e.x) / denom;
-            let u = (w.x * d.y - w.y * d.x) / denom;
-            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
-                best = Some(best.map_or(t, |b: f64| b.min(t)));
-            }
-        }
-        best.map(|t| from + d * t)
-    }
-
     /// Clip a rect to the app viewport; None when nothing remains visible.
     fn clip_to_viewport(&self, cx: &Cx2d, rect: Rect) -> Option<Rect> {
         let max_x = self.overlay_max_x(cx.current_pass_size());
@@ -12360,141 +11742,6 @@ impl Tweaker {
         self.redraw_sidebar(cx);
     }
 
-    /// The card's resize grab square, at its bottom-right corner. It sits on
-    /// top of the text field on purpose: the field runs to the card's edge,
-    /// so the grip borrows a corner of it rather than costing a strip.
-    fn note_corner(card: Rect) -> Rect {
-        Rect {
-            pos: dvec2(
-                card.pos.x + card.size.x - NOTE_GRIP,
-                card.pos.y + card.size.y - NOTE_GRIP,
-            ),
-            size: dvec2(NOTE_GRIP, NOTE_GRIP),
-        }
-    }
-
-    /// The closest pair of points on two axis-aligned rects, and the gap
-    /// between them. `None` when the rects overlap — there is no gap to
-    /// span then, and no pair that means anything.
-    ///
-    /// Per axis: if the rects are apart, the nearest pair is the facing
-    /// edges; if they share a span, both points sit at the middle of the
-    /// shared span so the line stays square to the axis it does cross.
-    fn closest_points(a: Rect, b: Rect) -> Option<(Vec2d, Vec2d, f64)> {
-        fn axis(a0: f64, a1: f64, b0: f64, b1: f64) -> (f64, f64) {
-            if a1 < b0 {
-                (a1, b0)
-            } else if b1 < a0 {
-                (a0, b1)
-            } else {
-                let mid = (a0.max(b0) + a1.min(b1)) * 0.5;
-                (mid, mid)
-            }
-        }
-        let (ax, bx) = axis(a.pos.x, a.pos.x + a.size.x, b.pos.x, b.pos.x + b.size.x);
-        let (ay, by) = axis(a.pos.y, a.pos.y + a.size.y, b.pos.y, b.pos.y + b.size.y);
-        let gap = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
-        if gap <= 0.0 {
-            return None;
-        }
-        Some((dvec2(ax, ay), dvec2(bx, by), gap))
-    }
-
-    /// The leader: a thin line from the note card to the widget it is about,
-    /// in the selection colour so it reads as one mark with the brackets.
-    /// It runs between the two CLOSEST points of the card and the widget's
-    /// outline, and only appears once they are more than
-    /// [`NOTE_LEADER_MIN_GAP`] apart — a card sitting against its own widget
-    /// needs no line to say so.
-    fn draw_note_leader(
-        &mut self,
-        cx: &mut Cx2d,
-        card: Rect,
-        target: Rect,
-        quad: Option<[Vec2d; 4]>,
-    ) {
-        let Some((from, mut to, mut gap)) = Self::closest_points(card, target) else {
-            return; // the card is over its own widget: nothing to join
-        };
-        // Exploded: the outline is a parallelogram on its plane, so carry on
-        // past the bounding box to the edge that is actually drawn.
-        if let Some(quad) = quad {
-            let centre = (quad[0] + quad[1] + quad[2] + quad[3]) * 0.25;
-            if let Some(hit) = Self::quad_edge_hit(&quad, from, centre) {
-                to = hit;
-                gap = ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
-            }
-        }
-        // Close enough to read as one thing already: a stub of line between
-        // a card and the widget it is touching is clutter, not information.
-        if gap <= NOTE_LEADER_MIN_GAP {
-            return;
-        }
-        let max_x = self.overlay_max_x(cx.current_pass_size());
-        // The same dot chain the annotation strokes use, one segment long.
-        const RADIUS: f64 = 1.0;
-        self.draw_stroke.stroke_color = vec4(0.19, 0.78, 1.0, 0.85);
-        let d = to - from;
-        let dist = (d.x * d.x + d.y * d.y).sqrt();
-        let steps = (dist / (RADIUS * 0.9)).ceil().max(1.0) as usize;
-        for step in 0..=steps {
-            let t = step as f64 / steps as f64;
-            let px = from.x + d.x * t;
-            let py = from.y + d.y * t;
-            if px + RADIUS > max_x {
-                continue; // never into the panel band
-            }
-            self.draw_stroke.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(px - RADIUS, py - RADIUS),
-                    size: dvec2(RADIUS * 2.0, RADIUS * 2.0),
-                },
-            );
-        }
-        // A dot where it meets the widget, so the line has an aim.
-        self.draw_stroke.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(to.x - 2.5, to.y - 2.5),
-                size: dvec2(5.0, 5.0),
-            },
-        );
-    }
-
-    /// The card's opaque backdrop, drawn under its widgets: solid while the
-    /// caret is in the note (a note being typed has to be readable over
-    /// whatever it covers) and near-solid when it is not, so the card never
-    /// dissolves into the app the way a bare `show_bg` View did. The border
-    /// is the selection colour, matching the brackets and the leader.
-    fn draw_note_backdrop(&mut self, cx: &mut Cx2d, card: Rect, focused: bool) {
-        let Some(card) = self.clip_to_viewport(cx, card) else { return };
-        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
-        self.draw_outline.dash = 0.0;
-        self.draw_outline.border_size =
-            if cx.seconds_since_app_start() < self.note_flash_until { 2.0 } else { 1.0 };
-        let now = cx.seconds_since_app_start();
-        self.draw_outline.border_color = if now < self.note_flash_until {
-            // A beat of colour saying the message left: amber into the queue,
-            // green out to the AI.
-            self.next_frame = cx.new_next_frame();
-            match self.note_flash_kind {
-                NoteFlash::Queued => vec4(1.0, 0.78, 0.29, 1.0),
-                _ => vec4(0.35, 0.90, 0.45, 1.0),
-            }
-        } else if focused {
-            vec4(0.19, 0.78, 1.0, 1.0)
-        } else {
-            vec4(0.19, 0.78, 1.0, 0.55)
-        };
-        self.draw_outline.fill_color = if focused {
-            vec4(0.145, 0.145, 0.180, 1.0)
-        } else {
-            vec4(0.145, 0.145, 0.180, 0.93)
-        };
-        self.draw_outline.draw_abs(cx, card);
-    }
-
     /// ISOLATE, in the app itself: everything outside the isolated widget is
     /// covered, so the one thing being worked on stands alone.
     ///
@@ -12607,13 +11854,13 @@ impl Tweaker {
         let keys: Vec<String> = {
             let mut s = session().lock().unwrap();
             s.load_notes();
-            // PINNED is the whole test. Requiring text as well meant a note
-            // pinned with TAB before anything was typed into it — which is
-            // the ordinary order of doing it — wore no badge at all, so the
-            // pins simply never appeared.
+            // A badge now means "something is written about this widget",
+            // which is the only test left once pinning is gone: a record
+            // exists for every widget a prompt was ever sent about, and
+            // those must not all wear a mark.
             s.notes
                 .iter()
-                .filter(|n| n.pinned)
+                .filter(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty())
                 .map(|n| n.path.clone())
                 .collect()
         };
@@ -12670,24 +11917,6 @@ impl Tweaker {
                 Rect { pos: badge(rect), size: dvec2(BADGE_SIZE, BADGE_SIZE) },
                 uid,
             ));
-        }
-    }
-
-    /// The card's bottom-right resize grip: three stacked ticks, the usual
-    /// shorthand, in the selection colour.
-    fn draw_note_grip(&mut self, cx: &mut Cx2d, card: Rect) {
-        let max_x = self.overlay_max_x(cx.current_pass_size());
-        self.draw_stroke.stroke_color = vec4(0.19, 0.78, 1.0, 0.7);
-        let right = card.pos.x + card.size.x - 3.0;
-        let bottom = card.pos.y + card.size.y - 3.0;
-        for i in 0..3 {
-            let inset = 3.0 * i as f64;
-            let len = 3.0 + inset;
-            let pos = dvec2(right - len, bottom - 1.0 - inset);
-            if pos.x + len > max_x {
-                continue;
-            }
-            self.draw_stroke.draw_abs(cx, Rect { pos, size: dvec2(len, 1.0) });
         }
     }
 
@@ -13125,67 +12354,13 @@ impl Widget for Tweaker {
             {
                 self.prompt_recall(cx, ke.key_code == KeyCode::ArrowUp);
             }
-            // Ctrl+Enter in the note card: send it to the AI. The card's
-            // TextInput would otherwise take Return, so this arm runs first
-            // (the match precedes `note_ui.handle_event` below).
-            Event::KeyDown(ke)
-                if self.note_open
-                    && tweak_is_on()
-                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
-                    && (ke.modifiers.control || ke.modifiers.logo) =>
-            {
-                self.note_send(cx);
-            }
-            // Up / Down in an EMPTY note walks its history, the way a shell
-            // prompt does. Only while empty: in a note being written those
-            // keys belong to the caret.
-            Event::KeyDown(ke)
-                if self.note_open
-                    && tweak_is_on()
-                    && matches!(ke.key_code, KeyCode::ArrowUp | KeyCode::ArrowDown)
-                    && !ke.modifiers.any()
-                    && self.note_ui.as_ref().is_some_and(|ui| {
-                        let field = ui.child(live_id!(note_text));
-                        cx.has_key_focus(field.area()) && field.text().is_empty()
-                    }) =>
-            {
-                self.note_recall(cx, ke.key_code == KeyCode::ArrowUp);
-            }
-            // Alt+Enter queues instead of sending: write against several
-            // widgets first, then release the batch with one Ctrl+Enter.
-            // Claimed here, before the field, which would otherwise take
-            // Alt+Enter as a newline.
-            Event::KeyDown(ke)
-                if self.note_open
-                    && tweak_is_on()
-                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
-                    && ke.modifiers.alt
-                    && !ke.modifiers.control
-                    && !ke.modifiers.logo =>
-            {
-                self.note_queue(cx);
-            }
-            // TAB pins or unpins the note being written. It is only ours
-            // while the caret is IN the card — everywhere else Tab is still
-            // focus traversal — and the caret is put back afterwards, so a
-            // focus move the same keypress caused is undone.
-            Event::KeyDown(ke)
-                if self.note_open
-                    && tweak_is_on()
-                    && ke.key_code == KeyCode::Tab
-                    && !ke.modifiers.any()
-                    && self
-                        .note_ui
-                        .as_ref()
-                        .is_some_and(|ui| cx.has_key_focus(ui.child(live_id!(note_text)).area())) =>
-            {
-                self.note_pin_toggle(cx);
-            }
-            // Escape calls off an armed @mention first — the card is still
-            // being written in — and only closes the card once there is no
+            // Escape calls off an armed @mention first — something is still
+            // being written in — and only leaves the tab once there is no
             // pick outstanding.
             Event::KeyDown(ke)
-                if self.note_open && tweak_is_on() && ke.key_code == KeyCode::Escape =>
+                if self.panel_tab == PanelTab::Spec
+                    && tweak_is_on()
+                    && ke.key_code == KeyCode::Escape =>
             {
                 if session().lock().unwrap().mention {
                     session().lock().unwrap().mention = false;
@@ -13389,78 +12564,6 @@ impl Widget for Tweaker {
         if let Some(ui) = self.spread_ui.clone() {
             ui.handle_event(cx, event, scope);
         }
-        if self.note_open {
-            // The resize corner sits ON the text field's bottom-right corner
-            // — the field runs to the card's edge rather than giving up a
-            // strip of writing space — so the press has to be claimed BEFORE
-            // the field sees it, or every resize would first drop a caret.
-            let corner_press = match event {
-                Event::MouseDown(e) if e.button.is_primary() => self
-                    .note_rect
-                    .map(|rect| Self::note_corner(rect).contains(e.abs))
-                    .unwrap_or(false),
-                _ => false,
-            };
-            if let (Some(ui), false) = (self.note_ui.clone(), corner_press) {
-                ui.handle_event(cx, event, scope);
-            }
-            match event {
-                Event::MouseDown(e) if e.button.is_primary() => {
-                    if let Some(rect) = self.note_rect {
-                        if corner_press {
-                            self.note_resize = Some((e.abs, rect.size));
-                        } else if self
-                            .note_grip_rect
-                            .is_some_and(|grip| grip.contains(e.abs))
-                        {
-                            self.note_drag = Some(dvec2(
-                                e.abs.x - rect.pos.x,
-                                e.abs.y - rect.pos.y,
-                            ));
-                        }
-                    }
-                }
-                Event::MouseMove(e) => {
-                    let sel = session().lock().unwrap().pinned.clone();
-                    let key = self.note_path(cx);
-                    if let (Some((start, size)), Some(key)) = (self.note_resize, key.clone()) {
-                        let mut s = session().lock().unwrap();
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == key) {
-                            note.w = (size.x + e.abs.x - start.x).max(NOTE_MIN_W);
-                            note.h = (size.y + e.abs.y - start.y).max(NOTE_MIN_H);
-                        }
-                        drop(s);
-                        cx.set_cursor(MouseCursor::NwseResize);
-                        self.redraw_overlay(cx);
-                    } else if let (Some(grab), Some(key), Some(sel)) = (self.note_drag, key, sel) {
-                        let mut s = session().lock().unwrap();
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == key) {
-                            note.dx = e.abs.x - grab.x - sel.rect.pos.x;
-                            note.dy = e.abs.y - grab.y - sel.rect.pos.y;
-                        }
-                        drop(s);
-                        cx.set_cursor(MouseCursor::Move);
-                        self.redraw_overlay(cx);
-                    } else if let Some(rect) = self.note_rect {
-                        // The corner announces itself before it is grabbed.
-                        if Self::note_corner(rect).contains(e.abs) {
-                            cx.set_cursor(MouseCursor::NwseResize);
-                        }
-                    }
-                }
-                Event::MouseUp(_) => {
-                    if self.note_drag.is_some() || self.note_resize.is_some() {
-                        // Geometry is part of a pinned note: keep it.
-                        let notes = session().lock().unwrap().notes.clone();
-                        note_store_save(&notes);
-                    }
-                    self.note_drag = None;
-                    self.note_resize = None;
-                }
-                _ => {}
-            }
-        }
-
         if let Event::Actions(actions) = event {
             self.handle_sidebar_actions(cx, actions);
         }
@@ -13740,7 +12843,7 @@ impl Widget for Tweaker {
         // note wears a pin, so the others announce themselves and can be
         // opened with a click. Outside note mode they would be chrome on the
         // canvas answering a question nobody asked.
-        if flat_outlines && self.note_open {
+        if flat_outlines && self.panel_tab == PanelTab::Spec {
             self.refresh_badges(cx);
             self.draw_badges(cx, scope, window_id);
         } else {
@@ -13776,116 +12879,11 @@ impl Widget for Tweaker {
             }
         }
 
-        // The note card rides the SELECTION's live rect, joined to it by a
-        // leader line in the selection's own colour so a card dragged clear
-        // of its widget still says what it is about.
-        self.note_rect = None;
-        self.note_grip_rect = None;
-        if self.note_open {
-            if let Some(pick) = &pinned {
-                let key = self.sel_ref(cx, pick.uid);
-                let note = {
-                    let s = session().lock().unwrap();
-                    s.notes.iter().find(|n| n.path == key).cloned()
-                };
-                if let Some(note) = note {
-                    self.ensure_note_ui(cx);
-                    let ui = self.note_ui.as_ref().unwrap().clone();
-                    let field = ui.child(live_id!(note_text));
-                    self.note_text_uid = field.widget_uid().0;
-                    // The strip: what the field is showing, and the buttons
-                    // that belong to it.
-                    let note_mode = session().lock().unwrap().note_mode;
-                    {
-                        let head = ui.child(live_id!(head));
-                        if let Some(mut check) =
-                            head.child(live_id!(prompt_mode)).borrow_mut::<CheckBox>()
-                        {
-                            check.set_active(cx, !note_mode, Animate::No);
-                        }
-                        head.child(live_id!(queue)).set_visible(cx, !note_mode);
-                        head.child(live_id!(send)).set_visible(cx, !note_mode);
-                        head.child(live_id!(pin)).set_visible(cx, note_mode);
-                        if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
-                            let hint = if note_mode {
-                                "a note about this item, for whoever reads it next \u{2014} it stays until you clear it \u{00b7} TAB pins it to disk \u{00b7} @ names another widget"
-                            } else {
-                                "tell the agent about this item \u{2014} Ctrl+Enter sends \u{00b7} Alt+Enter queues \u{00b7} Up recalls what you sent \u{00b7} @ names another widget"
-                            };
-                            if input.empty_text() != hint {
-                                input.set_empty_text(cx, hint.to_string());
-                            }
-                        }
-                    }
-                    // The mode is part of the key: flipping the checkbox has
-                    // to reseed, or the note would be shown with the prompt's
-                    // text still in the box.
-                    let key = format!("{}{}", if note_mode { "n:" } else { "p:" }, key);
-                    let shown = if note_mode { &note.text } else { &note.prompt };
-                    if self.note_clear_field {
-                        // The message went out; the box empties behind it.
-                        self.note_clear_field = false;
-                        field.set_text(cx, "");
-                        self.note_key_shown = key.clone();
-                        self.note_at_count = 0;
-                    } else if self.note_seed_pending || self.note_key_shown != key {
-                        field.set_text(cx, shown);
-                        self.note_seed_pending = false;
-                        self.note_key_shown = key.clone();
-                        // A note read back from the store can already hold
-                        // mentions; those must not read as freshly typed.
-                        self.note_at_count = shown.matches('@').count();
-                    }
-                    // Opaque while it is being typed in, translucent when
-                    // it is not: a note must be readable over whatever it
-                    // covers, and must stop covering it once it is written.
-                    let focused = cx.has_key_focus(field.area());
-                    self.note_style(cx, focused, note.pinned);
-                    let pos = dvec2(
-                        (pick.rect.pos.x + note.dx).max(0.0),
-                        (pick.rect.pos.y + note.dy).max(0.0),
-                    );
-                    let card = Rect { pos, size: dvec2(note.w, note.h) };
-                    // The leader FIRST: under the card, so it tucks beneath
-                    // the edge instead of crossing it.
-                    if pick.rect.size.x > 0.0 {
-                        let quad = self.plane_quad(cx, pick);
-                        let target = quad
-                            .map(|q| Self::quad_bounds(&q))
-                            .unwrap_or(pick.rect);
-                        self.draw_note_leader(cx, card, selection_ring(target), quad);
-                    }
-                    self.draw_note_backdrop(cx, card, focused);
-                    let mut walk = Walk::fit();
-                    walk.abs_pos = Some(pos);
-                    walk.width = Size::Fixed(note.w);
-                    walk.height = Size::Fixed(note.h);
-                    let _ = ui.draw_walk(cx, scope, walk);
-                    let rect = ui.area().rect(cx);
-                    if rect.size.x > 0.0 {
-                        self.note_rect = Some(rect);
-                        let grip = ui.child(live_id!(head)).child(live_id!(grip)).area().rect(cx);
-                        self.note_grip_rect = (grip.size.x > 0.0).then_some(grip);
-                        self.draw_note_grip(cx, rect);
-                    }
-                    if self.note_focus_pending {
-                        self.note_focus_pending = false;
-                        cx.set_key_focus(field.area());
-                        self.next_frame = cx.new_next_frame();
-                    }
-                }
-            }
-        }
-
-        // The note card is drawn FLAT on the window pass, so in the exploded
-        // view the mode must not re-address the pointer over it: the card
+        // The extrusion readout is drawn FLAT on the window pass, so in the
+        // exploded view the mode must not re-address the pointer over it: it
         // would be painted in one place and clicked in another. Same
         // exemption the panel band has, but this one moves.
-        let floating: Vec<Rect> = self
-            .note_rect
-            .into_iter()
-            .chain(self.spread_rect)
-            .collect();
+        let floating: Vec<Rect> = self.spread_rect.into_iter().collect();
         cx.sploded_set_flat_rects(floating.clone());
         session().lock().unwrap().chrome_float = floating;
 
