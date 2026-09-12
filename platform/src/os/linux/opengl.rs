@@ -382,6 +382,8 @@ impl Cx {
                 .1
                 .allocations
                 .set_device_limit(allowance / 4);
+            // The one derived limit of the publication registry (contract §7).
+            self.publications.set_envelope(allowance / 4);
             crate::log!("retained-upload budgets: adapter_bytes={} process_allowance={} allocation_limit={} source={}", reported, self.memory_budget(), allowance / 4, if reported != 0 { "GL_NVX_gpu_memory_info" } else { "process_allowance_fallback" });
         }
         self.draw_lists.1.allocations.collect_for_frame(
@@ -604,6 +606,10 @@ impl Cx {
                         draw_item.os.inst_vb.charge = Some(charge);
                     }
                     draw_item.instance_upload_pending = false;
+                    // What this copy costs feeds the producers' pacing
+                    // (contract §8): summed per frame, recorded at the
+                    // pass's end.
+                    let copy_started = std::time::Instant::now();
                     if let Some(retained) = &draw_item.retained_instances {
                         draw_item.os.inst_vb.update_retained_array(
                             gl,
@@ -616,6 +622,11 @@ impl Cx {
                             .inst_vb
                             .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
                     }
+                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(bytes);
+                    upload_budget.stats.install_us = upload_budget
+                        .stats
+                        .install_us
+                        .saturating_add(copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 }
 
                 // update the zbias uniform if we have it.
@@ -1029,6 +1040,13 @@ impl Cx {
                         charge.submitted(draw_item.consumed_serial);
                     }
                     draw_item.consumed_uniforms_gen = draw_call.uniforms_gen;
+                    if let Some((block, _)) = draw_item.shared.as_ref() {
+                        // The lease's receipt: this backend encodes and
+                        // submits in the same call, under the pass's serial.
+                        let receipt = block.receipt();
+                        receipt.mark_encoded(draw_item.consumed_serial);
+                        receipt.mark_submitted(draw_item.consumed_serial, draw_call.uniforms_gen);
+                    }
 
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
@@ -1071,6 +1089,7 @@ impl Cx {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let repaint_id = self.repaint_id;
+        self.record_publication_copies();
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
         // the bake transaction's paint receipt (whole draws: ranges ignored)
@@ -4339,6 +4358,9 @@ impl Cx {
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // The adapter draws attached blocks here (no per-publication
+        // backing): dropped blocks release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
         #[cfg(target_os = "linux")]
         let Some(display) = self.os.opengl_cx.as_ref() else {
             return;

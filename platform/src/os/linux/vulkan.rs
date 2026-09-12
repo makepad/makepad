@@ -5853,22 +5853,63 @@ impl CxVulkan {
                     draw_stats.skipped_no_instance_slots += 1;
                     continue;
                 }
-                let instances = if let Some(instances) = draw_item.instances.as_ref() {
+                // The fallback draw of a shared-instance block (contract §10):
+                // this backend has no per-publication backing yet, so an
+                // attached item copies `data()[range]` into this frame's ink —
+                // the item's ranges when it holds several, else its lease's
+                // slice — and draws it like frame ink. Before this an attached
+                // or adapter-retained item drew nothing on Vulkan.
+                let slots = sh.mapping.instances.total_slots;
+                let instances = if let Some(block) = draw_item.retained_instances.as_ref() {
+                    let data = block.data();
+                    let count = draw_item.retained_instance_count.min(data.len() / slots);
+                    if draw_item.instance_ranges.is_empty() {
+                        data[..count * slots].to_vec()
+                    } else {
+                        let mut ink = Vec::new();
+                        for range in &draw_item.instance_ranges {
+                            let start = (range.start as usize).min(count);
+                            let end = (range.end as usize).min(count);
+                            if end > start {
+                                ink.extend_from_slice(&data[start * slots..end * slots]);
+                            }
+                        }
+                        ink
+                    }
+                } else if let Some((block, range)) = draw_item.shared.as_ref() {
+                    block.data()[range.start * slots..range.end * slots].to_vec()
+                } else if let Some(instances) = draw_item.instances.as_ref() {
                     instances.to_vec()
                 } else {
                     draw_stats.skipped_no_instances_buffer += 1;
                     continue;
                 };
-                if instances.len() < sh.mapping.instances.total_slots {
+                if instances.len() < slots {
                     draw_stats.skipped_instances_too_short += 1;
                     continue;
                 }
-                let instance_count = instances.len() / sh.mapping.instances.total_slots;
+                let instance_count = instances.len() / slots;
                 if instance_count == 0 {
                     draw_stats.skipped_zero_instances += 1;
                     continue;
                 }
                 draw_stats.instances += instance_count as u64;
+                // Consumed like the other backends: the item's proofs read
+                // these, and a lease's receipt learns its draw.
+                draw_item.instance_upload_pending = false;
+                draw_item.retained_gpu_evicted = false;
+                draw_item.retained_instance_id =
+                    draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                draw_item.resident_schema = draw_item.retained_schema;
+                draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                draw_item.consumed_schema = draw_item.resident_schema;
+                draw_item.consumed_serial = cx.repaint_id;
+                draw_item.consumed_uniforms_gen = uniforms_gen;
+                if let Some((block, _)) = draw_item.shared.as_ref() {
+                    let receipt = block.receipt();
+                    receipt.mark_encoded(cx.repaint_id);
+                    receipt.mark_submitted(cx.repaint_id, uniforms_gen);
+                }
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {

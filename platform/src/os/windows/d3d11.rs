@@ -144,6 +144,8 @@ impl Cx {
                 .1
                 .allocations
                 .set_device_limit(allowance / 4);
+            // The one derived limit of the publication registry (contract §7).
+            self.publications.set_envelope(allowance / 4);
             crate::log!("retained-upload budgets: adapter_bytes={} process_allowance={} allocation_limit={} source={}", reported, self.memory_budget(), allowance / 4, if reported != 0 { "DXGI_adapter_budget" } else { "process_allowance_fallback" });
         }
         self.draw_lists.1.allocations.collect_for_frame(
@@ -333,7 +335,10 @@ impl Cx {
                     {
                         continue;
                     }
-                    // update the instance buffer data
+                    // update the instance buffer data; what the copy costs
+                    // feeds the producers' pacing (contract §8), recorded
+                    // at the pass's end.
+                    let copy_started = std::time::Instant::now();
                     if let Some(retained) = &draw_item.retained_instances {
                         draw_item.os.inst_vbuf.update_retained_instances(
                             d3d11_cx,
@@ -346,6 +351,11 @@ impl Cx {
                             draw_item.instances.as_deref().unwrap(),
                         );
                     }
+                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(slots * 4);
+                    upload_budget.stats.install_us = upload_budget
+                        .stats
+                        .install_us
+                        .saturating_add(copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 }
                 if draw_call.dyn_uniforms.len() != 0 {
                     draw_item
@@ -666,6 +676,17 @@ impl Cx {
                 if let Some(charge) = &draw_item.os.inst_vbuf.charge {
                     charge.submitted(draw_item.consumed_serial);
                 }
+                if let Some((block, _)) = draw_item.shared.as_ref() {
+                    // The lease's receipt: encoded and submitted in the same
+                    // call, under the pass's serial (completion by the
+                    // frame's event query).
+                    let receipt = block.receipt();
+                    receipt.mark_encoded(draw_item.consumed_serial);
+                    receipt.mark_submitted(
+                        draw_item.consumed_serial,
+                        draw_item.kind.draw_call().map_or(0, |call| call.uniforms_gen),
+                    );
+                }
                 draw_item.consumed_uniforms_gen = draw_item
                     .kind
                     .draw_call()
@@ -701,6 +722,7 @@ impl Cx {
             let uniforms_gen = self.next_uniform_gen();
             self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size, uniforms_gen);
         }
+        self.record_publication_copies();
         self.passes[pass_id].paint_dirty = false;
         // the bake transaction's paint receipt (whole draws: ranges ignored)
         self.passes[pass_id].painted_serial = self.repaint_id;
@@ -4588,6 +4610,9 @@ impl Cx {
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // The adapter draws attached blocks here (no per-publication
+        // backing): dropped blocks release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
         let Some(device) = self.os.d3d11_device.as_ref() else {
             return;
         };

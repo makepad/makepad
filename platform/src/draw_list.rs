@@ -345,6 +345,26 @@ pub struct GpuPassMetrics {
 }
 
 impl Cx {
+    /// A backend that copies instance data inline while drawing (the GL
+    /// family, D3D11) sums bytes and microseconds into the retained upload
+    /// stats; at the pass's end the sum becomes the frame's
+    /// `UploadObservation` (contract §8) and the counters clear. Recorded
+    /// only on a frame that copied.
+    #[allow(dead_code)]
+    pub(crate) fn record_publication_copies(&mut self) {
+        let stats = &mut self.draw_lists.1.stats;
+        if stats.bytes != 0 && stats.install_us != 0 {
+            self.publications.record_observation(crate::shared_instances::UploadObservation {
+                bytes: stats.bytes,
+                copy_ns: stats.install_us.saturating_mul(1000),
+            });
+        }
+        stats.bytes = 0;
+        stats.install_us = 0;
+    }
+}
+
+impl Cx {
     /// A single inventory traversal feeds three bounded priority buckets.
     /// Only one frame's byte allowance and at most256 requests leave here.
     pub fn pending_instance_uploads(&self, root: DrawListId) -> Vec<InstanceUploadRequest> {
