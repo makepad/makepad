@@ -54,6 +54,7 @@ const ICONS: &[BundledIcon] = &[
     icon!("vj"),
     icon!("fab"),
     icon!("studio"),
+    icon!("scope"),
     icon!("image"),
     icon!("pdf"),
     icon!("aichat"),
