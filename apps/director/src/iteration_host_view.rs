@@ -284,17 +284,10 @@ impl IterationRunView {
             return false;
         };
 
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if let Some(buffer) = drawn.software_buffer.as_ref() {
-            cx.upload_presentable_image_software_buffer(
-                &drawn.texture,
-                swapchain.alloc_width,
-                swapchain.alloc_height,
-                buffer.as_bytes(),
-            );
-        }
-
-        draw_app.set_texture(0, &drawn.texture);
+        let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
+            return false;
+        };
+        draw_app.set_texture(0, &texture);
         draw_app.draw_vars.set_dyn_instance(
             cx,
             id!(tex_scale),
@@ -321,7 +314,7 @@ impl IterationRunView {
         #[cfg(not(target_os = "windows"))]
         draw_app
             .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
+            .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
         // Linux's software fallback is copied row-for-row from a top-left
         // framebuffer and needs the historical shader flip. A GPU-shared
         // DMA-BUF texture already has the orientation expected by the GL

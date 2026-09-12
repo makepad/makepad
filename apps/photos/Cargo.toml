@@ -36,7 +36,7 @@ makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-image-tiles = { path = "../../libs/image_tiles" }
 # The assistant: the F10 overlay in this window, and the tools the wall
 # exposes to it (src/ai.rs).
-makepad-aichat = { path = "../aichat", optional = true }
+makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
 # The window manager's vocabulary for the standalone window: the bar's
 # title and the polite close (the module has no window of its own).
 makepad-wm-api = { path = "../../libs/wm_api", optional = true }

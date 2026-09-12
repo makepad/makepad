@@ -2392,6 +2392,15 @@ fn evict_resident(
         progress(&format!(
             "evict {model_id}: vram free {before} -> {after} MB (+{freed} MB, estimate {est_mb} MB)"
         ));
+        // The empty-card ceiling was sampled by the pool trim above, which
+        // ran before the asynchronous teardown handed the arena back: that
+        // sample can be the PRE-eviction free space. Republish it from this
+        // post-wait reading when nothing is resident, or the node keeps
+        // advertising a card that "can free 2 GB" until its next restart and
+        // lists a model it is running as too small.
+        if !any_backend_resident(backends) {
+            shared.vram_usable.refresh();
+        }
         // A retire that frees almost nothing is the failure this whole path
         // exists to prevent, and it used to leave no trace at all.
         if est_mb > 0 && freed * 4 < est_mb {

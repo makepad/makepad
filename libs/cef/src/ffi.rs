@@ -12,7 +12,10 @@ pub type cef_request_context_handler_t = c_void;
 pub type cef_render_process_handler_t = c_void;
 pub type cef_resource_bundle_handler_t = c_void;
 pub type cef_scheme_registrar_t = c_void;
+#[cfg(not(target_os = "linux"))]
 pub type cef_window_handle_t = *mut c_void;
+#[cfg(target_os = "linux")]
+pub type cef_window_handle_t = std::os::raw::c_ulong;
 pub type cef_string_userfree_t = *mut cef_string_t;
 pub type cef_string_list_t = *mut c_void;
 pub type cef_string_map_t = *mut c_void;
@@ -409,6 +412,22 @@ pub struct cef_window_info_t {
     pub bounds: cef_rect_t,
     pub parent_window: cef_window_handle_t,
     pub menu: *mut c_void,
+    pub windowless_rendering_enabled: c_int,
+    pub shared_texture_enabled: c_int,
+    pub external_begin_frame_enabled: c_int,
+    pub window: cef_window_handle_t,
+    pub runtime_style: cef_runtime_style_t,
+}
+
+/// Linux CEF uses XID-sized window handles, including for windowless setup.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_window_info_t {
+    pub size: usize,
+    pub window_name: cef_string_t,
+    pub bounds: cef_rect_t,
+    pub parent_window: cef_window_handle_t,
     pub windowless_rendering_enabled: c_int,
     pub shared_texture_enabled: c_int,
     pub external_begin_frame_enabled: c_int,

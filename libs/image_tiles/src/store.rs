@@ -21,10 +21,11 @@ pub enum StoreEvent {
     /// A picture at full resolution, mipmapped.
     Full { item: ItemId, px: u32, finest: bool, frame: FullFrame },
     /// A page decode that did not come back; without this the widget's
-    /// "already asked" mark would stand for ever.
-    PageFailed { shard: i64, level: usize },
+    /// "already asked" mark would stand for ever. `reason` is the decoder's
+    /// own words, for the one log line the widget writes per rest.
+    PageFailed { shard: i64, level: usize, reason: String },
     /// A full-frame decode that did not come back; same contract.
-    FullFailed { item: ItemId },
+    FullFailed { item: ItemId, reason: String },
 }
 
 #[derive(Clone, Copy)]
@@ -134,14 +135,14 @@ fn decode(library: &Library, work: Work) -> StoreEvent {
     match work {
         Work::DecodePage { shard, level } => match read_frame(&library.tape_path(shard, level)) {
             Ok(planes) => StoreEvent::Page { shard, level, planes },
-            Err(_) => StoreEvent::PageFailed { shard, level },
+            Err(reason) => StoreEvent::PageFailed { shard, level, reason },
         },
         Work::DecodeFull { item, px } => match display_frame(library, item, px) {
             Ok((planes, finest)) => {
                 let got = planes.width.max(planes.height);
                 StoreEvent::Full { item, px: got, finest, frame: full_frame(&planes) }
             }
-            Err(_) => StoreEvent::FullFailed { item },
+            Err(reason) => StoreEvent::FullFailed { item, reason },
         }
     }
 }

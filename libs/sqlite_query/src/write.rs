@@ -67,6 +67,61 @@ impl Connection {
         }
     }
 
+    /// Open an existing database for reading only: a library shipped inside
+    /// an application bundle, a file on a read-only volume, a database
+    /// another process owns. The main file is opened without write access
+    /// and never written, no journal or WAL is created (an existing WAL is
+    /// read for consistency, without its shared-memory lock when that
+    /// cannot be created), readers take SHARED locks only, and every
+    /// statement that would write answers [`crate::pager::READ_ONLY_CONNECTION`].
+    /// A hot journal left by a crashed writer is refused as busy: only a
+    /// writer may recover it. A missing or empty file is an error, never
+    /// created.
+    pub fn open_read_only(path: &Path, busy_timeout: Duration) -> Result<Connection> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let stores: Arc<dyn PageStoreSet> =
+                Arc::new(crate::storage::FileStoreSet::new(path));
+            return Self::open_store_read_only(stores, busy_timeout);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, busy_timeout);
+            Err(Error::unsupported(
+                "filesystem databases are unavailable on wasm32; use open_memory or open_with",
+            ))
+        }
+    }
+
+    /// [`Connection::open_read_only`] over a caller-supplied store set.
+    pub fn open_store_read_only(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        let mut pager = Pager::open_store_with_cache(stores, crate::pager::DEFAULT_CACHE_PAGES)?;
+        pager.set_busy_timeout(busy_timeout);
+        pager.begin_read()?;
+        let schema = Schema::load(&mut pager)?;
+        let schema_cookie = pager.header().schema_cookie;
+        let mut connection = Connection {
+            pager,
+            schema,
+            schema_cookie,
+            plans: HashMap::new(),
+            limits: Limits::default(),
+            changes: 0,
+            total_changes: 0,
+            autocommit: true,
+        };
+        connection.release_idle_locks();
+        Ok(connection)
+    }
+
+    /// True for a connection from [`Connection::open_read_only`].
+    pub fn is_read_only(&self) -> bool {
+        !self.pager.is_writable()
+    }
+
     /// Open a fresh database whose main file and rollback journal are memory
     /// backed. The returned connection owns the store set.
     pub fn open_memory() -> Result<Connection> {

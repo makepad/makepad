@@ -1,0 +1,16 @@
+# makepad-civil-time — Gregorian dates as a day number.
+#
+# No clocks, no zones, no leap seconds. A date is an i32 count of days from
+# 1970-01-01. Arithmetic is Howard Hinnant's days_from_civil, exact for the
+# whole proleptic Gregorian calendar.
+
+[package]
+name = "makepad-civil-time"
+version = "0.1.0"
+edition = "2021"
+description = "Civil dates as a day number: y/m/d, weekdays, month grids"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_civil_time"
+path = "src/lib.rs"

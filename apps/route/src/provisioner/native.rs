@@ -1,19 +1,22 @@
-use crate::testmap::TestMapBuild;
 use crate::overlays::{
     overlay_source, OverlaySelection, OCEAN_OVERLAY_LAYERS, OVERLAY_LAYERS,
 };
-use makepad_widgets::{Cx, MapViewRef, OverlaySource, TileSourceConfig};
+#[cfg(feature = "bake")]
+use crate::testmap::{Stage, TestMapBuild};
+use makepad_widgets::{Cx, MapViewRef, NetworkResponse, OverlaySource, TileSourceConfig};
 use std::fs;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 pub const PROFILE: super::ProvisioningProfile = super::ProvisioningProfile::Native;
 const WORLD_ARCHIVE: &str = "world.mkmap";
 
-/// Native source selection plus the existing test-map state used by the rest
-/// of the app's provisioning UI.
+/// Native source selection: a local world archive when the maps root has
+/// one, else the hosted range-cached archive — and, with `bake`, the
+/// first-run test-map build the popup card drives.
 pub struct MapProvisioner {
-    build: TestMapBuild,
+    maps_root: PathBuf,
+    #[cfg(feature = "bake")]
+    build: Option<TestMapBuild>,
 }
 
 impl Default for MapProvisioner {
@@ -22,7 +25,9 @@ impl Default for MapProvisioner {
             makepad_widgets::makepad_platform::home::makepad_home().join("route/tile-source"),
         );
         Self {
-            build: TestMapBuild::default(),
+            maps_root: PathBuf::new(),
+            #[cfg(feature = "bake")]
+            build: None,
         }
     }
 }
@@ -30,6 +35,24 @@ impl Default for MapProvisioner {
 pub struct ProvisionerUpdate {
     pub changed: bool,
     pub nav_basename: Option<String>,
+}
+
+/// What the first-run card shows while a build is offered, running,
+/// finished or failed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TestMapCard {
+    pub headline: String,
+    pub status: String,
+    pub log: String,
+    /// Whole-recipe progress, 0..1.
+    pub fraction: f32,
+    /// The start button does something (offered, or failed and retryable).
+    pub can_start: bool,
+    pub start_label: &'static str,
+    pub dismiss_label: &'static str,
+    /// The bake owns the machine for a minute and has no cancel; the
+    /// card stays put rather than offering a button that does nothing.
+    pub dismissable: bool,
 }
 
 impl MapProvisioner {
@@ -41,7 +64,11 @@ impl MapProvisioner {
         map: &MapViewRef,
         maps_root: &Path,
     ) -> Option<String> {
-        self.build.set_maps_root(maps_root);
+        self.maps_root = maps_root.to_path_buf();
+        #[cfg(feature = "bake")]
+        {
+            self.build = Some(TestMapBuild::new(maps_root));
+        }
         self.install_source(cx, map, maps_root);
         None
     }
@@ -79,16 +106,97 @@ impl MapProvisioner {
         map.set_source_config(cx, config);
     }
 
+    /// Poll the bake. A finished one is adopted into the map and its nav
+    /// basename returned for loading.
     pub fn handle_event(&mut self, cx: &mut Cx, map: &MapViewRef) -> ProvisionerUpdate {
-        let changed = self.build.poll();
-        let nav_basename = if matches!(self.build.stage, crate::testmap::Stage::Done) {
-            self.adopt_completed_test_map(cx, map)
-        } else {
-            None
-        };
+        #[cfg(feature = "bake")]
+        if let Some(build) = &mut self.build {
+            let changed = build.poll();
+            let nav_basename = if matches!(build.stage, Stage::Done) {
+                self.adopt_completed_test_map(cx, map)
+            } else {
+                None
+            };
+            return ProvisionerUpdate {
+                changed,
+                nav_basename,
+            };
+        }
+        let _ = (cx, map);
         ProvisionerUpdate {
-            changed,
-            nav_basename,
+            changed: false,
+            nav_basename: None,
+        }
+    }
+
+    /// The extract download rides the platform's HTTP stack. True when
+    /// the response was the build's and the card should refresh.
+    pub fn handle_network(&mut self, cx: &mut Cx, response: &NetworkResponse) -> bool {
+        #[cfg(feature = "bake")]
+        if let Some(build) = &mut self.build {
+            return match response {
+                NetworkResponse::HttpProgress {
+                    request_id,
+                    progress,
+                } => build.handle_http_progress(*request_id, progress),
+                NetworkResponse::HttpResponse {
+                    request_id,
+                    response,
+                } => build.handle_http_response(cx, *request_id, response),
+                NetworkResponse::HttpError { request_id, error } => {
+                    build.handle_http_error(*request_id, &error.message)
+                }
+                _ => false,
+            };
+        }
+        let _ = (cx, response);
+        false
+    }
+
+    /// The card, while there is something to show.
+    pub fn card(&self) -> Option<TestMapCard> {
+        #[cfg(feature = "bake")]
+        if let Some(build) = &self.build {
+            if !build.is_active() {
+                return None;
+            }
+            let done = matches!(build.stage, Stage::Done);
+            return Some(TestMapCard {
+                headline: build.headline.clone(),
+                status: build.status_line(),
+                log: build.log.join("\n"),
+                fraction: build.fraction,
+                can_start: build.can_start() && !build.is_running() && !done,
+                start_label: if matches!(build.stage, Stage::Failed(_)) {
+                    "Try again"
+                } else {
+                    "Build test map"
+                },
+                dismiss_label: match build.stage {
+                    Stage::Fetching { .. } => "Cancel",
+                    Stage::Done => "Start driving",
+                    _ => "Not now",
+                },
+                dismissable: !matches!(build.stage, Stage::Baking),
+            });
+        }
+        None
+    }
+
+    /// The card's first button.
+    pub fn start(&mut self, cx: &mut Cx) {
+        #[cfg(feature = "bake")]
+        if let Some(build) = &mut self.build {
+            build.start(cx);
+        }
+        let _ = cx;
+    }
+
+    /// The card's second button.
+    pub fn dismiss(&mut self) {
+        #[cfg(feature = "bake")]
+        if let Some(build) = &mut self.build {
+            build.dismiss();
         }
     }
 
@@ -130,33 +238,17 @@ impl MapProvisioner {
         sources
     }
 
-    fn adopt_existing_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) {
-        let archive = self.build.paths.archive.to_string_lossy().into_owned();
+    #[cfg(feature = "bake")]
+    fn adopt_completed_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
+        let build = self.build.as_ref()?;
+        let archive = build.paths.archive.to_string_lossy().into_owned();
         map.set_source_paths(cx, &archive, &archive, "");
         map.set_overlays(cx, Vec::new());
-    }
-
-    fn adopt_completed_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
-        self.adopt_existing_test_map(cx, map);
         map.set_center(cx, crate::AMSTERDAM_CENTER.0, crate::AMSTERDAM_CENTER.1);
-        Some(self.build.paths.nav_basename.to_string_lossy().into_owned())
+        Some(build.paths.nav_basename.to_string_lossy().into_owned())
     }
 }
 
 fn local_archive(maps_root: &Path) -> PathBuf {
     maps_root.join(WORLD_ARCHIVE)
-}
-
-impl Deref for MapProvisioner {
-    type Target = TestMapBuild;
-
-    fn deref(&self) -> &Self::Target {
-        &self.build
-    }
-}
-
-impl DerefMut for MapProvisioner {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.build
-    }
 }

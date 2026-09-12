@@ -252,8 +252,12 @@ const MOCK_KEYCHAIN_SWITCH: &str = "use-mock-keychain";
 #[cfg(target_os = "macos")]
 const DEFAULT_USE_ANGLE: Option<&str> = Some("metal");
 /// Chromium's own default (ANGLE over D3D11) on Windows.
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 const DEFAULT_USE_ANGLE: Option<&str> = None;
+/// Windowless Linux also runs without an X or Wayland display. ANGLE's GL
+/// default requires an X display even with the headless Ozone platform.
+#[cfg(target_os = "linux")]
+const DEFAULT_USE_ANGLE: Option<&str> = Some("vulkan");
 const FAVICON_MAX_SIZE: u32 = 64;
 
 struct CefApi {
@@ -304,7 +308,7 @@ struct RuntimePaths {
 /// The binary distribution as laid out on Windows: `Release/libcef.dll` with
 /// its sibling DLLs (the module dir), `Resources/` with the pak files,
 /// `icudtl.dat` and `locales/`.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 struct RuntimePaths {
     libcef: PathBuf,
     module_dir: PathBuf,
@@ -676,14 +680,14 @@ fn helper_binary_source() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_HELPER_BIN")))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn runtime_paths() -> RuntimePaths {
     let dist_dir = env::var_os("MAKEPAD_CEF_DIST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_DIST_DIR")));
     let module_dir = dist_dir.join("Release");
     RuntimePaths {
-        libcef: module_dir.join("libcef.dll"),
+        libcef: module_dir.join(if cfg!(windows) { "libcef.dll" } else { "libcef.so" }),
         resources_dir: dist_dir.join("Resources"),
         module_dir,
     }
@@ -695,7 +699,7 @@ fn runtime_paths() -> RuntimePaths {
 /// descriptor to ICU data received" and a breakpoint otherwise). Link the
 /// resources into the DLL's directory once, so the untouched download is a
 /// working layout.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn ensure_flat_layout(paths: &RuntimePaths) -> Result<()> {
     link_tree(&paths.resources_dir, &paths.module_dir)
 }
@@ -738,7 +742,7 @@ fn runtime() -> Result<&'static Runtime> {
     static RUNTIME: OnceLock<Result<Runtime>> = OnceLock::new();
     let runtime_result = RUNTIME.get_or_init(|| {
         let paths = runtime_paths();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         ensure_flat_layout(&paths)?;
         #[cfg(target_os = "macos")]
         let library = unsafe {
@@ -767,6 +771,12 @@ fn runtime() -> Result<&'static Runtime> {
             .map(Library::from)
         }
         .map_err(|err| Error::new(format!("failed to load {}: {err}", paths.libcef.display())))?;
+        #[cfg(target_os = "linux")]
+        let library = unsafe {
+            libloading::os::unix::Library::open(
+                Some(&paths.libcef), libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL,
+            ).map(Library::from)
+        }.map_err(|err| Error::new(format!("failed to load {}: {err}", paths.libcef.display())))?;
         let api = unsafe {
             CefApi {
                 cef_api_hash: load_symbol(&library, b"cef_api_hash\0")?,
@@ -1172,6 +1182,8 @@ fn chromium_switches() -> Vec<String> {
     if let Some(backend) = use_angle_backend() {
         switches.push(format!("--use-angle={backend}"));
     }
+    #[cfg(target_os = "linux")]
+    switches.push("--ozone-platform=headless".to_string());
     for switch in [
         "--disable-background-networking",
         "--disable-sync",
@@ -1198,7 +1210,7 @@ fn platform_prepare() -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn platform_prepare() -> Result<()> {
     Ok(())
 }
@@ -1215,7 +1227,7 @@ fn schedule_pump_work(delay_ms: i64) {
 
 /// No timer of its own on Windows: the embedder pumps at a fixed rate, at
 /// least as often as CEF asks for.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn schedule_pump_work(_delay_ms: i64) {}
 
 /// Whether browsers are created with `shared_texture_enabled`: requested and
@@ -1226,7 +1238,7 @@ fn accelerated_paint_available() -> bool {
     accelerated_paint_requested() && metal_blit().is_some()
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn accelerated_paint_available() -> bool {
     false
 }
@@ -1407,20 +1419,20 @@ fn ensure_initialized() -> Result<()> {
             synthetic_bundle.log_file.to_string_lossy().to_string(),
         )
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let (helper_executable, log_file) = (
         current_exe.to_string_lossy().to_string(),
         root_cache_path.join("cef.log").to_string_lossy().to_string(),
     );
     // The resources sit beside libcef.dll (`ensure_flat_layout`); say so.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let paths = runtime_paths();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let resources_dir = CefString::new(&runtime.api, paths.module_dir.to_string_lossy())?;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let locales_dir =
         CefString::new(&runtime.api, paths.module_dir.join("locales").to_string_lossy())?;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let (resources_dir_path, locales_dir_path) = (resources_dir.raw(), locales_dir.raw());
     #[cfg(target_os = "macos")]
     let (resources_dir_path, locales_dir_path) =
@@ -2055,7 +2067,7 @@ pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
 
 /// Nothing to re-exec into on Windows: Chromium's subprocesses are this
 /// executable.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
     Ok(())
 }
@@ -2327,6 +2339,8 @@ unsafe extern "system" fn app_on_before_command_line_processing(
     let Ok(runtime) = runtime() else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    let _ = (runtime, process_type);
     #[cfg(target_os = "macos")]
     {
         let _ = process_type;
@@ -3327,6 +3341,14 @@ impl Browser {
             external_begin_frame_enabled: 0,
             window: ptr::null_mut(),
             runtime_style: 0,
+        };
+        #[cfg(target_os = "linux")]
+        let mut window_info = ffi::cef_window_info_t {
+            size: std::mem::size_of::<ffi::cef_window_info_t>(),
+            bounds,
+            windowless_rendering_enabled: 1,
+            shared_texture_enabled: accelerated as c_int,
+            ..Default::default()
         };
         let mut browser_settings = ffi::cef_browser_settings_t {
             size: std::mem::size_of::<ffi::cef_browser_settings_t>(),

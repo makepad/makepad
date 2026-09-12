@@ -1,26 +1,44 @@
 # Personal finance: a ledger, budgets and reports over a SQLite file, with
 # bank-CSV import. The database is the file format; everything the screens
 # read is an in-memory cache rebuilt from it.
+#
+# finance runs standalone, and as a module (src/module.rs) a host such as
+# the phone window manager seats in-process, one instance per isolate.
 
 [package]
-name = "makepad-app-finance"
+name = "makepad-finance"
 version = "0.1.0"
 edition = "2021"
 description = "Personal finance: ledger, budgets, reports and CSV import"
 license = "MIT OR Apache-2.0"
 default-run = "finance"
 
+[lib]
+name = "makepad_finance"
+path = "src/lib.rs"
+
 [[bin]]
 name = "finance"
 path = "src/main.rs"
+required-features = ["standalone"]
 
 [features]
-default = []
+default = ["standalone"]
 demo = []
+# The standalone window (src/main.rs). A host that links the module leaves
+# this off and gets the lib only. Nothing today is exclusively the
+# window's — CSV import already goes through a native file dialog on every
+# non-wasm, non-demo build, module included — so this stays empty until a
+# window-only dependency actually shows up.
+standalone = []
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
+makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-ai-services = { path = "../../libs/ai/services" }
+# The module contract: what a host seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-sqlite = { path = "../../libs/sqlite_query" }

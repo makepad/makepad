@@ -88,11 +88,24 @@ impl PageStoreSet for FileStoreSet {
             .write(options.write)
             .create(options.create)
             .truncate(options.truncate)
-            .open(path);
+            .open(&path);
         match opened {
             Ok(file) => Ok(Some(Arc::new(FilePageStore::new(file)))),
             Err(error) if error.kind() == io::ErrorKind::NotFound && !options.create => Ok(None),
-            Err(error) => Err(error),
+            // The kind survives (callers match on it); the message says
+            // which file and which access the OS refused.
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "open {} for {}: {error}",
+                    path.display(),
+                    match (options.write, options.create) {
+                        (false, _) => "reading",
+                        (true, false) => "writing",
+                        (true, true) => "writing (create)",
+                    }
+                ),
+            )),
         }
     }
 
@@ -182,14 +195,18 @@ mod sys {
     use std::io;
     use std::os::unix::io::AsRawFd;
 
-    #[cfg(target_os = "macos")]
+    // Every Apple kernel — macOS, iOS, tvOS and their simulators — shares
+    // one fcntl ABI; gating this on macOS alone sent the Linux command
+    // numbers to a Darwin kernel from a simulator build, where 6 is
+    // F_SETOWN and every lock failed with "No such process".
+    #[cfg(target_vendor = "apple")]
     mod consts {
         pub const F_SETLK: i32 = 8;
         pub const F_RDLCK: i16 = 1;
         pub const F_UNLCK: i16 = 2;
         pub const F_WRLCK: i16 = 3;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     mod consts {
         pub const F_SETLK: i32 = 6;
         pub const F_RDLCK: i16 = 0;
@@ -198,7 +215,7 @@ mod sys {
     }
     use consts::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     #[repr(C)]
     struct Flock {
         l_start: i64,
@@ -207,7 +224,7 @@ mod sys {
         l_type: i16,
         l_whence: i16,
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     #[repr(C)]
     struct Flock {
         l_type: i16,
@@ -222,7 +239,7 @@ mod sys {
     }
 
     fn flock(kind: i16, start: u64, len: u64) -> Flock {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         return Flock {
             l_start: start as i64,
             l_len: len as i64,
@@ -230,7 +247,7 @@ mod sys {
             l_type: kind,
             l_whence: 0,
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         return Flock {
             l_type: kind,
             l_whence: 0,
@@ -249,7 +266,19 @@ mod sys {
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
             Some(13) | Some(11) | Some(35) => Ok(false),
-            _ => Err(error),
+            _ => Err(io::Error::new(
+                error.kind(),
+                format!("fcntl(F_SETLK, {}) on lock bytes {start}+{len}: {error}", lock_name(kind)),
+            )),
+        }
+    }
+
+    fn lock_name(kind: i16) -> &'static str {
+        match kind {
+            F_RDLCK => "shared",
+            F_WRLCK => "exclusive",
+            F_UNLCK => "unlock",
+            _ => "unknown",
         }
     }
 
@@ -270,22 +299,72 @@ mod sys {
     }
 
     pub fn is_write_locked(file: &File, start: u64, len: u64) -> io::Result<bool> {
-        const F_GETLK: i32 = if cfg!(target_os = "macos") { 7 } else { 5 };
+        const F_GETLK: i32 = if cfg!(target_vendor = "apple") { 7 } else { 5 };
         let mut flock = flock(F_WRLCK, start, len);
         let rc = unsafe { fcntl(file.as_raw_fd(), F_GETLK, &mut flock as *mut Flock) };
         if rc != 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(
+                error.kind(),
+                format!("fcntl(F_GETLK) on lock bytes {start}+{len}: {error}"),
+            ));
         }
         Ok(flock_type(&flock) != F_UNLCK)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     fn flock_type(flock: &Flock) -> i16 {
         flock.l_type
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn flock_type(flock: &Flock) -> i16 {
         flock.l_type
+    }
+
+    // The Darwin ABI is the vendor's, not one OS's: every Apple target
+    // (macOS, iOS, tvOS, watchOS, visionOS and their simulators) must take
+    // the Darwin command numbers and `struct flock` layout, and no other
+    // target may.
+    const _: () = assert!(
+        cfg!(target_vendor = "apple")
+            == cfg!(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "visionos"
+            ))
+    );
+
+    #[cfg(test)]
+    mod abi_tests {
+        use super::*;
+
+        #[test]
+        #[cfg(target_vendor = "apple")]
+        fn apple_targets_use_the_darwin_fcntl_abi() {
+            // Darwin: F_SETLK is 8 (6 is F_SETOWN, which answers ESRCH to a
+            // pointer), F_RDLCK 1, F_UNLCK 2, F_WRLCK 3; `struct flock`
+            // starts with l_start and carries l_type after l_pid.
+            assert_eq!(F_SETLK, 8);
+            assert_eq!((F_RDLCK, F_UNLCK, F_WRLCK), (1, 2, 3));
+            assert_eq!(std::mem::offset_of!(Flock, l_start), 0);
+            assert_eq!(std::mem::offset_of!(Flock, l_len), 8);
+            assert_eq!(std::mem::offset_of!(Flock, l_pid), 16);
+            assert_eq!(std::mem::offset_of!(Flock, l_type), 20);
+            assert_eq!(std::mem::offset_of!(Flock, l_whence), 22);
+            assert_eq!(std::mem::size_of::<Flock>(), 24);
+        }
+
+        #[test]
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        fn other_unix_targets_use_the_posix_fcntl_abi() {
+            assert_eq!(F_SETLK, 6);
+            assert_eq!((F_RDLCK, F_WRLCK, F_UNLCK), (0, 1, 2));
+            assert_eq!(std::mem::offset_of!(Flock, l_type), 0);
+            assert_eq!(std::mem::offset_of!(Flock, l_whence), 2);
+            assert_eq!(std::mem::offset_of!(Flock, l_start), 8);
+        }
     }
 }
 

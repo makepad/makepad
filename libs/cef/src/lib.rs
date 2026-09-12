@@ -68,19 +68,19 @@ pub const MOUSE_BUTTON_RIGHT: i32 = 2;
 
 pub const TEXT_INPUT_MODE_NONE: i32 = 1;
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
 mod ffi;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
 mod native;
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
 pub use native::{
     accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
     is_initialized, prepare, reexec_into_app_bundle_if_needed, set_application_dark_mode,
     set_background_color, shutdown, startup_phases, AcceleratedStats, Browser, RenderMode,
 };
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     None,
@@ -88,7 +88,7 @@ pub enum RenderMode {
     Accelerated,
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AcceleratedStats {
     pub frames: u64,
@@ -103,26 +103,26 @@ pub struct AcceleratedStats {
     pub last_copy_height: usize,
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn accelerated_paint_requested() -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn set_background_color(_argb: u32) {}
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn set_application_dark_mode(_dark: bool) {}
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn background_color() -> u32 {
     0
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub struct Browser;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 impl Browser {
     pub fn set_dark_mode(&mut self, _dark: bool) -> Result<()> {
         Ok(())
@@ -130,7 +130,7 @@ impl Browser {
 
     pub fn new(_url: &str, _width: usize, _height: usize, _scale_factor: f32) -> Result<Self> {
         Err(Error::new(
-            "makepad-cef is only wired up for macOS and Windows right now",
+            "makepad-cef is supported on macOS, Windows and desktop Linux",
         ))
     }
 
@@ -284,38 +284,38 @@ impl Browser {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn bootstrap() -> Result<BootstrapResult> {
     Ok(BootstrapResult::Continue)
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn do_message_loop_work() {}
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn initialize() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn prepare() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn is_initialized() -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn startup_phases() -> Option<(u128, u128)> {
     None
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn shutdown() {}
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
 pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
     Ok(())
 }

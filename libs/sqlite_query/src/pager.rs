@@ -295,6 +295,11 @@ pub const DEFAULT_CACHE_PAGES: usize = 256;
 /// Frames after which a commit checkpoints the log, matching SQLite's default.
 pub const DEFAULT_AUTOCHECKPOINT: u32 = 1000;
 
+/// What every write path answers on a connection opened read-only: the
+/// file is never touched, no journal or WAL is created.
+pub const READ_ONLY_CONNECTION: &str =
+    "read-only connection: the database was opened without write access";
+
 impl Pager {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: &Path) -> Result<Pager> {
@@ -735,7 +740,7 @@ impl Pager {
     /// exclusive access.
     pub fn set_journal_mode(&mut self, wal: bool) -> Result<&'static str> {
         if self.write.is_none() {
-            return Err(Error::unsupported("database opened read-only"));
+            return Err(Error::unsupported(READ_ONLY_CONNECTION));
         }
         if self.in_transaction() {
             return Err(Error::sql("cannot change journal mode inside a transaction"));
@@ -897,6 +902,12 @@ impl Pager {
         self.write.is_some()
     }
 
+    /// How long a lock is waited for; a read-only pager starts at the
+    /// default the read-write opener takes explicitly.
+    pub fn set_busy_timeout(&mut self, busy_timeout: Duration) {
+        self.busy_timeout = busy_timeout;
+    }
+
     pub fn in_transaction(&self) -> bool {
         self.write.as_ref().and_then(|w| w.tx.as_ref()).is_some()
     }
@@ -904,7 +915,7 @@ impl Pager {
     fn write_support(&mut self) -> Result<&mut WriteSupport> {
         self.write
             .as_mut()
-            .ok_or_else(|| Error::unsupported("database opened read-only"))
+            .ok_or_else(|| Error::unsupported(READ_ONLY_CONNECTION))
     }
 
     /// Take a read lock and move to the newest committed content. Readers of a
@@ -993,7 +1004,7 @@ impl Pager {
         }
         if immediate {
             if self.write.is_none() {
-                return Err(Error::unsupported("database opened read-only"));
+                return Err(Error::unsupported(READ_ONLY_CONNECTION));
             }
             let Pager {
                 file,
@@ -1037,7 +1048,7 @@ impl Pager {
         // Reserve the write lock lazily for a deferred transaction.
         {
             if self.write.is_none() {
-                return Err(Error::unsupported("database opened read-only"));
+                return Err(Error::unsupported(READ_ONLY_CONNECTION));
             }
             let Pager {
                 file,

@@ -1,6 +1,7 @@
 # clock — a small Makepad app with two resident faces: the full clock with a
 # stopwatch and a countdown, and a compact home-widget tile. The WM picks the
-# face on the same window/swapchain via `HostedView`; one process, one model.
+# face on the same window/swapchain via `HostedView`; one process, one model —
+# or, hosted in-process, one module instance in its own isolate (src/module.rs).
 
 [package]
 name = "makepad-clock"
@@ -11,8 +12,26 @@ default-run = "clock"
 [[bin]]
 name = "clock"
 path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+name = "makepad_clock"
+path = "src/lib.rs"
+
+[features]
+default = ["standalone"]
+# The standalone window: the F10 overlay and the port toward it. A host
+# that links the MODULE (makepad-wm) leaves this off and gets the lib only.
+standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
-makepad-wm-api = { path = "../../libs/wm_api" }
+# The assistant: the F10 overlay in this window, and the clock's one tool.
+makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
+# The window manager's vocabulary for the standalone window: the bar's
+# title and the polite close (the module has no window of its own).
+makepad-wm-api = { path = "../../libs/wm_api", optional = true }
+makepad-ai-services = { path = "../../libs/ai/services" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }

@@ -97,6 +97,8 @@ pub struct WebView {
     #[rust]
     pressed_buttons: MouseButton,
     #[rust]
+    scroll_remainder: Vec2d,
+    #[rust]
     suppress_next_paste_shortcut: bool,
     #[rust]
     pump_started: bool,
@@ -674,10 +676,17 @@ impl WebView {
         let Some((x, y)) = self.cef_position(cx, abs) else {
             return;
         };
+        if self.active_browser().is_none() {
+            return;
+        }
+        let (dx, dy) = BrowserKeys::cef_scroll_delta(delta, &mut self.scroll_remainder);
+        if dx == 0 && dy == 0 {
+            return;
+        }
         let m = BrowserKeys::cef_modifiers(modifiers, self.pressed_buttons)
             | makepad_cef::EVENTFLAG_PRECISION_SCROLLING_DELTA;
         if let Some(browser) = self.active_browser() {
-            let _ = browser.send_mouse_wheel(x, y, m, delta.x.round() as i32, delta.y.round() as i32);
+            let _ = browser.send_mouse_wheel(x, y, m, dx, dy);
         }
     }
 

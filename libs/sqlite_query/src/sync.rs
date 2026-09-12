@@ -27,14 +27,14 @@ pub fn sync(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
     extern "C" {
         fn fsync(fd: i32) -> i32;
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     const F_FULLFSYNC: i32 = 51;
 
     let fd = file.as_raw_fd();
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     if full_fsync() {
         // Safety: fd is owned by `file` for the duration of the call.
         let rc = unsafe { fcntl(fd, F_FULLFSYNC, 0) };

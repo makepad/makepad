@@ -40,62 +40,12 @@ const PRODUCTION_ARCHIVES: [&str; 3] = [
     "europe-base-br-faces.mbtiles",
     "europe-shortbread.mbtiles",
 ];
-const MAPS_ROOT_PREF: &str = "route/maps-root";
-
 /// The first production archive under this app's one resolved maps root.
 pub fn production_archive(maps_root: &Path) -> Option<PathBuf> {
     PRODUCTION_ARCHIVES
         .iter()
         .map(|name| maps_root.join(name))
         .find(|path| path.is_file())
-}
-
-/// Resolve once at startup: a checked-out executable uses that checkout's
-/// `local/maps`; an installed/copied executable uses Makepad's per-user home.
-/// A developer override in `route/maps-root` wins over both. The process cwd
-/// is deliberately absent.
-pub fn resolve_maps_root() -> PathBuf {
-    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| {
-        let home = makepad_widgets::makepad_platform::home::makepad_home();
-        let explicit = fs::read_to_string(home.join(MAPS_ROOT_PREF))
-            .ok()
-            .map(|value| PathBuf::from(value.trim()))
-            .filter(|path| !path.as_os_str().is_empty());
-        let executable = std::env::current_exe().unwrap_or_default();
-        resolve_maps_root_from(&executable, &home, explicit.as_deref())
-    })
-    .clone()
-}
-
-fn resolve_maps_root_from(executable: &Path, home: &Path, explicit: Option<&Path>) -> PathBuf {
-    resolve_maps_root_with(executable, home, explicit, |manifest| {
-        fs::read_to_string(manifest).is_ok_and(|text| {
-            text.lines().any(|line| {
-                let line = line.trim();
-                line == "[workspace]" || line.starts_with("workspace.members")
-            })
-        })
-    })
-}
-
-fn resolve_maps_root_with(
-    executable: &Path,
-    home: &Path,
-    explicit: Option<&Path>,
-    mut is_workspace_manifest: impl FnMut(&Path) -> bool,
-) -> PathBuf {
-    if let Some(explicit) = explicit {
-        return explicit.to_path_buf();
-    }
-    let mut directory = executable.parent();
-    while let Some(candidate) = directory {
-        if is_workspace_manifest(&candidate.join("Cargo.toml")) {
-            return candidate.join("local/maps");
-        }
-        directory = candidate.parent();
-    }
-    home.join("maps")
 }
 
 /// What the worker thread sends back.
@@ -132,10 +82,11 @@ pub struct TestMapBuild {
     sink: Option<SinkGuard>,
 }
 
-impl Default for TestMapBuild {
-    fn default() -> Self {
+impl TestMapBuild {
+    /// The bake for the test map under `maps_root`.
+    pub fn new(maps_root: &Path) -> Self {
         Self {
-            paths: TestMapPaths::in_dir(resolve_maps_root(), "amsterdam"),
+            paths: TestMapPaths::in_dir(maps_root, "amsterdam"),
             stage: Stage::Idle,
             headline: String::new(),
             log: Vec::new(),
@@ -425,41 +376,5 @@ impl TestMapBuild {
             ),
             _ => String::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_root_uses_checkout_found_from_executable() {
-        let executable = Path::new("/checkout/target/release/route");
-        let root = resolve_maps_root_with(executable, Path::new("/home/.makepad"), None, |path| {
-            path == Path::new("/checkout/Cargo.toml")
-        });
-        assert_eq!(root, PathBuf::from("/checkout/local/maps"));
-    }
-
-    #[test]
-    fn maps_root_for_a_binary_copy_uses_makepad_home() {
-        let root = resolve_maps_root_with(
-            Path::new("/Applications/Makepad/route"),
-            Path::new("/home/.makepad"),
-            None,
-            |_| false,
-        );
-        assert_eq!(root, PathBuf::from("/home/.makepad/maps"));
-    }
-
-    #[test]
-    fn explicit_maps_root_wins_over_checkout() {
-        let root = resolve_maps_root_with(
-            Path::new("/checkout/target/release/route"),
-            Path::new("/home/.makepad"),
-            Some(Path::new("/data/maps")),
-            |_| true,
-        );
-        assert_eq!(root, PathBuf::from("/data/maps"));
     }
 }

@@ -69,7 +69,7 @@ pub mod write;
 pub use error::{Error, Result};
 pub use exec::Limits;
 pub use write::Connection;
-pub use pager::{DbHeader, Pager};
+pub use pager::{DbHeader, Pager, READ_ONLY_CONNECTION};
 pub use schema::{Column, IndexInfo, Schema, SchemaObject, TableInfo};
 pub use storage::{
     MemoryPageStore, MemoryStoreSet, MemoryStoreSnapshot, PageStore, PageStoreSet, StoreKind,

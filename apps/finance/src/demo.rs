@@ -1,12 +1,13 @@
 use crate::model::{Id, Ledger};
 use crate::runtime::{ImportState, Runtime, Start};
 use makepad_widgets::{Actions, Cx};
+use std::path::Path;
 
 #[derive(Default)]
 pub(crate) struct Backend;
 
 impl Runtime for Backend {
-    fn start(&mut self) -> Start {
+    fn start(&mut self, _db_path: &Path) -> Start {
         let today = crate::runtime::demo_today();
         Start {
             today,

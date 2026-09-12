@@ -28433,6 +28433,11 @@ impl MatchEvent for App {
             self.grids_dirty = true;
         }
         if self.ui.button(cx, ids!(gen_blast)).clicked(actions) {
+            // Read the prompt box first, exactly like Queue: a blast fires the
+            // prompt the operator can see, never a stale or empty one.
+            let text = self.ui.text_input(cx, ids!(gen_prompt)).text();
+            self.gen.set_prompt(text);
+            self.gen.enhance_source = self.program_clip_source();
             let cmds = self.gen.blast(now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;

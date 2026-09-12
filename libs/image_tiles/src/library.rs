@@ -65,11 +65,28 @@ impl Library {
         self.root.join("tapes").join(format!("{shard:05}")).join(format!("L{level}.mov"))
     }
 
+    /// The finest page level this library SHIPS for `shard` (the smallest
+    /// level number whose tape exists), `None` when the shard has no page
+    /// at all. A bundled library carries only the coarse tail (a phone
+    /// ships L2-L4 of a set whose desktop bake has L0-L4), so the grid
+    /// asks for no finer page than this instead of embargoing a file that
+    /// was never there.
+    pub fn finest_page_level(&self, shard: i64) -> Option<usize> {
+        (0..crate::tape::LEVELS).find(|level| self.tape_path(shard, *level).is_file())
+    }
+
     pub fn full_path(&self, item: ItemId) -> PathBuf {
         self.root.join("full").join(format!("{item}.mov"))
     }
 
     /// One level of a picture's on-disk pyramid, named by its long side.
+    /// Whether this library ships single-picture pyramids at all (a `pyr/`
+    /// directory): a bundled coarse tail has none, so a zoom stays on the
+    /// atlas page instead of asking for frames that were never baked.
+    pub fn has_pyramid(&self) -> bool {
+        self.root.join("pyr").is_dir()
+    }
+
     pub fn pyramid_path(&self, item: ItemId, px: u32) -> PathBuf {
         self.root.join("pyr").join(format!("{item}-{px}.mov"))
     }
@@ -123,5 +140,27 @@ pub fn tmp_path(library: &Library, item: ItemId, ext: &str) -> PathBuf {
 impl Library {
     pub fn as_path(&self) -> &Path {
         &self.root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_finest_shipped_page_level_is_the_smallest_tape_present() {
+        let dir = std::env::temp_dir().join(format!("image-tiles-levels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shard = dir.join("tapes").join("00003");
+        std::fs::create_dir_all(&shard).unwrap();
+        for level in [2usize, 3, 4] {
+            std::fs::write(shard.join(format!("L{level}.mov")), b"").unwrap();
+        }
+        let library = Library::new(&dir);
+        assert_eq!(library.finest_page_level(3), Some(2), "a coarse-only bundle answers with L2");
+        assert_eq!(library.finest_page_level(4), None, "a shard with no tape at all");
+        std::fs::write(shard.join("L0.mov"), b"").unwrap();
+        assert_eq!(library.finest_page_level(3), Some(0), "the full bake answers with L0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

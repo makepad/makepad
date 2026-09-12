@@ -4,33 +4,65 @@ version = "0.1.0"
 edition = "2021"
 description = "AI-driven voice route/trip planner on MapView (see route.md)"
 license = "MIT OR Apache-2.0"
+default-run = "route"
+
+# route as a library: the map, the trip, turn-by-turn navigation, the
+# layers, the side panel and the assistant's tools, around one root widget
+# (`RouteView{}`, src/view.rs) — and the module (src/module.rs) a host such
+# as the window manager seats in-process, one instance per isolate. The
+# standalone binary (src/main.rs, feature `standalone`) is the same crate
+# with a `Window` around the view and the AI port toward the desktop.
+[lib]
+name = "makepad_app_route"
+path = "src/lib.rs"
+
+[[bin]]
+name = "route"
+path = "src/main.rs"
+required-features = ["standalone"]
 
 [features]
-default = ["native"]
+default = ["standalone", "native"]
+# The standalone window (src/main.rs). A host that links the module
+# leaves it off and gets the lib only.
+standalone = []
+# The in-app brain: the local Qwen dispatcher, the voice gate and whisper
+# mic, spoken replies, the cloud escalation agent, image search — the
+# desktop with models on disk. Includes the first-run test-map bake. With
+# it off the panel's tools still run (over the host's assistant bus) and
+# the prompt line answers that no assistant is linked.
 native = [
+    "bake",
     "makepad-widgets/voice",
-    "dep:makepad-map-build",
-    "dep:makepad-mbtile-reader",
+    "makepad-converse/tts",
+    "makepad-converse/local-llm",
     "dep:makepad-ai-hub",
     "dep:makepad-strict-json",
-    "dep:makepad-converse",
+    "dep:makepad-mbtile-reader",
 ]
-demo = []
+# The first-run download + bake of the Amsterdam test map (src/testmap.rs).
+bake = ["dep:makepad-map-build"]
+# The hosted demo (nav::api): the site API instead of the native data plane.
+demo = ["standalone"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-ai-services = { path = "../../libs/ai/services" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-map-build = { path = "../../libs/map_build", features = ["faces"], optional = true } # first run: download + bake a test map
 makepad-geodata = { path = "../../libs/geodata" }          # shared terrain renderer; native also uses geo/radar
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader", optional = true } # terrain drape landcover source
+# The agent seam only (tool definitions for the broker); the voice and the
+# local filter model come in with `native`.
+makepad-converse = { path = "../../libs/converse", default-features = false }
 
 makepad-ai-hub  = { path = "../../libs/ai/hub", default-features = false, features = ["llm"], optional = true } # M2: local dispatcher LLM
 
 makepad-strict-json = { path = "../../libs/strict_json", optional = true }  # claude_agent tool schemas
-makepad-converse = { path = "../../libs/converse", features = ["local-llm"], optional = true } # M3: attention-gate filter
 
 # Planned wiring (see route.md milestones) — enable as each phase lands:
 # makepad-tesla   = { path = "../../libs/tesla" }          # M5: vehicle SoC / charge state
