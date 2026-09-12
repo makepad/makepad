@@ -261,6 +261,19 @@ fn spec_weight(index: usize) -> f64 {
     }
 }
 
+/// One message waiting in the strip's queue. Taken on the tab it was
+/// written on: from the Shader tab it carries the draw layer that tab was
+/// showing and the fn sources for it, and goes out as a shader-fn rewrite
+/// rather than a plain ask -- the same channel the Shader tab's own box
+/// used to be, folded into the one box everybody types into.
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub path: String,
+    pub text: String,
+    /// (layer, fn sources) when this is about a shader.
+    pub shader: Option<(String, String)>,
+}
+
 /// The pin badge's clickable square, in points.
 const BADGE_SIZE: f64 = 13.0;
 /// How often the badge targets are re-resolved (a whole-tree walk).
@@ -785,7 +798,7 @@ pub(crate) struct TweakSession {
     renames_loaded: bool,
     /// Messages written and queued but not yet sent: (note key, text). They
     /// wake nobody until a Ctrl+Enter releases the batch.
-    outbox: Vec<(String, String)>,
+    outbox: Vec<Outgoing>,
     /// The prompt strip's text. ONE box for the whole panel, not one per
     /// widget: a send attributes it to whatever is selected at that moment,
     /// which is what the `TWEAK ask #N <path>` line already recorded. In
@@ -806,6 +819,10 @@ pub(crate) struct TweakSession {
     /// the next click in the app names a widget INTO the note instead of
     /// changing the selection. The hover outline turns amber to say so.
     mention: bool,
+    /// Which box the `@` was typed into, because that is where the name
+    /// lands: the prompt strip is present on every tab, so the tab cannot
+    /// say.
+    mention_from_prompt: bool,
     /// Note cards, keyed by widget path (one per widget).
     notes: Vec<TweakNote>,
     /// The pinned notes have been read back from the store: once per process,
@@ -2070,15 +2087,13 @@ pub fn window_intercept(
                 // was opened on; the mention is what it points AT.
                 if session().lock().unwrap().mention {
                     session().lock().unwrap().mention = false;
-                    // The field a mention lands in is whichever one the @
-                    // was typed into: the Spec tab's notes while that tab is
-                    // up, the prompt strip's box otherwise. A pick made for
-                    // a mention never moves the selection (this arm returns
-                    // before `commit_pick`), so the tab stays on the widget
-                    // the note is about.
-                    let into_notes = tweaker
-                        .borrow::<Tweaker>()
-                        .is_some_and(|tw| tw.panel_tab == PanelTab::Spec);
+                    // The field a mention lands in is the one the @ was
+                    // typed into, remembered at arming: the prompt strip is
+                    // on every tab, so which tab is up says nothing. A pick
+                    // made for a mention never moves the selection (this arm
+                    // returns before `commit_pick`), so the tab stays on the
+                    // widget the note is about.
+                    let into_notes = !session().lock().unwrap().mention_from_prompt;
                     let field = tweaker.borrow::<Tweaker>().and_then(|tw| {
                         tw.sidebar.as_ref().map(|sidebar| {
                             if into_notes {
@@ -5164,7 +5179,8 @@ pub fn tweak_callback(
                 let outbox = session().lock().unwrap().outbox.clone();
                 if !outbox.is_empty() {
                     out.push_str(",\"queued\":[");
-                    for (i, (path, text)) in outbox.iter().enumerate() {
+                    for (i, item) in outbox.iter().enumerate() {
+                        let (path, text) = (&item.path, &item.text);
                         if i > 0 {
                             out.push(',');
                         }
@@ -6459,7 +6475,6 @@ pub struct Tweaker {
     tree_open_defaults_pending: bool,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
-    vibe_prompt_uid: u64,
     #[rust]
     note_text_uid: u64,
     /// The identity row's name field.
@@ -6536,6 +6551,12 @@ pub struct Tweaker {
     /// keystroke would be a file write per frame.
     #[rust]
     spec_dirty: bool,
+    /// The prompt box's own `@` count -- see `note_at_count`, and why they
+    /// are two: one counter for two fields let typing in one arm or disarm
+    /// the other's mention, and a disarmed mention click falls through to a
+    /// pick and moves the selection the pending ask is about.
+    #[rust]
+    prompt_at_count: usize,
     /// Which note the Spec tab is actually SHOWING. The tab follows the
     /// selection, so the note being saved to and the text on screen can drift
     /// apart for a frame — and a save in that window would write one note's
@@ -7306,29 +7327,6 @@ impl Tweaker {
                                 }
                             }
                         }
-                        prompt := TextInput {
-                            width: Fill
-                            height: 64
-                            is_multiline: true
-                            empty_text: "what should this shader's CODE do differently\u{2026} Ctrl+Enter sends"
-                            draw_bg +: {
-                                color: #x1b1b1b
-                                border_radius: 3.0
-                            }
-                            draw_text +: {
-                                color: #xe6e6e6
-                                text_style +: { font_size: 8.5 }
-                            }
-                        }
-                        vibe_status := FabLabelSmall {
-                            width: Fill
-                            text: ""
-                            draw_text +: { color: #xffa040 }
-                        }
-                        vibe_hint := FabLabelSmall {
-                            width: Fill
-                            text: "Ctrl+Enter sends \u{00b7} the agent rewrites only the fn code \u{00b7} colours and sizes stay in Props"
-                        }
                         doc_tip := Tooltip {
                             width: 0
                             height: 0
@@ -7932,7 +7930,6 @@ impl Tweaker {
         let mut fields: Vec<Area> = Vec::new();
         if let Some(sidebar) = self.sidebar.as_ref() {
             fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
-            fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
             fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
             for index in 0..3 {
                 if let Some(field) = self.spec_field(index) {
@@ -7984,6 +7981,7 @@ impl Tweaker {
         let Some(sidebar) = self.sidebar.clone() else { return };
         let col = sidebar.child(live_id!(spec_col));
         let path = sel.map(|p| self.sel_ref(cx, p.uid));
+        let path_for_seed = path.clone();
 
         col.child(live_id!(spec_for)).set_text(
             cx,
@@ -8007,10 +8005,6 @@ impl Tweaker {
                 bx.set_visible(cx, have);
             }
         }
-        // Which path the tab is SHOWING. An @mention writes relative to this
-        // rather than to whatever is pinned: the two can differ for a frame,
-        // and writing one widget's text into another's is how a note is lost.
-        self.note_key_shown = path.clone().unwrap_or_default();
         self.note_text_uid = self.spec_field(0).map(|f| f.widget_uid().0).unwrap_or(0);
         // The dragged split, in case it changed while the tab was not up.
         self.spec_apply_weights(cx);
@@ -8033,7 +8027,7 @@ impl Tweaker {
             }
         }
 
-        if let Some(path) = path {
+        if let Some(path) = path_for_seed {
             let (mut notes, mut rules) = {
                 let mut s = session().lock().unwrap();
                 s.load_notes();
@@ -8042,10 +8036,20 @@ impl Tweaker {
                     None => (String::new(), String::new()),
                 }
             };
+            // `note_key_shown` is the path the two fields were last SEEDED
+            // for, and it is written here and nowhere else. The frame the
+            // selection moves, the fields still hold the old widget's text
+            // -- and if that frame read them back, it would commit the old
+            // widget's words to the new widget's record, destroying whatever
+            // the new one had. So a changed path seeds, unconditionally,
+            // caret or no caret; only a field seeded for THIS path is ever
+            // read back into it.
+            let seeded = self.note_key_shown == path;
             let mut changed = false;
             for (index, slot) in [(0usize, &mut notes), (1usize, &mut rules)] {
                 let Some(field) = self.spec_field(index) else { continue };
-                if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
+                let focused = field.area() != Area::Empty && cx.has_key_focus(field.area());
+                if seeded && focused {
                     let typed = field.text();
                     if typed != *slot {
                         *slot = typed;
@@ -8055,6 +8059,7 @@ impl Tweaker {
                     field.set_text(cx, slot);
                 }
             }
+            self.note_key_shown = path.clone();
             if changed {
                 let mut s = session().lock().unwrap();
                 if !s.notes.iter().any(|n| n.path == path) {
@@ -8067,6 +8072,10 @@ impl Tweaker {
                 drop(s);
                 self.spec_dirty = true;
             }
+        }
+
+        if path.is_none() {
+            self.note_key_shown.clear();
         }
 
         // The app rules need no selection -- that is the reason this tab
@@ -8279,6 +8288,20 @@ impl Tweaker {
             s.prompt.clear();
             text
         };
+        // From the Shader tab the message is about the layer that tab is
+        // showing, and the agent needs the fn sources to rewrite it: both
+        // ride with the message, so a queued shader ask still says which
+        // layer it meant after the tab has moved on.
+        let shader = (self.panel_tab == PanelTab::Shader).then(|| {
+            let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+            let fns = self
+                .vibe_fn_sources
+                .iter()
+                .map(|(name, loc, src)| format!("// {name} \u{2014} {loc}\n{src}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (layer, fns)
+        });
         {
             // The ask is counted on the record for the widget it is about,
             // so make one if this is the first thing ever said about it.
@@ -8287,7 +8310,7 @@ impl Tweaker {
             if !s.notes.iter().any(|n| n.path == path) {
                 s.notes.push(TweakNote::new(path.clone()));
             }
-            s.outbox.push((path, text));
+            s.outbox.push(Outgoing { path, text, shader });
         }
         self.prompt_clear_field = true;
         true
@@ -8299,7 +8322,7 @@ impl Tweaker {
     fn prompt_send(&mut self, cx: &mut Cx) {
         self.prompt_sync_text(cx);
         self.prompt_take_draft(cx);
-        let sent: Vec<(String, String)> = {
+        let sent: Vec<Outgoing> = {
             let mut s = session().lock().unwrap();
             std::mem::take(&mut s.outbox)
         };
@@ -8307,7 +8330,20 @@ impl Tweaker {
             session().lock().unwrap().prompt_status =
                 "nothing to send: the box is empty".to_string();
         } else {
-            for (note_path, text) in &sent {
+            for item in &sent {
+                let (note_path, text) = (&item.path, &item.text);
+                if let Some((layer, fns)) = &item.shader {
+                    // A shader ask: the execute bundle on the AI's ear (the
+                    // log and /tweak/state carry it), scoped to exactly this
+                    // draw layer. Code only -- colours and sizes are the
+                    // Props rows' business.
+                    log!("TWEAK vibe sel={note_path} layer={layer} prompt={text}");
+                    let mut s = session().lock().unwrap();
+                    s.vibe_status = format!("sent to the AI \u{00b7} waiting\u{2026} \u{2014} {text}");
+                    s.vibe_pending = Some((note_path.clone(), layer.clone()));
+                    s.vibes.push((note_path.clone(), layer.clone(), text.clone(), fns.clone()));
+                    continue;
+                }
                 let seq = {
                     let mut s = session().lock().unwrap();
                     match s.notes.iter_mut().find(|n| n.path == *note_path) {
@@ -9053,6 +9089,7 @@ impl Tweaker {
         if self.panel_tab == PanelTab::Theme {
             let colours = self.rows.iter().filter(|r| r.kind == RowKind::Color).count();
             let footer = sidebar.child(live_id!(ident_footer));
+            footer.child(live_id!(title_label)).set_visible(cx, true);
             footer
                 .child(live_id!(title_label))
                 .set_text(cx, &format!("Theme  \u{2022}  {colours} colours  \u{2022}  {} values", self.rows.len() - colours));
@@ -9065,21 +9102,22 @@ impl Tweaker {
         match sel {
             _ if self.panel_tab == PanelTab::Theme => {}
             Some(sel) => {
-                let head = {
-                    let mut head = format!("{}  \u{2022}  {} props", sel.ty, self.rows.len());
-                    // Depth readout: which plane the selection sits on in
-                    // the exploded view ("is it stacked deep, or is the
-                    // z-step just insane?").
-                    if cx.sploded_active() {
-                        if let Some(level) = cx.sploded_depth_of(sel.uid) {
-                            head.push_str(&format!("  \u{2022}  L{level}/{}", cx.sploded_max_level()));
-                        }
-                    }
-                    head
+                // The title line used to say "Label - 29 props": a row of
+                // the footer spent on a count nobody acts on. It now shows
+                // only while the exploded view is up, and then only the depth
+                // readout -- which plane the selection sits on ("is it
+                // stacked deep, or is the z-step just insane?").
+                let depth = if cx.sploded_active() {
+                    cx.sploded_depth_of(sel.uid)
+                        .map(|level| format!("L{level}/{}", cx.sploded_max_level()))
+                } else {
+                    None
                 };
-                sidebar
-                    .child(live_id!(ident_footer)).child(live_id!(title_label))
-                    .set_text(cx, &head);
+                let title = sidebar.child(live_id!(ident_footer)).child(live_id!(title_label));
+                title.set_visible(cx, depth.is_some());
+                if let Some(depth) = depth {
+                    title.set_text(cx, &depth);
+                }
                 let now = cx.seconds_since_app_start();
                 let shown_path = if now < self.footer_copied_until {
                     // The click's receipt, in place of the path it copied.
@@ -9141,11 +9179,29 @@ impl Tweaker {
                         source_origin(cx, &widget)
                     };
                     let base = origin.rsplit('/').next().unwrap_or(&origin).to_string();
-                    row.child(live_id!(scope_origin)).set_text(cx, &if base.is_empty() { String::new() } else { format!("edits land in {base}") });
+                    // The path line below is the widget's ADDRESS in the
+                    // running tree; this line is the FILE an edit is written
+                    // to, which changes with the scope -- "this" edits where
+                    // the instance is declared, "all Labels" edits the Label
+                    // type where it is defined. Two different questions, and
+                    // a line that only named the file read as a contradiction
+                    // of the path under it.
+                    let line = if base.is_empty() {
+                        String::new()
+                    } else if all && confined && !root.is_empty() {
+                        format!("edits land in {base} (the isolated branch)")
+                    } else if all {
+                        format!("edits land in {base} (the {} type, so every {})", sel.ty, sel.ty)
+                    } else {
+                        format!("edits land in {base} (this instance)")
+                    };
+                    row.child(live_id!(scope_origin)).set_text(cx, &line);
                 }
             }
             None => {
-                sidebar.child(live_id!(ident_footer)).child(live_id!(title_label)).set_text(cx, "tweak");
+                let title = sidebar.child(live_id!(ident_footer)).child(live_id!(title_label));
+                title.set_visible(cx, true);
+                title.set_text(cx, "tweak");
                 sidebar
                     .child(live_id!(ident_footer)).child(live_id!(path_row)).child(live_id!(path_label))
                     .set_text(cx, "click a widget to inspect it");
@@ -9261,10 +9317,31 @@ impl Tweaker {
                 let bar = row.child(live_id!(prompt_bar));
                 self.prompt_queue_uid = bar.child(live_id!(queue)).widget_uid().0;
                 self.prompt_send_uid = bar.child(live_id!(send)).widget_uid().0;
-                let status = session().lock().unwrap().prompt_status.clone();
+                // On the Shader tab the box is a shader ask and the status
+                // line is that channel's -- "waiting", "live", or the error.
+                let shader_tab = tab == PanelTab::Shader;
+                let status = {
+                    let s = session().lock().unwrap();
+                    if shader_tab && !s.vibe_status.is_empty() {
+                        s.vibe_status.clone()
+                    } else {
+                        s.prompt_status.clone()
+                    }
+                };
                 bar.child(live_id!(prompt_status)).set_text(cx, &status);
                 let field = row.child(live_id!(prompt_field));
                 self.prompt_field_uid = field.widget_uid().0;
+                if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
+                    let hint = if shader_tab {
+                        let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+                        format!("what should {layer}'s code do differently\u{2026} Ctrl+Enter sends \u{00b7} colours and sizes stay in Props")
+                    } else {
+                        "what should change\u{2026} Ctrl+Enter sends \u{00b7} Alt+Enter queues".to_string()
+                    };
+                    if input.empty_text() != hint {
+                        input.set_empty_text(cx, hint);
+                    }
+                }
                 if self.prompt_clear_field {
                     // A send emptied the box. Clear it here rather than in
                     // the send, so the field is written exactly once a frame
@@ -9290,10 +9367,6 @@ impl Tweaker {
                     .or_else(|| self.materials.first().cloned())
                     .unwrap_or_else(|| "draw_bg".to_string());
                 let col = sidebar.child(live_id!(shader_col));
-                {
-                    let status = session().lock().unwrap().vibe_status.clone();
-                    col.child(live_id!(vibe_status)).set_text(cx, &status);
-                }
                 // The layer the Shader tab shows is the one a prompt or an
                 // editor apply targets.
                 self.vibe_layer = Some(layer.clone());
@@ -9326,7 +9399,6 @@ impl Tweaker {
                     .child(live_id!(shader_src))
                     .widget_uid()
                     .0;
-                self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
                 // The source editor unfolds on demand only; folded, the tab
                 // is the swatch + doc + prompt.
                 let fold = col.child(live_id!(src_fold));
@@ -11035,27 +11107,47 @@ impl Tweaker {
                     && widget_action.widget_uid.0 == self.prompt_field_uid)
             {
                 if let TextInputAction::Changed(text) = widget_action.cast::<TextInputAction>() {
+                    let is_notes = widget_action.widget_uid.0 == self.note_text_uid;
+                    if !is_notes {
+                        // The prompt box is synced on every keystroke, not
+                        // only on send: the draw re-seeds the box from the
+                        // session whenever the caret is elsewhere, and a
+                        // session that only knew about sent messages handed
+                        // back an empty box -- or the last recalled one --
+                        // the moment you clicked the widget you were writing
+                        // about, with the caret left mid-string.
+                        session().lock().unwrap().prompt = text.clone();
+                    }
                     // A fresh `@` arms a widget pick: the next click in the
                     // app names something INTO the note. Counted rather than
                     // matched at the end, so an `@` typed mid-sentence arms
-                    // it too, and deleting one disarms.
+                    // it too, and deleting one disarms. Each box keeps its
+                    // own count.
                     let ats = text.matches('@').count();
-                    if ats > self.note_at_count {
-                        session().lock().unwrap().mention = true;
+                    let before = if is_notes { self.note_at_count } else { self.prompt_at_count };
+                    if ats > before {
+                        let mut s = session().lock().unwrap();
+                        s.mention = true;
+                        s.mention_from_prompt = !is_notes;
+                        drop(s);
                         log!("TWEAK @mention armed: click the widget to name it");
                         self.redraw_overlay(cx);
-                    } else if ats < self.note_at_count {
+                    } else if ats < before {
                         session().lock().unwrap().mention = false;
                         self.redraw_overlay(cx);
                     }
-                    self.note_at_count = ats;
+                    if is_notes {
+                        self.note_at_count = ats;
+                    } else {
+                        self.prompt_at_count = ats;
+                    }
                     // The notes field is the only one whose text belongs to a
                     // record; the prompt's box belongs to nobody until it is
-                    // sent. Guard on the tab SHOWING the path, because the
-                    // selection and the field can differ for a frame.
+                    // sent. Guard on the field being SEEDED for the path,
+                    // because the selection and the field can differ for a
+                    // frame.
                     let showing = self.note_path(cx).as_deref()
                         == Some(self.note_key_shown.as_str());
-                    let is_notes = widget_action.widget_uid.0 == self.note_text_uid;
                     let path = self.note_path(cx).filter(|_| showing && is_notes);
                     if let Some(path) = path {
                         let mut s = session().lock().unwrap();
@@ -11081,51 +11173,6 @@ impl Tweaker {
                 if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
                 {
                     self.request_rename(cx, text.trim());
-                }
-            }
-            if self.vibe_prompt_uid != 0
-                && widget_action.widget_uid.0 == self.vibe_prompt_uid
-            {
-                if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
-                {
-                    let text = text.trim().to_string();
-                    if !text.is_empty() {
-                        let (path, layer) = {
-                            let s = session().lock().unwrap();
-                            (
-                                s.pinned
-                                    .as_ref()
-                                    .map(|p| p.path.clone())
-                                    .unwrap_or_default(),
-                                self.vibe_layer.clone().unwrap_or_default(),
-                            )
-                        };
-                        // The execute bundle, on the AI's ear (the TWEAK
-                        // log + /tweak/state carry it to the driving
-                        // agent): scope = exactly this draw layer.
-                        // Code only: the fn sources (with their file:line)
-                        // ride along; colours/sizes are the Props rows'.
-                        let fns = self
-                            .vibe_fn_sources
-                            .iter()
-                            .map(|(name, loc, src)| format!("// {name} \u{2014} {loc}\n{src}"))
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        log!("TWEAK vibe sel={path} layer={layer} fns={} prompt={text}", self.vibe_fn_sources.iter().map(|(n, l, _)| format!("{n}@{l}")).collect::<Vec<_>>().join(","));
-                        {
-                            let mut s = session().lock().unwrap();
-                            s.vibe_status = format!("sent to the AI \u{00b7} waiting\u{2026} \u{2014} {text}");
-                            s.vibe_pending = Some((path.clone(), layer.clone()));
-                            s.vibes.push((path, layer, text, fns));
-                        }
-                        if let Some(sidebar) = self.sidebar.as_ref() {
-                            let col = sidebar.child(live_id!(shader_col));
-                            col.child(live_id!(prompt)).set_text(cx, "");
-                            let status = session().lock().unwrap().vibe_status.clone();
-                            col.child(live_id!(vibe_status)).set_text(cx, &status);
-                        }
-                        cx.redraw_all();
-                    }
                 }
             }
             if self.tab_uids.contains(&widget_action.widget_uid.0)
@@ -12663,7 +12710,8 @@ impl Widget for Tweaker {
                 if ke.key_code == KeyCode::ReturnKey
                     && (ke.modifiers.control || ke.modifiers.logo)
                     && tweak_is_on()
-                    && self.panel_tab == PanelTab::Shader =>
+                    && self.panel_tab == PanelTab::Shader
+                    && !self.prompt_field_focused(cx) =>
             {
                 let text = self
                     .sidebar
@@ -12675,14 +12723,12 @@ impl Widget for Tweaker {
                             .text()
                     })
                     .unwrap_or_default();
-                // The prompt box owns Ctrl+Enter when IT has focus (the AI
-                // loop); the editor's edit applies otherwise.
-                let prompt_focused = self
-                    .sidebar
-                    .as_ref()
-                    .map(|s| cx.has_key_focus(s.child(live_id!(shader_col)).child(live_id!(prompt)).area()))
-                    .unwrap_or(false);
-                if !prompt_focused && text.contains("fn") {
+                // The strip owns Ctrl+Enter when IT has focus (the AI loop).
+                // That is settled in this arm's guard rather than here, so
+                // that the strip's own arm -- which comes later in the match
+                // -- actually receives the key; the editor's edit applies
+                // otherwise.
+                if text.contains("fn") {
                     if let Err(error) = apply_fn_edit(cx, self, &text) {
                         self.live_revert(cx, &error);
                     } else {
