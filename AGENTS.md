@@ -3,28 +3,6 @@
 Repository-wide rules. Read the linked references when the task needs them;
 use current source for API signatures and working examples.
 
-## Current delegation context
-
-- HIERARCHY (user, 2026-09-11, supersedes 2026-09-10): FABLE does the work,
-  CODEX reviews, GROK runs the scripted proofs.
-- Fable (the supervisor session and its Fable forks) designs and BUILDS
-  everything: renderers, shaders, worker pipelines, layout engines, crate
-  geometry, memory/lifetime contracts, diagnose-and-fix of deep bugs. One
-  Fable fork per complex step, partitioned by file ownership; the supervisor
-  writes the briefs, sequences the forks, reads the reports, integrates,
-  commits with explicit paths and pushes, and relaunches the user.
-- Codex / Astra does CODE REVIEWS only (read-only, ephemeral): adversarial
-  review of a diff or a design of record against the laws and the acceptance
-  criteria, findings back as a report. Codex never edits the tree and never
-  builds a lane.
-- Grok does the scripted proofs and small mechanical work: hidden-instance
-  walks, grabs, `/gseq` sequences, acceptance runs, extractions, renames,
-  reference sweeps. A proof lane writes observations; a Fable fork acts on
-  them; Grok proves again. Never bundle "prove + fix" into one lane.
-- Keep this hierarchy in the context of Studio flows and their root agents,
-  including when resuming an archived lane. The user's later directions can
-  change these roles for a particular task or flow.
-
 ## Local work and documentation
 
 - Plans go in `local/plans/<topic>.md`.

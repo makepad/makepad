@@ -2,7 +2,8 @@
 //!
 //! One widget, hardcoded into [`crate::window::Window`] the way the tweaker
 //! and the nav control are, so every Makepad app can record itself without
-//! wiring anything up. Ctrl+F10 starts, Ctrl+F10 stops. While it records,
+//! wiring anything up. Ctrl+F10 starts at up to 60fps; Ctrl+Shift+F10 starts
+//! at 120fps. Either shortcut stops the current recording. While it records,
 //! a red dot sits in the top-right corner of the window (and therefore in
 //! the file — the indicator is drawn into the same pass the recorder reads
 //! back).
@@ -26,9 +27,11 @@
 //! ever touches the encoder. Files land in `local/screencap/`, one per
 //! recording, named for when it was taken.
 //!
-//! Video is constant-rate — 60fps by default, `max_fps` or
-//! `MAKEPAD_SCREENCAP_FPS` for 120 on a 120Hz display — with the frame index
-//! taken from the wall clock, and the audio position derived from that index —
+//! Video is constant-rate — 60fps by default, with `max_fps` or
+//! `MAKEPAD_SCREENCAP_FPS` able to lower that rate. Ctrl+Shift+F10 explicitly
+//! opts into 120fps (Studio feedback sessions reserve that shortcut for
+//! selecting feedback). The frame index is taken from the wall clock, and
+//! the audio position derived from that index —
 //! so an encoder that falls behind leaves a gap in both tracks rather than
 //! letting sound drift away from picture. A window that presents nothing is
 //! kept ticking by a pass repaint, which costs a re-present of the existing
@@ -98,10 +101,10 @@ script_mod! {
 }
 
 /// Frames per second written to the file, and the ceiling on how often the
-/// window is read back. 60 matches the refresh a Makepad app is usually
-/// paced to, so a recording moves the way the app does; `max_fps` (or
-/// `MAKEPAD_SCREENCAP_FPS`) takes it to 120 on a 120Hz display.
+/// window is read back. Normal recording is capped at 60; holding Shift
+/// with the default Ctrl+F10 shortcut opts into 120 for that session only.
 const DEFAULT_FPS: u32 = 60;
+const HIGH_FPS: u32 = 120;
 const MANAGED_MAX_FPS: u32 = 15;
 const MANAGED_MAX_INSPECTION_PIXELS: u64 = 16_777_216;
 static MANAGED_RECORDINGS: AtomicUsize = AtomicUsize::new(0);
@@ -116,9 +119,8 @@ const AUDIO_RATE_GRACE: Duration = Duration::from_millis(300);
 /// the oldest rather than grow without bound behind a realtime callback.
 const AUDIO_BACKLOG_SECONDS: usize = 4;
 
-/// The recording rate: the widget's `max_fps`, or `MAKEPAD_SCREENCAP_FPS` when
-/// it is set, so a display's real refresh (60, 120) can be matched without
-/// touching an app's DSL. Clamped to something an encoder can be asked for.
+/// The requested normal recording rate. The entry points cap this at 60
+/// (15 for managed evidence); the high-rate shortcut selects 120 directly.
 fn capture_fps(max_fps: f64) -> u32 {
     static ENV: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     let env = *ENV.get_or_init(|| {
@@ -160,8 +162,8 @@ pub struct ScreenCap {
     /// works while a text input has the caret.
     #[live(KeyCode::F10)]
     hotkey: KeyCode,
-    /// Whether the hotkey needs Shift held (false by default: Shift+F10 is
-    /// the design tweaker).
+    /// Whether the normal hotkey needs Shift held. With the default Ctrl
+    /// binding, adding Shift selects the high frame rate instead.
     #[live(false)]
     hotkey_shift: bool,
     /// Whether the hotkey needs Ctrl held. Ctrl+F10 by default, so the
@@ -271,19 +273,27 @@ impl ScreenCap {
     }
 
     pub fn toggle(&mut self, cx: &mut Cx) {
+        self.toggle_at_fps(cx, capture_fps(self.max_fps).min(DEFAULT_FPS));
+    }
+
+    fn toggle_at_fps(&mut self, cx: &mut Cx, fps: u32) {
         // Studio owns the lifetime of automatic evidence. The manual shortcut
         // remains unchanged for ordinary app launches without the managed env.
         if self.managed { return; }
         if self.is_recording() {
             self.stop(cx);
         } else if self.session.is_none() {
-            self.start(cx);
+            self.start_at_fps(cx, fps);
         }
-        // While a file is still finalizing, F11 is a no-op rather than a
-        // second encoder racing the first one onto the same directory.
+        // While a file is still finalizing, either shortcut is a no-op;
+        // never race a second encoder onto the same directory.
     }
 
     pub fn start(&mut self, cx: &mut Cx) {
+        self.start_at_fps(cx, capture_fps(self.max_fps).min(DEFAULT_FPS));
+    }
+
+    fn start_at_fps(&mut self, cx: &mut Cx, fps: u32) {
         if self.session.is_some() {
             return;
         }
@@ -293,7 +303,7 @@ impl ScreenCap {
             repo_screencap_dir()
         };
         let path = capture_path(&dir, self.window_id);
-        let fps = if self.managed { capture_fps(self.max_fps).min(MANAGED_MAX_FPS) } else { capture_fps(self.max_fps) };
+        let fps = if self.managed { fps.min(MANAGED_MAX_FPS) } else { fps };
         let session = Session::start(cx, path.clone(), self.window_id, fps, self.managed);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
@@ -359,11 +369,20 @@ impl Widget for ScreenCap {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
             if ke.key_code == self.hotkey
-                && ke.modifiers.shift == self.hotkey_shift
                 && ke.modifiers.control == self.hotkey_ctrl
                 && !ke.is_repeat
             {
-                self.toggle(cx);
+                if ke.modifiers.shift == self.hotkey_shift {
+                    self.toggle(cx);
+                } else if !self.hotkey_shift
+                    && ke.modifiers.shift
+                    && ke.modifiers.control
+                    && !ke.modifiers.alt
+                    && !ke.modifiers.logo
+                    && !cx.global::<crate::ai_slot::AiSlotRequests>().feedback_enabled
+                {
+                    self.toggle_at_fps(cx, HIGH_FPS);
+                }
             }
         }
         if self.next_frame.is_event(event).is_some() {
@@ -399,7 +418,7 @@ struct CapturedFrame {
 #[derive(Default)]
 struct FrameSlot {
     /// Only the NEWEST presented frame is kept. The encoder samples on its own
-    /// 30Hz clock, so queueing every 120Hz present would just buy latency and
+    /// recording clock, so queueing every 120Hz present would just buy latency and
     /// tens of megabytes of backlog.
     pending: Option<CapturedFrame>,
     /// Buffer handed back by the encoder thread, reused by the capture
@@ -750,6 +769,8 @@ fn encode_loop(
         }),
         keyframe_only: false,
     };
+    log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, app audio AAC 128kbps",
+        width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0);
     let path_str = path.to_string_lossy().to_string();
     let mut encoder =
         VideoFileEncoder::new(&path_str, options).map_err(|err| format!("{path_str}: {err}"))?;
@@ -931,12 +952,13 @@ fn tick_duration(index: u64, fps: u32) -> Duration {
     Duration::from_nanos(index * 1_000_000_000 / fps as u64)
 }
 
-/// ~0.1 bits per pixel per frame, which is a sane screen-content rate, held
-/// between 2 and 40 Mbps.
+/// A quarter bit per pixel per frame preserves fine text and map outlines
+/// during motion. Scale with both native resolution and capture rate;
+/// the previous 40 Mbps ceiling starved large high-refresh drawables.
 fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
     let pixels = width as u64 * height as u64;
-    let bps = pixels * fps as u64 / 12;
-    bps.clamp(2_000_000, 40_000_000) as u32
+    let bps = pixels * fps as u64 / 4;
+    bps.clamp(8_000_000, 160_000_000) as u32
 }
 
 fn stopped(stop: &AtomicBool) -> bool {
@@ -1178,9 +1200,9 @@ mod tests {
 
     #[test]
     fn bitrate_stays_in_band() {
-        assert_eq!(bitrate_for(64, 64, 30), 2_000_000);
-        assert_eq!(bitrate_for(7680, 4320, 60), 40_000_000);
-        assert_eq!(bitrate_for(2048, 1536, 30), 2048 * 1536 * 30 / 12);
+        assert_eq!(bitrate_for(64, 64, 30), 8_000_000);
+        assert_eq!(bitrate_for(7680, 4320, 60), 160_000_000);
+        assert_eq!(bitrate_for(2048, 1536, 30), 2048 * 1536 * 30 / 4);
     }
 
     #[test]
