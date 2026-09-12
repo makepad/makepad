@@ -85,12 +85,31 @@ fn library_root() -> PathBuf {
 }
 
 /// Explicit app roots remain isolated. Every default uses the shared store,
-/// including the first launch before its catalog exists. The legacy seed
-/// argument remains source-compatible but never creates a second library.
-pub fn default_store_root(prefix: &str, _seed_dir: &str) -> PathBuf {
-    std::env::var(format!("{prefix}_ASSET_ROOT"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| main_store_root())
+/// including the first launch before its catalog exists, and the seed
+/// argument never CREATES a second library.
+///
+/// It does keep one that already exists. An app that built its own library
+/// under `local/<seed_dir>` before the shared store did goes on hosting that
+/// library: choosing the empty shared store instead reads as "the app lost
+/// my content" the first time it launches after the change, and moving a
+/// library into the shared store is its owner's decision, not a launch's.
+pub fn default_store_root(prefix: &str, seed_dir: &str) -> PathBuf {
+    let pinned = std::env::var(format!("{prefix}_ASSET_ROOT")).ok().map(PathBuf::from);
+    let legacy = makepad_asset_client::paths::checkout_root().join("local").join(seed_dir);
+    choose_store_root(pinned, (!seed_dir.is_empty()).then_some(legacy.as_path()), main_store_root())
+}
+
+/// The decision [`default_store_root`] makes, without the environment and
+/// the filesystem layout: a pin wins, then an existing per-app library
+/// (one holding a catalog), then the shared store.
+fn choose_store_root(pinned: Option<PathBuf>, legacy: Option<&Path>, shared: PathBuf) -> PathBuf {
+    if let Some(root) = pinned.filter(|root| !root.as_os_str().is_empty()) {
+        return root;
+    }
+    match legacy {
+        Some(legacy) if legacy.join("catalog.sqlite3").is_file() => legacy.to_path_buf(),
+        _ => shared,
+    }
 }
 
 /// Does something on the other end of `addr` answer `GET /v1/health` like an
@@ -337,4 +356,36 @@ fn host_at(root: &Path, prefix: &str) -> Result<LocalStore, String> {
         return Err("admin token file empty".to_string());
     }
     Ok(LocalStore { host, root: root.to_path_buf() })
+}
+
+#[cfg(test)]
+mod store_root_tests {
+    use super::choose_store_root;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("embed-store-root-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_existing_per_app_library_is_kept_and_an_empty_one_is_not_created() {
+        let shared = PathBuf::from("/checkout/local/asset-library/store");
+        let legacy = scratch("legacy");
+        // No catalog in the app's own folder: the shared store, as upstream
+        // intends for every fresh install.
+        assert_eq!(choose_store_root(None, Some(&legacy), shared.clone()), shared);
+        // A library the app already built: kept.
+        std::fs::write(legacy.join("catalog.sqlite3"), b"").unwrap();
+        assert_eq!(choose_store_root(None, Some(&legacy), shared.clone()), legacy);
+        // A pin beats both, and an empty pin is no pin.
+        let pin = PathBuf::from("/elsewhere");
+        assert_eq!(choose_store_root(Some(pin.clone()), Some(&legacy), shared.clone()), pin);
+        assert_eq!(choose_store_root(Some(PathBuf::new()), Some(&legacy), shared.clone()), legacy);
+        // An app with no seed folder at all only ever gets the shared store.
+        assert_eq!(choose_store_root(None, None, shared.clone()), shared);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
 }
