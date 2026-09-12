@@ -606,14 +606,6 @@ impl Cx {
                     target_id,
                     width,
                     height,
-                    // NOTE for the lane that added `PresentableDraw.sequence`
-                    // (uncommitted in shared_framebuf.rs and the stdin
-                    // constructors): this line was re-added by the gpusim
-                    // rename (makepad-05, 2026-09-12) after the old
-                    // os/headless/event_loop.rs was deleted from the working
-                    // tree WITHOUT saving its uncommitted edits. If you had
-                    // more than this line uncommitted there, re-apply it here
-                    // and delete this note when you commit the field.
                     sequence: 0,
                 }));
             }
