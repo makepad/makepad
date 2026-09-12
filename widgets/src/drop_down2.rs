@@ -472,6 +472,10 @@ pub struct DropDown2 {
 
     #[rust]
     is_active: bool,
+    /// Held while the list is open, so `Escape` belongs to it rather than to
+    /// whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     #[rust]
     opening_click: bool,
     #[rust]
@@ -516,6 +520,7 @@ impl DropDown2 {
     pub fn set_active(&mut self, cx: &mut Cx) {
         self.clamp_selected();
         self.is_active = true;
+        self.cancel_scope = Some(cx.begin_cancel_scope());
         self.opening_click = true;
         self.hover_item = Some(self.selected_item);
         self.scroll = None;
@@ -527,6 +532,9 @@ impl DropDown2 {
 
     pub fn set_closed(&mut self, cx: &mut Cx) {
         self.is_active = false;
+        if let Some(scope) = self.cancel_scope.take() {
+            cx.end_cancel_scope(scope);
+        }
         self.opening_click = false;
         self.arrow_dir = None;
         self.geom = None;
@@ -723,6 +731,12 @@ impl Widget for DropDown2 {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.set_closed(cx);
+            return;
+        }
         // Between draws every deferred alignment has been applied, so this
         // is the field's true on-screen rect (see `aligned_rect`).
         let rect = self.draw_bg.area().rect(cx);
@@ -837,7 +851,9 @@ impl Widget for DropDown2 {
                 self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyDown(ke) => match ke.key_code {
-                KeyCode::Escape => {
+                KeyCode::Escape
+                    if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
                     self.set_closed(cx);
                 }
                 KeyCode::ReturnKey => {

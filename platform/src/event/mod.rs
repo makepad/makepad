@@ -1,3 +1,4 @@
+pub mod cancel_scope;
 pub mod drag_drop;
 pub mod event;
 pub mod finger;
@@ -9,6 +10,7 @@ pub mod video_playback;
 pub mod window;
 pub mod xr;
 
+pub use cancel_scope::*;
 pub use drag_drop::*;
 pub use event::*;
 pub use finger::*;
