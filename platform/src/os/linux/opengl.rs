@@ -674,7 +674,10 @@ impl Cx {
                     continue;
                 }
                 let geometry = &mut self.geometries[geometry_id];
-                if !crate::geometry::geometry_backend_supports_typed(
+                // Typed geometry (a byte layout, u16 indices) uploads as-is;
+                // the GL attribute pointers still assume f32-lane records,
+                // so a compact shader layout stays gated.
+                if !crate::geometry::geometry_backend_supports_compact(
                     geometry,
                     "opengl",
                     sh.mapping.geometry_is_compact(),
@@ -687,18 +690,30 @@ impl Cx {
                 ) {
                     continue;
                 }
-                if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
-                    let Some(vertices) = geometry.vertices.as_f32() else {
+                let index_gl_type = match geometry.index_width {
+                    2 => gl_sys::UNSIGNED_SHORT,
+                    4 => gl_sys::UNSIGNED_INT,
+                    width => {
+                        crate::error!("invalid resident index width {width}; skipping draw");
                         continue;
-                    };
-                    geometry.os.vb.update_array_buffer(gl, vertices);
+                    }
+                };
+                if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
+                    geometry
+                        .os
+                        .vb
+                        .update_array_buffer_bytes(gl, geometry.vertices.as_bytes());
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
-                    let Some(indices) = geometry.indices.as_u32() else {
-                        continue;
-                    };
-                    geometry.os.ib.update_index_buffer(gl, indices);
+                    match &geometry.indices {
+                        crate::geometry::IndexData::U32(indices) => {
+                            geometry.os.ib.update_index_buffer(gl, indices);
+                        }
+                        crate::geometry::IndexData::U16(indices) => {
+                            geometry.os.ib.update_index_buffer_u16(gl, indices);
+                        }
+                    }
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -1023,7 +1038,7 @@ impl Cx {
                     (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
-                        gl_sys::UNSIGNED_INT,
+                        index_gl_type,
                         ptr::null(),
                         instances as i32,
                     );
@@ -3684,6 +3699,14 @@ impl OpenglBuffer {
     }
 
     pub fn update_array_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        self.update_array_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// A vertex record stream in its physical layout (typed geometry, or
+    /// the f32-lane path's bytes).
+    pub fn update_array_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         self.retained_capacity = 0;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
@@ -3692,7 +3715,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
@@ -3728,6 +3751,20 @@ impl OpenglBuffer {
     }
 
     pub fn update_index_buffer(&mut self, gl: &LibGl, data: &[u32]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// Compact (u16) indices; the draw selects `GL_UNSIGNED_SHORT` from the
+    /// geometry's resident index width.
+    pub fn update_index_buffer_u16(&mut self, gl: &LibGl, data: &[u16]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    fn update_index_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3735,7 +3772,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ELEMENT_ARRAY_BUFFER,
-                (data.len() * mem::size_of::<u32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
