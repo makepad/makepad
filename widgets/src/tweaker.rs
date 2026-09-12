@@ -491,6 +491,12 @@ fn note_store_load() -> Vec<TweakNote> {
     let Ok(body) = std::fs::read_to_string(NOTE_STORE) else {
         return Vec::new();
     };
+    note_store_parse(&body)
+}
+
+/// The parser on its own, so both shapes of the file can be tested without
+/// one on disk.
+fn note_store_parse(body: &str) -> Vec<TweakNote> {
     let mut out = Vec::new();
     for line in body.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -1991,7 +1997,10 @@ pub fn window_intercept(
                     let field = tweaker.borrow::<Tweaker>().and_then(|tw| {
                         tw.sidebar.as_ref().map(|sidebar| {
                             if into_notes {
-                                sidebar.child(live_id!(spec_col)).child(live_id!(spec_notes))
+                                sidebar
+                                    .child(live_id!(spec_col))
+                                    .child(live_id!(spec_widget))
+                                    .child(live_id!(spec_notes))
                             } else {
                                 sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field))
                             }
@@ -6414,6 +6423,12 @@ pub struct Tweaker {
     /// same way one typed into the notes field does.
     #[rust]
     prompt_field_uid: u64,
+    /// Put the caret back in the box the frame after a send or a queue. A
+    /// message going out must not cost you the box you were writing in:
+    /// without this, Up after a send walks nothing, because the strip's keys
+    /// are claimed only while the caret is actually there.
+    #[rust]
+    prompt_focus_pending: bool,
     /// Something in the Spec tab was typed into and is not on disk yet.
     /// Flushed when the caret leaves the tab's fields -- a write per
     /// keystroke would be a file write per frame.
@@ -7246,6 +7261,11 @@ impl Tweaker {
                             max_lines: 1
                             text_overflow: TextOverflow.Ellipsis
                         }
+                        spec_widget := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 6
                         notes_head := FabHeaderLabel {
                             width: Fill
                             text: "notes"
@@ -7281,6 +7301,7 @@ impl Tweaker {
                                 color: #xe6e6e6
                                 text_style +: { font_size: 8.5 }
                             }
+                        }
                         }
                         spec_div := View {
                             width: Fill
@@ -7757,9 +7778,11 @@ impl Tweaker {
             fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
             fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
             let spec = sidebar.child(live_id!(spec_col));
-            for id in [live_id!(spec_notes), live_id!(spec_rules), live_id!(spec_app)] {
-                fields.push(spec.child(id).area());
+            let spec_widget = spec.child(live_id!(spec_widget));
+            for id in [live_id!(spec_notes), live_id!(spec_rules)] {
+                fields.push(spec_widget.child(id).area());
             }
+            fields.push(spec.child(live_id!(spec_app)).area());
         }
         // The property rows' own inputs come and go with the selection, so
         // ask the live ones rather than keeping a list.
@@ -7817,17 +7840,18 @@ impl Tweaker {
         // notes and rules belong to the selection; with nothing selected
         // there is nothing for them to be about, so they say so and stay
         // out of the way rather than writing to a record that has no path.
+        // One View carries all four, because only a View's visibility can be
+        // toggled: `TextInput` has no `visible` of its own, so `set_visible`
+        // on the fields themselves was silently nothing -- the headers hid
+        // (Label declares one) and the boxes stayed.
         let have = path.is_some();
-        for id in [live_id!(spec_notes), live_id!(spec_rules)] {
-            col.child(id).set_visible(cx, have);
-        }
-        col.child(live_id!(notes_head)).set_visible(cx, have);
-        col.child(live_id!(rules_head)).set_visible(cx, have);
+        let widget_col = col.child(live_id!(spec_widget));
+        widget_col.set_visible(cx, have);
         // Which path the tab is SHOWING. An @mention writes relative to this
         // rather than to whatever is pinned: the two can differ for a frame,
         // and writing one widget's text into another's is how a note is lost.
         self.note_key_shown = path.clone().unwrap_or_default();
-        self.note_text_uid = col.child(live_id!(spec_notes)).widget_uid().0;
+        self.note_text_uid = widget_col.child(live_id!(spec_notes)).widget_uid().0;
 
         if let Some(path) = path {
             let (mut notes, mut rules) = {
@@ -7843,7 +7867,7 @@ impl Tweaker {
                 (live_id!(spec_notes), &mut notes),
                 (live_id!(spec_rules), &mut rules),
             ] {
-                let field = col.child(id);
+                let field = widget_col.child(id);
                 if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
                     let typed = field.text();
                     if typed != *slot {
@@ -7891,12 +7915,16 @@ impl Tweaker {
         // Nothing in the tab has the caret any more, so what was typed is
         // finished: put it on disk.
         if self.spec_dirty
-            && ![live_id!(spec_notes), live_id!(spec_rules), live_id!(spec_app)]
-                .into_iter()
-                .any(|id| {
-                    let area = col.child(id).area();
-                    !area.is_empty() && cx.has_key_focus(area)
-                })
+            && ![
+                widget_col.child(live_id!(spec_notes)),
+                widget_col.child(live_id!(spec_rules)),
+                col.child(live_id!(spec_app)),
+            ]
+            .into_iter()
+            .any(|field| {
+                let area = field.area();
+                !area.is_empty() && cx.has_key_focus(area)
+            })
         {
             self.spec_flush();
         }
@@ -8024,6 +8052,7 @@ impl Tweaker {
                 format!("{} messages sent to the AI", sent.len())
             };
         }
+        self.prompt_focus_pending = true;
         self.redraw_sidebar(cx);
     }
 
@@ -8044,6 +8073,7 @@ impl Tweaker {
             n => format!("{n} queued \u{00b7} Ctrl+Enter sends the queue"),
         };
         log!("TWEAK note queued \u{00b7} {count} waiting");
+        self.prompt_focus_pending = true;
         self.redraw_sidebar(cx);
     }
 
@@ -8974,6 +9004,11 @@ impl Tweaker {
                     if field.text() != live {
                         field.set_text(cx, &live);
                     }
+                }
+                if self.prompt_focus_pending && field.area() != Area::Empty {
+                    self.prompt_focus_pending = false;
+                    cx.set_key_focus(field.area());
+                    self.next_frame = cx.new_next_frame();
                 }
             }
             // Shader tab content: the layer's live preview + doc + prompt.
@@ -13024,6 +13059,47 @@ mod tests {
         // An absolute reference is left as it is, leading slash or not.
         assert_eq!(absolute_mention("/a/b", "/x/y/z"), "/x/y/z");
         assert_eq!(absolute_mention("/a/b", "x/y/z"), "/x/y/z");
+    }
+
+    #[test]
+    fn the_store_reads_both_its_own_shape_and_the_one_before_it() {
+        // The current shape: path, notes, rules.
+        let now = note_store_parse("# header
+Root/Button_1	too tight	keep it 44 high
+");
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].path, "Root/Button_1");
+        assert_eq!(now[0].text, "too tight");
+        assert_eq!(now[0].rules, "keep it 44 high");
+
+        // A file written before rules existed: two columns, no third.
+        let two = note_store_parse("Root/Label_2	just a note
+");
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].text, "just a note");
+        assert!(two[0].rules.is_empty());
+
+        // The shape the note CARD wrote: four columns of geometry it no
+        // longer has anything to describe, with the text in column five.
+        // The text has to survive; the geometry is dropped.
+        let old = note_store_parse("Root/View_3	8	-108	230	96	the old card said this
+");
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].path, "Root/View_3");
+        assert_eq!(old[0].text, "the old card said this");
+        assert!(old[0].rules.is_empty());
+
+        // Newlines survive the round trip through a one-line-per-note file.
+        let round = note_store_parse(&format!(
+            "p	{}	{}
+",
+            note_store_escape("line one
+line two"),
+            note_store_escape("rule	with a tab")
+        ));
+        assert_eq!(round[0].text, "line one
+line two");
+        assert_eq!(round[0].rules, "rule	with a tab");
     }
 
     #[test]
