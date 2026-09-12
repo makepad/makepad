@@ -34681,6 +34681,18 @@ p2 {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        // The runtime's warm task pool, handed to every worker that runs
+        // one-shot jobs on it. Without it those workers refuse whatever
+        // they are asked with "not started": an import from either page, an
+        // archive fetch and a pipeline run all went nowhere.
+        let spawner = cx.thread_spawner();
+        let pool = cx.task_pool();
+        self.import.set_task_pool(pool.clone());
+        self.music_import_run.set_task_pool(pool.clone());
+        self.archive.set_spawner(spawner.clone());
+        self.archive.set_task_pool(pool.clone());
+        self.pipelines.set_spawner(spawner);
+        self.pipelines.set_task_pool(pool);
         self.status_text = "starting…".to_string();
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
