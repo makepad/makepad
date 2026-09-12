@@ -248,6 +248,14 @@ impl Widget for CommandTextInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.is_text_input_focus_pending = true;
+            self.hide_popup(cx);
+            self.redraw(cx);
+            return;
+        }
         if cx.has_key_focus(self.key_controller_text_input_ref(cx).area()) {
             if let Event::KeyDown(key_event) = event {
                 let popup_visible = self.view(cx, ids!(popup)).visible();

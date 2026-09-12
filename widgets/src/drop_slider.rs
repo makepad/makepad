@@ -278,6 +278,12 @@ impl Widget for DropSlider {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.set_open(cx, false);
+            return;
+        }
         // The popover owns the pointer while open: a press inside scrubs,
         // a press outside chip AND panel closes. The CHIP toggle itself
         // lives in the hits arm below — one press, one state change.

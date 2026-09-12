@@ -731,6 +731,12 @@ impl Widget for DropDown2 {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.set_closed(cx);
+            return;
+        }
         // Between draws every deferred alignment has been applied, so this
         // is the field's true on-screen rect (see `aligned_rect`).
         let rect = self.draw_bg.area().rect(cx);

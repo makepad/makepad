@@ -136,19 +136,23 @@ impl Widget for Modal {
         let bg_area = self.draw_bg.area();
         let bg_area_hit = event.hits(cx, bg_area);
 
+        let owns_cancel = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
+        // Check ownership before consuming Back. A non-dismissible foreground
+        // modal still blocks navigation behind it, without dismissing itself.
+        let back_pressed = owns_cancel && event.back_pressed();
         if self.can_dismiss {
             // Close the modal if any of the following conditions occur:
-            // * If the back navigational action/gesture was triggered (e.g., on Android),
+            // * If this modal owns the back navigational action/gesture (e.g., on Android),
             // * If an `Escape` press this modal owns was released. Ownership, not key
             //   focus, is what keeps a widget behind the modal from acting on the press.
             // * If there was a click/tap in the background area, outside of the inner `content` view.
-            let should_close = event.back_pressed()
+            let should_close = back_pressed
                 || match bg_area_hit {
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape
-                    && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)));
+                    && owns_cancel);
             if should_close {
                 // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
                 // action up by `self.widget_uid()`, so the content view's uid
