@@ -2582,7 +2582,7 @@ fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String
 /// has to come back as the same handful of shapes the editor draws.
 #[derive(Clone, Debug, PartialEq)]
 enum SizeText {
-    Fill { weight: f64 },
+    Fill(FillText),
     Fit,
     Fixed(f64),
     /// `50%`, `25vw`, `60cqw`: a size relative to something, as written.
@@ -2591,11 +2591,133 @@ enum SizeText {
     Expr(String),
 }
 
+/// What a `Fill` carries: how much of the free space it takes against its
+/// siblings, where it starts from, how it gives way, and the margin-box
+/// bounds a Fill has always had. Read off the printed row and written back
+/// whole, since a field of a variant is not a property of its own.
+#[derive(Clone, Debug, PartialEq)]
+struct FillText {
+    weight: f64,
+    /// `0`, `25%`, `calc(100% - 20px)`: the basis as written.
+    basis: String,
+    shrink: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+impl FillText {
+    /// A Fill with nothing said about it.
+    fn plain() -> Self {
+        FillText { weight: 100.0, basis: "0".to_string(), shrink: 0.0, min: None, max: None }
+    }
+
+    /// The chunk that sets the axis to this Fill.
+    fn chunk(&self, axis: &str) -> String {
+        let mut out = format!(
+            "{axis}: Size.Fill{{weight: {} basis: {} shrink: {}",
+            fmt_f64(self.weight),
+            size_literal(&self.basis),
+            fmt_f64(self.shrink)
+        );
+        if let Some(min) = self.min {
+            out.push_str(&format!(" min: {}", fmt_f64(min)));
+        }
+        if let Some(max) = self.max {
+            out.push_str(&format!(" max: {}", fmt_f64(max)));
+        }
+        out.push('}');
+        out
+    }
+}
+
+/// A size as the engine reads it: a number stays bare, anything else --
+/// `25%`, `calc(100% - 20px)` -- is a string for its parser.
+fn size_literal(text: &str) -> String {
+    let text = text.trim().trim_matches('"').trim();
+    if text.parse::<f64>().is_ok() {
+        text.to_string()
+    } else {
+        format!("\"{text}\"")
+    }
+}
+
+/// The fields of a printed `Size.Fill{weight: 100 basis: FitBound.Abs(0)
+/// shrink: 0}`; anything missing is the engine's own default.
+fn parse_fill_text(text: &str) -> FillText {
+    FillText {
+        weight: field_number(text, "weight").unwrap_or(100.0),
+        basis: fill_field(text, "basis").map(bound_text).unwrap_or_else(|| "0".to_string()),
+        shrink: field_number(text, "shrink").unwrap_or(0.0),
+        min: field_number(text, "min"),
+        max: field_number(text, "max"),
+    }
+}
+
+/// One field of a printed Fill, up to the next field or the closing brace;
+/// a quoted value -- an expression with spaces in it -- is taken whole.
+fn fill_field<'a>(text: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        return Some(&quoted[..end]);
+    }
+    let end = [" weight:", " basis:", " shrink:", " min:", " max:", "}"]
+        .iter()
+        .filter_map(|stop| rest.find(stop))
+        .min()
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim())
+}
+
+/// A bound as printed -- `FitBound.Abs(120)`, `50%`, `"calc(100% - 20px)"`
+/// -- as the text of its field: `120`, `50%`, `calc(100% - 20px)`.
+fn bound_text(printed: &str) -> String {
+    let text = printed.trim().trim_matches('"').trim();
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    if head.rsplit('.').next() == Some("Abs") {
+        let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
+        return inner.parse::<f64>().map(fmt_f64).unwrap_or_else(|_| inner.to_string());
+    }
+    text.to_string()
+}
+
+/// What was typed into a min / max field: nothing clears the bound, a
+/// number is points, and a spelling the engine parses goes in quotes.
+/// Fill and Fit mean nothing for a bound, and half-typed text is not sent.
+fn bound_chunk(prop: &str, typed: &str) -> Option<String> {
+    let typed = typed.trim().trim_matches('"').trim();
+    if typed.is_empty() || typed == "-" || typed == "\u{2013}" || typed.eq_ignore_ascii_case("none") {
+        return Some(format!("{prop}: nil"));
+    }
+    match parse_size_text(typed) {
+        SizeText::Fixed(v) => Some(format!("{prop}: {}", fmt_f64(v))),
+        SizeText::Rel(text) | SizeText::Expr(text) => Some(format!("{prop}: \"{text}\"")),
+        SizeText::Fill(_) | SizeText::Fit => None,
+    }
+}
+
+/// What was typed into the aspect field: nothing clears it, `16:9` or
+/// `16/9` is a ratio, a number is width over height; `3:` on the way to
+/// `3:2` is not sent.
+fn aspect_chunk(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if typed.is_empty() || typed == "-" || typed == "\u{2013}" || typed.eq_ignore_ascii_case("none") {
+        return Some("aspect: nil".to_string());
+    }
+    if let Some((w, h)) = typed.split_once([':', '/']) {
+        let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+        return (h != 0.0).then(|| format!("aspect: {}", fmt_f64(w / h)));
+    }
+    typed.parse::<f64>().ok().map(|v| format!("aspect: {}", fmt_f64(v)))
+}
+
 impl SizeText {
     /// The value the field shows for it.
     fn field_text(&self) -> String {
         match self {
-            SizeText::Fill { .. } => "Fill".to_string(),
+            SizeText::Fill(_) => "Fill".to_string(),
             SizeText::Fit => "Fit".to_string(),
             SizeText::Fixed(v) => fmt_f64(*v),
             SizeText::Rel(text) | SizeText::Expr(text) => text.clone(),
@@ -2621,10 +2743,7 @@ fn parse_size_text(text: &str) -> SizeText {
     let head = text.split(['{', '(']).next().unwrap_or("").trim();
     let variant = head.rsplit('.').next().unwrap_or("").trim();
     match variant {
-        "Fill" => {
-            let weight = field_number(text, "weight").unwrap_or(100.0);
-            return SizeText::Fill { weight };
-        }
+        "Fill" => return SizeText::Fill(parse_fill_text(text)),
         "Fit" => return SizeText::Fit,
         "Fixed" => {
             let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
@@ -2776,20 +2895,20 @@ fn field_word<'a>(text: &'a str, field: &str) -> Option<&'a str> {
 /// What a person typed into a size field, as the chunk that sets it. A bare
 /// word is a mode, a number is points, a percent or a viewport unit or a
 /// function is the CSS spelling and goes in quotes so the engine's string
-/// parser sees it; anything else is passed through as written and the
-/// engine says what it thinks of it.
-fn size_chunk(axis: &str, typed: &str) -> String {
+/// parser sees it. Text that reads as none of those -- the half of a word
+/// still being typed -- is not sent.
+fn size_chunk(axis: &str, typed: &str) -> Option<String> {
     let typed = typed.trim().trim_matches('"').trim();
     match typed.to_ascii_lowercase().as_str() {
-        "fill" => return format!("{axis}: Fill"),
-        "fit" => return format!("{axis}: Fit"),
+        "fill" => return Some(format!("{axis}: Fill")),
+        "fit" => return Some(format!("{axis}: Fit")),
         _ => {}
     }
     match parse_size_text(typed) {
-        SizeText::Fixed(v) => format!("{axis}: {}", fmt_f64(v)),
-        SizeText::Rel(text) | SizeText::Expr(text) => format!("{axis}: \"{text}\""),
-        SizeText::Fill { .. } => format!("{axis}: Fill"),
-        SizeText::Fit => format!("{axis}: {typed}"),
+        SizeText::Fixed(v) => Some(format!("{axis}: {}", fmt_f64(v))),
+        SizeText::Rel(text) | SizeText::Expr(text) => Some(format!("{axis}: \"{text}\"")),
+        SizeText::Fill(_) => Some(format!("{axis}: Fill")),
+        SizeText::Fit => None,
     }
 }
 
@@ -6229,7 +6348,8 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
     match first {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
-        | "metrics" | "distribute" | "container_id" => return SectionKind::Layout,
+        | "metrics" | "distribute" | "container_id" | "min_width" | "max_width"
+        | "min_height" | "max_height" | "aspect" | "cell" => return SectionKind::Layout,
         "text" | "empty_text" | "label" | "title" | "suffix" => return SectionKind::Text,
         "visible" | "enabled" | "grab_key_focus" | "cursor" | "trigger_on_press"
         | "enable_long_press" | "reset_hover_on_click" | "block_signal_event"
@@ -6279,20 +6399,26 @@ fn section_rank(section: SectionKind, prop: &str) -> (u32, u32, String) {
             let major = match first {
                 "width" => 0,
                 "height" => 1,
-                "abs_pos" => 2,
-                "margin" => 3,
-                "padding" => 4,
-                "spacing" => 5,
-                "wrap_spacing" => 6,
-                "line_spacing" => 7,
-                "align" => 8,
-                "distribute" => 9,
-                "flow" => 10,
-                "clip_x" => 11,
-                "clip_y" => 12,
-                "scroll" => 13,
-                "container_id" => 14,
-                _ => 20,
+                "min_width" => 2,
+                "max_width" => 3,
+                "min_height" => 4,
+                "max_height" => 5,
+                "aspect" => 6,
+                "abs_pos" => 7,
+                "cell" => 8,
+                "margin" => 9,
+                "padding" => 10,
+                "spacing" => 11,
+                "wrap_spacing" => 12,
+                "line_spacing" => 13,
+                "align" => 14,
+                "distribute" => 15,
+                "flow" => 16,
+                "clip_x" => 17,
+                "clip_y" => 18,
+                "scroll" => 19,
+                "container_id" => 20,
+                _ => 30,
             };
             let minor = match first {
                 "margin" | "padding" => inset_leg_rank(leaf),
@@ -7230,6 +7356,22 @@ impl Tweaker {
                         text: ""
                     }
                 }
+                // One size field, in the person's own words: a number, a
+                // percentage, an expression.
+                let SizeInputT = TextInput {
+                    height: 18
+                    empty_text: ""
+                    label_align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {
+                        color: #x1d1d1d
+                        border_radius: 2.0
+                    }
+                    draw_text +: {
+                        ink_centered: true
+                        color: #xe6e6e6
+                        text_style +: { font_size: 8.5 }
+                    }
+                }
                 let SizeRowT = FabPropRow {
                     height: Fit
                     size_col := View {
@@ -7249,21 +7391,40 @@ impl Tweaker {
                                 w_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 w_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            w_input := TextInput {
-                                width: Fill
-                                height: 18
-                                empty_text: ""
-                                label_align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: { font_size: 8.5 }
-                                }
-                            }
+                            w_input := SizeInputT { width: Fill }
+                        }
+                        // The content-box clamps, under the axis they bound.
+                        w_clamp := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_min_label := FabLabelSmall { width: Fit text: "min" }
+                            w_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            w_max_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            w_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                        }
+                        // A Fill's own fields; the lines are not there otherwise.
+                        w_grow := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_grow_label := FabLabelSmall { width: Fit text: "grow" }
+                            w_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                            w_shrink_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            w_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                        }
+                        w_basis := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_basis_label := FabLabelSmall { width: Fit text: "basis" }
+                            w_basis_in := SizeInputT { width: Fill }
                         }
                         h_row := View {
                             width: Fill
@@ -7277,21 +7438,50 @@ impl Tweaker {
                                 h_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 h_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            h_input := TextInput {
-                                width: Fill
-                                height: 18
-                                empty_text: ""
-                                label_align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: { font_size: 8.5 }
-                                }
-                            }
+                            h_input := SizeInputT { width: Fill }
+                        }
+                        // The content-box clamps, under the axis they bound.
+                        h_clamp := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_min_label := FabLabelSmall { width: Fit text: "min" }
+                            h_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            h_max_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            h_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                        }
+                        // A Fill's own fields; the lines are not there otherwise.
+                        h_grow := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_grow_label := FabLabelSmall { width: Fit text: "grow" }
+                            h_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                            h_shrink_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            h_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                        }
+                        h_basis := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_basis_label := FabLabelSmall { width: Fit text: "basis" }
+                            h_basis_in := SizeInputT { width: Fill }
+                        }
+                        aspect_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            aspect_label := FabLabelSmall { width: Fit text: "aspect" }
+                            aspect_in := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            aspect_hint := FabLabelSmall { width: Fit text: "width : height" }
                         }
                     }
                 }
@@ -8543,7 +8733,7 @@ impl Tweaker {
             })
         {
             let item = &row.item;
-            let inner: [(&[LiveId], &str); 33] = [
+            let inner: [(&[LiveId], &str); 44] = [
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
@@ -8571,6 +8761,17 @@ impl Tweaker {
                 (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fit)], "height: fit the content"),
                 (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fix)], "height: a fixed size, in points"),
                 (&[live_id!(size_col), live_id!(h_row), live_id!(h_input)], "the height \u{00b7} a number, or a size such as 50% or calc(100% - 20px)"),
+                (&[live_id!(size_col), live_id!(w_clamp), live_id!(w_min)], "never narrower than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(w_clamp), live_id!(w_max)], "never wider than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(h_clamp), live_id!(h_min)], "never shorter than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(h_clamp), live_id!(h_max)], "never taller than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(w_grow), live_id!(w_weight)], "its share of the free width against its siblings"),
+                (&[live_id!(size_col), live_id!(w_grow), live_id!(w_shrink)], "how readily it gives up width when there is too little \u{00b7} 0 never"),
+                (&[live_id!(size_col), live_id!(w_basis), live_id!(w_basis_in)], "the width it starts from before the free space is shared"),
+                (&[live_id!(size_col), live_id!(h_grow), live_id!(h_weight)], "its share of the free height against its siblings"),
+                (&[live_id!(size_col), live_id!(h_grow), live_id!(h_shrink)], "how readily it gives up height when there is too little \u{00b7} 0 never"),
+                (&[live_id!(size_col), live_id!(h_basis), live_id!(h_basis_in)], "the height it starts from before the free space is shared"),
+                (&[live_id!(size_col), live_id!(aspect_row), live_id!(aspect_in)], "width over height \u{00b7} 1.5 or 3:2 \u{00b7} empty for none"),
                 (&[live_id!(box_col), live_id!(top_row), live_id!(leg_top)], "the top side, in points"),
                 (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_left)], "the left side, in points"),
                 (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_right)], "the right side, in points"),
@@ -9322,7 +9523,8 @@ impl Tweaker {
         let first = prop.split('.').next().unwrap_or("");
         matches!(
             first,
-            "width" | "height" | "margin" | "padding" | "spacing" | "wrap_spacing" | "flow" | "align"
+            "width" | "height" | "min_width" | "max_width" | "min_height" | "max_height" | "aspect"
+                | "margin" | "padding" | "spacing" | "wrap_spacing" | "flow" | "align"
         )
     }
 
@@ -9336,7 +9538,7 @@ impl Tweaker {
     fn composite_terms(kind: &VisKind) -> &'static str {
         match kind {
             VisKind::Measured => "measured size width height pixels device",
-            VisKind::Size => "size width height fit fill",
+            VisKind::Size => "size width height fit fill min max clamp aspect ratio grow shrink basis weight percent",
             VisKind::BoxInset(BoxKind::Margin) => "margin",
             VisKind::BoxInset(BoxKind::Padding) => "padding",
             VisKind::FlowSpacing => "spacing flow gap wrap direction rows overlay",
@@ -9348,7 +9550,9 @@ impl Tweaker {
     /// Which composite, if any, has swallowed `prop`.
     fn composite_of(prop: &str) -> Option<VisKind> {
         match prop.split('.').next().unwrap_or("") {
-            "width" | "height" => Some(VisKind::Size),
+            "width" | "height" | "min_width" | "max_width" | "min_height" | "max_height" | "aspect" => {
+                Some(VisKind::Size)
+            }
             "margin" => Some(VisKind::BoxInset(BoxKind::Margin)),
             "padding" => Some(VisKind::BoxInset(BoxKind::Padding)),
             "spacing" | "wrap_spacing" | "flow" => Some(VisKind::FlowSpacing),
@@ -9381,6 +9585,22 @@ impl Tweaker {
             .iter()
             .find(|row| row.prop == prop)
             .map(|row| row.value.as_str())
+    }
+
+    /// The axis's Fill with one field -- weight, shrink, basis -- replaced
+    /// by what was typed, as the chunk that sets the whole of it.
+    fn fill_chunk(&self, axis: &str, key: &str, typed: &str) -> String {
+        let mut fill = match parse_size_text(self.row_value(axis).unwrap_or("")) {
+            SizeText::Fill(fill) => fill,
+            _ => FillText::plain(),
+        };
+        match key {
+            "weight" => fill.weight = typed.trim().parse().unwrap_or(fill.weight),
+            "shrink" => fill.shrink = typed.trim().parse().unwrap_or(fill.shrink),
+            "basis" => fill.basis = typed.trim().trim_matches('"').trim().to_string(),
+            _ => {}
+        }
+        fill.chunk(axis)
     }
 
     /// A row matches the filter on its name, its value text, or its
@@ -10497,13 +10717,15 @@ impl Tweaker {
                     VisKind::Size => {
                         item.child(live_id!(name)).set_text(cx, "size");
                         let size_col = item.child(live_id!(size_col));
-                        for (axis, row_id, seg_id, input_id, segs) in [
+                        for (axis, row_id, seg_id, input_id, segs, lines, fields) in [
                             (
                                 "width",
                                 live_id!(w_row),
                                 live_id!(w_seg),
                                 live_id!(w_input),
                                 [live_id!(w_fill), live_id!(w_fit), live_id!(w_fix)],
+                                [live_id!(w_clamp), live_id!(w_grow), live_id!(w_basis)],
+                                [live_id!(w_min), live_id!(w_max), live_id!(w_weight), live_id!(w_shrink), live_id!(w_basis_in)],
                             ),
                             (
                                 "height",
@@ -10511,6 +10733,8 @@ impl Tweaker {
                                 live_id!(h_seg),
                                 live_id!(h_input),
                                 [live_id!(h_fill), live_id!(h_fit), live_id!(h_fix)],
+                                [live_id!(h_clamp), live_id!(h_grow), live_id!(h_basis)],
+                                [live_id!(h_min), live_id!(h_max), live_id!(h_weight), live_id!(h_shrink), live_id!(h_basis_in)],
                             ),
                         ] {
                             let row = size_col.child(row_id);
@@ -10554,7 +10778,59 @@ impl Tweaker {
                             }
                             self.composite_fields
                                 .push((input.widget_uid().0, axis.to_string()));
+                            // The content-box clamps. A row only exists once
+                            // a bound is set, so no row reads as none.
+                            let clamp = size_col.child(lines[0]);
+                            for (child, prop) in
+                                [(fields[0], format!("min_{axis}")), (fields[1], format!("max_{axis}"))]
+                            {
+                                let field = clamp.child(child);
+                                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                    let text = self.row_value(&prop).map(bound_text).unwrap_or_default();
+                                    field.set_text(cx, &text);
+                                }
+                                self.composite_fields.push((field.widget_uid().0, prop));
+                            }
+                            // A Fill's own fields, on their lines under the
+                            // axis; the lines are not there for anything else.
+                            let fill = match &size {
+                                SizeText::Fill(fill) => Some(fill.clone()),
+                                _ => None,
+                            };
+                            let grow = size_col.child(lines[1]);
+                            let basis = size_col.child(lines[2]);
+                            grow.set_visible(cx, fill.is_some());
+                            basis.set_visible(cx, fill.is_some());
+                            if let Some(fill) = fill {
+                                for (child, key, value) in
+                                    [(fields[2], "weight", fill.weight), (fields[3], "shrink", fill.shrink)]
+                                {
+                                    let field = grow.child(child);
+                                    if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                        input.set_value(cx, value);
+                                    }
+                                    self.composite_fields
+                                        .push((field.widget_uid().0, format!("{axis}#{key}")));
+                                }
+                                let field = basis.child(fields[4]);
+                                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                    field.set_text(cx, &fill.basis);
+                                }
+                                self.composite_fields
+                                    .push((field.widget_uid().0, format!("{axis}#basis")));
+                            }
                         }
+                        // The aspect, width over height, under both axes.
+                        let field = size_col.child(live_id!(aspect_row)).child(live_id!(aspect_in));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            let text = self
+                                .row_value("aspect")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .map(fmt_f64)
+                                .unwrap_or_default();
+                            field.set_text(cx, &text);
+                        }
+                        self.composite_fields.push((field.widget_uid().0, "aspect".to_string()));
                     }
                     VisKind::BoxInset(kind) => {
                         let base = kind.prop();
@@ -12072,6 +12348,12 @@ impl Tweaker {
                         continue;
                     }
                     FabValueInputAction::Changed(v) => {
+                        // A Fill's weight or shrink: the whole Fill goes
+                        // back, with the one field changed.
+                        if let Some((axis, key)) = prop.split_once('#') {
+                            edits.push(Edit::Apply(self.fill_chunk(axis, key, &fmt_f64(v))));
+                            continue;
+                        }
                         // Linked box editor: one leg drives all four.
                         let link_index = if prop.starts_with("margin.") {
                             Some(0)
@@ -12101,15 +12383,22 @@ impl Tweaker {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
                         let text = text.trim().to_string();
-                        if !text.is_empty() {
-                            // A size field takes a mode, points, a CSS
-                            // spelling or an expression; the chunk is the
-                            // one the engine accepts for each.
-                            let chunk = if prop == "width" || prop == "height" {
-                                size_chunk(&prop, &text)
-                            } else {
-                                format!("{prop}: {text}")
-                            };
+                        // A size field takes a mode, points, a CSS spelling
+                        // or an expression; a bound or the aspect takes the
+                        // same and, emptied, clears; the chunk is the one
+                        // the engine accepts for each.
+                        let chunk = if prop == "width" || prop == "height" {
+                            size_chunk(&prop, &text)
+                        } else if let Some((axis, key)) = prop.split_once('#') {
+                            (!text.is_empty()).then(|| self.fill_chunk(axis, key, &text))
+                        } else if prop.starts_with("min_") || prop.starts_with("max_") {
+                            bound_chunk(&prop, &text)
+                        } else if prop == "aspect" {
+                            aspect_chunk(&text)
+                        } else {
+                            (!text.is_empty()).then(|| format!("{prop}: {text}"))
+                        };
+                        if let Some(chunk) = chunk {
                             edits.push(Edit::Apply(chunk));
                         }
                         continue;
@@ -14046,9 +14335,15 @@ mod tests {
 
     #[test]
     fn a_size_row_reads_as_one_value_however_it_was_spelled() {
-        assert_eq!(parse_size_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}"), SizeText::Fill { weight: 100.0 });
-        assert_eq!(parse_size_text("Fill"), SizeText::Fill { weight: 100.0 });
-        assert_eq!(parse_size_text("Size.Fill{weight: 2 shrink: 1}"), SizeText::Fill { weight: 2.0 });
+        assert_eq!(
+            parse_size_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}"),
+            SizeText::Fill(FillText::plain())
+        );
+        assert_eq!(parse_size_text("Fill"), SizeText::Fill(FillText::plain()));
+        assert_eq!(
+            parse_size_text("Size.Fill{weight: 2 shrink: 1}"),
+            SizeText::Fill(FillText { weight: 2.0, shrink: 1.0, ..FillText::plain() })
+        );
         assert_eq!(parse_size_text("Size.Fit{}"), SizeText::Fit);
         assert_eq!(parse_size_text("Fit"), SizeText::Fit);
         assert_eq!(parse_size_text("Size.Fixed(200)"), SizeText::Fixed(200.0));
@@ -14058,6 +14353,44 @@ mod tests {
         assert_eq!(parse_size_text("25vw"), SizeText::Rel("25vw".into()));
         assert_eq!(parse_size_text("calc(100% - 20px)"), SizeText::Expr("calc(100% - 20px)".into()));
         assert_eq!(parse_size_text(""), SizeText::Fit);
+    }
+
+    #[test]
+    fn a_fill_keeps_every_field_it_had_and_writes_back_whole() {
+        let fill = parse_fill_text("Size.Fill{weight: 2 basis: 25% shrink: 1 min: 48 max: 200}");
+        assert_eq!(fill.basis, "25%");
+        assert_eq!(fill.min, Some(48.0));
+        assert_eq!(
+            fill.chunk("width"),
+            "width: Size.Fill{weight: 2 basis: \"25%\" shrink: 1 min: 48 max: 200}"
+        );
+        let plain = parse_fill_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}");
+        assert_eq!(plain.chunk("height"), "height: Size.Fill{weight: 100 basis: 0 shrink: 0}");
+        let expr = parse_fill_text("Size.Fill{weight: 1 basis: \"calc(100% - 20px)\" shrink: 0}");
+        assert_eq!(expr.basis, "calc(100% - 20px)");
+        assert_eq!(expr.chunk("width"), "width: Size.Fill{weight: 1 basis: \"calc(100% - 20px)\" shrink: 0}");
+        assert_eq!(parse_fill_text("Fill").chunk("width"), "width: Size.Fill{weight: 100 basis: 0 shrink: 0}");
+    }
+
+    #[test]
+    fn a_bound_or_an_aspect_is_set_by_its_text_and_cleared_by_none() {
+        assert_eq!(bound_text("FitBound.Abs(120)"), "120");
+        assert_eq!(bound_text("50%"), "50%");
+        assert_eq!(bound_text("\"calc(100% - 20px)\""), "calc(100% - 20px)");
+        assert_eq!(bound_chunk("min_width", "120").as_deref(), Some("min_width: 120"));
+        assert_eq!(bound_chunk("max_width", "50%").as_deref(), Some("max_width: \"50%\""));
+        assert_eq!(bound_chunk("max_height", "clamp(200px, 50%, 600px)").as_deref(), Some("max_height: \"clamp(200px, 50%, 600px)\""));
+        assert_eq!(bound_chunk("min_height", "").as_deref(), Some("min_height: nil"));
+        assert_eq!(bound_chunk("min_height", "none").as_deref(), Some("min_height: nil"));
+        assert_eq!(bound_chunk("min_height", "Fill"), None);
+        assert_eq!(bound_chunk("min_height", "12p"), None);
+        assert_eq!(aspect_chunk("1.5").as_deref(), Some("aspect: 1.5"));
+        assert_eq!(aspect_chunk("16:9").as_deref(), Some("aspect: 1.7778"));
+        assert_eq!(aspect_chunk("3/2").as_deref(), Some("aspect: 1.5"));
+        assert_eq!(aspect_chunk("").as_deref(), Some("aspect: nil"));
+        assert_eq!(aspect_chunk("3:"), None);
+        assert_eq!(aspect_chunk("3:0"), None);
+        assert_eq!(aspect_chunk("wide"), None);
     }
 
     #[test]
@@ -14090,14 +14423,17 @@ mod tests {
 
     #[test]
     fn what_is_typed_into_a_size_field_becomes_the_chunk_the_engine_accepts() {
-        assert_eq!(size_chunk("width", "fill"), "width: Fill");
-        assert_eq!(size_chunk("width", "Fit"), "width: Fit");
-        assert_eq!(size_chunk("width", "200"), "width: 200");
-        assert_eq!(size_chunk("height", "24px"), "height: 24");
-        assert_eq!(size_chunk("width", "50%"), "width: \"50%\"");
-        assert_eq!(size_chunk("width", "clamp(200px, 50%, 600px)"), "width: \"clamp(200px, 50%, 600px)\"");
+        assert_eq!(size_chunk("width", "fill").as_deref(), Some("width: Fill"));
+        assert_eq!(size_chunk("width", "Fit").as_deref(), Some("width: Fit"));
+        assert_eq!(size_chunk("width", "200").as_deref(), Some("width: 200"));
+        assert_eq!(size_chunk("height", "24px").as_deref(), Some("height: 24"));
+        assert_eq!(size_chunk("width", "50%").as_deref(), Some("width: \"50%\""));
+        assert_eq!(size_chunk("width", "clamp(200px, 50%, 600px)").as_deref(), Some("width: \"clamp(200px, 50%, 600px)\""));
         // A Fill with fields still sets Fill; the weight gets its own field.
-        assert_eq!(size_chunk("width", "Fill{weight: 2}"), "width: Fill");
+        assert_eq!(size_chunk("width", "Fill{weight: 2}").as_deref(), Some("width: Fill"));
+        // Half a word on its way to being one is not sent.
+        assert_eq!(size_chunk("width", "12p"), None);
+        assert_eq!(size_chunk("width", "fi"), None);
     }
 
     #[test]
