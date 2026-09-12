@@ -233,27 +233,31 @@ impl BadgeKind {
     }
 }
 
-/// How tall the Spec tab's fields start out, and the range a drag may take
-/// them through. The floor is two lines plus the padding -- below that the
-/// box says less than its own placeholder -- and the ceiling is there so a
-/// field cannot swallow the tab and strand the others off the bottom.
-const SPEC_FIELD_H: f64 = 110.0;
+/// The least a Spec field may be squeezed to: two lines plus the padding.
+/// Below that a box says less than its own placeholder. It is also, in the
+/// other direction, the only ceiling a field has -- one can grow until the
+/// others are at their floor, and no further, because the three share the
+/// tab's height rather than adding to it.
 const SPEC_FIELD_MIN: f64 = 48.0;
-const SPEC_FIELD_MAX: f64 = 420.0;
 
-/// The grab strip under each field, in points.
-const SPEC_GRIP_H: f64 = 6.0;
-
-/// How tall each Spec field is right now. Zero means "never dragged" and
-/// resolves to the default, the way `sidebar_width` does -- and like the
-/// panel's own width it lives on the session and not on disk, so a drag
-/// lasts the run. The three are notes, rules, app rules, in that order.
-fn spec_height(index: usize) -> f64 {
-    let h = session().lock().unwrap().spec_heights[index];
-    if h <= 0.0 {
-        SPEC_FIELD_H
+/// How the Spec tab's height is shared between its three fields. These are
+/// flex weights -- `grid-template-rows: repeat(3, minmax(48px, 1fr))`, in
+/// effect -- so the split is a proportion of whatever height the tab has,
+/// and a window that changes size keeps the proportion rather than an
+/// absolute number that no longer fits. Zero means "never dragged" and
+/// resolves to an equal share. Like the panel's own width they live on the
+/// session and not on disk, so a drag lasts the run. Notes, rules, app
+/// rules, in that order.
+fn spec_weight(index: usize) -> f64 {
+    let weights = session().lock().unwrap().spec_weights;
+    // "Never dragged" is all three at zero, not this one: a drag writes the
+    // whole triple, and a row dragged down to its floor legitimately holds
+    // a weight of exactly zero -- treating that as unset handed it an equal
+    // share back the moment it got there.
+    if weights.iter().all(|w| *w <= 0.0) {
+        1.0
     } else {
-        h
+        weights[index].max(0.0)
     }
 }
 
@@ -698,9 +702,9 @@ pub(crate) struct TweakSession {
     /// A remote pulse request: a theme colour name (or #rrggbbaa) to pulse
     /// app-wide until an empty request clears it; consumed by the tweaker.
     pulse_req: Option<String>,
-    /// The Spec tab's three field heights, dragged by the grips under them.
-    /// See [`spec_height`].
-    spec_heights: [f64; 3],
+    /// The Spec tab's three field weights, dragged by the splitters between
+    /// them. See [`spec_weight`].
+    spec_weights: [f64; 3],
     /// The open colour popover's window rect, for /tweak/state.
     popup: Option<Rect>,
     /// A remote lock on the pulse mix (deterministic grabs): the pulse
@@ -899,6 +903,33 @@ const FOOTER_COPIED_LINGER: f64 = 1.2;
 
 /// How long the selection outline stays quiet after the last applied edit.
 const SUPPRESS_LINGER: f64 = 0.5;
+
+/// A thick red frame round the whole window while the bridge is driving.
+/// The one thing a person watching a scripted run needs to know is that
+/// the pointer and the keyboard are spoken for, and a frame the size of the
+/// window says it from across the room. Lit by the bridge itself for a few
+/// seconds after any injected input, or held up by `/handsoff?on=1`.
+///
+/// Returns whether it drew, so the caller can keep the frames coming until
+/// it has gone quiet -- the frame must disappear on its own, not wait for
+/// the next thing that happens to redraw.
+fn draw_hands_off_frame(cx: &mut Cx2d, outline: &mut DrawTweakOutline) -> bool {
+    if !makepad_platform::remote::hands_off_active() {
+        return false;
+    }
+    let size = cx.current_pass_size();
+    const T: f64 = 6.0;
+    outline.fill_color = vec4(0.93, 0.13, 0.13, 0.95);
+    for rect in [
+        Rect { pos: dvec2(0.0, 0.0), size: dvec2(size.x, T) },
+        Rect { pos: dvec2(0.0, size.y - T), size: dvec2(size.x, T) },
+        Rect { pos: dvec2(0.0, 0.0), size: dvec2(T, size.y) },
+        Rect { pos: dvec2(size.x - T, 0.0), size: dvec2(T, size.y) },
+    ] {
+        outline.draw_abs(cx, rect);
+    }
+    true
+}
 
 fn sidebar_width() -> f64 {
     let width = session().lock().unwrap().sidebar_width;
@@ -2053,7 +2084,7 @@ pub fn window_intercept(
                             if into_notes {
                                 sidebar
                                     .child(live_id!(spec_col))
-                                    .child(live_id!(spec_widget))
+                                    .child(live_id!(notes_box))
                                     .child(live_id!(spec_notes))
                             } else {
                                 sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field))
@@ -6483,16 +6514,20 @@ pub struct Tweaker {
     /// are claimed only while the caret is actually there.
     #[rust]
     prompt_focus_pending: bool,
-    /// A field height being dragged: which of the three, where the press
-    /// landed, and how tall it was when it started. Held rather than
-    /// recomputed so the drag tracks the pointer from where it was grabbed
-    /// instead of jumping the field's edge to it.
+    /// A splitter being dragged: which boundary (0 is notes/rules, 1 is
+    /// rules/app), where the press landed, the three weights as they were
+    /// at the press, and how much weight one point of pointer travel is
+    /// worth. The weights are the only truth. An earlier version measured
+    /// the boxes on screen at each press and turned pixels back into
+    /// weights, and that snapped: the walk lands a frame after the weight
+    /// changes, the measured rects a frame after that, so the second handle
+    /// grabbed was reading a split that was already gone.
     #[rust]
-    spec_resize: Option<(usize, f64, f64)>,
-    /// The heights last pushed at the fields. An apply per frame would be
+    spec_resize: Option<(usize, f64, [f64; 3], f64)>,
+    /// The weights last pushed at the boxes. An apply per frame would be
     /// three applies per frame forever; this makes it three per drag step.
     #[rust]
-    spec_applied_h: [f64; 3],
+    spec_applied_w: [f64; 3],
     /// The cross that empties the notes field.
     #[rust]
     spec_clear_uid: u64,
@@ -7316,11 +7351,11 @@ impl Tweaker {
                             }
                         }
                     }
-                    spec_col := ScrollYView {
+                    spec_col := View {
                         width: Fill
                         height: Fill
                         flow: Down
-                        spacing: 6
+                        spacing: 4
                         padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
                         spec_for := FabLabelSmall {
                             width: Fill
@@ -7328,11 +7363,6 @@ impl Tweaker {
                             max_lines: 1
                             text_overflow: TextOverflow.Ellipsis
                         }
-                        spec_widget := View {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 6
                         notes_head := View {
                             width: Fill
                             height: Fit
@@ -7356,87 +7386,90 @@ impl Tweaker {
                                 }
                             }
                         }
-                        spec_notes := TextInput {
+                        notes_box := View {
                             width: Fill
-                            height: 110
-                            is_multiline: true
-                            empty_text: "what this widget is about \u{2014} for whoever reads it next"
-                            draw_bg +: {
-                                color: #x1b1b1b
-                                border_radius: 3.0
-                            }
-                            draw_text +: {
-                                color: #xe6e6e6
-                                text_style +: { font_size: 8.5 }
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_notes := TextInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "what this widget is about \u{2014} for whoever reads it next"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    color: #xe6e6e6
+                                    text_style +: { font_size: 8.5 }
+                                }
                             }
                         }
-                        notes_grip := View {
+                        rules_head := View {
                             width: Fill
-                            height: 6
-                            align: Align{x: 0.5 y: 0.5}
-                            // A plain View's draw_bg is a bare DrawQuad whose
-                            // default pixel fn returns #0000, so show_bg plus a
-                            // colour paints nothing. RoundedView has a pixel fn.
-                            bar := RoundedView {
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            rules_label := FabHeaderLabel {
+                                width: Fill
+                                text: "rules"
+                            }
+                            grip := RoundedView {
                                 width: 28
                                 height: 3
+                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
                                 draw_bg +: { color: #x5c5c68 radius: 1.5 }
                             }
                         }
-                        rules_head := FabHeaderLabel {
+                        rules_box := View {
                             width: Fill
-                            text: "rules"
-                        }
-                        spec_rules := TextInput {
-                            width: Fill
-                            height: 110
-                            is_multiline: true
-                            empty_text: "what must stay true of this widget"
-                            draw_bg +: {
-                                color: #x1b1b1b
-                                border_radius: 3.0
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_rules := TextInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "what must stay true of this widget"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    color: #xe6e6e6
+                                    text_style +: { font_size: 8.5 }
+                                }
                             }
-                            draw_text +: {
-                                color: #xe6e6e6
-                                text_style +: { font_size: 8.5 }
-                            }
                         }
-                        }
-                        rules_grip := View {
+                        app_head := View {
                             width: Fill
-                            height: 6
-                            align: Align{x: 0.5 y: 0.5}
-                            // A plain View's draw_bg is a bare DrawQuad whose
-                            // default pixel fn returns #0000, so show_bg plus a
-                            // colour paints nothing. RoundedView has a pixel fn.
-                            bar := RoundedView {
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            app_label := FabHeaderLabel {
+                                width: Fill
+                                text: "app rules"
+                            }
+                            grip := RoundedView {
                                 width: 28
                                 height: 3
+                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
                                 draw_bg +: { color: #x5c5c68 radius: 1.5 }
                             }
                         }
-                        spec_div := RoundedView {
+                        app_box := View {
                             width: Fill
-                            height: 1
-                            margin: Inset{left: 0 top: 4 right: 0 bottom: 0}
-                            draw_bg +: { color: #x4a4a52 radius: 0.5 }
-                        }
-                        app_head := FabHeaderLabel {
-                            width: Fill
-                            text: "app rules"
-                        }
-                        spec_app := TextInput {
-                            width: Fill
-                            height: 110
-                            is_multiline: true
-                            empty_text: "rules that stand over the whole app \u{2014} no selection needed"
-                            draw_bg +: {
-                                color: #x1b1b1b
-                                border_radius: 3.0
-                            }
-                            draw_text +: {
-                                color: #xe6e6e6
-                                text_style +: { font_size: 8.5 }
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_app := TextInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "rules that stand over the whole app \u{2014} no selection needed"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    color: #xe6e6e6
+                                    text_style +: { font_size: 8.5 }
+                                }
                             }
                         }
                     }
@@ -7901,12 +7934,11 @@ impl Tweaker {
             fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
             fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
             fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
-            let spec = sidebar.child(live_id!(spec_col));
-            let spec_widget = spec.child(live_id!(spec_widget));
-            for id in [live_id!(spec_notes), live_id!(spec_rules)] {
-                fields.push(spec_widget.child(id).area());
+            for index in 0..3 {
+                if let Some(field) = self.spec_field(index) {
+                    fields.push(field.area());
+                }
             }
-            fields.push(spec.child(live_id!(spec_app)).area());
         }
         // The property rows' own inputs come and go with the selection, so
         // ask the live ones rather than keeping a list.
@@ -7969,39 +8001,36 @@ impl Tweaker {
         // on the fields themselves was silently nothing -- the headers hid
         // (Label declares one) and the boxes stayed.
         let have = path.is_some();
-        let widget_col = col.child(live_id!(spec_widget));
-        widget_col.set_visible(cx, have);
+        for index in 0..2 {
+            if let Some((head, bx, _)) = self.spec_row(index) {
+                head.set_visible(cx, have);
+                bx.set_visible(cx, have);
+            }
+        }
         // Which path the tab is SHOWING. An @mention writes relative to this
         // rather than to whatever is pinned: the two can differ for a frame,
         // and writing one widget's text into another's is how a note is lost.
         self.note_key_shown = path.clone().unwrap_or_default();
-        self.note_text_uid = widget_col.child(live_id!(spec_notes)).widget_uid().0;
-        // The dragged heights. Applied from here rather than left in the
-        // markup so a grip can move them, and only when one has actually
-        // changed -- see `spec_applied_h`.
-        for (i, field) in [
-            widget_col.child(live_id!(spec_notes)),
-            widget_col.child(live_id!(spec_rules)),
-            col.child(live_id!(spec_app)),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let h = spec_height(i);
-            if (self.spec_applied_h[i] - h).abs() > 0.01 {
-                self.spec_applied_h[i] = h;
-                let mut field = field;
-                script_apply_eval!(cx, field, { height: #(h) });
+        self.note_text_uid = self.spec_field(0).map(|f| f.widget_uid().0).unwrap_or(0);
+        // The dragged split, in case it changed while the tab was not up.
+        self.spec_apply_weights(cx);
+        // The splitters only exist while there is something above them to
+        // split with: with nothing selected the two upper rows are gone and
+        // the app rules header is just a header.
+        for index in 1..3 {
+            if let Some((head, _, _)) = self.spec_row(index) {
+                head.child(live_id!(grip)).set_visible(cx, have);
             }
         }
         {
             // The cross is only there when there is something to clear: an
             // always-present one invites a click that does nothing, and this
             // is the only control in the tab that destroys what you wrote.
-            let clear = widget_col.child(live_id!(notes_head)).child(live_id!(notes_clear));
-            self.spec_clear_uid = clear.widget_uid().0;
-            let has_text = !widget_col.child(live_id!(spec_notes)).text().is_empty();
-            clear.set_visible(cx, has_text);
+            if let Some((head, _, field)) = self.spec_row(0) {
+                let clear = head.child(live_id!(notes_clear));
+                self.spec_clear_uid = clear.widget_uid().0;
+                clear.set_visible(cx, !field.text().is_empty());
+            }
         }
 
         if let Some(path) = path {
@@ -8014,11 +8043,8 @@ impl Tweaker {
                 }
             };
             let mut changed = false;
-            for (id, slot) in [
-                (live_id!(spec_notes), &mut notes),
-                (live_id!(spec_rules), &mut rules),
-            ] {
-                let field = widget_col.child(id);
+            for (index, slot) in [(0usize, &mut notes), (1usize, &mut rules)] {
+                let Some(field) = self.spec_field(index) else { continue };
                 if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
                     let typed = field.text();
                     if typed != *slot {
@@ -8046,7 +8072,7 @@ impl Tweaker {
         // The app rules need no selection -- that is the reason this tab
         // has to draw with nothing picked at all.
         {
-            let field = col.child(live_id!(spec_app));
+            let Some(field) = self.spec_field(2) else { return };
             let live = {
                 let mut s = session().lock().unwrap();
                 s.load_app_rules();
@@ -8066,13 +8092,8 @@ impl Tweaker {
         // Nothing in the tab has the caret any more, so what was typed is
         // finished: put it on disk.
         if self.spec_dirty
-            && ![
-                widget_col.child(live_id!(spec_notes)),
-                widget_col.child(live_id!(spec_rules)),
-                col.child(live_id!(spec_app)),
-            ]
-            .into_iter()
-            .any(|field| {
+            && !(0..3).any(|index| {
+                let Some(field) = self.spec_field(index) else { return false };
                 let area = field.area();
                 !area.is_empty() && cx.has_key_focus(area)
             })
@@ -8081,31 +8102,79 @@ impl Tweaker {
         }
     }
 
-    /// Which field's grab strip is under this point, if any: 0 notes,
-    /// 1 rules, 2 app rules.
+    /// The Spec tab's rows by index -- 0 notes, 1 rules, 2 app rules -- as
+    /// (header, box, field). The header carries the label and, for the two
+    /// lower rows, the splitter; the box is the flex row that shares the
+    /// tab's height; the field is the TextInput inside it.
+    fn spec_row(&self, index: usize) -> Option<(WidgetRef, WidgetRef, WidgetRef)> {
+        let col = self.sidebar.as_ref()?.child(live_id!(spec_col));
+        let (head, bx, field) = match index {
+            0 => (live_id!(notes_head), live_id!(notes_box), live_id!(spec_notes)),
+            1 => (live_id!(rules_head), live_id!(rules_box), live_id!(spec_rules)),
+            _ => (live_id!(app_head), live_id!(app_box), live_id!(spec_app)),
+        };
+        let bx = col.child(bx);
+        Some((col.child(head), bx.clone(), bx.child(field)))
+    }
+
+    /// Push the session's weights at the three boxes, whichever have
+    /// changed since last time -- see `spec_applied_w`. Called from the
+    /// draw, and from the drag itself, so a move lands on the very next
+    /// layout pass instead of the one after.
     ///
-    /// The strips are read at event time, so they answer for the frame
-    /// already on screen -- the same rule the property rows follow. The two
-    /// per-widget strips live inside the wrapper that hides with them, so
-    /// with nothing selected their rects are empty and only the app rules
-    /// strip answers.
+    /// Set through the typed walk, not the script: the apply macro
+    /// evaluates without the markup's prelude, so `Fill` is not in scope
+    /// there, and a split set that way never landed at all.
+    fn spec_apply_weights(&mut self, cx: &mut Cx) {
+        for index in 0..3 {
+            let w = spec_weight(index);
+            if (self.spec_applied_w[index] - w).abs() <= 0.01 {
+                continue;
+            }
+            self.spec_applied_w[index] = w;
+            let Some((_, bx, _)) = self.spec_row(index) else { continue };
+            // A named guard, so it is dropped before `bx` rather than after
+            // it: an if-let's temporary lives to the end of the statement,
+            // which here is the end of the loop body, past the local it
+            // borrows.
+            let guard = bx.borrow_mut::<crate::View>();
+            if let Some(mut view) = guard {
+                view.walk.height = Size::Fill {
+                    weight: w,
+                    basis: crate::makepad_draw::FitBound::Abs(0.0),
+                    shrink: 0.0,
+                    min: Some(SPEC_FIELD_MIN),
+                    max: None,
+                };
+                view.redraw(cx);
+            }
+        }
+    }
+
+    fn spec_field(&self, index: usize) -> Option<WidgetRef> {
+        self.spec_row(index).map(|(_, _, field)| field)
+    }
+
+    /// Which splitter is under this point, if any: 0 is the boundary
+    /// between notes and rules, 1 between rules and app rules. A splitter IS
+    /// the header row of the lower field -- a row that was already there,
+    /// costing the tab no height of its own -- and it only answers while
+    /// the field above it is on screen: with nothing selected the app rules
+    /// header has nothing above it to split with.
+    ///
+    /// Read at event time, so it answers for the frame already on screen,
+    /// the rule the property rows follow.
     fn spec_grip_hit(&self, cx: &Cx, abs: Vec2d) -> Option<usize> {
         if self.panel_tab != PanelTab::Spec {
             return None;
         }
-        let sidebar = self.sidebar.as_ref()?;
-        let col = sidebar.child(live_id!(spec_col));
-        let widget_col = col.child(live_id!(spec_widget));
-        [
-            widget_col.child(live_id!(notes_grip)),
-            widget_col.child(live_id!(rules_grip)),
-            col.child(live_id!(app_grip)),
-        ]
-        .into_iter()
-        .position(|grip| {
-            let r = grip.area().rect(cx);
-            // Six points is a small thing to hit, so the band it answers to
-            // is a little taller than the strip it draws.
+        (0..2).find(|&k| {
+            let Some((_, above, _)) = self.spec_row(k) else { return false };
+            let Some((head, _, _)) = self.spec_row(k + 1) else { return false };
+            if above.area().rect(cx).size.y <= 0.0 {
+                return false;
+            }
+            let r = head.area().rect(cx);
             r.size.y > 0.0
                 && abs.x >= r.pos.x
                 && abs.x <= r.pos.x + r.size.x
@@ -8121,7 +8190,7 @@ impl Tweaker {
         let Some(sidebar) = self.sidebar.clone() else { return };
         sidebar
             .child(live_id!(spec_col))
-            .child(live_id!(spec_widget))
+            .child(live_id!(notes_box))
             .child(live_id!(spec_notes))
             .set_text(cx, "");
         let path = self.note_key_shown.clone();
@@ -12446,10 +12515,35 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
-                } else if let Some(index) = grip {
-                    // Grab where it was grabbed: the field grows by how far
-                    // the pointer has moved since, not by where it is.
-                    self.spec_resize = Some((index, e.abs.y, spec_height(index)));
+                } else if let Some(k) = grip {
+                    // Grab where it was grabbed: the boundary moves by how far
+                    // the pointer has moved since, not to where it is. The
+                    // weights are taken as they are; the screen is measured
+                    // ONLY for the exchange rate between a point of travel
+                    // and a unit of weight, where a frame of staleness costs
+                    // a little speed and no position.
+                    let weights = [spec_weight(0), spec_weight(1), spec_weight(2)];
+                    // Only the height ABOVE the floors is shared by weight:
+                    // the engine reserves each row's minimum first and hands
+                    // out what is left in proportion. So the exchange rate
+                    // between a point of travel and a unit of weight is
+                    // measured against that remainder, not the whole -- with
+                    // the whole, a 64-point drag moved the boundary 44.
+                    let (mut rows, mut on_screen) = (0.0, 0.0);
+                    for index in 0..3 {
+                        if let Some((_, bx, _)) = self.spec_row(index) {
+                            let h = bx.area().rect(cx).size.y;
+                            if h > 0.0 {
+                                rows += 1.0;
+                                on_screen += h;
+                            }
+                        }
+                    }
+                    let free = on_screen - rows * SPEC_FIELD_MIN;
+                    if free > 0.0 {
+                        let per_point = weights.iter().sum::<f64>() / free;
+                        self.spec_resize = Some((k, e.abs.y, weights, per_point));
+                    }
                 } else if e.abs.x > x && self.footer_path_hit(cx, e.abs) {
                     // The footer's path line is the selection's ADDRESS, and
                     // it is shown head-clipped because it does not fit. One
@@ -12722,9 +12816,23 @@ impl Widget for Tweaker {
             // A field is being resized: its height follows the pointer from
             // where the strip was grabbed.
             Event::MouseMove(e) if self.spec_resize.is_some() => {
-                let (index, from_y, from_h) = self.spec_resize.unwrap();
-                let h = (from_h + e.abs.y - from_y).clamp(SPEC_FIELD_MIN, SPEC_FIELD_MAX);
-                session().lock().unwrap().spec_heights[index] = h;
+                let (k, from_y, from, per_point) = self.spec_resize.unwrap();
+                // The pair either side of the boundary trade weight between
+                // them; their sum is fixed, and neither may go below the
+                // floor -- which is what stops one growing forever. The
+                // third row is not touched, so it keeps exactly its share.
+                // A weight of zero IS the floor -- the engine's reserved
+                // minimum is all that row then gets -- so the clamp is on
+                // the pair's weight itself, not on some pixel figure.
+                let pair = from[k] + from[k + 1];
+                let above = (from[k] + (e.abs.y - from_y) * per_point).clamp(0.0, pair);
+                let mut weights = from;
+                weights[k] = above;
+                weights[k + 1] = pair - above;
+                session().lock().unwrap().spec_weights = weights;
+                // Applied here, at event time, so the next layout pass is
+                // already the new split rather than the one after it.
+                self.spec_apply_weights(cx);
                 cx.set_cursor(MouseCursor::NsResize);
                 self.redraw_sidebar(cx);
             }
@@ -12933,15 +13041,25 @@ impl Widget for Tweaker {
             if cx.sploded_focus() != (None, 0.0, 1.0) {
                 cx.sploded_set_focus(None, 0.0, 1.0);
             }
-            for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
+            let mut hands_off = false;
+            for (index, list) in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
                 .into_iter()
                 .flatten()
+                .enumerate()
             {
                 list.begin_overlay_reuse(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
+                // The mode is off, but the bridge may still be driving: the
+                // frame that says so is drawn into the topmost list.
+                if index == 1 && draw_hands_off_frame(cx, &mut self.draw_outline) {
+                    hands_off = true;
+                }
                 cx.end_pass_sized_turtle();
                 list.end(cx);
+            }
+            if hands_off {
+                self.next_frame = cx.new_next_frame();
             }
             return DrawStep::done();
         }
@@ -13242,6 +13360,10 @@ impl Widget for Tweaker {
                 cx.set_key_focus(area);
                 self.next_frame = cx.new_next_frame();
             }
+        }
+        // Last into the topmost list, so it lies over the panel too.
+        if draw_hands_off_frame(cx, &mut self.draw_outline) {
+            self.next_frame = cx.new_next_frame();
         }
         cx.end_pass_sized_turtle();
         self.sidebar_list.as_mut().unwrap().end(cx);

@@ -45,6 +45,36 @@ mod imp {
     // ------------------------------------------------------------------
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// When the bridge last injected input, in milliseconds since it came
+    /// up; zero until it has. The window wears a red frame while this is
+    /// recent, so a person watching a scripted run can see that the pointer
+    /// and the keyboard are spoken for and keep their hands off.
+    static INJECTED_AT_MS: AtomicU64 = AtomicU64::new(0);
+    /// `/handsoff?on=1` holds the frame up regardless of recency, for a run
+    /// that thinks between its inputs; `?on=0` lets it go.
+    static HANDS_OFF: AtomicBool = AtomicBool::new(false);
+    /// How long the frame stays lit after the last injected input.
+    const HANDS_OFF_LINGER_MS: u64 = 3000;
+
+    fn uptime_ms() -> u64 {
+        static T0: OnceLock<std::time::Instant> = OnceLock::new();
+        T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+    }
+
+    /// Called by every route that injects input.
+    fn note_injected_input() {
+        INJECTED_AT_MS.store(uptime_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Is the bridge driving right now, as far as a person watching the
+    /// window should be told? Read by the tweaker's draw on every frame.
+    pub fn hands_off_active() -> bool {
+        if HANDS_OFF.load(Ordering::Relaxed) {
+            return true;
+        }
+        let at = INJECTED_AT_MS.load(Ordering::Relaxed);
+        at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
+    }
 
     /// True when this process was started with `--remote` (any form). Pure
     /// argv scan, usable before the bridge itself is up — the platform's
@@ -1173,6 +1203,14 @@ mod imp {
             // reads the conversation. Answered by `Cx::ai_callback`.
             "/ai" => route_ai(if p.get(&["say"]).is_some() { "say" } else { "toggle" }, p, true),
             "/ai/transcript" => route_ai("transcript", p, false),
+            // The red hands-off frame, held up or let go by hand. It lights
+            // by itself for a few seconds after any injected input, and
+            // shows from the next frame the app draws.
+            "/handsoff" => {
+                let on = p.get(&["on"]).map(|v| v.to_string()).unwrap_or_else(|| "1".to_string()) != "0";
+                HANDS_OFF.store(on, Ordering::Relaxed);
+                Out::Json(200, format!("{{\"handsoff\":{}}}", on as u8))
+            }
             "/tweak" => route_tweak("toggle", p, true),
             "/tweak/state" => route_tweak("state", p, false),
             "/tweak/apply" => route_tweak("apply", p, true),
@@ -1313,6 +1351,7 @@ mod imp {
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
              /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /handsoff?on=1|0  a red frame round the window: the bridge is driving, hands off. it lights by itself for 3s after any /m /k /t\n\
              /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
@@ -1462,6 +1501,7 @@ mod imp {
     }
 
     fn route_mouse(p: &Params, force_kind: Option<&str>) -> Out {
+        note_injected_input();
         let window = p.window();
         let kind = force_kind
             .map(str::to_string)
@@ -1614,6 +1654,7 @@ mod imp {
     }
 
     fn route_key(p: &Params) -> Out {
+        note_injected_input();
         let window = p.window();
         let mods = p.mods();
         if let Some(text) = p.get(&["t", "text"]) {
@@ -1655,6 +1696,7 @@ mod imp {
     }
 
     fn route_text(p: &Params) -> Out {
+        note_injected_input();
         let Some(text) = p.get(&["t", "text"]) else {
             return err("need t=");
         };
