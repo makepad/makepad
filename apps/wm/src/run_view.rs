@@ -224,6 +224,10 @@ pub struct MpRunView {
     /// binary, a GPU handoff pause) is pumped again after `tick_fallback`.
     #[rust]
     tick_outstanding: Option<f64>,
+    /// A timer beat arrived while the child was busy. Retain one request so
+    /// its acknowledgement can start the next frame without another beat.
+    #[rust]
+    tick_deferred: bool,
     /// The pointer's latest position since the last Tick went out: the
     /// child sees at most one MouseMove per frame, flushed ahead of the
     /// Tick or of any Down/Up/Scroll so their order holds.
@@ -344,13 +348,38 @@ impl MpRunView {
         (self.tick_period * 4.0).max(0.050)
     }
 
-    /// The child consumed a Tick: the next one may go out on the next
-    /// timer beat.
-    pub fn tick_done(&mut self, _cx: &mut Cx) {
+    fn append_tick(&mut self, target: RunTarget, msgs: &mut Vec<StudioToApp>) {
+        trace_host(&format!("tick c{}", target.client));
+        if let Some(mv) = self.pending_move.take() {
+            msgs.push(StudioToApp::MouseMove(mv));
+        }
+        msgs.push(StudioToApp::Tick);
+        self.tick_outstanding = Some(crate::host::now());
+        self.tick_deferred = false;
+    }
+
+    /// Return one tick credit. If a timer beat was missed while the child
+    /// rendered, service that retained request now instead of quantizing a
+    /// slightly late child to half the compositor's frame rate.
+    pub fn tick_done(&mut self, cx: &mut Cx) {
         if let Some(target) = self.current_target {
             trace_host(&format!("ack c{}", target.client));
         }
-        self.tick_outstanding = None;
+        if self.tick_outstanding.take().is_none() {
+            return;
+        }
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        if self.frozen.is_some() {
+            self.tick_deferred = false;
+            return;
+        }
+        if self.tick_deferred {
+            if let Some(target) = self.current_target {
+                let mut msgs = Vec::new();
+                self.append_tick(target, &mut msgs);
+                self.emit_to_app(cx, target.client, msgs);
+            }
+        }
     }
 
     fn set_target(&mut self, cx: &mut Cx, target: Option<RunTarget>) {
@@ -374,6 +403,7 @@ impl MpRunView {
         }
         self.current_target = target;
         self.tick_outstanding = None;
+        self.tick_deferred = false;
         self.pending_move = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
@@ -835,6 +865,7 @@ impl MpRunView {
         }
         self.app_ready_for_swapchain = true;
         self.tick_outstanding = None;
+        self.tick_deferred = false;
         self.present_ok_count = 0;
         self.first_present_at = None;
         self.bootstrap_pending = true;
@@ -1270,6 +1301,7 @@ impl Widget for MpRunView {
                         }
                     }
                     if !frozen {
+                        self.tick_deferred = true;
                         let now = crate::host::now();
                         let due = match self.tick_outstanding {
                             None => true,
@@ -1284,12 +1316,7 @@ impl Widget for MpRunView {
                             Some(_) => false,
                         };
                         if due {
-                            trace_host(&format!("tick c{}", target.client));
-                            if let Some(mv) = self.pending_move.take() {
-                                msgs.push(StudioToApp::MouseMove(mv));
-                            }
-                            msgs.push(StudioToApp::Tick);
-                            self.tick_outstanding = Some(now);
+                            self.append_tick(target, &mut msgs);
                         }
                     }
                     self.emit_to_app(cx, target.client, msgs);
