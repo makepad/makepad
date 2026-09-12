@@ -178,6 +178,11 @@ pub struct TweakNote {
     /// next — you, tomorrow, or an agent looking for standing context. It is
     /// never cleared by sending; only you empty it.
     pub text: String,
+    /// The RULES: what must stay true of this widget. A note describes, a
+    /// rule constrains -- they are kept apart because an agent reading the
+    /// state must be able to tell "here is context" from "do not break
+    /// this". Saved beside the note.
+    pub rules: String,
     /// The PROMPT: one instruction, on its way out. Sending or queueing
     /// empties it, because a message you have sent is not a message you
     /// still have. In memory only — a note is worth keeping across runs, a
@@ -249,6 +254,7 @@ impl TweakNote {
         Self {
             path,
             text: String::new(),
+            rules: String::new(),
             prompt: String::new(),
             dx: 8.0,
             dy: -(NOTE_H + 12.0),
@@ -271,6 +277,30 @@ impl TweakNote {
 // without the app running.
 
 const NOTE_STORE: &str = ".makepad-notes.txt";
+/// The rules that stand over the WHOLE app, in their own file beside the
+/// notes. Its own file rather than a row in the note store because it is
+/// not about a widget: nothing keys it, and a person editing it by hand
+/// should not have to find it among a hundred paths.
+const RULES_STORE: &str = ".makepad-rules.txt";
+
+/// Read the app-wide rules back. A missing file is an empty document, not
+/// an error -- most apps will never have one.
+fn app_rules_load() -> String {
+    std::fs::read_to_string(RULES_STORE).unwrap_or_default()
+}
+
+/// Write the app-wide rules out, or take the file away when they are
+/// emptied -- an empty file beside the app says something is there when
+/// nothing is.
+fn app_rules_save(text: &str) {
+    if text.trim().is_empty() {
+        let _ = std::fs::remove_file(RULES_STORE);
+        return;
+    }
+    if let Err(error) = std::fs::write(RULES_STORE, text) {
+        log!("TWEAK rules store write failed: {error}");
+    }
+}
 /// Custom names live beside the notes and outlive the process the same way:
 /// a name typed into the Props tab is a request the AI carries out in the
 /// source, and it must still be there when the AI gets to it — including
@@ -508,17 +538,29 @@ fn note_store_load() -> Vec<TweakNote> {
             continue;
         }
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 6 {
-            continue;
-        }
-        let num = |i: usize, fallback: f64| cols[i].parse::<f64>().unwrap_or(fallback);
+        // Two shapes are read. The current one is `path\tnotes\trules`.
+        // The old one carried the card's geometry in columns 1-4 with the
+        // text in column 5, and files written by it still exist: take the
+        // text from where it was and drop the geometry, which describes a
+        // card that no longer exists.
+        let (path, text, rules) = match cols.len() {
+            0 | 1 => continue,
+            2 => (cols[0], note_store_unescape(cols[1]), String::new()),
+            3..=5 => (
+                cols[0],
+                note_store_unescape(cols[1]),
+                note_store_unescape(cols[2]),
+            ),
+            _ => (cols[0], note_store_unescape(cols[5]), String::new()),
+        };
         out.push(TweakNote {
-            path: cols[0].to_string(),
-            dx: num(1, 8.0),
-            dy: num(2, -(NOTE_H + 12.0)),
-            w: num(3, NOTE_W).max(NOTE_MIN_W),
-            h: num(4, NOTE_H).max(NOTE_MIN_H),
-            text: note_store_unescape(cols[5]),
+            path: path.to_string(),
+            dx: 8.0,
+            dy: -(NOTE_H + 12.0),
+            w: NOTE_W,
+            h: NOTE_H,
+            text,
+            rules,
             prompt: String::new(),
             pinned: true,
             history: Vec::new(),
@@ -532,7 +574,12 @@ fn note_store_load() -> Vec<TweakNote> {
 /// Write every pinned note out. Called on each pin toggle and on each text
 /// commit of a pinned note — the file is tiny and the write is rare.
 fn note_store_save(notes: &[TweakNote]) {
-    let pinned: Vec<&TweakNote> = notes.iter().filter(|n| n.pinned).collect();
+    // Pinning is gone: anything written about a widget is worth keeping, so
+    // every record that says something is saved and empty ones are not.
+    let pinned: Vec<&TweakNote> = notes
+        .iter()
+        .filter(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty())
+        .collect();
     if pinned.is_empty() {
         // Nothing pinned any more: take the file away rather than leave an
         // empty one lying beside the app.
@@ -540,18 +587,15 @@ fn note_store_save(notes: &[TweakNote]) {
         return;
     }
     let mut out = String::from(
-        "# makepad tweak notes — pinned from the Shift+F10 note card, one per line\n\
-         # path\\tdx\\tdy\\tw\\th\\ttext (\\\\n for newlines)\n",
+        "# makepad tweak notes \u{2014} written in the Shift+F10 Spec tab, one per line\n\
+         # path\\tnotes\\trules (\\\\n for newlines)\n",
     );
     for note in pinned {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\n",
             note.path,
-            fmt_f64(note.dx),
-            fmt_f64(note.dy),
-            fmt_f64(note.w),
-            fmt_f64(note.h),
-            note_store_escape(&note.text)
+            note_store_escape(&note.text),
+            note_store_escape(&note.rules)
         ));
     }
     if let Err(error) = std::fs::write(NOTE_STORE, out) {
@@ -732,6 +776,22 @@ pub(crate) struct TweakSession {
     /// Messages written and queued but not yet sent: (note key, text). They
     /// wake nobody until a Ctrl+Enter releases the batch.
     outbox: Vec<(String, String)>,
+    /// The prompt strip's text. ONE box for the whole panel, not one per
+    /// widget: a send attributes it to whatever is selected at that moment,
+    /// which is what the `TWEAK ask #N <path>` line already recorded. In
+    /// memory only -- a half-typed instruction is not worth a file.
+    prompt: String,
+    /// Everything ever sent or queued from the strip, oldest first. Sending
+    /// CLEARS the box, so this is where a message goes to stay recallable.
+    prompt_history: Vec<String>,
+    /// How far back through `prompt_history` Up has walked;
+    /// `prompt_history.len()` is the empty draft being typed now.
+    prompt_at: usize,
+    /// What the strip says under the box: "2 queued", "sent", or why not.
+    prompt_status: String,
+    /// The rules that stand over the whole app, read once from their file.
+    app_rules: String,
+    app_rules_loaded: bool,
     /// A note is mid-@mention: an `@` was just typed into the open card, so
     /// the next click in the app names a widget INTO the note instead of
     /// changing the selection. The hover outline turns amber to say so.
@@ -773,6 +833,20 @@ impl TweakSession {
             if !self.notes.iter().any(|n| n.path == note.path) {
                 self.notes.push(note);
             }
+        }
+    }
+
+    /// Pull the app-wide rules in, once per process. Same shape as
+    /// `load_notes`: the file is read lazily, because most sessions never
+    /// open the Spec tab at all.
+    fn load_app_rules(&mut self) {
+        if self.app_rules_loaded {
+            return;
+        }
+        self.app_rules_loaded = true;
+        self.app_rules = app_rules_load();
+        if !self.app_rules.trim().is_empty() {
+            log!("TWEAK rules store: app rules read from {RULES_STORE}");
         }
     }
 
@@ -5115,9 +5189,17 @@ pub fn tweak_callback(
                             )
                         };
                         out.push_str(&format!(
-                            "{{\"path\":{},\"text\":{}{}{}{}}}",
+                            "{{\"path\":{},\"text\":{}{}{}{}{}}}",
                             json_str(&note.path),
                             json_str(&note.text),
+                            // A rule is not a note: an agent reading this
+                            // must be able to tell what it may not break
+                            // from what it is merely told.
+                            if note.rules.trim().is_empty() {
+                                String::new()
+                            } else {
+                                format!(",\"rules\":{}", json_str(&note.rules))
+                            },
                             mentions,
                             // "ask": the human pressed Ctrl+Enter / the
                             // sparkle on this note — act on it, do not just
@@ -5127,6 +5209,19 @@ pub fn tweak_callback(
                         ));
                     }
                     out.push(']');
+                }
+            }
+            {
+                // The app-wide rules ride alongside the notes, so a standing
+                // rule is readable without the app running and without
+                // guessing which widget it might have been attached to.
+                let rules = {
+                    let mut s = session().lock().unwrap();
+                    s.load_app_rules();
+                    s.app_rules.clone()
+                };
+                if !rules.trim().is_empty() {
+                    out.push_str(&format!(",\"app_rules\":{}", json_str(&rules)));
                 }
             }
             {
@@ -5920,6 +6015,10 @@ enum PanelTab {
     Tree,
     /// The global theme: its colours, spacing and font sizes, edited live.
     Theme,
+    /// What is WRITTEN about the selection -- its notes and its rules -- and
+    /// the rules that stand over the whole app. The app-wide field is why
+    /// this tab has to work with nothing selected.
+    Spec,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -6259,7 +6358,7 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 4],
+    tab_uids: [u64; 5],
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -6399,6 +6498,19 @@ pub struct Tweaker {
     /// The field must be emptied at the next draw: a message went out.
     #[rust]
     note_clear_field: bool,
+    /// The strip's box has been emptied by a send: clear the TextInput on
+    /// the next draw rather than fighting it mid-keystroke.
+    #[rust]
+    prompt_clear_field: bool,
+    #[rust]
+    prompt_queue_uid: u64,
+    #[rust]
+    prompt_send_uid: u64,
+    /// Something in the Spec tab was typed into and is not on disk yet.
+    /// Flushed when the caret leaves the tab's fields -- a write per
+    /// keystroke would be a file write per frame.
+    #[rust]
+    spec_dirty: bool,
     /// Put the caret in the card the frame after it opens.
     #[rust]
     note_focus_pending: bool,
@@ -7066,6 +7178,7 @@ impl Tweaker {
                         tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_theme := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_spec := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -7219,6 +7332,80 @@ impl Tweaker {
                             }
                         }
                     }
+                    spec_col := ScrollYView {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 6
+                        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                        spec_for := FabLabelSmall {
+                            width: Fill
+                            text: ""
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                        }
+                        notes_head := FabHeaderLabel {
+                            width: Fill
+                            text: "notes"
+                        }
+                        spec_notes := TextInput {
+                            width: Fill
+                            height: 110
+                            is_multiline: true
+                            empty_text: "what this widget is about \u{2014} for whoever reads it next"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe6e6e6
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                        rules_head := FabHeaderLabel {
+                            width: Fill
+                            text: "rules"
+                        }
+                        spec_rules := TextInput {
+                            width: Fill
+                            height: 110
+                            is_multiline: true
+                            empty_text: "what must stay true of this widget"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe6e6e6
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                        spec_div := View {
+                            width: Fill
+                            height: 1
+                            margin: Inset{left: 0 top: 4 right: 0 bottom: 0}
+                            show_bg: true
+                            draw_bg +: { color: #x4a4a52 }
+                        }
+                        app_head := FabHeaderLabel {
+                            width: Fill
+                            text: "app rules"
+                        }
+                        spec_app := TextInput {
+                            width: Fill
+                            height: 110
+                            is_multiline: true
+                            empty_text: "rules that stand over the whole app \u{2014} no selection needed"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe6e6e6
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                    }
                     tree_wrap := View {
                         width: Fill
                         height: Fill
@@ -7293,6 +7480,80 @@ impl Tweaker {
                         SizeFieldRow := SizeFieldRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
+                    }
+                    prompt_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 3
+                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                        show_bg: true
+                        draw_bg +: { color: #x242429 }
+                        prompt_field := TextInput {
+                            width: Fill
+                            height: 56
+                            is_multiline: true
+                            empty_text: "what should change\u{2026} Ctrl+Enter sends \u{00b7} Alt+Enter queues"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe8e8d0
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                        prompt_bar := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            prompt_status := FabLabelSmall {
+                                width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                                draw_text +: { color: #xffa040 }
+                            }
+                            queue := Button {
+                                width: Fit
+                                height: 15
+                                padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
+                                spacing: 3
+                                align: Align{x: 0.5 y: 0.5}
+                                icon_walk: Walk{width: 9 height: Fit}
+                                text: "queue"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #xc8c8d4
+                                    text_style +: { font_size: 7.5 }
+                                }
+                                draw_icon +: {
+                                    color: #xc8c8d4
+                                    svg: crate_resource("self:resources/icons/note_queue.svg")
+                                }
+                            }
+                            send := Button {
+                                width: Fit
+                                height: 15
+                                padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                spacing: 3
+                                align: Align{x: 0.5 y: 0.5}
+                                icon_walk: Walk{width: 9 height: Fit}
+                                text: "send"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #x8fd8ff
+                                    text_style +: { font_size: 7.5 }
+                                }
+                                draw_icon +: {
+                                    color: #x8fd8ff
+                                    svg: crate_resource("self:resources/icons/note_send.svg")
+                                }
+                            }
+                        }
                     }
                     ident_footer := View {
                         width: Fill
@@ -7800,6 +8061,7 @@ impl Tweaker {
         if let Some(sidebar) = self.sidebar.as_ref() {
             fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
             fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
+            fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
         }
         if let Some(note) = self.note_ui.as_ref() {
             fields.push(note.child(live_id!(note_text)).area());
@@ -7868,6 +8130,283 @@ impl Tweaker {
             }
         }
         let _ = cx;
+    }
+
+    /// The Spec tab: what is written ABOUT the selection, and the rules
+    /// that stand over the whole app.
+    ///
+    /// Each field is read back into the model while it HAS the caret and
+    /// seeded from the model while it does not. That asymmetry is the whole
+    /// trick: seeding unconditionally overwrites what is being typed every
+    /// frame, and reading unconditionally lets a stale field overwrite the
+    /// model when the selection changes under it.
+    fn draw_spec(&mut self, cx: &mut Cx2d, sel: Option<&TweakPick>) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        let col = sidebar.child(live_id!(spec_col));
+        let path = sel.map(|p| self.sel_ref(cx, p.uid));
+
+        col.child(live_id!(spec_for)).set_text(
+            cx,
+            &match (&path, sel) {
+                (Some(path), Some(sel)) => format!("{}  \u{2022}  {}", sel.ty, tail_ellipsis(path, 40)),
+                _ => "nothing selected \u{2014} the app rules below still work".to_string(),
+            },
+        );
+
+        // notes and rules belong to the selection; with nothing selected
+        // there is nothing for them to be about, so they say so and stay
+        // out of the way rather than writing to a record that has no path.
+        let have = path.is_some();
+        for id in [live_id!(spec_notes), live_id!(spec_rules)] {
+            col.child(id).set_visible(cx, have);
+        }
+        col.child(live_id!(notes_head)).set_visible(cx, have);
+        col.child(live_id!(rules_head)).set_visible(cx, have);
+
+        if let Some(path) = path {
+            let (mut notes, mut rules) = {
+                let mut s = session().lock().unwrap();
+                s.load_notes();
+                match s.notes.iter().find(|n| n.path == path) {
+                    Some(note) => (note.text.clone(), note.rules.clone()),
+                    None => (String::new(), String::new()),
+                }
+            };
+            let mut changed = false;
+            for (id, slot) in [
+                (live_id!(spec_notes), &mut notes),
+                (live_id!(spec_rules), &mut rules),
+            ] {
+                let field = col.child(id);
+                if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
+                    let typed = field.text();
+                    if typed != *slot {
+                        *slot = typed;
+                        changed = true;
+                    }
+                } else if field.text() != *slot {
+                    field.set_text(cx, slot);
+                }
+            }
+            if changed {
+                let mut s = session().lock().unwrap();
+                if !s.notes.iter().any(|n| n.path == path) {
+                    s.notes.push(TweakNote::new(path.clone()));
+                }
+                if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                    note.text = notes;
+                    note.rules = rules;
+                }
+                drop(s);
+                self.spec_dirty = true;
+            }
+        }
+
+        // The app rules need no selection -- that is the reason this tab
+        // has to draw with nothing picked at all.
+        {
+            let field = col.child(live_id!(spec_app));
+            let live = {
+                let mut s = session().lock().unwrap();
+                s.load_app_rules();
+                s.app_rules.clone()
+            };
+            if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
+                let typed = field.text();
+                if typed != live {
+                    session().lock().unwrap().app_rules = typed;
+                    self.spec_dirty = true;
+                }
+            } else if field.text() != live {
+                field.set_text(cx, &live);
+            }
+        }
+
+        // Nothing in the tab has the caret any more, so what was typed is
+        // finished: put it on disk.
+        if self.spec_dirty
+            && ![live_id!(spec_notes), live_id!(spec_rules), live_id!(spec_app)]
+                .into_iter()
+                .any(|id| {
+                    let area = col.child(id).area();
+                    !area.is_empty() && cx.has_key_focus(area)
+                })
+        {
+            self.spec_flush();
+        }
+    }
+
+    /// Put what the Spec tab holds on disk: the per-widget records in the
+    /// note store, the app-wide document in its own file.
+    fn spec_flush(&mut self) {
+        self.spec_dirty = false;
+        let (notes, rules) = {
+            let s = session().lock().unwrap();
+            (s.notes.clone(), s.app_rules.clone())
+        };
+        note_store_save(&notes);
+        app_rules_save(&rules);
+    }
+
+    /// Is the caret in the prompt strip's box? Every one of the strip's
+    /// keys is claimed only there -- Ctrl+Enter belongs to the shader
+    /// prompt when the caret is in THAT, and to nothing at all when the
+    /// caret is in a property field.
+    fn prompt_field_focused(&self, cx: &Cx) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        let area = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area();
+        !area.is_empty() && cx.has_key_focus(area)
+    }
+
+    /// Nothing typed yet -- the only state in which Up walks the history
+    /// instead of moving the caret.
+    fn prompt_field_empty(&self) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).text().is_empty()
+    }
+
+    /// Which widget a send is ABOUT. One box serves every widget, so the
+    /// attribution is read at the moment of sending rather than carried by
+    /// the box. With nothing selected the ask is about the app itself, which
+    /// is a real thing to say and must not be dropped on the floor.
+    fn prompt_target(&mut self, cx: &Cx) -> String {
+        let uid = session().lock().unwrap().pinned.as_ref().map(|p| p.uid);
+        match uid {
+            Some(uid) => self.sel_ref(cx, uid),
+            None => "app".to_string(),
+        }
+    }
+
+    /// The strip's field into the session. The TextInput is the truth while
+    /// the caret is in it; the session is the truth across redraws.
+    fn prompt_sync_text(&mut self, cx: &mut Cx) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        let field = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field));
+        if field.area() == Area::Empty {
+            return;
+        }
+        let text = field.text();
+        let mut s = session().lock().unwrap();
+        if s.prompt != text {
+            s.prompt = text;
+        }
+        let _ = cx;
+    }
+
+    /// Take what is written into the outbox and EMPTY the box, the way a
+    /// message box empties when you press send. The text is not lost: it
+    /// goes into the recall history, where Up brings it back.
+    ///
+    /// Returns false when there was nothing written.
+    fn prompt_take_draft(&mut self, cx: &mut Cx) -> bool {
+        let path = self.prompt_target(cx);
+        let text = {
+            let mut s = session().lock().unwrap();
+            let text = s.prompt.trim().to_string();
+            if text.is_empty() {
+                return false;
+            }
+            s.prompt_history.push(text.clone());
+            s.prompt_at = s.prompt_history.len();
+            s.prompt.clear();
+            text
+        };
+        {
+            // The ask is counted on the record for the widget it is about,
+            // so make one if this is the first thing ever said about it.
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path.clone()));
+            }
+            s.outbox.push((path, text));
+        }
+        self.prompt_clear_field = true;
+        true
+    }
+
+    /// Ctrl+Enter: hand the queue to the AI. Same channel the card used --
+    /// `/tweak/state` carries the ask and a `TWEAK ask` line lands in the
+    /// log ring -- but from one box under the tabs instead of a card.
+    fn prompt_send(&mut self, cx: &mut Cx) {
+        self.prompt_sync_text(cx);
+        self.prompt_take_draft(cx);
+        let sent: Vec<(String, String)> = {
+            let mut s = session().lock().unwrap();
+            std::mem::take(&mut s.outbox)
+        };
+        if sent.is_empty() {
+            session().lock().unwrap().prompt_status =
+                "nothing to send: the box is empty".to_string();
+        } else {
+            for (note_path, text) in &sent {
+                let seq = {
+                    let mut s = session().lock().unwrap();
+                    match s.notes.iter_mut().find(|n| n.path == *note_path) {
+                        Some(note) => {
+                            note.sent += 1;
+                            note.sent
+                        }
+                        None => 0,
+                    }
+                };
+                log!("TWEAK ask #{seq} {note_path}: {text}");
+            }
+            session().lock().unwrap().prompt_status = if sent.len() == 1 {
+                "sent to the AI".to_string()
+            } else {
+                format!("{} messages sent to the AI", sent.len())
+            };
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// Alt+Enter: put this message in the queue and wake nobody. It goes out
+    /// with the next Ctrl+Enter -- deliberately NOT logged as an ask,
+    /// because an ask is what an agent watching the log acts on.
+    fn prompt_queue(&mut self, cx: &mut Cx) {
+        self.prompt_sync_text(cx);
+        if !self.prompt_take_draft(cx) {
+            session().lock().unwrap().prompt_status =
+                "nothing to queue: the box is empty".to_string();
+            self.redraw_sidebar(cx);
+            return;
+        }
+        let count = session().lock().unwrap().outbox.len();
+        session().lock().unwrap().prompt_status = match count {
+            1 => "1 queued \u{00b7} Ctrl+Enter sends the queue".to_string(),
+            n => format!("{n} queued \u{00b7} Ctrl+Enter sends the queue"),
+        };
+        log!("TWEAK note queued \u{00b7} {count} waiting");
+        self.redraw_sidebar(cx);
+    }
+
+    /// Up / Down in an EMPTY box walks the history, the way a shell prompt
+    /// does -- so a message just sent is one keypress from being sent again,
+    /// or edited and sent again. Only while empty, or Up would be fighting
+    /// the caret in a message being written.
+    fn prompt_recall(&mut self, cx: &mut Cx, back: bool) {
+        let text = {
+            let mut s = session().lock().unwrap();
+            if s.prompt_history.is_empty() {
+                return;
+            }
+            let len = s.prompt_history.len();
+            if back {
+                s.prompt_at = s.prompt_at.saturating_sub(1);
+            } else if s.prompt_at < len {
+                s.prompt_at += 1;
+            }
+            let at = s.prompt_at;
+            let text = s.prompt_history.get(at).cloned().unwrap_or_default();
+            s.prompt = text.clone();
+            text
+        };
+        if let Some(sidebar) = self.sidebar.clone() {
+            let field = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field));
+            field.set_text(cx, &text);
+        }
+        self.redraw_sidebar(cx);
     }
 
     /// The sparkle: hand this note to the AI driving the session. There is
@@ -8856,7 +9395,8 @@ impl Tweaker {
                 self.focus_search_pending = false;
             }
         }
-        // The panel tabs: Props / Shader / Tree, one content visible.
+        // The panel tabs: Props / Shader / Tree / Theme / Spec, one content
+        // visible.
         {
             let tab = self.panel_tab;
             sidebar
@@ -8868,6 +9408,9 @@ impl Tweaker {
             sidebar
                 .child(live_id!(tree_wrap))
                 .set_visible(cx, tab == PanelTab::Tree);
+            sidebar
+                .child(live_id!(spec_col))
+                .set_visible(cx, tab == PanelTab::Spec);
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -8896,12 +9439,46 @@ impl Tweaker {
                 (live_id!(tab_shader), PanelTab::Shader, "Shader"),
                 (live_id!(tab_tree), PanelTab::Tree, "Tree"),
                 (live_id!(tab_theme), PanelTab::Theme, "Theme"),
+                (live_id!(tab_spec), PanelTab::Spec, "Spec"),
             ];
             for (i, (id, t, label)) in tabs.into_iter().enumerate() {
                 let btn = tab_row.child(id);
                 btn.set_text(cx, label);
                 set_button_fill(cx, btn.clone(), t == tab);
                 self.tab_uids[i] = btn.widget_uid().0;
+            }
+            if tab == PanelTab::Spec {
+                self.draw_spec(cx, sel);
+            } else if self.spec_dirty {
+                // Left the tab with something unsaved: flush it now rather
+                // than wait for a focus change that may never come.
+                self.spec_flush();
+            }
+            // The prompt strip lives OUTSIDE the tabs: it is pinned between
+            // the tab bodies and the footer, so whichever tab is up, the box
+            // is in the same place and the body scrolls above it.
+            {
+                let row = sidebar.child(live_id!(prompt_row));
+                let bar = row.child(live_id!(prompt_bar));
+                self.prompt_queue_uid = bar.child(live_id!(queue)).widget_uid().0;
+                self.prompt_send_uid = bar.child(live_id!(send)).widget_uid().0;
+                let status = session().lock().unwrap().prompt_status.clone();
+                bar.child(live_id!(prompt_status)).set_text(cx, &status);
+                let field = row.child(live_id!(prompt_field));
+                if self.prompt_clear_field {
+                    // A send emptied the box. Clear it here rather than in
+                    // the send, so the field is written exactly once a frame
+                    // and never while the caret is mid-keystroke.
+                    self.prompt_clear_field = false;
+                    field.set_text(cx, "");
+                } else if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                    // The anti-clobber guard: without it, typing is
+                    // overwritten from the session every frame.
+                    let live = session().lock().unwrap().prompt.clone();
+                    if field.text() != live {
+                        field.set_text(cx, &live);
+                    }
+                }
             }
             // Shader tab content: the layer's live preview + doc + prompt.
             if tab == PanelTab::Shader {
@@ -10761,6 +11338,7 @@ impl Tweaker {
                         1 => PanelTab::Shader,
                         2 => PanelTab::Tree,
                         3 => PanelTab::Theme,
+                        4 => PanelTab::Spec,
                         _ => PanelTab::Props,
                     };
                     self.redraw_sidebar(cx);
@@ -11026,6 +11604,18 @@ impl Tweaker {
                         session().lock().unwrap().note_mode = !on;
                         self.note_focus_pending = true;
                         self.redraw_overlay(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.prompt_queue_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.prompt_queue(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.prompt_send_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.prompt_send(cx);
                     }
                     continue;
                 }
@@ -12501,6 +13091,39 @@ impl Widget for Tweaker {
             _ if self.badge_open.is_some() && tweak_is_on() => {
                 let uid = self.badge_open.take().unwrap();
                 self.open_badged_note(cx, uid);
+            }
+            // Ctrl+Enter in the prompt strip: send the queue. The field
+            // would otherwise take Return, so this arm runs before it.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && (ke.modifiers.control || ke.modifiers.logo)
+                    && self.prompt_field_focused(cx) =>
+            {
+                self.prompt_send(cx);
+            }
+            // Alt+Enter queues instead of sending: write against several
+            // widgets first, then release the batch with one Ctrl+Enter.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && ke.modifiers.alt
+                    && !ke.modifiers.control
+                    && !ke.modifiers.logo
+                    && self.prompt_field_focused(cx) =>
+            {
+                self.prompt_queue(cx);
+            }
+            // Up / Down in an EMPTY box walks the history. Only while empty:
+            // in a message being written those keys belong to the caret.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ArrowUp | KeyCode::ArrowDown)
+                    && !ke.modifiers.any()
+                    && self.prompt_field_focused(cx)
+                    && self.prompt_field_empty() =>
+            {
+                self.prompt_recall(cx, ke.key_code == KeyCode::ArrowUp);
             }
             // Ctrl+Enter in the note card: send it to the AI. The card's
             // TextInput would otherwise take Return, so this arm runs first
