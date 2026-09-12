@@ -4,4 +4,5 @@ mod.widgets.Button.draw_bg.border_size = 1.0
 mod.widgets.Button.draw_bg.color_2 = #191e21
 mod.widgets.TextInput.draw_bg.border_radius = 0.0
 mod.widgets.Window.pass.clear_color = #101315
+mod.widgets.Window.caption_bar.caption_label.padding = mod.turtle.Inset{left: 8.0}
 true

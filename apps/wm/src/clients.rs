@@ -173,6 +173,12 @@ fn curated() -> Vec<AppDef> {
             "studio",
             OrFocus,
         ),
+        {
+            // Scope is an optional private checkout with its own workspace.
+            let mut scope = AppDef::app("scope", "Scope", "makepad-scope", "apps/scope", "scope", OrFocus);
+            scope.manifest = Some("apps/scope/Cargo.toml".to_string());
+            scope
+        },
     ]
 }
 
@@ -983,6 +989,9 @@ pub fn spawn_client(
     // Cargo colors its output when it thinks a terminal is watching; the
     // pipe already turns that off, and this makes it certain.
     cmd.env("CARGO_TERM_COLOR", "never");
+    // The app owns any controls it embeds in its caption. Keep that content
+    // inside the tile; the WM still supplies the outer window decorations.
+    cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
     if let Some(cwd) = cwd {
         // The terminal's Omarchy behavior: open where the focused one is.
         cmd.arg("--cwd").arg(cwd);
@@ -1163,6 +1172,7 @@ mod tests {
                 "VJ",
                 "Fab",
                 "Studio",
+                "Scope",
             ]
             .map(str::to_string)
         );

@@ -12,7 +12,7 @@ COLORS = {
     'terminal': '#252b34', 'mixer': '#f05a83', 'task': '#35bb86',
     'sheets': '#24a366', 'photos': '#f083b4', 'fabric': '#539ade',
     'score': '#ef7b39', 'video': '#8c5cdd', 'route': '#65b876',
-    'vj': '#c159d5', 'fab': '#e5a044', 'studio': '#526fdf',
+    'vj': '#c159d5', 'fab': '#e5a044', 'studio': '#526fdf', 'scope': '#159baf',
     'image': '#699fe3', 'pdf': '#e9515a', 'aichat': '#28a899',
     'counter': '#f2725c', 'app': '#7589bf',
 }
@@ -126,6 +126,15 @@ def pixel_icon(name):
                 if d<47: dot(x,y,black if d>36 else light)
         box(4,4,3,2,white);box(3,6,2,3,'#00ffff');box(10,9,3,2,'#ff00ff');box(8,11,3,2,'#0000ff')
         box(6,6,4,4,gray);box(7,7,2,2,black)
+    elif name=='scope':
+        # A code treemap and loupe, drawn on whole pixels for small menus.
+        box(1,1,12,12,black);box(2,2,10,10,white);box(3,3,8,8,navy)
+        box(3,3,3,4,'#00ffff');box(7,3,4,2,teal);box(7,6,4,1,'#00ff00')
+        box(3,8,3,3,'#0000ff');box(7,8,3,3,yellow)
+        box(8,7,5,1,black);box(7,8,1,5,black);box(13,8,1,5,black)
+        box(8,13,5,1,black);box(8,8,5,5,light);box(9,9,3,3,navy)
+        box(9,9,2,1,'#00ffff');dot(9,10,white)
+        box(13,13,2,2,black);dot(13,13,gray);dot(15,15,black)
     elif name in ('terminal','task','studio','app','vj','mixer'):
         box(1,1,14,11,black);box(2,2,12,9,light);box(3,3,10,7,navy if name=='terminal' else black);box(5,12,6,1,gray);box(4,13,8,2,light);box(3,15,10,1,black)
         if name=='terminal':
@@ -166,7 +175,66 @@ def pixel_icon(name):
             x=end
     return f'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">{body}</svg>\n'
 
+def scope_icon(style):
+    """A lit code treemap under a loupe; each desktop keeps its own material."""
+    if style == 'windows-2000':
+        return pixel_icon('scope')
+    defs = ('<defs><linearGradient id="scope-bg" x2="0.8" y2="1">'
+            '<stop stop-color="#183f62"/><stop offset="1" stop-color="#092539"/>'
+            '</linearGradient><linearGradient id="scope-glass" x2="0.7" y2="1">'
+            '<stop stop-color="#eaffff"/><stop offset="1" stop-color="#7fcfdb"/>'
+            '</linearGradient><linearGradient id="scope-tile" x2="0.6" y2="1">'
+            '<stop stop-color="#2bc6bf"/><stop offset="1" stop-color="#087d9b"/>'
+            '</linearGradient></defs>')
+    # A few generously separated cells keep the identity readable at dock size.
+    cells = (rect(13,14,13,17,'#64e3d2',2)
+             +rect(29,14,19,7,'#48b8e9',2)
+             +rect(29,24,19,7,'#a0efcc',2)
+             +rect(13,34,13,14,'#458fce',2)
+             +rect(29,34,19,14,'#f4cc76',2))
+    lines = ''.join(rect(17,y,w,1.5,'#efffff',0.75) for y,w in [(18,5),(22,4),(37,5),(41,3)])
+    loupe = (path('M43 48 L48 43 L57 52 Q60 55 57 58 Q54 60 51 57 Z','#092638','none')
+             +path('M45 48 L48 45 L55 52 Q58 55 55 57 Q54 58 52 56 Z','url(#scope-glass)','none')
+             +circle(40,40,12,'#092638')
+             +circle(40,40,10.5,'url(#scope-glass)')
+             +circle(40,40,8,'#123a50')
+             +rect(35,35,4,9,'#79ead9',1)+rect(41,35,4,4,'#56b9ed',1)
+             +rect(41,41,4,3,'#f4cc76',1)
+             +circle(35.5,35.5,1,'#efffff'))
+    board = rect(9,10,43,42,'url(#scope-bg)',5)+cells+lines
+    if style == 'omarchy':
+        # Filled contours avoid overlapping stroke caps at tiny icon sizes.
+        ink = '#d5dce8'
+        body = (path('M10 11 H52 V27 H49 V14 H28 V21 H49 V24 H28 V31 '
+                     'H13 V33 H28 V52 H10 Z M13 14 V28 H25 V14 Z '
+                     'M13 36 V49 H25 V36 Z',ink,'none')
+                +path('M40 29 A11 11 0 0 1 49.01 46.31 L57 54.3 L54.3 57 '
+                      'L46.31 49.01 A11 11 0 1 1 40 29 Z '
+                      'M40 32 A8 8 0 1 0 40 48 A8 8 0 1 0 40 32 Z',ink,'none')
+                +rect(35,35,3,10,ink,0.5)+rect(41,35,4,4,ink,0.5)
+                +rect(41,42,4,3,ink,0.5))
+    elif style == 'macos':
+        body = mac_tile('url(#scope-bg)')+cells+lines+loupe
+    elif style == 'ios':
+        body = (path('M17 1 H47 C59 1 63 5 63 17 V47 C63 59 59 63 47 63 '
+                     'H17 C5 63 1 59 1 47 V17 C1 5 5 1 17 1 Z','url(#scope-tile)','none')
+                +board+loupe)
+    elif style == 'android':
+        body = (circle(32,32,31,'#d6f4ef')
+                +f'<g transform="translate(5 5) scale(0.84)">{board}{loupe}</g>')
+    elif style == 'windows':
+        body = (rect(5,6,42,43,'#b0e8ed',4)
+                +rect(7,8,42,43,'#439ec2',4)+board+loupe)
+    else:  # NeXTSTEP: a raised gray dock tile and an inset map plate.
+        body = (rect(0,0,64,64,'#000000')+rect(1,1,62,62,'#aaaaaa')
+                +path('M1 1 H63 L61 3 H3 V61 L1 63 Z','#ffffff','none')
+                +path('M1 63 H63 V1 L61 3 V61 H3 Z','#555555','none')
+                +rect(7,8,47,46,'#555555')+rect(9,10,43,42,'#111b24')
+                +cells+lines+loupe)
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">{defs}{body}</svg>\n'
+
 def icon(name, style):
+    if name=='scope': return scope_icon(style)
     if style=='windows-2000': return pixel_icon(name)
     color=COLORS[name]
     if style in ('macos','ios'):

@@ -292,6 +292,10 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    #[rust]
+    caption_has_content: Option<bool>,
+    #[rust]
+    hosted_caption_content: Option<bool>,
     /// Whether this widget should create its native surface during initial
     /// construction. The stable window id and widget tree still exist when
     /// false, so the owner can explicitly create the surface later.
@@ -414,6 +418,7 @@ impl ScriptHook for Window {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        self.caption_has_content = None;
         if !self.create_on_start && !self.initial_create_policy_applied {
             apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
             self.initial_create_policy_applied = true;
@@ -716,6 +721,24 @@ impl SsaaStack {
 }
 
 impl Window {
+    fn caption_contains_app_content(&mut self, cx: &mut Cx) -> bool {
+        if let Some(content) = self.caption_has_content {
+            return content;
+        }
+        // Preserve the actual app widgets and their identities/handlers. A
+        // stock title-only caption does not need a second row inside a WM tile.
+        let label_content = self.view(cx, ids!(caption_label)).borrow().is_some_and(|view| {
+            view.children.iter().any(|(id, _)| !matches!(*id, id!(caption_icon) | id!(label)))
+        });
+        let bar_content = self.view(cx, ids!(caption_bar)).borrow().is_some_and(|view| {
+            view.children.iter().any(|(id, _)| !matches!(*id,
+                id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen)))
+        });
+        let content = label_content || bar_content;
+        self.caption_has_content = Some(content);
+        content
+    }
+
     fn close_after_recording(&mut self, cx: &mut Cx) {
         if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
             self.managed_close_pending = true;
@@ -735,10 +758,15 @@ impl Window {
     }
 
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
-        // Hosted inside studio: the studio chrome owns the window, never
-        // show our own caption bar (a DSL hot-reload re-runs this sync).
+        let has_content = self.caption_contains_app_content(cx);
         if cx.in_makepad_studio() {
-            self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+            // The WM allows app-owned caption controls as a toolbar inside
+            // its tile. Other hosts retain their existing caption policy.
+            let enabled = *self.hosted_caption_content.get_or_insert_with(|| {
+                std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1")
+            });
+            self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && enabled && has_content);
+            self.view(cx, ids!(windows_buttons)).set_visible(cx, false);
             return;
         }
         match cx.os_type() {
@@ -748,22 +776,19 @@ impl Window {
                 self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
             }
             OsType::Macos => {
-                // In macOS fullscreen, the OS provides its own auto-hiding
-                // toolbar with traffic-light buttons, so hide our caption bar.
+                // Fullscreen supplies native traffic lights. Keep app controls
+                // as content, but omit a redundant title-only caption.
                 let is_fullscreen = self.window.handle.is_fullscreen(cx);
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && !is_fullscreen);
+                    .set_visible(cx, self.show_caption_bar && (!is_fullscreen || has_content));
             }
             OsType::LinuxWindow(params) => {
-                // Only show the caption bar if we're drawing our own window chrome
-                // (e.g. Wayland without server-side decorations). On X11 the WM
-                // provides native decorations, so we hide the in-app caption bar.
+                // With server-side decorations, app caption controls become
+                // a content toolbar; only the native window buttons disappear.
                 let custom_chrome = params.custom_window_chrome;
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && custom_chrome);
-                if custom_chrome {
-                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
-                }
+                    .set_visible(cx, self.show_caption_bar && (custom_chrome || has_content));
+                self.view(cx, ids!(windows_buttons)).set_visible(cx, custom_chrome);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -795,8 +820,13 @@ impl Window {
     /// When the window is too narrow, the padding gracefully reduces to 0,
     /// transitioning to a left-aligned title.
     fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        // App toolbars own their layout, including padding supplied by a theme.
+        if self.caption_contains_app_content(cx) {
+            return;
+        }
         let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
-        let buttons_width = self.view(cx, ids!(windows_buttons)).area().rect(cx).size.x;
+        let buttons = self.view(cx, ids!(windows_buttons));
+        let buttons_width = if buttons.visible() { buttons.area().rect(cx).size.x } else { 0.0 };
 
         if bar_width <= 0.0 {
             return; // No area info yet (first frame)
@@ -1430,7 +1460,8 @@ impl Widget for Window {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+                                    let content = self.caption_contains_app_content(cx);
+                                    self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && content);
                                 } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
                                     self.view(cx, ids!(caption_bar))
                                         .set_visible(cx, self.show_caption_bar);
@@ -1513,9 +1544,12 @@ impl Widget for Window {
                     };
                     if visible {
                         if caption_rect.contains(dq.abs) {
-                            if buttons_rect.size != Vec2d::default()
+                            let content_toolbar = cx.in_makepad_studio()
+                                || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
+                                || (matches!(cx.os_type(), OsType::Macos) && self.window.handle.is_fullscreen(cx));
+                            if content_toolbar || (buttons_rect.size != Vec2d::default()
                                 && buttons_rect.contains(dq.abs)
-                            {
+                            ) {
                                 dq.response.set(WindowDragQueryResponse::Client);
                             } else {
                                 dq.response.set(WindowDragQueryResponse::Caption);
