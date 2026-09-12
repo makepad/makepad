@@ -5544,6 +5544,160 @@ pub fn column_height(tile: [u8; 4]) -> f32 {
 /// The unseparated wave's grey, as the shader declares it.
 pub const WAVE_GREY: [f32; 3] = [0.545, 0.596, 0.651];
 
+/// The lane's own ground, as the shader declares it (`color_bg`): what a
+/// label sits on where nothing else reaches.
+pub const LANE_GROUND: [f32; 3] = [0.039, 0.051, 0.071];
+
+/// How much of the wave's own brightness survives behind the playhead.
+pub const WAVE_PLAYED_DIM: f32 = 0.58;
+
+/// What a parked deck pushes as the shader's `active`, and the floor that
+/// input mixes up from. A parked deck is NOT dimmed to the floor: it is
+/// 0.45 + 0.55 x 0.7 of full, which is most of it. Two separate numbers
+/// because the shader has two, and the mirror has to be of the composite
+/// as drawn rather than of a number that reads plausible.
+pub const WAVE_PARKED_ACTIVE: f32 = 0.7;
+pub const WAVE_ACTIVE_FLOOR: f32 = 0.45;
+
+/// How far a loud column's core lifts toward white, separated and not.
+///
+/// The glow is at its strongest exactly at the centre line, which is
+/// exactly where the strip writes its readout -- so a mirror that leaves
+/// it out is not off by a little. Measured against the running app: the
+/// pixel under that readout came back (255, 127, 255) on a separated
+/// record, which is the bass colour lifted by this and then dimmed.
+pub const WAVE_GLOW_SEPARATED: f32 = 0.45;
+pub const WAVE_GLOW_PLAIN: f32 = 0.18;
+
+/// The wave's brightness where the playhead and the deck's own state have
+/// had their say, as the shader computes it.
+pub fn wave_dim(played: bool, active: bool) -> f32 {
+    let input = if active { 1.0 } else { WAVE_PARKED_ACTIVE };
+    let by_deck = WAVE_ACTIVE_FLOOR + (1.0 - WAVE_ACTIVE_FLOOR) * input;
+    let by_head = if played { WAVE_PLAYED_DIM } else { 1.0 };
+    by_head * by_deck
+}
+
+/// Where a label turns over. Above this its ground counts as bright: the
+/// glyph goes dark and its ring light, and below it the pair is the other
+/// way round. Half way, because the question is only ever which side of
+/// the middle the ground is on.
+pub const LABEL_FLIP_LUMA: f32 = 0.5;
+
+/// The glyph over a bright ground, and the ring that carries it.
+///
+/// Neither is pure: the wave is never black or white, and a glyph in flat
+/// black over a lit column reads as a hole punched in it rather than as
+/// writing. The ring keeps the 0.85 it has always had -- opaque enough to
+/// separate, sheer enough to see the picture through.
+pub const LABEL_INK_DARK: u32 = 0x0d1117ff;
+pub const LABEL_RING_LIGHT: u32 = 0xf4f7fad9;
+pub const LABEL_RING_DARK: u32 = 0x000000d9;
+
+/// The lightness this file judges a colour by. The band tint already had
+/// to hold a colour's brightness still and used these weights to do it;
+/// one idea of bright serves the whole picture.
+pub fn luma(r: f32, g: f32, b: f32) -> f32 {
+    r * 0.299 + g * 0.587 + b * 0.114
+}
+
+/// One colour laid over another, the shader's own `mix`.
+fn over(under: Vec4f, tint: Vec4f, alpha: f32) -> Vec4f {
+    let t = alpha.clamp(0.0, 1.0);
+    Vec4f {
+        x: under.x + (tint.x - under.x) * t,
+        y: under.y + (tint.y - under.y) * t,
+        z: under.z + (tint.z - under.z) * t,
+        w: 1.0,
+    }
+}
+
+fn rgb(c: [f32; 3]) -> Vec4f {
+    Vec4f { x: c[0], y: c[1], z: c[2], w: 1.0 }
+}
+
+/// A label's glyph and the ring it is stamped in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LabelInk {
+    pub fill: Vec4f,
+    pub ring: Vec4f,
+}
+
+/// The ink a label uses over a KNOWN ground.
+///
+/// `want` is the colour the caller would use on a dark ground -- the
+/// hierarchy it chose, a bright white for a mark and a quieter grey for a
+/// bar number. That holds while the ground is dark. Over a bright one the
+/// pair turns over: the glyph goes dark and the ring light, because the
+/// ring's whole job is to be the opposite of whatever it is separating
+/// the glyph from, and a dark ring on a bright ground separates nothing.
+///
+/// Legibility outranks the hierarchy, so the flipped glyph is one colour
+/// for every caller. A label that has turned over is already saying
+/// something the caller's shade of grey cannot.
+pub fn label_ink(want: Vec4f, behind: Vec4f) -> LabelInk {
+    if luma(behind.x, behind.y, behind.z) <= LABEL_FLIP_LUMA {
+        LabelInk { fill: want, ring: Vec4f::from_u32(LABEL_RING_DARK) }
+    } else {
+        LabelInk {
+            fill: Vec4f::from_u32(LABEL_INK_DARK),
+            ring: Vec4f::from_u32(LABEL_RING_LIGHT),
+        }
+    }
+}
+
+/// What a label at the TOP of a zoomed lane sits on, as the lane shader
+/// would have drawn it there.
+///
+/// The wave never reaches: the envelope stops at [`WAVE_ENVELOPE`] of the
+/// half-lane, which leaves the outer tenth of the lane clear, and that is
+/// the band these labels are in. What can be there is the ground, the
+/// loop band over it, and the end-of-track warning over that.
+///
+/// The beat rulings are left out deliberately. They are hairlines: a
+/// whole glyph is never on one, and letting a 1-pixel rule decide the ink
+/// would have it turning over as the wave scrolled under the label.
+pub fn lane_label_ground(in_loop: bool, accent: Vec4f, warn: f32) -> Vec4f {
+    let ground = rgb(LANE_GROUND);
+    let banded = if in_loop { over(ground, accent, LOOP_BAND_ALPHA) } else { ground };
+    over(banded, Vec4f::from_u32(WARN_TINT), warn.clamp(0.0, 1.0) * WARN_MAX_ALPHA)
+}
+
+/// What a label at the MIDDLE of the whole-track strip sits on.
+///
+/// The centre line is where the first layer of the stack is drawn -- the
+/// bass of a separated record, the grey of one the separator has not
+/// reached -- lifted by the glow, which is at full strength there, and
+/// then dimmed for the playhead and the deck. The clamp is last, as the
+/// shader has it: the lift can take a channel past white, and where it
+/// does the dim comes off a channel already held at white.
+///
+/// A band-tinted column counts as the grey and not as an approximation of
+/// it: the tint holds the grey's own brightness by construction, so the
+/// colouring of a column cannot decide a label's ink.
+///
+/// What the mirror cannot know is how LOUD the column under the glyph is,
+/// and it does not try: the ground is taken at a full envelope. A label
+/// here is 80 points of strip wide, over a passage rather than a column,
+/// and the bright end is the safe end to be wrong at -- a dark glyph on a
+/// light ring over a middling ground is a label, while a light glyph on a
+/// near-white one is the defect this decision exists to end.
+pub fn strip_label_ground(separated: bool, played: bool, active: bool) -> Vec4f {
+    let base = if separated {
+        rgb([STEM_COLORS[2][0], STEM_COLORS[2][1], STEM_COLORS[2][2]])
+    } else {
+        rgb(WAVE_GREY)
+    };
+    let glow = if separated { WAVE_GLOW_SEPARATED } else { WAVE_GLOW_PLAIN };
+    let dim = wave_dim(played, active);
+    Vec4f {
+        x: ((base.x + glow) * dim).clamp(0.0, 1.0),
+        y: ((base.y + glow) * dim).clamp(0.0, 1.0),
+        z: ((base.z + glow) * dim).clamp(0.0, 1.0),
+        w: 1.0,
+    }
+}
+
 /// The most colour a band reading is allowed to carry.
 ///
 /// This is the number that keeps a band-coloured column from being mistaken
@@ -5554,6 +5708,13 @@ pub const WAVE_GREY: [f32; 3] = [0.545, 0.596, 0.651];
 /// are above 0.82. The closest any real column ever comes to a stem it could
 /// be confused with is 0.27 of saturation away.
 pub const BAND_CHROMA: f32 = 0.24;
+
+/// The loop band's weight over the picture, and the warning's ceiling:
+/// the two alphas the lane shader mixes with, named so the Rust side of a
+/// picture decision cannot drift from them.
+pub const LOOP_BAND_ALPHA: f32 = 0.18;
+pub const WARN_MAX_ALPHA: f32 = 0.38;
+pub const WARN_TINT: u32 = 0xff3b30ff;
 
 /// What one unseparated column is COLOURED like, from its three bands.
 ///
@@ -5574,8 +5735,8 @@ pub const BAND_CHROMA: f32 = 0.24;
 ///   texture's own red-green-blue = low-mid-high axis. A column with its
 ///   three bands level has nothing to say and draws neutral.
 pub fn band_tint(tile: [u8; 4]) -> [f32; 3] {
-    let luma = |c: [f32; 3]| c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
-    let grey_y = luma(WAVE_GREY);
+    let luma3 = |c: [f32; 3]| luma(c[0], c[1], c[2]);
+    let grey_y = luma3(WAVE_GREY);
     let band = [tile[0] as f32 / 255.0, tile[1] as f32 / 255.0, tile[2] as f32 / 255.0];
     let top = band[0].max(band[1]).max(band[2]);
     // Nothing measured here at all: keep the grey rather than invent a hue
@@ -5587,7 +5748,7 @@ pub fn band_tint(tile: [u8; 4]) -> [f32; 3] {
     // the three and not their loudness — loudness is the level channel's
     // job, and this must not say it twice.
     let unit = [band[0] / top, band[1] / top, band[2] / top];
-    let mid = luma(unit);
+    let mid = luma3(unit);
     let off = [unit[0] - mid, unit[1] - mid, unit[2] - mid];
     let spread = off[0].max(off[1]).max(off[2]) - off[0].min(off[1]).min(off[2]);
     if spread < 1e-6 {
@@ -5841,13 +6002,13 @@ const WAVE_TEXT_OUTLINE_RING: [(f64, f64); 8] = [
 /// is plain 2D overlay drawing, so draw ORDER already puts the ring
 /// under the fill, unlike the karaoke line's own outline which shares a
 /// depth-tested pass with video and needs one.
-fn draw_outlined_text(draw_text: &mut DrawText, cx: &mut Cx2d, pos: DVec2, text: &str, fill: Vec4f) {
-    let ring = (draw_text.text_style.font_size as f64 * 0.09).max(1.0);
-    draw_text.color = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.85 };
+fn draw_outlined_text(draw_text: &mut DrawText, cx: &mut Cx2d, pos: DVec2, text: &str, ink: LabelInk) {
+    let spread = (draw_text.text_style.font_size as f64 * 0.09).max(1.0);
+    draw_text.color = ink.ring;
     for (dx, dy) in WAVE_TEXT_OUTLINE_RING {
-        draw_text.draw_abs(cx, dvec2(pos.x + dx * ring, pos.y + dy * ring), text);
+        draw_text.draw_abs(cx, dvec2(pos.x + dx * spread, pos.y + dy * spread), text);
     }
-    draw_text.color = fill;
+    draw_text.color = ink.fill;
     draw_text.draw_abs(cx, pos, text);
 }
 
@@ -6636,12 +6797,17 @@ impl Widget for VjWaveScroll {
                 continue;
             }
             self.draw_text.text_style.font_size = 9.0;
+            let ground = lane_label_ground(
+                true,
+                deck_accent(if index == 0 { DeckId::A } else { DeckId::B }),
+                lane.warn_at(now, self.warn_secs),
+            );
             draw_outlined_text(
                 &mut self.draw_text,
                 cx,
                 dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
                 &slot.to_string(),
-                Vec4f::from_u32(0xf4f7faff),
+                label_ink(Vec4f::from_u32(0xf4f7faff), ground),
             );
         }
 
@@ -6651,6 +6817,9 @@ impl Widget for VjWaveScroll {
         // stands between them -- and a set built to a clock wants both.
         let bar_number_color = Vec4f::from_u32(0x8e9aa7ff);
         let minute_label_color = Vec4f::from_u32(0xa9b4c1ff);
+        // The gutter is the lane's own ground with nothing over it: no
+        // wave reaches it, no band tints it, and no warning colours it.
+        let gutter_ground = rgb(LANE_GROUND);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
@@ -6683,7 +6852,7 @@ impl Widget for VjWaveScroll {
                         cx,
                         dvec2(x + 3.0, rect.pos.y + lane_h + 1.0),
                         &crate::clock::length(at),
-                        minute_label_color,
+                        label_ink(minute_label_color, gutter_ground),
                     );
                     minute_xs.push(x);
                 }
@@ -6720,7 +6889,7 @@ impl Widget for VjWaveScroll {
                                 cx,
                                 dvec2(x + 2.0, rect.pos.y + lane_h + 1.0),
                                 &format!("{}", bar + 1),
-                                bar_number_color,
+                                label_ink(bar_number_color, gutter_ground),
                             );
                         }
                     }
@@ -6783,12 +6952,18 @@ impl Widget for VjWaveScroll {
             let lane_rect = self.lane_rects[index];
             let head_x = lane_rect.pos.x + lane_rect.size.x * self.head_fraction;
             self.draw_text.text_style.font_size = 9.0;
+            let lane = &self.lanes[index];
+            let ground = lane_label_ground(
+                lane.loop_columns().is_some(),
+                deck_accent(if index == 0 { DeckId::A } else { DeckId::B }),
+                lane.warn_at(now, self.warn_secs),
+            );
             draw_outlined_text(
                 &mut self.draw_text,
                 cx,
                 dvec2(head_x + 9.0, lane_rect.pos.y + 2.0),
                 &label,
-                Vec4f::from_u32(0xf4f7faff),
+                label_ink(Vec4f::from_u32(0xf4f7faff), ground),
             );
         }
         DrawStep::done()
@@ -7774,12 +7949,17 @@ impl Widget for VjWaveOverview {
                     crate::clock::offset(target_secs - head_secs)
                 );
                 let x = centre_of(target_secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 84.0);
+                let ground = strip_label_ground(
+                    self.stem_pyramid.is_some(),
+                    target_secs < head_secs,
+                    self.active,
+                );
                 draw_outlined_text(
                     &mut self.draw_text,
                     cx,
                     dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
                     &label,
-                    Vec4f::from_u32(0xf4f7faff),
+                    label_ink(Vec4f::from_u32(0xf4f7faff), ground),
                 );
             } else if self.drag.is_none() {
                 // Hovering (not dragging) a mark answers WHEN: the strip
@@ -7788,12 +7968,17 @@ impl Widget for VjWaveOverview {
                 if let Some(secs) = self.hover_mark_secs() {
                     self.draw_text.text_style.font_size = 9.0;
                     let x = centre_of(secs).clamp(rect.pos.x, rect.pos.x + rect.size.x - 48.0);
+                    let ground = strip_label_ground(
+                        self.stem_pyramid.is_some(),
+                        secs < self.head * duration,
+                        self.active,
+                    );
                     draw_outlined_text(
                         &mut self.draw_text,
                         cx,
                         dvec2(x, rect.pos.y + rect.size.y * 0.5 - 5.0),
                         &crate::clock::playhead(secs),
-                        Vec4f::from_u32(0xf4f7faff),
+                        label_ink(Vec4f::from_u32(0xf4f7faff), ground),
                     );
                 }
             }
@@ -9279,6 +9464,138 @@ pub fn format_key_shift(semitones: f64) -> String {
 mod tests {
     use super::*;
 
+    /// A label's outline is only worth drawing if it is the opposite of
+    /// what it is separating the glyph from, which means the pair has to
+    /// be decided per label and from the ground under it.
+    #[test]
+    fn a_label_turns_over_with_the_ground_under_it() {
+        let want = Vec4f::from_u32(0xf4f7faff);
+        let dark = label_ink(want, rgb(LANE_GROUND));
+        assert_eq!(dark.fill, want, "over the lane's own ground the caller's colour stands");
+        assert_eq!(dark.ring, Vec4f::from_u32(LABEL_RING_DARK));
+        // The unseparated wave is a light grey and always was: this is the
+        // ground the old fixed pair was worst over.
+        let bright = label_ink(want, rgb(WAVE_GREY));
+        assert_eq!(bright.fill, Vec4f::from_u32(LABEL_INK_DARK));
+        assert_eq!(bright.ring, Vec4f::from_u32(LABEL_RING_LIGHT));
+        // The hierarchy survives the dark side: a bar number stays quieter
+        // than a mark label over the same ground.
+        let quiet = label_ink(Vec4f::from_u32(0x8e9aa7ff), rgb(LANE_GROUND));
+        assert_ne!(quiet.fill, dark.fill);
+        // Whichever way it lands, glyph and ring are on opposite sides of
+        // the turnover -- an outline the colour of its glyph is no outline.
+        for step in 0..=100 {
+            let v = step as f32 / 100.0;
+            let ink = label_ink(want, Vec4f { x: v, y: v, z: v, w: 1.0 });
+            let fill = luma_of(ink.fill);
+            let ring = luma_of(ink.ring);
+            assert!(
+                (fill > LABEL_FLIP_LUMA) != (ring > LABEL_FLIP_LUMA),
+                "ground {v}: glyph {fill} and ring {ring} are the same side"
+            );
+        }
+    }
+
+    /// The band tint holds the grey's own brightness by construction, so a
+    /// column's colour cannot move a label's ink. If it could, a label
+    /// over a scrolling wave would flicker between the two inks as the
+    /// colouring changed under it.
+    #[test]
+    fn a_columns_own_colour_never_decides_a_labels_ink() {
+        let want = Vec4f::from_u32(0xf4f7faff);
+        let plain = label_ink(want, rgb(WAVE_GREY));
+        for tile in [
+            [255u8, 0, 0, 200],
+            [0, 255, 0, 200],
+            [0, 0, 255, 200],
+            [200, 40, 90, 120],
+            [7, 9, 11, 40],
+            [0, 0, 0, 0],
+        ] {
+            assert_eq!(label_ink(want, rgb(band_tint(tile))), plain, "{tile:?}");
+        }
+    }
+
+    /// The mirror is of the composite AS DRAWN, and it is measured
+    /// against it rather than reasoned about: with a separated record on
+    /// a parked deck, the pixel under this very label came back
+    /// (255, 127, 255) from the running app -- the bass layer, lifted by
+    /// the glow that is at full strength on the centre line, then dimmed
+    /// for a deck that is not the active one.
+    ///
+    /// The first draft of this mirror said 0.18 where the picture said
+    /// 0.71, because it left the glow out and took a parked deck for a
+    /// dimmer thing than it is. It would have left the readout in white
+    /// over a near-white ground, which is the defect.
+    #[test]
+    fn the_strips_ground_is_the_pixel_the_app_draws() {
+        let ground = strip_label_ground(true, false, false);
+        for (got, want, channel) in [
+            (ground.x, 255.0 / 255.0, "red"),
+            (ground.y, 127.0 / 255.0, "green"),
+            (ground.z, 255.0 / 255.0, "blue"),
+        ] {
+            assert!((got - want).abs() < 0.01, "{channel}: {got} is not {want}");
+        }
+        assert!(luma_of(ground) > LABEL_FLIP_LUMA, "and it is a bright ground");
+        assert_eq!(
+            label_ink(Vec4f::from_u32(0xf4f7faff), ground).fill,
+            Vec4f::from_u32(LABEL_INK_DARK),
+            "so the readout turns over"
+        );
+    }
+
+    /// A label ahead of the playhead is over the wave at full; one behind
+    /// it is over what has been played, which the shader dims by nearly
+    /// half. The same label takes different ink either side of the head,
+    /// which is the whole reason the decision is made per label.
+    #[test]
+    fn the_same_label_takes_different_ink_either_side_of_the_playhead() {
+        let want = Vec4f::from_u32(0xf4f7faff);
+        for separated in [false, true] {
+            let coming = strip_label_ground(separated, false, true);
+            let played = strip_label_ground(separated, true, true);
+            assert!(
+                luma_of(coming) > luma_of(played),
+                "separated {separated}: played is not the dimmer of the two"
+            );
+            assert_eq!(label_ink(want, coming).fill, Vec4f::from_u32(LABEL_INK_DARK));
+            assert_eq!(label_ink(want, played).fill, want);
+        }
+        // A parked deck keeps most of its brightness -- it is 0.835 of
+        // full and not the 0.45 floor, which is a mistake worth a test.
+        assert!((wave_dim(false, false) - 0.835).abs() < 1e-6, "{}", wave_dim(false, false));
+        assert!((wave_dim(false, true) - 1.0).abs() < 1e-6);
+        assert!((wave_dim(true, true) - WAVE_PLAYED_DIM).abs() < 1e-6);
+    }
+
+    /// The top of a lane is the one band the envelope cannot reach, which
+    /// is why the labels are there. Nothing that CAN be there -- the loop
+    /// band, the end-of-track warning, both at once -- lifts it over the
+    /// turnover, so these labels keep the ink they have always had.
+    #[test]
+    fn the_top_of_a_lane_stays_a_dark_ground() {
+        let want = Vec4f::from_u32(0xf4f7faff);
+        for deck in [DeckId::A, DeckId::B] {
+            for in_loop in [false, true] {
+                for warn in [0.0, 0.5, 1.0] {
+                    let ground = lane_label_ground(in_loop, deck_accent(deck), warn);
+                    let value = luma_of(ground);
+                    assert!(
+                        value <= LABEL_FLIP_LUMA,
+                        "loop {in_loop} warn {warn} read as bright: {value}"
+                    );
+                    assert_eq!(label_ink(want, ground).fill, want);
+                }
+            }
+        }
+        // The warning does move it, though -- the mirror is of the real
+        // composite and not a constant dressed up as one.
+        let plain = lane_label_ground(false, deck_accent(DeckId::A), 0.0);
+        let warned = lane_label_ground(false, deck_accent(DeckId::A), 1.0);
+        assert!(luma_of(warned) > luma_of(plain));
+    }
+
     /// The drawn wave has one ceiling and the visual gain does not lift
     /// it: what the gain does is decide how much of a record reaches that
     /// ceiling, which is the whole of what an operator wants from it.
@@ -10558,7 +10875,11 @@ mod tests {
     }
 
     fn luma(c: [f32; 3]) -> f32 {
-        c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114
+        super::luma(c[0], c[1], c[2])
+    }
+
+    fn luma_of(c: Vec4f) -> f32 {
+        super::luma(c.x, c.y, c.z)
     }
 
     fn saturation(c: [f32; 3]) -> f32 {
