@@ -233,7 +233,7 @@ fn table_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/table/overview",
+    key: "data-display/table/overview",
     category: "Data display",
     component: "Table",
     also: &["TableStriped", "TableBordered", "TableCompact"],

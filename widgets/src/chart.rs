@@ -1,4 +1,10 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    badge::measure,
+    chart_more::{parse_rows, Row},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -135,15 +141,26 @@ script_mod! {
         color_bg: #x14142a
         color_grid: #x272a44
         color_line: #x4fc3f7
+        color_line_2: #xff8a65
+        color_line_3: #x81c784
+        color_line_4: #xce93d8
         color_fill: #x4fc3f73f
         color_up: #x26a69a
         color_down: #xef5350
         color_text: #x8890a8
         color_accent: #xffb74d
         line_width: 2.0
+        show_legend: false
+        range_min: 0.0
+        range_max: 0.0
+        series: []
 
+        // The face is named outright: a merge into a text style the type
+        // default has not set yet left the tile with a style that measured
+        // but drew nothing -- a key of swatches with no names beside them,
+        // a gutter with no numbers.
         draw_text +: {
-            text_style +: {font_size: 8.0}
+            text_style: theme.font_regular{font_size: 8.0}
             color: #x8890a8
         }
     }
@@ -1654,11 +1671,53 @@ pub struct DrawChartSegment {
     pub fade_len: f32,
 }
 
-/// A self-contained price/series chart drawn entirely with instanced quads:
-/// an SDF anti-aliased polyline with gradient area fill, or candlesticks,
-/// over a nice-tick grid with axis labels. No turtle alignment, no vector
-/// paths — it renders correctly under any parent (docks, grids, cells) and
-/// the whole chart batches into a handful of draw calls.
+/// A self-contained series chart drawn entirely with instanced quads: one
+/// or several SDF anti-aliased polylines with a gradient area fill, or
+/// candlesticks, over a nice-tick grid with axis labels. No turtle
+/// alignment, no vector paths — it renders correctly under any parent
+/// (docks, grids, cells) and the whole chart batches into a handful of
+/// draw calls.
+///
+/// # Several lines
+///
+/// The data is lines of markup, one per plotted line — `"cpu 32 35 41"`, a
+/// name and then its numbers, read by [`crate::chart_more::parse_row`]
+/// exactly as the shapes in that module read theirs — or the same thing
+/// from Rust through [`TrendChart::set_rows`]. [`TrendChart::set_series`]
+/// is one line with no name, which is what it has always been. Every line
+/// shares the one value axis and the one spacing along the bottom: the
+/// longest line sets the spacing and a shorter one stops short, which is
+/// the true picture of fewer samples so far.
+///
+/// The first line is drawn in `color_line` over `color_fill`, as it always
+/// was. The second, third and fourth are `color_line_2`, `_3` and `_4`,
+/// each over its own colour at `color_fill`'s opacity — so a fill made
+/// transparent is transparent for every line — and a fifth starts round
+/// again rather than fading past the fourth: two lines the same colour are
+/// honestly ambiguous, where two nearly the same colour look
+/// distinguishable and are not. With one line the last-value rule is
+/// `color_accent`; with several it has to say WHICH line, so it takes the
+/// line's colour.
+///
+/// # The key
+///
+/// `show_legend` draws a key at the top left of the plot — a swatch and a
+/// name for every line that has a name — on a panel of the chart's own
+/// background, so the lines do not run through the words. It is off unless
+/// asked for. The library's position is that a legend is a list of labels
+/// beside a picture, which is a layout decision belonging to whatever is
+/// placing the chart, and it stands; the one exception is a tile with no
+/// room beside it for anything, which is what this widget is for. The
+/// panel is as wide as its names measure in the face they are drawn in,
+/// not as wide as a count of characters guesses.
+///
+/// # A pinned axis
+///
+/// The value axis fits the data on every draw, with a little room above
+/// and below. `range_max` above `range_min` pins it to exactly that span
+/// instead, so two tiles side by side, or one tile frame after frame, put
+/// the same value at the same height and compare. A value beyond a pinned
+/// axis is drawn pegged to the edge it left by rather than off the chart.
 #[derive(Script, ScriptHook, Widget)]
 pub struct TrendChart {
     #[uid]
@@ -1685,8 +1744,17 @@ pub struct TrendChart {
     pub color_bg: Vec4f,
     #[live]
     pub color_grid: Vec4f,
+    /// The first line, over `color_fill` as written.
     #[live]
     pub color_line: Vec4f,
+    /// The second, third and fourth lines, each over its own colour at
+    /// `color_fill`'s opacity. A fifth line is `color_line` again.
+    #[live]
+    pub color_line_2: Vec4f,
+    #[live]
+    pub color_line_3: Vec4f,
+    #[live]
+    pub color_line_4: Vec4f,
     #[live]
     pub color_fill: Vec4f,
     #[live]
@@ -1699,23 +1767,193 @@ pub struct TrendChart {
     pub color_accent: Vec4f,
     #[live(2.0)]
     pub line_width: f64,
+    /// The key: a swatch and a name per named line, at the top left of the
+    /// plot. Off unless asked for.
+    #[live]
+    pub show_legend: bool,
+    /// The value axis, pinned to exactly this span while `range_max` is
+    /// above `range_min`; otherwise the axis fits the data on every draw.
+    #[live]
+    pub range_min: f64,
+    #[live]
+    pub range_max: f64,
+    /// One line of markup per plotted line: a name, then its numbers. See
+    /// [`crate::chart_more::parse_row`].
+    #[live]
+    pub series: Vec<String>,
 
     #[rust]
-    series: Vec<f64>,
+    rows: Vec<Row>,
+    #[rust]
+    seeded_from: Vec<String>,
     #[rust]
     candles: Vec<Candle>,
 }
 
+/// Room the fitted axis leaves above and below the data, as a share of its
+/// span, so a line does not run along the frame.
+const AXIS_ROOM: f64 = 0.08;
+
+/// The value axis: `pin_min..pin_max` exactly while the top is above the
+/// bottom, else the data's `lo..hi` with [`AXIS_ROOM`] added each side. A
+/// pin gets no room added, because it is what a host asked for: two tiles
+/// pinned to the same numbers have to put the same value at the same
+/// height, or they do not compare.
+pub fn axis_range(lo: f64, hi: f64, pin_min: f64, pin_max: f64) -> (f64, f64) {
+    if pin_max > pin_min {
+        return (pin_min, pin_max);
+    }
+    // A flat line still gets an axis, and one in proportion to its numbers:
+    // a fixed floor under a million is smaller than the difference between
+    // two neighbouring f64s there, and a tick step made from it never
+    // advanced.
+    let floor = (hi.abs().max(lo.abs()) * 1e-6).max(1e-9);
+    let room = (hi - lo).max(floor) * AXIS_ROOM;
+    (lo - room, hi + room)
+}
+
+/// At most this many grid lines on the value axis: a step that cannot
+/// advance a tick stops here rather than never.
+const MAX_TICKS: usize = 64;
+
+/// The ticks of the value axis: multiples of `step` from the first at or
+/// above `min` up to and including `max`, so an axis pinned to a round
+/// number labels its own ceiling; a fitted axis pads its ends and never
+/// lands a tick on them.
+pub fn axis_ticks(min: f64, max: f64, step: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    if !(step > 0.0) || !min.is_finite() || !max.is_finite() {
+        return out;
+    }
+    let first = (min / step).ceil();
+    for n in 0..MAX_TICKS {
+        let tick = (first + n as f64) * step;
+        if tick > max + step * 1e-6 {
+            break;
+        }
+        out.push(tick);
+    }
+    out
+}
+
+/// The least and greatest number in the rows that can be drawn, and how
+/// many points the longest of them has. A row with fewer than two numbers
+/// has no line, and no say in the axis either. `None` when no row can be
+/// drawn.
+pub fn rows_extent(rows: &[Row]) -> Option<(f64, f64, usize)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut longest = 0;
+    for row in rows.iter().filter(|row| row.values.len() >= 2) {
+        for v in &row.values {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+        longest = longest.max(row.values.len());
+    }
+    (longest >= 2).then(|| (lo, hi, longest))
+}
+
+/// The key's measures, in layout points: the panel's inset, the swatch's
+/// side, the gap from a swatch to its name, and the gap from one entry to
+/// the next.
+const KEY_PAD: f64 = 6.0;
+const KEY_SWATCH: f64 = 8.0;
+const KEY_SWATCH_GAP: f64 = 5.0;
+const KEY_ENTRY_GAP: f64 = 12.0;
+/// The box a line of the chart's text is drawn in, in font sizes; the
+/// gutter's labels sit six points above their tick for the same reason.
+const TEXT_BOX: f64 = 1.5;
+
+/// Where the parts of a key go: the panel behind it, a swatch per entry
+/// and the top-left corner of each name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegendRow {
+    pub panel: Rect,
+    pub swatches: Vec<Rect>,
+    pub names: Vec<DVec2>,
+}
+
+/// Lay a key out from `origin`, its panel's top-left corner: one entry per
+/// name, in a row, given the MEASURED width of each name and the height of
+/// a line of text. The widths have to come from the face the names are
+/// drawn in — a key sized by a count of characters is the right width for
+/// exactly one font, and clips or gapes in every other.
+pub fn legend_row(origin: DVec2, widths: &[f64], text_h: f64) -> LegendRow {
+    let mut swatches = Vec::with_capacity(widths.len());
+    let mut names = Vec::with_capacity(widths.len());
+    let mut x = origin.x + KEY_PAD;
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            x += KEY_ENTRY_GAP;
+        }
+        swatches.push(Rect {
+            pos: dvec2(x, origin.y + KEY_PAD + (text_h - KEY_SWATCH) * 0.5),
+            size: dvec2(KEY_SWATCH, KEY_SWATCH),
+        });
+        x += KEY_SWATCH + KEY_SWATCH_GAP;
+        names.push(dvec2(x, origin.y + KEY_PAD));
+        x += w;
+    }
+    let panel = if widths.is_empty() {
+        Rect { pos: origin, size: dvec2(0.0, 0.0) }
+    } else {
+        Rect { pos: origin, size: dvec2(x + KEY_PAD - origin.x, text_h + KEY_PAD * 2.0) }
+    };
+    LegendRow { panel, swatches, names }
+}
+
 impl TrendChart {
+    /// One line with no name. Clears any candles.
     pub fn set_series(&mut self, values: &[f64]) {
-        self.series.clear();
-        self.series.extend_from_slice(values);
+        self.set_rows(vec![Row::new("", values)]);
+    }
+
+    /// The lines from Rust instead of from markup, each a name and its
+    /// numbers, in the order they are drawn and keyed. The markup lines are
+    /// marked as already read, so the next draw does not put them back.
+    /// Clears any candles.
+    pub fn set_rows(&mut self, rows: Vec<Row>) {
+        self.rows = rows;
+        self.seeded_from = self.series.clone();
         self.candles.clear();
     }
 
+    /// Candles instead of lines. Clears the lines, markup ones included.
     pub fn set_candles(&mut self, candles: Vec<Candle>) {
         self.candles = candles;
-        self.series.clear();
+        self.rows.clear();
+        self.seeded_from = self.series.clone();
+    }
+
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    pub fn candles(&self) -> &[Candle] {
+        &self.candles
+    }
+
+    /// The colour line `i` is drawn in, the four going round again after
+    /// the fourth.
+    pub fn line_color(&self, i: usize) -> Vec4f {
+        match i % 4 {
+            0 => self.color_line,
+            1 => self.color_line_2,
+            2 => self.color_line_3,
+            _ => self.color_line_4,
+        }
+    }
+
+    /// Re-read the markup lines if they have changed since the last draw.
+    fn sync(&mut self) {
+        if self.seeded_from != self.series {
+            self.seeded_from = self.series.clone();
+            self.rows = parse_rows(&self.series);
+            // The markup is lines; candles that were set from Rust would
+            // otherwise keep the tile, drawn ahead of them.
+            self.candles.clear();
+        }
     }
 
     fn nice_step(raw: f64) -> f64 {
@@ -1732,40 +1970,58 @@ impl TrendChart {
         };
         nice * mag
     }
+
+    /// The key, on a panel of the chart's background at the top left of
+    /// `plot`: a swatch in each named line's colour, then its name. A named
+    /// line with no numbers yet is still in the key — it is a line the host
+    /// wrote down.
+    fn draw_key(&mut self, cx: &mut Cx2d, plot: Rect) {
+        let named: Vec<usize> = (0..self.rows.len()).filter(|&r| !self.rows[r].label.is_empty()).collect();
+        if named.is_empty() {
+            return;
+        }
+        let widths: Vec<f64> = named.iter().map(|&r| measure(&self.draw_text, cx, &self.rows[r].label)).collect();
+        let text_h = self.draw_text.text_style.font_size as f64 * TEXT_BOX;
+        let key = legend_row(plot.pos + dvec2(6.0, 6.0), &widths, text_h);
+        // The panel goes through the grid's quad, not the tile's: the
+        // tile's is the widget's area, and the last rect it draws is what
+        // the overlay and the tree would take for the whole chart.
+        self.draw_grid.color = self.color_bg;
+        self.draw_grid.draw_abs(cx, key.panel);
+        self.draw_text.color = self.color_text;
+        for (k, &r) in named.iter().enumerate() {
+            self.draw_grid.color = self.line_color(r);
+            self.draw_grid.draw_abs(cx, key.swatches[k]);
+            self.draw_text.draw_abs(cx, key.names[k], &self.rows[r].label);
+        }
+    }
 }
 
 impl Widget for TrendChart {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.sync();
         let rect = cx.walk_turtle(walk);
         self.draw_bg.color = self.color_bg;
         self.draw_bg.draw_abs(cx, rect);
 
-        // data range
-        let (mut min, mut max, n) = if !self.candles.is_empty() {
-            let mut min = f64::INFINITY;
-            let mut max = f64::NEG_INFINITY;
+        // data range: the candles when there are any, else every line
+        let (lo, hi, n) = if !self.candles.is_empty() {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
             for c in &self.candles {
-                min = min.min(c.low);
-                max = max.max(c.high);
+                lo = lo.min(c.low);
+                hi = hi.max(c.high);
             }
-            (min, max, self.candles.len())
+            (lo, hi, self.candles.len())
         } else {
-            let mut min = f64::INFINITY;
-            let mut max = f64::NEG_INFINITY;
-            for v in &self.series {
-                min = min.min(*v);
-                max = max.max(*v);
-            }
-            (min, max, self.series.len())
+            rows_extent(&self.rows).unwrap_or((0.0, 0.0, 0))
         };
         if n < 2 || rect.size.x < 80.0 || rect.size.y < 60.0 {
             return DrawStep::done();
         }
-        let pad = (max - min).max(1e-9) * 0.08;
-        min -= pad;
-        max += pad;
+        let (min, max) = axis_range(lo, hi, self.range_min, self.range_max);
         let range = max - min;
 
         let gutter = 54.0;
@@ -1773,14 +2029,14 @@ impl Widget for TrendChart {
             pos: rect.pos + dvec2(10.0, 8.0),
             size: rect.size - dvec2(gutter + 18.0, 18.0),
         };
-        let py = |v: f64| plot.pos.y + (1.0 - (v - min) / range) * plot.size.y;
+        // a value beyond a pinned axis is pegged to the edge it left by
+        let py = |v: f64| plot.pos.y + (1.0 - ((v - min) / range).clamp(0.0, 1.0)) * plot.size.y;
 
         // horizontal grid at nice ticks, labels in the right gutter
         let step = Self::nice_step(range / 5.0);
-        let mut tick = (min / step).ceil() * step;
         self.draw_grid.color = self.color_grid;
         self.draw_text.color = self.color_text;
-        while tick < max {
+        for tick in axis_ticks(min, max, step) {
             let y = py(tick);
             self.draw_grid.draw_abs(cx, Rect {
                 pos: dvec2(plot.pos.x, y),
@@ -1793,7 +2049,6 @@ impl Widget for TrendChart {
             };
             self.draw_text
                 .draw_abs(cx, dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0), &label);
-            tick += step;
         }
         // vertical grid every ~90px
         let vticks = (plot.size.x / 90.0).max(1.0) as usize;
@@ -1830,74 +2085,105 @@ impl Widget for TrendChart {
                 });
             }
         } else {
+            // the longest line sets the spacing; a shorter one stops short
             let dx = plot.size.x / (n - 1) as f64;
-            // area fill: one column quad per segment, shader fades below the line
+            let count = self.rows.len();
+            let several = self.rows.iter().filter(|row| row.values.len() >= 2).count() > 1;
+            let colors: Vec<Vec4f> = (0..count).map(|r| self.line_color(r)).collect();
+            // area fills: one column quad per segment, shader fades below the line
             self.draw_seg.mode = 1.0;
-            self.draw_seg.color = self.color_fill;
             self.draw_seg.fade_len = (plot.size.y * 0.85) as f32;
-            for i in 0..n - 1 {
-                let x0 = plot.pos.x + i as f64 * dx;
-                let y0 = py(self.series[i]);
-                let y1 = py(self.series[i + 1]);
-                let top = y0.min(y1);
-                let r = Rect {
-                    pos: dvec2(x0, top),
-                    size: dvec2(dx, plot.pos.y + plot.size.y - top),
+            for r in 0..count {
+                let values = &self.rows[r].values;
+                if values.len() < 2 {
+                    continue;
+                }
+                self.draw_seg.color = if r == 0 {
+                    self.color_fill
+                } else {
+                    Vec4f { w: self.color_fill.w, ..colors[r] }
                 };
-                self.draw_seg.seg_a = Vec2f {
-                    x: 0.0,
-                    y: (y0 - top) as f32,
-                };
-                self.draw_seg.seg_b = Vec2f {
-                    x: r.size.x as f32,
-                    y: (y1 - top) as f32,
-                };
-                self.draw_seg.draw_abs(cx, r);
+                for i in 0..values.len() - 1 {
+                    let x0 = plot.pos.x + i as f64 * dx;
+                    let y0 = py(values[i]);
+                    let y1 = py(values[i + 1]);
+                    let top = y0.min(y1);
+                    let quad = Rect {
+                        pos: dvec2(x0, top),
+                        size: dvec2(dx, plot.pos.y + plot.size.y - top),
+                    };
+                    self.draw_seg.seg_a = Vec2f {
+                        x: 0.0,
+                        y: (y0 - top) as f32,
+                    };
+                    self.draw_seg.seg_b = Vec2f {
+                        x: quad.size.x as f32,
+                        y: (y1 - top) as f32,
+                    };
+                    self.draw_seg.draw_abs(cx, quad);
+                }
             }
-            // anti-aliased polyline on top
+            // anti-aliased polylines on top of every fill
             self.draw_seg.mode = 0.0;
-            self.draw_seg.color = self.color_line;
             self.draw_seg.thickness = self.line_width as f32;
             let m = self.line_width + 2.0;
-            for i in 0..n - 1 {
-                let x0 = plot.pos.x + i as f64 * dx;
-                let x1 = x0 + dx;
-                let y0 = py(self.series[i]);
-                let y1 = py(self.series[i + 1]);
-                let top = y0.min(y1) - m;
-                let bottom = y0.max(y1) + m;
-                let r = Rect {
-                    pos: dvec2(x0 - m, top),
-                    size: dvec2(x1 - x0 + 2.0 * m, bottom - top),
-                };
-                self.draw_seg.seg_a = Vec2f {
-                    x: (x0 - r.pos.x) as f32,
-                    y: (y0 - r.pos.y) as f32,
-                };
-                self.draw_seg.seg_b = Vec2f {
-                    x: (x1 - r.pos.x) as f32,
-                    y: (y1 - r.pos.y) as f32,
-                };
-                self.draw_seg.draw_abs(cx, r);
+            for r in 0..count {
+                let values = &self.rows[r].values;
+                if values.len() < 2 {
+                    continue;
+                }
+                self.draw_seg.color = colors[r];
+                for i in 0..values.len() - 1 {
+                    let x0 = plot.pos.x + i as f64 * dx;
+                    let x1 = x0 + dx;
+                    let y0 = py(values[i]);
+                    let y1 = py(values[i + 1]);
+                    let top = y0.min(y1) - m;
+                    let bottom = y0.max(y1) + m;
+                    let quad = Rect {
+                        pos: dvec2(x0 - m, top),
+                        size: dvec2(x1 - x0 + 2.0 * m, bottom - top),
+                    };
+                    self.draw_seg.seg_a = Vec2f {
+                        x: (x0 - quad.pos.x) as f32,
+                        y: (y0 - quad.pos.y) as f32,
+                    };
+                    self.draw_seg.seg_b = Vec2f {
+                        x: (x1 - quad.pos.x) as f32,
+                        y: (y1 - quad.pos.y) as f32,
+                    };
+                    self.draw_seg.draw_abs(cx, quad);
+                }
             }
-            // last-value marker line + label
-            let last = *self.series.last().unwrap();
-            let y = py(last);
-            self.draw_grid.color = self.color_accent;
-            let mut x = plot.pos.x;
-            while x < plot.pos.x + plot.size.x {
-                self.draw_grid.draw_abs(cx, Rect {
-                    pos: dvec2(x, y),
-                    size: dvec2(4.0, 1.0),
-                });
-                x += 8.0;
+            // last-value rule and label per line: the accent when there is
+            // one line, the line's own colour when it has to say which
+            for r in 0..count {
+                let values = &self.rows[r].values;
+                if values.len() < 2 {
+                    continue;
+                }
+                let last = *values.last().unwrap();
+                let color = if several { colors[r] } else { self.color_accent };
+                let y = py(last);
+                self.draw_grid.color = color;
+                let mut x = plot.pos.x;
+                while x < plot.pos.x + plot.size.x {
+                    self.draw_grid.draw_abs(cx, Rect {
+                        pos: dvec2(x, y),
+                        size: dvec2(4.0, 1.0),
+                    });
+                    x += 8.0;
+                }
+                self.draw_text.color = color;
+                self.draw_text.draw_abs(
+                    cx,
+                    dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0),
+                    &format!("{:.2}", last),
+                );
             }
-            self.draw_text.color = self.color_accent;
-            self.draw_text.draw_abs(
-                cx,
-                dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0),
-                &format!("{:.2}", last),
-            );
+        }
+        if self.show_legend {
+            self.draw_key(cx, plot);
         }
         DrawStep::done()
     }
@@ -1911,10 +2197,225 @@ impl TrendChartRef {
         }
     }
 
+    pub fn set_rows(&self, cx: &mut Cx, rows: Vec<Row>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_rows(rows);
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
     pub fn set_candles(&self, cx: &mut Cx, candles: Vec<Candle>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_candles(candles);
             inner.draw_bg.redraw(cx);
         }
+    }
+
+    /// Pin the value axis to `min..max`. A top not above its bottom lets
+    /// the axis fit the data again.
+    pub fn pin_range(&self, cx: &mut Cx, min: f64, max: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.range_min = min;
+            inner.range_max = max;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn several_lines_share_one_axis_that_covers_them_all() {
+        let rows = vec![Row::new("cpu", &[30.0, 45.0, 40.0]), Row::new("memory", &[60.0, 62.0, 70.0, 71.0])];
+        let (lo, hi, longest) = rows_extent(&rows).unwrap();
+        // The least of one line and the greatest of the other, not the
+        // first line's own span: a second line drawn on the first line's
+        // axis would leave the frame the moment it was higher.
+        assert_eq!((lo, hi), (30.0, 71.0));
+        // The longest line sets the spacing along the bottom.
+        assert_eq!(longest, 4);
+        // And the fitted axis leaves room each side, so neither line runs
+        // along the frame.
+        let (min, max) = axis_range(lo, hi, 0.0, 0.0);
+        assert!(min < lo && max > hi);
+        assert!(close(max - min, 41.0 * (1.0 + 2.0 * AXIS_ROOM)));
+    }
+
+    #[test]
+    fn a_line_of_one_number_is_not_a_line_and_has_no_say_in_the_axis() {
+        let rows = vec![Row::new("cpu", &[30.0, 45.0]), Row::new("waiting", &[900.0])];
+        let (lo, hi, longest) = rows_extent(&rows).unwrap();
+        assert_eq!((lo, hi, longest), (30.0, 45.0, 2));
+        // And when no row has two numbers there is nothing to draw at all,
+        // which is an answer and not a division by zero.
+        assert_eq!(rows_extent(&[Row::new("waiting", &[900.0])]), None);
+        assert_eq!(rows_extent(&[]), None);
+    }
+
+    #[test]
+    fn a_pinned_axis_is_exactly_the_pin_whatever_the_data_does() {
+        // The same pin over two frames of different data is the same axis,
+        // which is the whole point of pinning: the two frames compare.
+        assert_eq!(axis_range(30.0, 45.0, 0.0, 100.0), (0.0, 100.0));
+        assert_eq!(axis_range(12.0, 240.0, 0.0, 100.0), (0.0, 100.0));
+        // No room is added round a pin. The host asked for these edges.
+        assert_eq!(axis_range(50.0, 50.0, 20.0, 80.0), (20.0, 80.0));
+        // A top not above its bottom is no pin: the axis fits the data.
+        let fitted = axis_range(30.0, 45.0, 0.0, 0.0);
+        assert_eq!(axis_range(30.0, 45.0, 100.0, 100.0), fitted);
+        assert_eq!(axis_range(30.0, 45.0, 100.0, 0.0), fitted);
+    }
+
+    #[test]
+    fn a_key_is_as_wide_as_its_names_measure_and_no_wider() {
+        let origin = dvec2(100.0, 50.0);
+        let text_h = 12.0;
+        // Three names of very different measured widths — the kind of
+        // spread a proportional face gives "cpu", "memory" and "disk io".
+        let widths = [14.0, 61.0, 33.0];
+        let key = legend_row(origin, &widths, text_h);
+        assert_eq!(key.swatches.len(), 3);
+        assert_eq!(key.names.len(), 3);
+        assert_eq!(key.panel.pos, origin);
+        // The panel is the inset, then per entry a swatch, its gap and the
+        // name's own width, with a gap between entries. Nothing in it is
+        // a count of characters.
+        let entries: f64 = widths.iter().map(|w| KEY_SWATCH + KEY_SWATCH_GAP + w).sum();
+        let expect_w = KEY_PAD * 2.0 + entries + KEY_ENTRY_GAP * 2.0;
+        assert!(close(key.panel.size.x, expect_w));
+        assert!(close(key.panel.size.y, text_h + KEY_PAD * 2.0));
+        // Each name starts where the swatch before it ends, and each entry
+        // starts where the measured name before it ended plus the gap: the
+        // second entry is 61 wide apart from the third, not 33 apart.
+        for k in 0..3 {
+            assert!(close(key.names[k].x, key.swatches[k].pos.x + KEY_SWATCH + KEY_SWATCH_GAP));
+            assert!(close(key.names[k].y, origin.y + KEY_PAD));
+        }
+        assert!(close(key.swatches[1].pos.x, key.names[0].x + widths[0] + KEY_ENTRY_GAP));
+        assert!(close(key.swatches[2].pos.x, key.names[1].x + widths[1] + KEY_ENTRY_GAP));
+        // The swatch sits in the middle of the text's box.
+        let swatch_mid = key.swatches[0].pos.y + KEY_SWATCH * 0.5;
+        assert!(close(swatch_mid, origin.y + KEY_PAD + text_h * 0.5));
+        // The last name ends one inset short of the panel's right edge.
+        let last_end = key.names[2].x + widths[2];
+        assert!(close(last_end + KEY_PAD, origin.x + key.panel.size.x));
+    }
+
+    #[test]
+    fn a_key_with_no_names_takes_no_room() {
+        let key = legend_row(dvec2(10.0, 10.0), &[], 12.0);
+        assert!(key.swatches.is_empty());
+        assert!(key.names.is_empty());
+        assert_eq!(key.panel.size, dvec2(0.0, 0.0));
+    }
+
+    /// A TrendChart as `TrendChart{}` builds one: the type default applied
+    /// through the real machinery, which is exactly what a page gets.
+    fn declared() -> (Cx, WidgetRef) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let chart = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm.bx.heap.value(widgets, LiveId::from_str("TrendChart").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!chart.is_empty(), "TrendChart built no widget");
+        (cx, chart)
+    }
+
+    /// Any widget of the library, built as a page builds it.
+    fn declared_as(cx: &mut Cx, name: &str) -> WidgetRef {
+        let widget = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!widget.is_empty(), "{name} built no widget");
+        widget
+    }
+
+    /// The tile's text is drawn in the face the rest of the library draws
+    /// in, at the tile's size. A style that only merged a size into the
+    /// raw default was left with a family of one member that named no
+    /// file: its words measured, and none of them drew.
+    #[test]
+    fn as_declared_the_text_is_in_the_library_face() {
+        let (mut cx, chart) = declared();
+        let label = declared_as(&mut cx, "Label");
+        let chart = chart.borrow::<TrendChart>().unwrap();
+        let label = label.borrow::<crate::Label>().unwrap();
+        let (tile, library) = (&chart.draw_text.text_style, &label.draw_text.text_style);
+        assert_eq!(
+            tile.font_family.member_ids().collect::<Vec<_>>(),
+            library.font_family.member_ids().collect::<Vec<_>>(),
+            "the tile's face is not the library's"
+        );
+        assert_eq!(tile.font_size, 8.0);
+    }
+
+    #[test]
+    fn a_pinned_axis_labels_its_ceiling_and_a_fitted_one_never_lands_on_its_ends() {
+        assert_eq!(axis_ticks(0.0, 100.0, 20.0), vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0]);
+        let (min, max) = axis_range(0.0, 100.0, 0.0, 0.0);
+        let ticks = axis_ticks(min, max, TrendChart::nice_step((max - min) / 5.0));
+        assert!(ticks.first().copied().unwrap() > min);
+        assert!(ticks.last().copied().unwrap() < max);
+    }
+
+    /// A flat line at a million: the axis has room in proportion to the
+    /// number, and the ticks advance and end.
+    #[test]
+    fn a_flat_series_of_large_numbers_has_an_axis_and_a_finite_number_of_ticks() {
+        let (min, max) = axis_range(1_048_576.0, 1_048_576.0, 0.0, 0.0);
+        assert!(max > min);
+        let ticks = axis_ticks(min, max, TrendChart::nice_step((max - min) / 5.0));
+        assert!(!ticks.is_empty() && ticks.len() <= MAX_TICKS);
+        assert!(ticks.windows(2).all(|w| w[1] > w[0]), "the ticks do not advance: {ticks:?}");
+        // A step below what an f64 can add to the number still ends.
+        assert!(axis_ticks(1e6, 1e6 + 2e-10, 5e-11).len() <= MAX_TICKS);
+        assert!(axis_ticks(0.0, 1.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn as_declared_the_key_is_off_the_axis_fits_and_the_lines_have_four_colours() {
+        let (_cx, chart) = declared();
+        let chart = chart.borrow::<TrendChart>().unwrap();
+        assert!(!chart.show_legend, "a legend is the placer's decision unless the tile asks");
+        assert!(chart.range_max <= chart.range_min, "no pin: the axis fits the data");
+        assert!(chart.series.is_empty() && chart.rows().is_empty(), "no line was invented");
+        // Four colours, no two alike, and the fifth line is the first's.
+        let colors: Vec<Vec4f> = (0..4).map(|i| chart.line_color(i)).collect();
+        for a in 0..4 {
+            for b in 0..a {
+                assert_ne!(colors[a], colors[b], "lines {} and {} share a colour", a, b);
+            }
+        }
+        assert_eq!(chart.line_color(0), chart.color_line, "the first line is what it always was");
+        assert_eq!(chart.line_color(4), chart.line_color(0));
+        assert_eq!(chart.line_color(5), chart.line_color(1));
+    }
+
+    #[test]
+    fn set_series_is_one_unnamed_line_and_lines_and_candles_replace_each_other() {
+        let (_cx, chart) = declared();
+        let mut chart = chart.borrow_mut::<TrendChart>().unwrap();
+        chart.set_series(&[1.0, 2.0, 3.0]);
+        assert_eq!(chart.rows(), &[Row::new("", &[1.0, 2.0, 3.0])]);
+        chart.set_rows(vec![Row::new("cpu", &[1.0, 2.0]), Row::new("memory", &[3.0, 4.0])]);
+        assert_eq!(chart.rows().len(), 2);
+        assert_eq!(chart.rows()[1].label, "memory");
+        // The chart draws lines or candles over its one axis, never both.
+        chart.set_candles(vec![Candle { time: 0.0, open: 1.0, high: 2.0, low: 0.5, close: 1.5, volume: 0.0 }]);
+        assert!(chart.rows().is_empty());
+        assert_eq!(chart.candles().len(), 1);
+        chart.set_series(&[4.0, 5.0]);
+        assert_eq!(chart.rows().len(), 1);
+        assert!(chart.candles().is_empty());
     }
 }

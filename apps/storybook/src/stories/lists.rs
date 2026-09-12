@@ -259,7 +259,7 @@ fn lists_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/lists/overview",
+    key: "data-display/lists/overview",
     category: "Data display",
     component: "Lists",
     also: &["FlatList", "ReorderList"],

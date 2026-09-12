@@ -79,7 +79,7 @@ impl Widget for StoryNewsFeed {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/portallist/overview",
+    key: "data-display/portallist/overview",
     category: "Data display",
     component: "PortalList",
     also: &[],

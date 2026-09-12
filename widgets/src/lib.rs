@@ -146,6 +146,7 @@ pub mod chart_more;
 pub mod toolbar;
 pub mod masonry;
 pub mod tile_list;
+pub mod item_grid;
 pub mod kanban;
 pub mod splitter_more;
 pub mod svg_select;
@@ -315,6 +316,7 @@ pub use crate::{
     toolbar::*,
     masonry::*,
     tile_list::*,
+    item_grid::*,
     kanban::*,
     splitter_more::*,
     svg_select::*,
@@ -606,6 +608,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::toolbar::script_mod(vm);
     crate::masonry::script_mod(vm);
     crate::tile_list::script_mod(vm);
+    crate::item_grid::script_mod(vm);
     crate::kanban::script_mod(vm);
     crate::splitter_more::script_mod(vm);
     crate::scroll_more::script_mod(vm);
