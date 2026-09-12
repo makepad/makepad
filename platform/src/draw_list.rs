@@ -1813,6 +1813,7 @@ pub struct CxDrawItems {
     // the large uniform/texture/backend payload of every preceding child.
     pub(crate) buffer: Vec<Box<CxDrawItem>>,
     used: usize,
+    bindings_used: usize,
     instance_capacity_hint: usize,
     first_instance_spare: RecordingBuffer,
     recording_budget: RecordingBudget,
@@ -2153,7 +2154,24 @@ impl CxDrawItems {
         self.instance_counters.set(None);
         self.child_inventory.clear();
         self.child_inventory_valid = true;
+        self.bindings_used = self.bindings_used.max(self.used);
         self.used = 0
+    }
+    /// Discard bindings from calls omitted by this recording. Keep their
+    /// reusable instance/backend storage, but never keep a shared framebuffer
+    /// leased through a spare slot that the renderer no longer visits.
+    pub fn finish_recording(&mut self) {
+        if self.used < self.bindings_used {
+            for item in &mut self.buffer[self.used..self.bindings_used] {
+                if let Some(call) = item.kind.draw_call_mut() {
+                    call.texture_slots = Default::default();
+                    call.uniform_buffer_slots = Default::default();
+                }
+                item.shared = None;
+            }
+        }
+        // Only newly discarded slots need cleanup on the next recording.
+        self.bindings_used = self.used;
     }
     /// Binding changes backend residency/uniform stamps, never instance
     /// dirtiness or child topology. Upload/recording mutations use IndexMut.
