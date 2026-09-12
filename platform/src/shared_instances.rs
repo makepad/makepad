@@ -121,14 +121,21 @@ struct Counters {
     /// The backend's last copy measurement, packed `bytes << 32 | copy_ns`
     /// (each saturated at u32) so a reader never sees a torn pair.
     observation: AtomicU64,
-    /// Ids whose last reference dropped while the backend still holds a
-    /// backing: appended at the drop, drained by the backend once per
-    /// frame (`Publications::drain_retired`). O(retired), never a walk.
-    retired: Mutex<Vec<u64>>,
+    /// Blocks drained by `retire_without_backing` whose release is still
+    /// refused (a submission that read them has not completed): re-asked
+    /// every poll, O(retiring), never a walk over live publications.
+    retiring: Mutex<Vec<(u64, PublishReceipt)>>,
+    /// Blocks whose last reference dropped while the backend may still hold
+    /// a backing: (id, receipt) appended at the drop, drained by the backend
+    /// once per frame (`Publications::drain_retired`). The receipt travels
+    /// with the id so a backend that never built a backing for the block can
+    /// still answer `retire_complete()` and release the charge. O(retired),
+    /// never a walk.
+    retired: Mutex<Vec<(u64, PublishReceipt)>>,
 }
 
 impl Counters {
-    fn retired(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
+    fn retired(&self) -> std::sync::MutexGuard<'_, Vec<(u64, PublishReceipt)>> {
         self.retired.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
@@ -219,7 +226,8 @@ impl Drop for Publication {
         } else {
             state.move_charge(CHARGE_CHARGED, CHARGE_PENDING);
             if state.charge.load(Ordering::Acquire) != CHARGE_RELEASED {
-                state.counters.retired().push(self.id);
+                let receipt = PublishReceipt { state: state.clone(), serials: self.serials.clone() };
+                state.counters.retired().push((self.id, receipt));
             }
         }
         state.counters.live.fetch_sub(1, Ordering::AcqRel);
@@ -607,6 +615,7 @@ impl Publications {
                 live: AtomicUsize::new(0),
                 observation: AtomicU64::new(0),
                 retired: Mutex::new(Vec::new()),
+                retiring: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -665,12 +674,32 @@ impl Publications {
         }
     }
     /// Ids of blocks whose last reference dropped since the last drain and
-    /// whose backing the backend still holds: appended to `out`. O(retired)
-    /// per call; the backend drains once per frame and calls
-    /// `retire_complete()` on each id's receipt until it answers true.
-    /// Adapter-owned blocks never appear (they have no backing here).
-    pub fn drain_retired(&self, out: &mut Vec<u64>) {
+    /// whose backing the backend may still hold: (id, receipt) appended to
+    /// `out`. O(retired) per call; the backend drains once per frame and
+    /// calls `retire_complete()` on each receipt until it answers true — a
+    /// block it never built a backing for releases at once. Adapter-owned
+    /// blocks never appear (they have no backing here).
+    pub fn drain_retired(&self, out: &mut Vec<(u64, PublishReceipt)>) {
         out.append(&mut self.counters.retired());
+    }
+    /// The per-frame retirement of a backend that keeps no per-publication
+    /// backing (it draws attached blocks through the adapter or the frame-ink
+    /// fallback): every dropped block is asked `retire_complete()` — released
+    /// at once when nothing read it or its last reader completed, re-asked
+    /// next poll otherwise — so its bytes never sit in `pending_retirement`
+    /// for ever and `publish` never refuses room that nothing holds. Returns
+    /// the blocks released. A backend with backings drains the queue itself
+    /// (`drain_retired`) and frees the backing first.
+    pub fn retire_without_backing(&self) -> usize {
+        let mut retiring = self
+            .counters
+            .retiring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        retiring.append(&mut self.counters.retired());
+        let before = retiring.len();
+        retiring.retain(|(_, receipt)| !receipt.retire_complete());
+        before - retiring.len()
     }
     /// Publish an immutable block. Validates the stride, charges the bytes
     /// against the envelope (refusing with the accounting when they do not
@@ -855,14 +884,34 @@ mod tests {
         assert_eq!(receipt.phase(), ReceiptPhase::Complete);
         let mut retired = Vec::new();
         r.drain_retired(&mut retired);
-        assert_eq!(retired, vec![id]);
+        assert_eq!(retired.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![id]);
         assert_eq!(r.accounting().pending_retirement, 16);
-        assert!(receipt.retire_complete());
+        assert!(retired[0].1.retire_complete(), "the drained receipt answers for the block");
+        assert!(receipt.retire_complete(), "and the release is idempotent");
         assert_eq!(receipt.phase(), ReceiptPhase::Released);
         assert_eq!(r.accounting().pending_retirement, 0);
         retired.clear();
         r.drain_retired(&mut retired);
         assert!(retired.is_empty(), "each drop is named once");
+    }
+
+    #[test]
+    fn a_backend_without_backings_releases_dropped_blocks_from_its_poll() {
+        let (r, serials) = registry();
+        let never_read = r.publish_ready(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let read = r.publish_ready(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let s = serials.submit();
+        read.receipt().mark_submitted(s, 1);
+        drop(never_read);
+        drop(read);
+        assert_eq!(r.accounting().pending_retirement, 32, "both dropped, both still on the books");
+        assert_eq!(r.retire_without_backing(), 1, "the never-read block goes at once");
+        assert_eq!(r.accounting().pending_retirement, 16, "the read block waits for its reader");
+        assert_eq!(r.retire_without_backing(), 0, "still reading");
+        serials.complete(s);
+        assert_eq!(r.retire_without_backing(), 1, "completed: released");
+        assert_eq!(r.accounting().pending_retirement, 0);
+        assert_eq!(r.retire_without_backing(), 0, "each drop is released once");
     }
 
     #[test]
