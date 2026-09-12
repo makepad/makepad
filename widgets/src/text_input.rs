@@ -588,6 +588,10 @@ pub struct TextInput {
     submit_on_enter: bool,
     #[live]
     scroll_bar: ScrollBar,
+    /// Space between the vertical scroll bar and the input's top, right and bottom edges,
+    /// e.g. to keep it clear of a button overlaid in a corner.
+    #[live]
+    scroll_bar_inset: Inset,
     #[live]
     scroll_y: f64,
     /// Horizontal scroll offset for single-line mode (in logical pixels).
@@ -1408,10 +1412,19 @@ impl TextInput {
         };
         let view_rect = cx.turtle().inner_rect();
         let view_total = dvec2(view_rect.size.x, laidout_text.size_in_lpxs.height as f64);
-        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar.
+        // The bar runs down the input's right edge, in its padding rather than over the text.
+        let size = cx.turtle().rect().size;
+        let inset = self.scroll_bar_inset;
+        let track = Rect {
+            pos: dvec2(0.0, inset.top),
+            size: dvec2(size.x - inset.right, size.y - inset.top - inset.bottom),
+        };
+        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar,
+        // after the new text height, so a scroll into newly added text isn't clamped away.
+        self.scroll_bar.set_scroll_view_total(cx, view_total.y);
         self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
         self.scroll_bar
-            .draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
+            .draw_scroll_bar_along(cx, ScrollAxis::Vertical, track, view_rect.size, view_total);
     }
 
     /// Moves the cursor one column to the left.
