@@ -350,12 +350,11 @@ pub struct MacosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
-    /// Per-layer CAMetalDisplayLink paint pacing on macOS 14+, with the
-    /// existing per-view CADisplayLink path as its runtime fallback: each
-    /// window's paint beat fires FROM its own panel's refresh callback
-    /// instead of an NSTimer racing it — the real frame-flip clock, per
-    /// window, per display. Empty until a window exists (or unsupported:
-    /// NSTimer pacing stays). Entries are (cocoa window, link).
+    /// Per-window CADisplayLink paint pacing: each window's paint beat fires
+    /// FROM its own panel's refresh callback instead of an NSTimer racing it
+    /// — the real frame-flip clock, per window, per display. Empty until a
+    /// window exists (or unsupported: NSTimer pacing stays). Entries are
+    /// (cocoa window, link).
     display_links: Vec<(ObjcId, ObjcId)>,
     display_links_paused: bool,
     remote_capture_deadline: Option<Instant>,
@@ -1375,11 +1374,9 @@ impl MacosApp {
         }
     }
 
-    /// Arm (or resume) display-link pacing: one link per window. On macOS 14+
-    /// CAMetalDisplayLink is built from that view's CAMetalLayer so its update
-    /// owns both the beat and drawable. Older systems take the existing
-    /// NSView.displayLink path unchanged. Returns false when neither can run,
-    /// so the caller falls back to NSTimer pacing.
+    /// Arm (or resume) display-link pacing: one CADisplayLink per window via
+    /// NSView.displayLink. Returns false when that cannot run, so the caller
+    /// falls back to NSTimer pacing.
     pub fn ensure_display_link(&mut self) -> bool {
         unsafe {
             // Prune links whose window is gone.
@@ -1397,100 +1394,45 @@ impl MacosApp {
                 if self.display_links.iter().any(|(w, _)| *w == window) {
                     continue;
                 }
-                // Runtime availability is the contract here: referring to the
-                // class by name keeps the binary loadable before macOS 14.
-                let mut is_metal_link = false;
-                let mut link = nil;
-                // Opt-in until it paces at the display's rate: measured 11 fps
-                // visible on 2026-08-25 against 62 fps on the CVDisplayLink path.
-                let metal_link_wanted = std::env::var("MAKEPAD_METAL_DISPLAY_LINK")
-                    .map(|v| v != "0")
-                    .unwrap_or(false);
-                if let Some(link_class) =
-                    Class::get("CAMetalDisplayLink").filter(|_| metal_link_wanted)
-                {
-                    let layer: ObjcId = msg_send![view, layer];
-                    if layer != nil {
-                        let allocated: ObjcId = msg_send![link_class, alloc];
-                        link = msg_send![allocated, initWithMetalLayer: layer];
-                        if link != nil {
-                            let () = msg_send![link, setDelegate: self.timer_delegate_instance];
-                            let default_range: CAFrameRateRange =
-                                msg_send![link, preferredFrameRateRange];
-                            let default_latency: isize = msg_send![link, preferredFrameLatency];
-                            let screen: ObjcId = msg_send![window, screen];
-                            let maximum_fps: isize = if screen != nil {
-                                msg_send![screen, maximumFramesPerSecond]
-                            } else {
-                                60
-                            };
-                            let requested_fps = maximum_fps.max(1) as f32;
-                            let requested_range = CAFrameRateRange {
-                                minimum: requested_fps,
-                                maximum: requested_fps,
-                                preferred: requested_fps,
-                            };
-                            // The defaults do not promise the panel maximum. Request it
-                            // explicitly, and keep two frames of render latency against
-                            // the CAMetalLayer's three-drawable pool.
-                            let () = msg_send![link, setPreferredFrameRateRange: requested_range];
-                            let () = msg_send![link, setPreferredFrameLatency: 2isize];
-                            if metal_link_frame_trace_enabled() {
-                                crate::trace!(
-                                    "frame",
-                                    "metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
-                                    default_range.minimum,
-                                    default_range.maximum,
-                                    default_range.preferred,
-                                    default_latency,
-                                    requested_fps,
-                                );
-                            }
-                            is_metal_link = true;
-                        }
-                    }
+                let responds: bool = msg_send![
+                    view,
+                    respondsToSelector: sel!(displayLinkWithTarget: selector:)
+                ];
+                if !responds {
+                    return false;
                 }
-                if link == nil {
-                    let responds: bool = msg_send![
-                        view,
-                        respondsToSelector: sel!(displayLinkWithTarget: selector:)
-                    ];
-                    if !responds {
-                        return false;
-                    }
-                    link = msg_send![
-                        view,
-                        displayLinkWithTarget: self.timer_delegate_instance
-                        selector: sel!(receivedDisplayLink:)
-                    ];
-                    // An unconstrained CADisplayLink lets the SYSTEM pick the
-                    // rate, and it adaptively throttles a "static" window to
-                    // 30Hz — measured as a hard 33.9ms lock on frames that
-                    // cost 3ms. Pin the range to the panel's maximum.
-                    if link != nil {
-                        let responds: bool =
-                            msg_send![link, respondsToSelector: sel!(setPreferredFrameRateRange:)];
-                        if responds {
-                            let screen: ObjcId = msg_send![window, screen];
-                            let maximum_fps: isize = if screen != nil {
-                                msg_send![screen, maximumFramesPerSecond]
-                            } else {
-                                60
-                            };
-                            let fps = maximum_fps.max(1) as f32;
-                            let range = CAFrameRateRange {
-                                minimum: fps,
-                                maximum: fps,
-                                preferred: fps,
-                            };
-                            let () = msg_send![link, setPreferredFrameRateRange: range];
-                            crate::log!(
-                                "macos: display link pinned to {}fps (panel maximum)",
-                                maximum_fps
-                            );
+                let link: ObjcId = msg_send![
+                    view,
+                    displayLinkWithTarget: self.timer_delegate_instance
+                    selector: sel!(receivedDisplayLink:)
+                ];
+                // An unconstrained CADisplayLink lets the SYSTEM pick the
+                // rate, and it adaptively throttles a "static" window to
+                // 30Hz — measured as a hard 33.9ms lock on frames that
+                // cost 3ms. Pin the range to the panel's maximum.
+                if link != nil {
+                    let responds: bool =
+                        msg_send![link, respondsToSelector: sel!(setPreferredFrameRateRange:)];
+                    if responds {
+                        let screen: ObjcId = msg_send![window, screen];
+                        let maximum_fps: isize = if screen != nil {
+                            msg_send![screen, maximumFramesPerSecond]
                         } else {
-                            crate::log!("macos: display link has no rate-range API");
-                        }
+                            60
+                        };
+                        let fps = maximum_fps.max(1) as f32;
+                        let range = CAFrameRateRange {
+                            minimum: fps,
+                            maximum: fps,
+                            preferred: fps,
+                        };
+                        let () = msg_send![link, setPreferredFrameRateRange: range];
+                        crate::log!(
+                            "macos: display link pinned to {}fps (panel maximum)",
+                            maximum_fps
+                        );
+                    } else {
+                        crate::log!("macos: display link has no rate-range API");
                     }
                 }
                 if link == nil {
@@ -1503,12 +1445,7 @@ impl MacosApp {
                 }
                 self.display_links.push((window, link));
                 crate::log!(
-                    "macos: paint pacing on {} (frame-flip clock), window {}",
-                    if is_metal_link {
-                        "CAMetalDisplayLink"
-                    } else {
-                        "CADisplayLink"
-                    },
+                    "macos: paint pacing on CADisplayLink (frame-flip clock), window {}",
                     self.display_links.len()
                 );
             }

@@ -235,11 +235,20 @@ impl Cx {
         }
         write_stdout_msg(&AppToStudio::AfterStartup);
 
-        while running {
-            let msg = match json_msg_rx.recv() {
+        'host: while running {
+            let first = match json_msg_rx.recv() {
                 Ok(msg) => msg,
                 Err(_) => break,
             };
+            // The whole queued backlog at once, collapsed to one Tick and
+            // the latest pointer position, so a slow frame never pays for
+            // the ticks it missed.
+            let mut batch = vec![first];
+            while let Ok(msg) = json_msg_rx.try_recv() {
+                batch.push(msg);
+            }
+            Self::stdin_coalesce_host_batch(&mut batch);
+            for msg in batch {
             match msg {
                 StudioToApp::KeyDown(e) => self.call_event_handler(&Event::KeyDown(e)),
                 StudioToApp::KeyUp(e) => self.call_event_handler(&Event::KeyUp(e)),
@@ -409,7 +418,7 @@ impl Cx {
 
                     running = self.gpusim_handle_platform_ops(&mut windows, true);
                     if !running {
-                        break;
+                        break 'host;
                     }
 
                     let time_now = self.os.stdin_timers.time_now();
@@ -432,15 +441,18 @@ impl Cx {
                     {
                         write_stdout_msg(&AppToStudio::RequestAnimationFrame);
                     }
+                    // One Tick consumed: the host sends the next one on
+                    // this, never ahead of it (run_view.rs tick pacing).
+                    write_stdout_msg(&AppToStudio::TickDone);
                 }
                 other => {
                     if self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0)) {
-                        break;
+                        break 'host;
                     }
 
                     running = self.gpusim_handle_platform_ops(&mut windows, true);
                     if !running {
-                        break;
+                        break 'host;
                     }
 
                     let time_now = self.os.stdin_timers.time_now();
@@ -464,6 +476,7 @@ impl Cx {
                         write_stdout_msg(&AppToStudio::RequestAnimationFrame);
                     }
                 }
+            }
             }
         }
     }
@@ -593,6 +606,15 @@ impl Cx {
                     target_id,
                     width,
                     height,
+                    // NOTE for the lane that added `PresentableDraw.sequence`
+                    // (uncommitted in shared_framebuf.rs and the stdin
+                    // constructors): this line was re-added by the gpusim
+                    // rename (makepad-05, 2026-09-12) after the old
+                    // os/headless/event_loop.rs was deleted from the working
+                    // tree WITHOUT saving its uncommitted edits. If you had
+                    // more than this line uncommitted there, re-apply it here
+                    // and delete this note when you commit the field.
+                    sequence: 0,
                 }));
             }
 

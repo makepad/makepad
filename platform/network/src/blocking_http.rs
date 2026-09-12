@@ -5,7 +5,7 @@
 //! non-Windows; Windows talks through synchronous WinHTTP with redirects
 //! disabled and a hard cap on raw header allocation.
 //!
-//! This slice is non-streaming (no SSE). Secrets must never appear in
+//! Responses can be collected or streamed to a writer (no SSE). Secrets must never appear in
 //! `Error` text; [`Request`] deliberately does not implement `Debug`.
 
 #[cfg(not(target_os = "windows"))]
@@ -286,9 +286,24 @@ pub fn post_json(req: Request) -> Result<Response, Error> {
 /// Execute exactly one hop. A 3xx status is returned as-is; the Location
 /// target is never contacted.
 pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
+    let mut body = Vec::new();
+    let mut response = request_to_writer_no_redirect(req, &mut body)?;
+    response.body = body;
+    Ok(response)
+}
+
+/// Execute exactly one hop, writing decoded body chunks directly to `writer`.
+/// The returned response contains status and headers; its body is empty.
+/// Limits, cancellation, timeouts and progress have the same semantics as
+/// [`request_no_redirect`]. An error may leave a partial body in the writer;
+/// callers downloading files should publish a temporary file only on success.
+pub fn request_to_writer_no_redirect(
+    req: Request,
+    writer: &mut dyn std::io::Write,
+) -> Result<Response, Error> {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = req;
+        let _ = (req, writer);
         return Err(Error::Unsupported);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -305,11 +320,11 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
             .ok_or(Error::Timeout)?;
         #[cfg(target_os = "windows")]
         {
-            winhttp_fetch(&req, &url, deadline)
+            winhttp_fetch(&req, &url, deadline, writer)
         }
         #[cfg(not(target_os = "windows"))]
         {
-            socket_fetch(&req, &url, deadline)
+            socket_fetch(&req, &url, deadline, writer)
         }
     }
 }
@@ -696,10 +711,10 @@ impl Transport {
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-fn socket_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Response, Error> {
+fn socket_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut dyn Write) -> Result<Response, Error> {
     let mut transport = connect(url, &req.cancel, deadline)?;
     write_request(&mut transport, req, url, deadline)?;
-    read_response(&mut transport, req, deadline)
+    read_response(&mut transport, req, deadline, writer)
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -1477,6 +1492,7 @@ fn read_response(
     transport: &mut Transport,
     req: &Request,
     deadline: Instant,
+    writer: &mut dyn Write,
 ) -> Result<Response, Error> {
     let mut carry = Vec::new();
     let mut informational = 0u8;
@@ -1498,19 +1514,18 @@ fn read_response(
         let raw_headers = parse_header_block(&header_block, &req.limits)?;
         let validated = validate_response_headers(raw_headers, &req.limits)?;
         let no_body = req.method.is_head() || status == 204 || status == 304;
-        let body = if no_body {
+        if no_body {
             if !prefix.is_empty() {
                 return Err(Error::InvalidResponse);
             }
-            Vec::new()
         } else if validated.chunked {
-            read_chunked(transport, prefix, req, deadline)?
+            read_chunked(transport, prefix, req, deadline, writer)?;
         } else if let Some(len) = validated.content_length {
-            read_sized(transport, prefix, len, req, deadline)?
+            read_sized(transport, prefix, len, req, deadline, writer)?;
         } else {
-            read_until_close(transport, prefix, req, deadline)?
-        };
-        return Ok(Response { status, headers: validated.headers, body });
+            read_until_close(transport, prefix, req, deadline, writer)?;
+        }
+        return Ok(Response { status, headers: validated.headers, body: Vec::new() });
     }
 }
 
@@ -1584,32 +1599,34 @@ fn read_sized(
     len: u64,
     req: &Request,
     deadline: Instant,
-) -> Result<Vec<u8>, Error> {
+    writer: &mut dyn Write,
+) -> Result<u64, Error> {
     let want = usize::try_from(len).map_err(|_| Error::ResponseTooLarge)?;
     if want > req.limits.max_body_bytes {
         return Err(Error::ResponseTooLarge);
     }
-    let mut body = Vec::with_capacity(want);
     if prefix.len() > want {
         return Err(Error::InvalidResponse);
     }
-    body.extend_from_slice(&prefix);
-    req.report_body(body.len() as u64, Some(len));
+    writer.write_all(&prefix).map_err(|_| Error::Io)?;
+    let mut received = prefix.len();
+    req.report_body(received as u64, Some(len));
     let mut tmp = [0u8; 8192];
-    while body.len() < want {
-        let take = (want - body.len()).min(tmp.len());
+    while received < want {
+        let take = (want - received).min(tmp.len());
         let n = read_watch(transport, &mut tmp[..take], &req.cancel, deadline)?;
         if n == 0 {
             return Err(Error::InvalidResponse);
         }
-        let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
+        let new_len = received.checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > req.limits.max_body_bytes {
             return Err(Error::ResponseTooLarge);
         }
-        body.extend_from_slice(&tmp[..n]);
-        req.report_body(body.len() as u64, Some(len));
+        writer.write_all(&tmp[..n]).map_err(|_| Error::Io)?;
+        received = new_len;
+        req.report_body(received as u64, Some(len));
     }
-    Ok(body)
+    Ok(received as u64)
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -1618,31 +1635,31 @@ fn read_until_close(
     prefix: Vec<u8>,
     req: &Request,
     deadline: Instant,
-) -> Result<Vec<u8>, Error> {
-    let mut body = prefix;
-    if body.len() > req.limits.max_body_bytes {
+    writer: &mut dyn Write,
+) -> Result<u64, Error> {
+    let mut received = prefix.len();
+    if received > req.limits.max_body_bytes {
         return Err(Error::ResponseTooLarge);
     }
+    writer.write_all(&prefix).map_err(|_| Error::Io)?;
     let mut tmp = [0u8; 8192];
     loop {
-        let read_len = capped_read_len(req.limits.max_body_bytes, body.len(), tmp.len());
+        let read_len = capped_read_len(req.limits.max_body_bytes, received, tmp.len());
         let n = match read_watch(transport, &mut tmp[..read_len], &req.cancel, deadline) {
             Ok(0) => break,
             Ok(n) => n,
             Err(Error::Reset) => return Err(Error::Reset),
             Err(e) => return Err(e),
         };
-        let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
+        let new_len = received.checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > req.limits.max_body_bytes {
             return Err(Error::ResponseTooLarge);
         }
-        if req.limits.max_body_bytes != usize::MAX {
-            body.reserve_exact(n);
-        }
-        body.extend_from_slice(&tmp[..n]);
-        req.report_body(body.len() as u64, None);
+        writer.write_all(&tmp[..n]).map_err(|_| Error::Io)?;
+        received = new_len;
+        req.report_body(received as u64, None);
     }
-    Ok(body)
+    Ok(received as u64)
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -1651,9 +1668,11 @@ fn read_chunked(
     prefix: Vec<u8>,
     req: &Request,
     deadline: Instant,
-) -> Result<Vec<u8>, Error> {
+    writer: &mut dyn Write,
+) -> Result<u64, Error> {
     let mut src = ChunkSrc { transport, prefix, pos: 0 };
-    let mut body = Vec::new();
+    let mut received = 0usize;
+    let mut chunk = [0u8; 8192];
     let mut trailer_bytes = 0usize;
     let mut trailer_count = 0usize;
     loop {
@@ -1683,27 +1702,30 @@ fn read_chunked(
                 return Err(Error::InvalidResponse);
             }
             expect_eof(src.transport, &req.cancel, deadline)?;
-            return Ok(body);
+            return Ok(received as u64);
         }
         if size > req.limits.max_body_bytes as u64 {
             return Err(Error::ResponseTooLarge);
         }
         let take = usize::try_from(size).map_err(|_| Error::ResponseTooLarge)?;
-        let new_len = body.len().checked_add(take).ok_or(Error::ResponseTooLarge)?;
+        let new_len = received.checked_add(take).ok_or(Error::ResponseTooLarge)?;
         if new_len > req.limits.max_body_bytes {
             return Err(Error::ResponseTooLarge);
         }
-        let mut chunk = vec![0u8; take];
-        src.read_exact(&mut chunk, &req.cancel, deadline)?;
+        let mut remaining = take;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            src.read_exact(&mut chunk[..n], &req.cancel, deadline)?;
+            writer.write_all(&chunk[..n]).map_err(|_| Error::Io)?;
+            received += n;
+            remaining -= n;
+            req.report_body(received as u64, None);
+        }
         let mut crlf = [0u8; 2];
         src.read_exact(&mut crlf, &req.cancel, deadline)?;
         if crlf != *b"\r\n" {
             return Err(Error::InvalidResponse);
         }
-        if req.limits.max_body_bytes != usize::MAX {
-            body.reserve_exact(take);
-        }
-        body.extend_from_slice(&chunk);
     }
 }
 
@@ -2113,7 +2135,7 @@ fn timeout_ms(deadline: Instant) -> Result<i32, Error> {
 }
 
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
-fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Response, Error> {
+fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut dyn std::io::Write) -> Result<Response, Error> {
     check_watch(&req.cancel, deadline)?;
     // Windows cleartext: only literal loopback IPs. No sync DNS before the
     // watchdog covers the hop — `localhost` must be spelled as 127.0.0.1/::1.
@@ -2233,35 +2255,31 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     if !no_body && content_length.is_some_and(|len| len > req.limits.max_body_bytes as u64) {
         return Err(Error::ResponseTooLarge);
     }
-    let body = if no_body {
-        Vec::new()
-    } else {
-        let body = winhttp_read_body(
+    if !no_body {
+        let received = winhttp_read_body(
             &request,
-            &req.cancel,
+            req,
             deadline,
-            req.limits.max_body_bytes,
             content_length,
-            req.body_progress.as_ref(),
+            writer,
         )?;
         if request.load().is_null() {
             return Err(fail());
         }
         if let Some(len) = content_length {
-            if body.len() as u64 != len {
+            if received != len {
                 return Err(Error::InvalidResponse);
             }
         }
         if chunked {
             winhttp_validate_trailers(&request, &req.cancel, deadline, &req.limits)?;
         }
-        body
-    };
+    }
     drop(watchdog);
     drop(request);
     drop(connect);
     drop(session);
-    Ok(Response { status, headers, body })
+    Ok(Response { status, headers, body: Vec::new() })
 }
 
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
@@ -2446,18 +2464,19 @@ fn winhttp_raw_headers(
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 fn winhttp_read_body(
     request: &SharedRequest,
-    cancel: &CancelToken,
+    req: &Request,
     deadline: Instant,
-    max_body: usize,
     total: Option<u64>,
-    progress: Option<&Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
-) -> Result<Vec<u8>, Error> {
-    let mut body = Vec::new();
+    writer: &mut dyn std::io::Write,
+) -> Result<u64, Error> {
+    let cancel = &req.cancel;
+    let max_body = req.limits.max_body_bytes;
+    let mut received = 0usize;
     let mut buf = [0u8; 8192];
     loop {
         check_watch(cancel, deadline)?;
         let mut read = 0u32;
-        let read_len = capped_read_len(max_body, body.len(), buf.len());
+        let read_len = capped_read_len(max_body, received, buf.len());
         let ok = request.invoke(cancel, deadline, |p| unsafe {
             WinHttpReadData(
                 p,
@@ -2470,23 +2489,17 @@ fn winhttp_read_body(
             return Err(request.classify(cancel, deadline));
         }
         if read == 0 {
-            if let Some(cb) = progress {
-                cb(body.len() as u64, total);
-            }
-            return Ok(body);
+            req.report_body(received as u64, total);
+            return Ok(received as u64);
         }
         let n = read as usize;
-        let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
+        let new_len = received.checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > max_body {
             return Err(Error::ResponseTooLarge);
         }
-        if max_body != usize::MAX {
-            body.reserve_exact(n);
-        }
-        body.extend_from_slice(&buf[..n]);
-        if let Some(cb) = progress {
-            cb(body.len() as u64, total);
-        }
+        writer.write_all(&buf[..n]).map_err(|_| Error::Io)?;
+        received = new_len;
+        req.report_body(received as u64, total);
     }
 }
 

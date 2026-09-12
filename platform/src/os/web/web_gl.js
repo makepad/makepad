@@ -2912,6 +2912,36 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  FromWasmPollGpuCompletion(args) {
+    const gl = this.gl;
+    let fence = null;
+    const finish = success => {
+      if (fence && !gl.isContextLost()) gl.deleteSync(fence);
+      fence = null;
+      if (this.wasm == null) return;
+      this.to_wasm.ToWasmGpuCompletion({ ...args, success });
+      this.do_wasm_pump();
+    };
+    try {
+      if (this.webgl_context_lost || gl.isContextLost()) { finish(false); return; }
+      fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (!fence) { finish(false); return; }
+      gl.flush();
+    } catch (_) { finish(false); return; }
+    const started = performance.now();
+    const poll = () => {
+      if (this.wasm == null || this.webgl_context_lost || gl.isContextLost()) { finish(false); return; }
+      let status;
+      try { status = gl.clientWaitSync(fence, 0, 0); }
+      catch (_) { finish(false); return; }
+      if (status === gl.TIMEOUT_EXPIRED) {
+        if (performance.now() - started > 10000) { finish(false); return; }
+        setTimeout(poll, 16);
+      } else { finish(status !== gl.WAIT_FAILED); }
+    };
+    poll();
+  }
+
   FromWasmRequestRenderTextureCapture(args) {
     const ticket_lo = args.ticket_lo || 0;
     const ticket_hi = args.ticket_hi || 0;

@@ -99,6 +99,7 @@ impl Cx {
                             let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
+                                sequence: 0,
                                 window_id: window_id.id(),
                                 target_id: img_id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
@@ -147,7 +148,13 @@ impl Cx {
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
-                        for msg in msgs.0 {
+                        // The whole queued backlog at once, collapsed to one
+                        // Tick and the latest pointer position, so a slow
+                        // frame never pays for the ticks it missed.
+                        let mut batch = msgs.0;
+                        let closed = self.stdin_drain_host_batches(&mut batch);
+                        Self::stdin_coalesce_host_batch(&mut batch);
+                        for msg in batch {
                             if self.stdin_handle_host_to_stdin(
                                 msg,
                                 d3d11_cx,
@@ -158,6 +165,9 @@ impl Cx {
                             }
                         }
                         self.handle_actions();
+                        if closed {
+                            break;
+                        }
                     }
                     Err(err) => {
                         crate::error!(
@@ -372,6 +382,9 @@ impl Cx {
                 {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
+                // One Tick consumed: the host sends the next one on this,
+                // never ahead of it (run_view.rs tick pacing).
+                Self::stdin_send_to_host(AppToStudio::TickDone);
             }
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.

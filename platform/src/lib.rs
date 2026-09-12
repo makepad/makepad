@@ -53,6 +53,21 @@ mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
+// Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
+// root so headless logic builds of the WM see the same types and API; only the
+// direct Vulkan backend fills it in.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/display.rs"]
+pub mod linux_display;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/input.rs"]
+pub mod linux_input;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/gpu.rs"]
+pub mod linux_gpu;
+
 #[cfg(all(not(gpusim), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;

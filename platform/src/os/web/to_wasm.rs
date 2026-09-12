@@ -738,6 +738,13 @@ pub struct ToWasmVideoPlaybackCompleted {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmGpuCompletion {
+    pub serial_lo: u32,
+    pub serial_hi: u32,
+    pub success: bool,
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmVideoPlaybackResourcesReleased {
     pub video_id_lo: u32,
     pub video_id_hi: u32,

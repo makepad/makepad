@@ -2,15 +2,14 @@ use {
     self::super::super::{gl_sys, linux_media::CxLinuxMedia, select_timer::SelectTimers},
     self::super::{
         direct_event::*,
-        egl_drm::{Drm, Egl},
         raw_input::RawInput,
+        terminal::DirectTerminal,
     },
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-        event::{Event, TimerEvent, WindowGeom},
+        event::{Event, TimerEvent, WindowGeom, WindowGeomChangeEvent},
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::*,
@@ -23,42 +22,88 @@ use {
     std::time::Instant,
 };
 
+/// Retry deadline while the source output's image or the frame fence is in
+/// flight: short enough to keep a 240 Hz source paced by its own vblank, and
+/// interrupted by input or the wake pipe like any other wait.
+#[cfg(use_vulkan)]
+const DIRECT_GPU_RETRY_SECONDS: f64 = 0.0005;
+
+#[cfg(not(use_vulkan))]
+use super::egl_drm::{Drm, Egl};
+#[cfg(not(use_vulkan))]
+use crate::draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId};
+
 pub struct DirectApp {
     timers: SelectTimers,
+    #[cfg(not(use_vulkan))]
     drm: Drm,
+    #[cfg(not(use_vulkan))]
     egl: Egl,
+    width: u32,
+    height: u32,
     raw_input: RawInput,
     dpi_factor: f64,
+    cursor: crate::cursor::MouseCursor,
+    #[cfg(use_vulkan)]
+    first_frame_submitted: bool,
+    // Dropped after the display/input resources on normal event-loop exit.
+    _terminal: Option<DirectTerminal>,
 }
 
 impl DirectApp {
-    fn new() -> Self {
-        let mut mode = "1280x720-60".to_string();
+    fn new(cx: &mut Cx) -> Self {
+        let mut mode = std::env::var("MAKEPAD_DRM_MODE").ok().filter(|v| !v.is_empty() && v != "auto");
         let mut dpi_factor = 1.0;
         for arg in std::env::args() {
-            if arg.starts_with("-mode=") {
-                mode = arg.trim_start_matches("-mode=").to_string();
+            if let Some(value) = arg.strip_prefix("-mode=").or_else(|| arg.strip_prefix("--mode=")) {
+                mode = (value != "auto").then(|| value.to_owned());
             }
-            if arg.starts_with("-scale=") {
-                dpi_factor = arg.trim_start_matches("-scale=").parse().unwrap();
+            if let Some(value) = arg.strip_prefix("-scale=") {
+                dpi_factor = value.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+                    .expect("-scale must be a positive finite number");
             }
         }
-
-        // ok so. lets do some drm devices things
-        let mut drm = unsafe { Drm::new(&mode) }.unwrap();
-        let egl = unsafe { Egl::new(&drm) }.unwrap();
-        egl.swap_buffers();
-        unsafe { drm.first_mode() };
+        let terminal = DirectTerminal::enter()
+            .unwrap_or_else(|error| panic!("Direct console initialization failed: {error}"));
+        if terminal.is_none() {
+            crate::log!("Direct display: no local VT; launch on an active text console to suspend fbcon and console input");
+        }
+        crate::log!("Direct display: Ctrl+Alt+Backspace exits the application");
+        #[cfg(not(use_vulkan))]
+        let (drm, egl, width, height) = {
+            let mut drm = unsafe { Drm::new(mode.as_deref().unwrap_or("1280x720-60")) }
+                .expect("No connected DRM output with the requested mode");
+            let egl = unsafe { Egl::new(&drm) }.expect("Failed to initialize DRM/EGL");
+            cx.os.direct_gl = Some(egl.libgl.clone());
+            egl.swap_buffers();
+            unsafe { drm.first_mode() };
+            let (width, height) = (drm.width, drm.height);
+            (drm, egl, width, height)
+        };
+        #[cfg(use_vulkan)]
+        let (width, height) = {
+            // The hotplug watcher is a long-lived worker fed by kernel uevents;
+            // it publishes connector changes over a bounded channel.
+            let vulkan = crate::os::linux::vulkan::CxVulkan::new_direct(mode.as_deref(), &cx.thread_spawner())
+                .unwrap_or_else(|error| panic!("Direct Vulkan initialization failed: {error}"));
+            let size = vulkan.size();
+            cx.os.vulkan = Some(vulkan);
+            size
+        };
         Self {
             dpi_factor,
+            cursor: Default::default(),
+            #[cfg(use_vulkan)]
+            first_frame_submitted: false,
+            width,
+            height,
+            #[cfg(not(use_vulkan))]
             egl,
-            raw_input: RawInput::new(
-                drm.width as f64 / dpi_factor,
-                drm.height as f64 / dpi_factor,
-                dpi_factor,
-            ),
+            #[cfg(not(use_vulkan))]
             drm,
+            raw_input: RawInput::new(width as f64 / dpi_factor, height as f64 / dpi_factor, dpi_factor),
             timers: SelectTimers::new(),
+            _terminal: terminal,
         }
     }
 }
@@ -69,44 +114,90 @@ impl Cx {
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
         let mut cx = cx.borrow_mut();
+
+        #[cfg(use_vulkan)]
+        if crate::app_main::should_run_stdin_loop_from_env() {
+            cx.in_makepad_studio = true;
+            // The WM owns the display and its cursor. Hosted children use
+            // ordinary windows even when their binary includes direct output.
+            cx.os_type = OsType::LinuxWindow(crate::cx::LinuxWindowParams {
+                custom_window_chrome: false,
+            });
+            cx.os.vulkan = Some(crate::os::linux::vulkan::CxVulkan::new_offscreen()
+                .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}")));
+            cx.stdin_event_loop();
+            drop(cx.os.vulkan.take());
+            cx.self_ref = None;
+            return;
+        }
 
         cx.os_type = OsType::LinuxDirect;
         cx.gpu_info.performance = GpuPerformance::Tier1;
         cx.set_physical_keyboard_state(true);
 
+        let mut direct_app = DirectApp::new(&mut cx);
+
         cx.call_event_handler(&Event::Startup);
         cx.redraw_all();
 
-        let mut direct_app = DirectApp::new();
         direct_app.timers.start_timer(0, 0.008, true);
         // lets run the kms eventloop
         let mut event_flow = EventFlow::Poll;
         let mut timer_ids = Vec::new();
 
-        while event_flow != EventFlow::Exit {
+        'event_loop: while event_flow != EventFlow::Exit {
             if event_flow == EventFlow::Wait {
-                //    kms_app.timers.select(signal_fds[0]);
+                direct_app.timers.select_fds(direct_app.raw_input.fds());
+            } else {
+                // A source whose image or frame fence is still in flight is
+                // retried on a short deadline that input and the wake pipe
+                // interrupt, instead of spinning a core until the vblank.
+                #[cfg(use_vulkan)]
+                {
+                    if cx.direct_gpu_busy() {
+                        direct_app
+                            .timers
+                            .select_fds_capped(direct_app.raw_input.fds(), Some(DIRECT_GPU_RETRY_SECONDS));
+                    }
+                }
+            }
+            // The wake pipe signals completed worker/hosted-app work. Drain
+            // it on wake, before paint, rather than delaying child frames
+            // until the 8 ms maintenance timer (which would cap them at 125 Hz).
+            if SignalToUI::check_and_clear_ui_signal() {
+                cx.handle_termination_signal();
+                cx.handle_media_signals();
+                cx.handle_script_signals();
+                cx.call_event_handler(&Event::Signal);
+            }
+            if SignalToUI::check_and_clear_action_signal() {
+                cx.handle_action_receiver();
             }
             direct_app.timers.update_timers(&mut timer_ids);
             let time = direct_app.timers.time_now();
             for timer_id in &timer_ids {
-                cx.direct_event_callback(
+                if let EventFlow::Exit = cx.direct_event_callback(
                     &mut direct_app,
-                    DirectEvent::Timer(TimerEvent {
-                        timer_id: *timer_id,
-                        time: Some(time),
-                    }),
-                );
+                    DirectEvent::Timer(TimerEvent { timer_id: *timer_id, time: Some(time) }),
+                ) {
+                    break 'event_loop;
+                }
             }
             let input_events = direct_app
                 .raw_input
                 .poll_raw_input(direct_app.timers.time_now(), CxWindowPool::id_zero());
             for event in input_events {
-                cx.direct_event_callback(&mut direct_app, event);
+                if let EventFlow::Exit = cx.direct_event_callback(&mut direct_app, event) {
+                    break 'event_loop;
+                }
             }
             event_flow = cx.direct_event_callback(&mut direct_app, DirectEvent::Paint);
         }
+        #[cfg(use_vulkan)]
+        drop(cx.os.vulkan.take());
+        cx.self_ref = None;
     }
 
     fn direct_event_callback(
@@ -124,18 +215,45 @@ impl Cx {
             DirectEvent::Paint => {
                 //let p = profile_start();
                 let time_now = direct_app.timers.time_now();
-                if self.new_next_frames.len() != 0 {
+                #[cfg(use_vulkan)]
+                self.linux_poll_gpu_transition();
+                // Displays first: hotplug/source changes may resize the desktop
+                // before this tick's draw, and clones that were busy take the
+                // retained frame without a UI redraw.
+                #[cfg(use_vulkan)]
+                self.direct_reconcile_displays(direct_app);
+                // While the previous frame is still waiting for the GPU or for
+                // an output, do not advance animations, rebuild draw lists, or
+                // re-encode the Gauss pass chain: the drawn frame is retained
+                // and retried as is. Output maintenance, timers and input stay
+                // alive. NoOutput still paints when a capture is requested.
+                #[cfg(use_vulkan)]
+                let may_paint = {
+                    let wait = self.direct_wait_reason();
+                    wait == crate::os::linux::vulkan::DirectWait::Ready
+                        || (wait == crate::os::linux::vulkan::DirectWait::NoOutput
+                            && (!self.screenshot_requests.is_empty()
+                                || crate::screen_capture::screen_capture_active()))
+                };
+                #[cfg(not(use_vulkan))]
+                let may_paint = true;
+                if may_paint && self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
                 }
-                if self.need_redrawing() {
+                if may_paint && self.need_redrawing() {
                     self.call_draw_event(time_now);
-                    direct_app.egl.make_current();
-                    self.opengl_compile_shaders();
+                    #[cfg(not(use_vulkan))]
+                    {
+                        direct_app.egl.make_current();
+                        self.opengl_compile_shaders();
+                    }
                 }
                 // ok here we send out to all our childprocesses
                 //profile_end("paint event handling", p);
                 //let p = profile_start();
-                self.handle_repaint(direct_app);
+                if may_paint {
+                    self.handle_repaint(direct_app);
+                }
                 //profile_end("paint openGL", p);
 
                 // Run script-VM garbage collection at a safe point after paint, matching
@@ -170,6 +288,10 @@ impl Cx {
                 self.call_event_handler(&Event::Scroll(e.into()))
             }
             DirectEvent::KeyDown(e) => {
+                if e.key_code == crate::event::KeyCode::Backspace && e.modifiers.control && e.modifiers.alt {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
             }
@@ -180,16 +302,8 @@ impl Cx {
             DirectEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             DirectEvent::Timer(e) => {
                 if e.timer_id == 0 {
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_termination_signal();
-                        self.handle_media_signals();
-                        self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        self.handle_action_receiver();
-                    }
                     self.poll_control_channel();
+                    self.handle_actions();
                     self.handle_networking_events();
                 } else {
                     self.handle_script_timer(&e);
@@ -199,13 +313,98 @@ impl Cx {
                 self.run_live_edit_if_needed("linux-direct");
             }
         }
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
+        #[cfg(use_vulkan)]
+        {
+            match self.direct_wait_reason() {
+                // Nothing can show a frame: keep the dirty pass for the
+                // reconnect and sleep normally (timers and input still wake
+                // the loop).
+                crate::os::linux::vulkan::DirectWait::NoOutput => return EventFlow::Wait,
+                // The loop applies the short capped select for this case.
+                crate::os::linux::vulkan::DirectWait::GpuBusy => return EventFlow::Poll,
+                crate::os::linux::vulkan::DirectWait::Ready => {}
+            }
+        }
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0
+            || self.demo_time_repaint || !self.screenshot_requests.is_empty() {
             EventFlow::Poll
         } else {
             EventFlow::Wait
         }
     }
 
+    #[cfg(use_vulkan)]
+    fn direct_wait_reason(&self) -> crate::os::linux::vulkan::DirectWait {
+        self.os
+            .vulkan
+            .as_ref()
+            .map(|vulkan| vulkan.direct_wait_reason())
+            .unwrap_or(crate::os::linux::vulkan::DirectWait::Ready)
+    }
+
+    #[cfg(use_vulkan)]
+    fn direct_gpu_busy(&self) -> bool {
+        self.direct_wait_reason() == crate::os::linux::vulkan::DirectWait::GpuBusy
+    }
+
+    /// Paint-time display maintenance: apply hotplug and render-source
+    /// changes at this safe GPU boundary, then let outputs that were busy
+    /// present the retained composition. Output failures never panic; they
+    /// are reported through the display snapshot.
+    #[cfg(use_vulkan)]
+    fn direct_reconcile_displays(&mut self, direct_app: &mut DirectApp) {
+        let Some(mut vulkan) = self.os.vulkan.take() else {
+            return;
+        };
+        let reconciled = vulkan.direct_reconcile_outputs();
+        let presented = vulkan.direct_present_retained();
+        self.os.vulkan = Some(vulkan);
+        match reconciled {
+            Ok(Some(extent)) => self.direct_apply_desktop_extent(direct_app, extent.width, extent.height),
+            Ok(None) => {}
+            Err(error) => crate::error!("Direct Vulkan: display reconcile failed: {error}"),
+        }
+        if let Err(error) = presented {
+            crate::error!("Direct Vulkan: output presentation failed: {error}");
+        }
+    }
+
+    /// The render source changed its native size: the logical desktop is that
+    /// size divided by the effective DPI. The main window gets the ordinary
+    /// geometry event (children relayout from it), raw input keeps its native
+    /// base DPI so the existing override remap stays correct.
+    #[cfg(use_vulkan)]
+    fn direct_apply_desktop_extent(&mut self, direct_app: &mut DirectApp, width: u32, height: u32) {
+        if direct_app.width == width && direct_app.height == height {
+            return;
+        }
+        direct_app.width = width;
+        direct_app.height = height;
+        direct_app.raw_input.set_bounds(
+            width as f64 / direct_app.dpi_factor,
+            height as f64 / direct_app.dpi_factor,
+            direct_app.dpi_factor,
+        );
+        let window_id = CxWindowPool::id_zero();
+        if self.windows.is_valid(window_id) && self.windows[window_id].is_created {
+            let window = &mut self.windows[window_id];
+            let dpi_factor = window.effective_dpi_factor();
+            let old_geom = window.window_geom.clone();
+            let size = dvec2(width as f64 / dpi_factor, height as f64 / dpi_factor);
+            window.window_geom.inner_size = size;
+            window.window_geom.outer_size = size;
+            let new_geom = window.window_geom.clone();
+            self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                window_id,
+                old_geom,
+                new_geom,
+            }));
+        }
+        self.redraw_all();
+        crate::log!("Direct display: desktop is now {width}x{height} native pixels");
+    }
+
+    #[cfg(not(use_vulkan))]
     pub fn draw_pass_to_fullscreen(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -219,12 +418,13 @@ impl Cx {
         //self.passes[draw_pass_id].paint_dirty = false;
 
         unsafe {
+            let gl = self.os.gl();
             direct_app.egl.make_current();
             (gl.glViewport)(
                 0,
                 0,
-                direct_app.drm.width as i32,
-                direct_app.drm.height as i32,
+                direct_app.width as i32,
+                direct_app.height as i32,
             );
         }
 
@@ -243,13 +443,14 @@ impl Cx {
 
         if !self.passes[draw_pass_id].dont_clear {
             unsafe {
+                let gl = self.os.gl();
                 (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
                 (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
-        Self::set_default_depth_and_blend_mode();
+        Self::set_default_depth_and_blend_mode(self.os.gl());
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
@@ -262,6 +463,8 @@ impl Cx {
     }
 
     pub(crate) fn handle_repaint(&mut self, direct_app: &mut DirectApp) {
+        #[cfg(use_vulkan)]
+        if self.os.vulkan.as_ref().is_some_and(|gpu| gpu.gpu_transition_pending()) { return; }
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -273,13 +476,48 @@ impl Cx {
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(_window_id) => {
+                    #[cfg(not(use_vulkan))]
                     self.draw_pass_to_fullscreen(*draw_pass_id, direct_app);
+                    #[cfg(use_vulkan)]
+                    {
+                        let mut vulkan = self.os.vulkan.take().expect("Vulkan renderer initialized");
+                        let result = vulkan.draw_pass_and_present(self, *draw_pass_id);
+                        self.os.vulkan = Some(vulkan);
+                        match result {
+                            Ok(true) if !direct_app.first_frame_submitted => {
+                                direct_app.first_frame_submitted = true;
+                                crate::log!("Direct Vulkan: first frame submitted after {:.3}s", self.seconds_since_app_start());
+                            }
+                            Ok(_) => {}
+                            Err(error) => panic!("Direct Vulkan rendering failed: {error}"),
+                        }
+                    }
                 }
                 CxDrawPassParent::DrawPass(_) => {
-                    self.draw_pass_to_magic_texture(*draw_pass_id);
+                    #[cfg(not(use_vulkan))]
+                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    #[cfg(use_vulkan)]
+                    {
+                        let mut vulkan = self.os.vulkan.take().expect("Vulkan renderer initialized");
+                        let result = vulkan.draw_pass_to_texture(self, *draw_pass_id);
+                        self.os.vulkan = Some(vulkan);
+                        if let Err(error) = result {
+                            panic!("Direct Vulkan offscreen rendering failed: {error}");
+                        }
+                    }
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass_to_magic_texture(*draw_pass_id);
+                    #[cfg(not(use_vulkan))]
+                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    #[cfg(use_vulkan)]
+                    {
+                        let mut vulkan = self.os.vulkan.take().expect("Vulkan renderer initialized");
+                        let result = vulkan.draw_pass_to_texture(self, *draw_pass_id);
+                        self.os.vulkan = Some(vulkan);
+                        if let Err(error) = result {
+                            panic!("Direct Vulkan offscreen rendering failed: {error}");
+                        }
+                    }
                 }
             }
         }
@@ -297,8 +535,8 @@ impl Cx {
                     // field and re-emits the geom directly.
                     let dpi_factor = window.dpi_override.unwrap_or(direct_app.dpi_factor);
                     let size = dvec2(
-                        direct_app.drm.width as f64 / dpi_factor,
-                        direct_app.drm.height as f64 / dpi_factor,
+                        direct_app.width as f64 / dpi_factor,
+                        direct_app.height as f64 / dpi_factor,
                     );
                     window.window_geom = WindowGeom {
                         dpi_factor,
@@ -351,6 +589,19 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     direct_app.timers.stop_timer(timer_id);
                 }
+                CxOsOp::ShowTextIME(..) | CxOsOp::HideTextIME => {
+                    // This console uses raw keyboard TextInput events; it has
+                    // no separate native IME window to position or dismiss.
+                }
+                CxOsOp::SetCursor(cursor) => {
+                    // Apply the final cursor request after event dispatch.
+                    // Ancestor hover handlers can request Default before a
+                    // child requests Text; that must not relayout every move.
+                    if direct_app.cursor != cursor {
+                        direct_app.cursor = cursor;
+                        self.redraw_all();
+                    }
+                }
                 CxOsOp::HttpRequest {
                     request_id,
                     request,
@@ -359,6 +610,13 @@ impl Cx {
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
                     let _ = self.net.http_cancel(request_id);
+                }
+                CxOsOp::CloseWindow(window_id) => {
+                    self.windows[window_id].is_created = false;
+                    self.call_event_handler(&Event::WindowClosed(crate::WindowClosedEvent { window_id }));
+                    if window_id == CxWindowPool::id_zero() {
+                        return EventFlow::Exit;
+                    }
                 }
                 CxOsOp::Quit => {
                     return EventFlow::Exit;
@@ -434,7 +692,25 @@ impl CxOsApi for Cx {
 
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
+    #[cfg(use_vulkan)]
+    pub(crate) stdin_timers: crate::os::shared_framebuf::PollTimers,
     pub(crate) start_time: Instant,
+    pub opengl_cx: Option<super::super::opengl_cx::OpenglCx>,
+    pub(crate) gstreamer: Option<super::super::gstreamer_sys::LibGStreamer>,
+    #[cfg(not(use_vulkan))]
+    direct_gl: Option<Rc<gl_sys::LibGl>>,
+    #[cfg(use_vulkan)]
+    pub(crate) vulkan: Option<super::super::vulkan::CxVulkan>,
+    #[cfg(use_vulkan)]
+    pub(crate) gpu_inbox: Option<super::super::hosted_gpu::GpuInbox>,
+    #[cfg(use_vulkan)]
+    pub(crate) gpu_participants: Vec<crate::window::WindowId>,
+    #[cfg(use_vulkan)]
+    pub(crate) gpu_reported: Option<(u64, crate::linux_gpu::LinuxGpuPhase)>,
+    #[cfg(use_vulkan)]
+    pub(crate) gpu_callbacks_paused: bool,
+    #[cfg(use_vulkan)]
+    pub(crate) gpu_control_net: Option<std::sync::Arc<crate::makepad_network::NetworkRuntime>>,
 }
 
 impl Default for CxOs {
@@ -442,6 +718,33 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             media: Default::default(),
+            #[cfg(use_vulkan)]
+            stdin_timers: Default::default(),
+            opengl_cx: None,
+            gstreamer: None,
+            #[cfg(not(use_vulkan))]
+            direct_gl: None,
+            #[cfg(use_vulkan)]
+            vulkan: None,
+            #[cfg(use_vulkan)]
+            gpu_inbox: None,
+            #[cfg(use_vulkan)]
+            gpu_participants: Vec::new(),
+            #[cfg(use_vulkan)]
+            gpu_reported: None,
+            #[cfg(use_vulkan)]
+            gpu_callbacks_paused: false,
+            #[cfg(use_vulkan)]
+            gpu_control_net: None,
         }
+    }
+}
+
+impl CxOs {
+    pub(crate) fn gl(&self) -> &gl_sys::LibGl {
+        #[cfg(not(use_vulkan))]
+        { self.direct_gl.as_deref().expect("DRM/EGL context is not initialized") }
+        #[cfg(use_vulkan)]
+        { panic!("OpenGL is unavailable in the direct Vulkan renderer") }
     }
 }
