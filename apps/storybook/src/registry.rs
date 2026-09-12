@@ -142,6 +142,16 @@ mod tests {
                 "{} is not category/component/name",
                 story.key
             );
+            // A key travels in a URL and a route: every segment is a slug,
+            // words joined by dashes, so `data display` is not one.
+            for segment in story.key.split('/') {
+                assert!(
+                    !segment.is_empty()
+                        && segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "{} has a segment that is not a slug: {segment:?}",
+                    story.key
+                );
+            }
         }
     }
 

@@ -191,7 +191,7 @@ fn item_grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/itemgrid/overview",
+    key: "data-display/itemgrid/overview",
     category: "Data display",
     component: "ItemGrid",
     also: &[],
