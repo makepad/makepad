@@ -6696,7 +6696,7 @@ const LANE_CHIPS: [(&[LiveId], GridLane, &str); 6] = [
 /// it is: a knob reads its number as its binding says, a wheel is a
 /// knob whose turns are jogs, and a button carries the press that is
 /// its own until a binding says otherwise.
-const LEARNABLES: [(&[LiveId], &str, Learnable); 24] = [
+const LEARNABLES: [(&[LiveId], &str, Learnable); 25] = [
     (ids!(video_fade_learn), "video_fade", Learnable::Knob),
     (ids!(xfader_learn), "xfader", Learnable::Knob),
     (ids!(master_learn), "master", Learnable::Knob),
@@ -6721,6 +6721,7 @@ const LEARNABLES: [(&[LiveId], &str, Learnable); 24] = [
     (ids!(fx_slot_b_d2_learn), "fx_b_d2", Learnable::Knob),
     (ids!(fadeout_learn), "fadeout", Learnable::Knob),
     (ids!(wave_zoom_learn), "wave_zoom", Learnable::Knob),
+    (ids!(wave_gain_learn), "wave_gain", Learnable::Knob),
 ];
 
 /// Which of a learned control's values a turn moves from. One row per
@@ -6730,6 +6731,7 @@ const LEARNABLES: [(&[LiveId], &str, Learnable); 24] = [
 enum ReadSide {
     VideoFade,
     WaveZoom,
+    WaveGain,
     ProgramMix,
     Fadeout,
     Master,
@@ -6765,6 +6767,7 @@ fn read_side(control: &str) -> Option<ReadSide> {
         "xfader" => ReadSide::ProgramMix,
         "fadeout" => ReadSide::Fadeout,
         "wave_zoom" => ReadSide::WaveZoom,
+        "wave_gain" => ReadSide::WaveGain,
         "master" => ReadSide::Master,
         "autofade" | "deck_a_play" | "deck_b_play" | "deck_a_rev" | "deck_b_rev" => ReadSide::Button,
         "deck_a_wheel" | "deck_b_wheel" => ReadSide::Wheel,
@@ -8996,6 +8999,20 @@ fn unit_to_zoom(unit: f64) -> f64 {
         .clamp(crate::music_view::ZOOM_MIN_SECS, crate::music_view::ZOOM_MAX_SECS)
 }
 
+/// The wave's visual gain as a knob reads it, 0 to 1 over the range the
+/// operator can ask for. Its own unit is a multiplier on the drawn
+/// envelope, which is what the chip shows and what is written down.
+fn gain_to_unit(gain: f64) -> f64 {
+    let span = crate::music_view::WAVE_GAIN_MAX - crate::music_view::WAVE_GAIN_MIN;
+    ((gain - crate::music_view::WAVE_GAIN_MIN) / span).clamp(0.0, 1.0)
+}
+
+fn unit_to_gain(unit: f64) -> f64 {
+    let span = crate::music_view::WAVE_GAIN_MAX - crate::music_view::WAVE_GAIN_MIN;
+    (crate::music_view::WAVE_GAIN_MIN + unit.clamp(0.0, 1.0) * span)
+        .clamp(crate::music_view::WAVE_GAIN_MIN, crate::music_view::WAVE_GAIN_MAX)
+}
+
 /// How far one press walks the grid, and how far it walks with shift
 /// held. Five milliseconds is about the smallest step that can be heard
 /// against a kick; twenty-five is a nudge for a grid that is plainly out.
@@ -11011,6 +11028,11 @@ pub struct App {
     /// the playhead.
     #[rust(crate::music_view::ZOOM_DEFAULT_SECS)]
     wave_zoom_secs: f64,
+    /// How tall the drawn wave stands, as a multiplier. Seeded with the
+    /// picture's own default for the same reason as the zoom beside it: a
+    /// zero here would flatten every lane on a fresh install.
+    #[rust(crate::music_view::WAVE_GAIN_DEFAULT)]
+    wave_gain: f64,
     /// Where the playhead sits across the zoomed lane, 0..1. Set once at
     /// startup from the settings file -- a preference decided once, not a
     /// live gesture like zoom.
@@ -12763,6 +12785,7 @@ impl App {
             // The lane's zoom is seconds across its width, read back over
             // the range the operator can actually ask for.
             Some(ReadSide::WaveZoom) => zoom_to_unit(self.wave_zoom_secs) as f32,
+            Some(ReadSide::WaveGain) => gain_to_unit(self.wave_gain) as f32,
             // The mixer's master is a command with no cell to read back;
             // the on-screen slider is written by every route that sets it.
             Some(ReadSide::Master) => {
@@ -12819,6 +12842,9 @@ impl App {
             }
             "wave_zoom" => {
                 self.set_wave_zoom(cx, unit_to_zoom(v as f64));
+            }
+            "wave_gain" => {
+                self.set_wave_gain(cx, unit_to_gain(v as f64));
             }
             "autofade" => {
                 // A press does what the binding says to the AUTOFADE latch;
@@ -18850,6 +18876,7 @@ p2 {}
         // move; the setter refuses a value it is already showing, and a
         // chip being dragged refuses one altogether.
         self.set_drop_slider(cx, ids!(wave_zoom_knob), self.wave_zoom_secs);
+        self.set_drop_slider(cx, ids!(wave_gain_knob), self.wave_gain);
         for (deck, gain_id, pitch_id) in [
             (DeckId::A, ids!(deck_a_gain), ids!(deck_a_pitch)),
             (DeckId::B, ids!(deck_b_gain), ids!(deck_b_pitch)),
@@ -19219,6 +19246,26 @@ p2 {}
             scroll.set_zoom(cx, secs);
         }
         self.set_drop_slider(cx, ids!(wave_zoom_knob), secs);
+        self.save_preprocess_settings();
+    }
+
+    /// How tall the drawn wave stands, on both surfaces at once. Nothing
+    /// audible moves: this is the picture's own gain, and the only reason
+    /// it is not a preference set once is that which record is on is what
+    /// decides whether it wants turning up.
+    fn set_wave_gain(&mut self, cx: &mut Cx, gain: f64) {
+        let gain = gain.clamp(
+            crate::music_view::WAVE_GAIN_MIN,
+            crate::music_view::WAVE_GAIN_MAX,
+        );
+        if (gain - self.wave_gain).abs() < 1e-9 {
+            return;
+        }
+        self.wave_gain = gain;
+        if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
+            scroll.set_wave_gain(cx, gain);
+        }
+        self.set_drop_slider(cx, ids!(wave_gain_knob), gain);
         self.save_preprocess_settings();
     }
 
@@ -25086,12 +25133,13 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\nwave_head {}\nwave_warn {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\nwave_zoom {}\nwave_gain {}\nwave_head {}\nwave_warn {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
             self.key_notation.index(),
             self.wave_zoom_secs,
+            self.wave_gain,
             self.wave_head_fraction,
             self.wave_warn_secs,
             self.console.to_text(),
@@ -25127,6 +25175,16 @@ p2 {}
                             .clamp(
                                 crate::music_view::ZOOM_MIN_SECS,
                                 crate::music_view::ZOOM_MAX_SECS,
+                            )
+                    }
+                    "wave_gain" => {
+                        self.wave_gain = value
+                            .trim()
+                            .parse()
+                            .unwrap_or(crate::music_view::WAVE_GAIN_DEFAULT)
+                            .clamp(
+                                crate::music_view::WAVE_GAIN_MIN,
+                                crate::music_view::WAVE_GAIN_MAX,
                             )
                     }
                     "wave_head" => {
@@ -29593,6 +29651,7 @@ p2 {}
                 if !self.wave_zoom_applied {
                     self.wave_zoom_applied = true;
                     scroll.set_zoom(cx, self.wave_zoom_secs);
+                    scroll.set_wave_gain(cx, self.wave_gain);
                     scroll.set_head_fraction(cx, self.wave_head_fraction);
                     scroll.set_warn_secs(cx, self.wave_warn_secs);
                 }
@@ -29620,6 +29679,7 @@ p2 {}
                 strip.set_sound(cx, sound);
                 strip.set_shape(cx, shape);
                 strip.set_snap_grid(cx, grid, self.decks.snap_beats(deck));
+                strip.set_wave_gain(cx, self.wave_gain);
             };
             self.music_refs.decks[index] = refs;
         }
@@ -35753,6 +35813,9 @@ impl MatchEvent for App {
         if let Some(v) = self.drop_slider_changed(cx, ids!(wave_zoom_knob), actions) {
             self.set_wave_zoom(cx, v);
         }
+        if let Some(v) = self.drop_slider_changed(cx, ids!(wave_gain_knob), actions) {
+            self.set_wave_gain(cx, v);
+        }
         if let Some(v) = self.ui.slider(cx, ids!(video_fade)).slided(actions) {
             self.fade_secs = v as f32;
             self.ui
@@ -38312,6 +38375,33 @@ mod sync_tests {
     /// same number in two units, and the conversion has to survive the
     /// round trip or a mapped knob would walk the value every time it was
     /// read back and written again.
+    /// The wave's visual gain answers to a knob the same way the zoom
+    /// beside it does, and out of range it stays in range: the settings
+    /// file is the operator's to edit by hand, and a controller can send
+    /// anything at all.
+    #[test]
+    fn the_waves_visual_gain_reads_back_as_the_knob_position_that_set_it() {
+        use crate::music_view::{WAVE_GAIN_DEFAULT, WAVE_GAIN_MAX, WAVE_GAIN_MIN};
+        assert!((unit_to_gain(0.0) - WAVE_GAIN_MIN).abs() < 1e-12, "the flattest");
+        assert!((unit_to_gain(1.0) - WAVE_GAIN_MAX).abs() < 1e-12, "and the tallest");
+        assert!((gain_to_unit(WAVE_GAIN_MIN) - 0.0).abs() < 1e-12);
+        assert!((gain_to_unit(WAVE_GAIN_MAX) - 1.0).abs() < 1e-12);
+        for unit in [0.0, 0.13, 0.5, 0.764, 1.0] {
+            let back = gain_to_unit(unit_to_gain(unit));
+            assert!((back - unit).abs() < 1e-12, "{unit} came back as {back}");
+        }
+        // Out of range at either end, from either side.
+        assert!((unit_to_gain(-4.0) - WAVE_GAIN_MIN).abs() < 1e-12);
+        assert!((unit_to_gain(9.0) - WAVE_GAIN_MAX).abs() < 1e-12);
+        assert!((gain_to_unit(-1.0) - 0.0).abs() < 1e-12);
+        assert!((gain_to_unit(99.0) - 1.0).abs() < 1e-12);
+        // The picture as it has always been drawn is a position on the
+        // knob like any other, and it is not an end of the range.
+        let unit = gain_to_unit(WAVE_GAIN_DEFAULT);
+        assert!(unit > 0.0 && unit < 1.0, "{unit}");
+        assert!((unit_to_gain(unit) - WAVE_GAIN_DEFAULT).abs() < 1e-12);
+    }
+
     #[test]
     fn the_lanes_zoom_reads_back_as_the_knob_position_that_set_it() {
         use crate::music_view::{ZOOM_DEFAULT_SECS, ZOOM_MAX_SECS, ZOOM_MIN_SECS};

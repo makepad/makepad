@@ -168,6 +168,17 @@ fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
     lane.draw_vars.set_uniform(cx, live_id!(warn), &[warn.clamp(0.0, 1.0)]);
 }
 
+/// The eye's gain on the drawn envelope, pushed every draw by both
+/// surfaces. Clamped here as well as at every way in: this is the last
+/// place before the GPU, and the shader has no range of its own.
+fn set_wave_gain_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, gain: f32) {
+    lane.draw_vars.set_uniform(
+        cx,
+        live_id!(wave_gain),
+        &[gain.clamp(WAVE_GAIN_MIN as f32, WAVE_GAIN_MAX as f32)],
+    );
+}
+
 fn set_head_fraction_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, fraction: f32) {
     lane.draw_vars.set_uniform(cx, live_id!(head_fraction), &[fraction]);
 }
@@ -390,6 +401,19 @@ pub const WARN_SECS_MAX: f64 = 90.0;
 pub const WARN_SECS_DEFAULT: f64 = 30.0;
 
 /// Zoom limits, seconds of audio across the full lane width.
+/// What the drawn envelope's amplitude may be scaled by, and where it
+/// sits when nobody has asked.
+///
+/// A record mastered quiet draws as a flat line beside one mastered loud,
+/// which says nothing true about either: the level channel was normalised
+/// against the track's own loudest column, so a track with one loud bar
+/// and a quiet body draws the body flat. This is the EYE's gain on the
+/// picture. It touches no sound, and the default is the picture as it has
+/// always been drawn.
+pub const WAVE_GAIN_MIN: f64 = 0.5;
+pub const WAVE_GAIN_MAX: f64 = 4.0;
+pub const WAVE_GAIN_DEFAULT: f64 = 1.0;
+
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
@@ -681,6 +705,10 @@ script_mod! {
         // is one more per-instance attribute and no waveform at all on
         // Windows. It varies per LANE rather than per instance, and each
         // lane is its own draw, so a uniform carries it honestly.
+        // The eye's gain on the envelope. 1.0 is the picture as it was
+        // always drawn, which is what every surface that never sets it
+        // goes on getting.
+        wave_gain: uniform(1.0)
         warn: uniform(0.0)
         color_warn: uniform(#xff3b30)
         // A loop drag's would-be landing, same encoding as `loop_span`.
@@ -823,11 +851,17 @@ script_mod! {
             let t = self.tile_span(column)
             // THE HEIGHT OF A COLUMN IS HOW LOUD THE TRACK IS THERE. The
             // level channel was normalized once, against the whole track,
-            // when the tiles were built; nothing here may raise it. A quiet
-            // intro draws short and a drop draws tall, in the grey region
-            // and in the separated one alike, so the seam between them is
-            // invisible in height and only the colouring changes.
-            let level = clamp(t.w, 0.0, 1.0) * 0.78
+            // when the tiles were built. A quiet intro draws short and a
+            // drop draws tall, in the grey region and in the separated one
+            // alike, so the seam between them is invisible in height and
+            // only the colouring changes.
+            //
+            // One hand may raise it and it is the operator's: the visual
+            // gain is the EYE's and not the mix's, it moves nothing that
+            // can be heard, and it is clamped before the envelope so a
+            // lifted column saturates flat at the half-lane rather than
+            // drawing outside it. At 1.0 this line is what it always was.
+            let level = clamp(t.w * self.wave_gain, 0.0, 1.0) * 0.78
 
             // A column the separator has reached is coloured by WHAT it is;
             // one it has not is a single honest grey. Both are the same
@@ -3689,6 +3723,19 @@ script_mod! {
                                         draw_icon +: { svg: crate_resource("self:resources/icons/waveform.svg") }
                                     }
                                 }
+                                // How tall the wave draws, on both surfaces.
+                                // Beside the zoom because the two are the
+                                // same kind of thing -- neither is heard,
+                                // both are how the record is being looked at.
+                                wave_gain_learn := Learn{
+                                    wave_gain_knob := DropSlider{
+                                        min: 0.5
+                                        max: 4.0
+                                        default: 1.0
+                                        suffix: "x"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/levels.svg") }
+                                    }
+                                }
                                 // Latched, the deck a picked track lands on starts as
                                 // soon as its decode finishes — "select and it plays".
                                 // An EJECT turned a quarter turn: the bar leads,
@@ -5475,12 +5522,23 @@ pub fn stem_column_shares(rms: [f64; 4]) -> [u8; 4] {
     out
 }
 
-/// The height of one column's envelope, as a fraction of the half-lane —
-/// the Rust mirror of the height law in `DrawWaveLane::pixel`, and what the
-/// tests measure. Keep the two in step: the shader is the picture, this is
-/// the proof.
+/// The height of one column's envelope at a visual gain of `gain`, as a
+/// fraction of the half-lane — the Rust mirror of the height law in
+/// `DrawWaveLane::pixel`, and what the tests measure. Keep the two in
+/// step: the shader is the picture, this is the proof.
+///
+/// The clamp is before the envelope and not after it, which is what makes
+/// the ceiling absolute: whatever the gain, no column draws past
+/// [`WAVE_ENVELOPE`] of the half-lane, and a boosted loud passage
+/// saturates into a block rather than climbing out of its lane.
+pub fn column_height_at(tile: [u8; 4], gain: f32) -> f32 {
+    let gain = gain.clamp(WAVE_GAIN_MIN as f32, WAVE_GAIN_MAX as f32);
+    ((tile[3] as f32 / 255.0) * gain).clamp(0.0, 1.0) * WAVE_ENVELOPE
+}
+
+/// The same height at the gain the picture has always been drawn with.
 pub fn column_height(tile: [u8; 4]) -> f32 {
-    (tile[3] as f32 / 255.0).clamp(0.0, 1.0) * WAVE_ENVELOPE
+    column_height_at(tile, WAVE_GAIN_DEFAULT as f32)
 }
 
 /// The unseparated wave's grey, as the shader declares it.
@@ -5858,6 +5916,10 @@ pub struct VjWaveScroll {
     head_fraction: f64,
     #[rust(WARN_SECS_DEFAULT)]
     warn_secs: f64,
+    /// The eye's gain on the drawn envelope. A live value like zoom: a
+    /// quiet record is something you turn up to read while it is on.
+    #[rust(WAVE_GAIN_DEFAULT)]
+    wave_gain: f64,
     #[rust]
     lane_rects: [Rect; 2],
     /// The viewport centre captured when a loop becomes active. The wave
@@ -6143,6 +6205,14 @@ impl VjWaveScroll {
         }
     }
 
+    pub fn set_wave_gain(&mut self, cx: &mut Cx, gain: f64) {
+        let gain = gain.clamp(WAVE_GAIN_MIN, WAVE_GAIN_MAX);
+        if (gain - self.wave_gain).abs() > 1e-9 {
+            self.wave_gain = gain;
+            self.area.redraw(cx);
+        }
+    }
+
     /// Set once from the settings file at startup, not a live gesture: an
     /// operator's preferred balance of history against lookahead is a
     /// thing decided once, not dragged mid-set the way zoom is.
@@ -6418,6 +6488,7 @@ impl Widget for VjWaveScroll {
                 }
             }
             set_stem_color_uniforms(&mut self.draw_lane, cx);
+            set_wave_gain_uniform(&mut self.draw_lane, cx, self.wave_gain as f32);
             self.draw_lane.gain_vocals = lane.stem_gain[0];
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
@@ -6919,6 +6990,12 @@ pub struct VjWaveOverview {
     load: Option<WaveLoadView>,
     #[rust]
     load_frame: NextFrame,
+    /// The same eye's gain the lanes are drawn at. The stem knobs stop at
+    /// the strip -- it stays the reference picture of the MIX -- but a
+    /// record too quiet to read is too quiet to read here as well, and one
+    /// number for both surfaces is one thing to reach for.
+    #[rust(WAVE_GAIN_DEFAULT)]
+    wave_gain: f64,
 }
 
 impl VjWaveOverview {
@@ -6949,6 +7026,14 @@ impl VjWaveOverview {
         self.stem_pyramid = stem_pyramid;
         self.cols = cols;
         self.area.redraw(cx);
+    }
+
+    pub fn set_wave_gain(&mut self, cx: &mut Cx, gain: f64) {
+        let gain = gain.clamp(WAVE_GAIN_MIN, WAVE_GAIN_MAX);
+        if (gain - self.wave_gain).abs() > 1e-9 {
+            self.wave_gain = gain;
+            self.area.redraw(cx);
+        }
     }
 
     /// The running loop in source seconds, or `None`. Diffed, because this
@@ -7429,6 +7514,7 @@ impl Widget for VjWaveOverview {
         set_preview_span_uniform(&mut self.draw_lane, cx, preview_columns);
         self.draw_lane.active = if self.active { 1.0 } else { 0.7 };
         set_stem_color_uniforms(&mut self.draw_lane, cx);
+        set_wave_gain_uniform(&mut self.draw_lane, cx, self.wave_gain as f32);
         // The reference picture: every layer at full weight, whatever the
         // knobs are doing to the mix.
         self.draw_lane.gain_vocals = 1.0;
@@ -9192,6 +9278,70 @@ pub fn format_key_shift(semitones: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drawn wave has one ceiling and the visual gain does not lift
+    /// it: what the gain does is decide how much of a record reaches that
+    /// ceiling, which is the whole of what an operator wants from it.
+    #[test]
+    fn the_visual_gain_lifts_a_quiet_column_but_not_the_ceiling() {
+        // A column at a fifth of the track's own loudest.
+        let quiet = [0u8, 0, 0, 51];
+        let loud = [0u8, 0, 0, 255];
+        let at_one = column_height_at(quiet, 1.0);
+        assert!(
+            (at_one - column_height(quiet)).abs() < 1e-9,
+            "at 1.0 the picture is the one it has always been"
+        );
+        // Turned up, the quiet column stands taller, in proportion.
+        let at_two = column_height_at(quiet, 2.0);
+        assert!((at_two - at_one * 2.0).abs() < 1e-6, "{at_one} -> {at_two}");
+        // And turned down it stands shorter.
+        assert!(column_height_at(quiet, 0.5) < at_one);
+        // The ceiling is the ceiling at every gain there is, and the loud
+        // column is already on it.
+        for gain in [0.5, 1.0, 2.0, 3.3, 4.0] {
+            assert!(
+                column_height_at(loud, gain) <= WAVE_ENVELOPE + 1e-6,
+                "gain {gain} drew past the half-lane"
+            );
+            assert!(column_height_at(quiet, gain) <= WAVE_ENVELOPE + 1e-6);
+        }
+        assert!((column_height_at(loud, 4.0) - WAVE_ENVELOPE).abs() < 1e-6);
+    }
+
+    /// The clamp is BEFORE the envelope, which is what makes a boosted
+    /// passage saturate flat instead of climbing out of its lane.
+    #[test]
+    fn a_boosted_column_saturates_at_the_same_height_as_a_full_one() {
+        let half = [0u8, 0, 0, 128];
+        let full = [0u8, 0, 0, 255];
+        let boosted = column_height_at(half, 2.0);
+        assert!(
+            (boosted - column_height_at(full, 1.0)).abs() < 0.005,
+            "half a column at twice the gain is a full column: {boosted}"
+        );
+        // Past saturation nothing more happens, however far it is pushed.
+        assert!((column_height_at(half, 4.0) - boosted).abs() < 0.005);
+    }
+
+    /// The gain a caller asks for is not the gain that is drawn: the last
+    /// place before the GPU holds the range, because the settings file is
+    /// hand-editable and a taught knob can send anything.
+    #[test]
+    fn a_gain_out_of_range_is_drawn_in_range() {
+        let quiet = [0u8, 0, 0, 51];
+        assert_eq!(
+            column_height_at(quiet, 40.0),
+            column_height_at(quiet, WAVE_GAIN_MAX as f32),
+            "nothing above the top of the range"
+        );
+        assert_eq!(
+            column_height_at(quiet, 0.0),
+            column_height_at(quiet, WAVE_GAIN_MIN as f32),
+            "and nothing below the bottom"
+        );
+        assert_eq!(column_height_at(quiet, -3.0), column_height_at(quiet, WAVE_GAIN_MIN as f32));
+    }
 
     /// The minute ruler exists to be COUNTED, and everything about it
     /// follows from that: a round step, a step that grows before the
