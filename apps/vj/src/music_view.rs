@@ -49,6 +49,65 @@ pub const CHANGE_CLEAR: f64 = 18.0;
 /// is marking; past this they are one turn, which is what they look like.
 pub const CHANGE_MIN_PX: f64 = 5.0;
 
+/// The closest two minute ticks may be drawn before the ruler coarsens.
+/// Under this a tick a minute is a hatch, and a hatch cannot be counted --
+/// counting is the whole of what a wall-clock ruler is for.
+pub const MINUTE_MIN_PX: f64 = 26.0;
+
+/// How the minute ruler coarsens. Every step is a round number of minutes:
+/// a rule stepping in threes or sevens has to be read rather than counted.
+const MINUTE_STRIDES: [u32; 7] = [1, 2, 5, 10, 15, 30, 60];
+
+/// Every fifth tick stands taller, the way a rule marks its fifths, so the
+/// eye reaches five without counting to it.
+const MINUTE_MAJOR_EVERY: u32 = 5;
+
+/// How far a minute tick rises off the strip's bottom edge, and how far
+/// every fifth one does.
+const MINUTE_MINOR_PX: f64 = 4.0;
+const MINUTE_MAJOR_PX: f64 = 8.0;
+
+/// How much gutter a minute label claims for itself.
+const MINUTE_LABEL_CLEAR_PX: f64 = 34.0;
+
+/// The minute ruler's step when one minute is `px_per_minute` wide.
+///
+/// The last stride is a ceiling: an hour a tick, however long the record
+/// or however narrow the strip it is ruled on.
+pub fn minute_stride(px_per_minute: f64) -> u32 {
+    for stride in MINUTE_STRIDES {
+        if px_per_minute * stride as f64 >= MINUTE_MIN_PX {
+            return stride;
+        }
+    }
+    MINUTE_STRIDES[MINUTE_STRIDES.len() - 1]
+}
+
+/// The last whole minute that falls INSIDE a record this long.
+///
+/// A tick exactly on the end is the edge it is measuring up to, drawn
+/// twice: a record of exactly five minutes rules four ticks, not five.
+pub fn last_minute_inside(duration_secs: f64) -> u32 {
+    if !(duration_secs > 0.0) {
+        return 0;
+    }
+    ((duration_secs / 60.0).ceil() as i64 - 1).max(0) as u32
+}
+
+/// Whether a tick is one of the tall fifths.
+pub fn minute_is_major(minute: u32, stride: u32) -> bool {
+    let every = stride.max(1).saturating_mul(MINUTE_MAJOR_EVERY);
+    minute % every == 0
+}
+
+/// Whether a bar number at `x` has the gutter to itself.
+///
+/// The two rulers share one strip of gutter and the coarser one wins: a
+/// bar number printed over a minute reads as neither.
+fn bar_label_clear(x: f64, minute_xs: &[f64]) -> bool {
+    minute_xs.iter().all(|at| (x - at).abs() >= MINUTE_LABEL_CLEAR_PX)
+}
+
 /// Deepest pyramid level built: 2^15 finest columns is about five minutes
 /// in one texel, past which a level holds a single column.
 const MAX_WAVE_LEVELS: usize = 16;
@@ -897,6 +956,9 @@ script_mod! {
             text_style: theme.font_bold{font_size: 8}
         }
         draw_body_edge +: { color: #xb4c0cd }
+        // The wall-clock ruler's own hairline, quiet enough that the bar
+        // numbers beside it stay the louder of the two scales.
+        draw_minute +: { color: #x66707c }
         draw_mark_top +: {
             color: #xe5484d
             pixel: fn() {
@@ -1066,6 +1128,10 @@ script_mod! {
         // a difference in SHAPE: three greys separated only by lightness
         // all read as "a dark hairline" over a bright waveform.
         draw_change +: { color: #x8e9aa8 }
+        // The minute ticks. Light, because unlike every other mark on the
+        // strip they are drawn over the loud end of the waveform rather
+        // than through it.
+        draw_minute +: { color: #xc2ccd8 }
         draw_marker_found +: {
             color: uniform(#xf5c542)
             pixel: fn() {
@@ -5773,6 +5839,9 @@ pub struct VjWaveScroll {
     /// a fact about the record, like the ruling it crosses.
     #[live]
     draw_body_edge: DrawColor,
+    /// The wall-clock ruling through the gutter.
+    #[live]
+    draw_minute: DrawColor,
     #[live]
     draw_mark_top: DrawColor,
     #[live]
@@ -6505,17 +6574,54 @@ impl Widget for VjWaveScroll {
             );
         }
 
-        // Bar numbers, ruled off whichever deck is leading the view.
+        // The gutter carries two rulers, both off whichever deck is
+        // leading the view: the musical one in bars, and the wall-clock
+        // one in minutes. Neither can be read off the other -- the tempo
+        // stands between them -- and a set built to a clock wants both.
         let bar_number_color = Vec4f::from_u32(0x8e9aa7ff);
+        let minute_label_color = Vec4f::from_u32(0xa9b4c1ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
+        let centre = self.loop_centres[ruler]
+            .filter(|_| moving_heads[ruler])
+            .unwrap_or_else(|| lane.head_column_at(now));
+        let middle_x = rect.pos.x + rect.size.x * self.head_fraction;
+        // The minutes go down first: where they land is what decides which
+        // bar numbers still have room.
+        let mut minute_xs: Vec<f64> = Vec::new();
+        if lane.cols > 0 {
+            let lane_cols = lane_cols.max(1e-4) as f64;
+            let last = last_minute_inside(lane.cols as f64 / ZOOM_COLS_PER_SEC);
+            let stride = minute_stride(60.0 * ZOOM_COLS_PER_SEC / lane_cols);
+            self.draw_text.text_style.font_size = 8.0;
+            let mut minute = stride;
+            while minute <= last {
+                let at = minute as f64 * 60.0;
+                let x = WaveLane::mark_x(at, centre, lane_cols, middle_x);
+                if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - MINUTE_LABEL_CLEAR_PX {
+                    self.draw_minute.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(x - 0.75, rect.pos.y + lane_h),
+                            size: dvec2(1.5, gutter),
+                        },
+                    );
+                    draw_outlined_text(
+                        &mut self.draw_text,
+                        cx,
+                        dvec2(x + 3.0, rect.pos.y + lane_h + 1.0),
+                        &crate::clock::length(at),
+                        minute_label_color,
+                    );
+                    minute_xs.push(x);
+                }
+                minute += stride;
+            }
+        }
         if let Some((beat_cols, phase)) = lane.grid_columns() {
             let bar_cols = beat_cols * 4.0;
             if bar_cols > 1.0 {
-                let centre = self.loop_centres[ruler]
-                    .filter(|_| moving_heads[ruler])
-                    .unwrap_or_else(|| lane.head_column_at(now));
                 // The columns this lane actually shows, which is its own
                 // zoom across the width -- not the shared one.
                 let half_cols = rect.size.x * lane_cols as f64 * 0.5;
@@ -6533,9 +6639,11 @@ impl Widget for VjWaveScroll {
                 while bar <= last as i64 {
                     if bar >= 0 && bar % stride == 0 {
                         let col = phase + bar as f64 * bar_cols;
-                        let x = rect.pos.x + rect.size.x * self.head_fraction
-                            + (col - centre) / lane_cols.max(1e-4) as f64;
-                        if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
+                        let x = middle_x + (col - centre) / lane_cols.max(1e-4) as f64;
+                        if x >= rect.pos.x
+                            && x <= rect.pos.x + rect.size.x - 12.0
+                            && bar_label_clear(x, &minute_xs)
+                        {
                             draw_outlined_text(
                                 &mut self.draw_text,
                                 cx,
@@ -6772,6 +6880,9 @@ pub struct VjWaveOverview {
     draw_edge_body: DrawColor,
     #[live]
     draw_change: DrawColor,
+    /// The minute ticks along the bottom edge.
+    #[live]
+    draw_minute: DrawColor,
     /// The red chip at CUE's landing — the track start — so the button's
     /// destination is visible at a glance.
     #[live]
@@ -7484,6 +7595,32 @@ impl Widget for VjWaveOverview {
                         size: dvec2(1.0, band),
                     },
                 );
+            }
+            // The wall-clock ruler: a tick a minute along the bottom edge,
+            // every fifth one taller so the eye reaches five without
+            // counting to it. No numbers on it -- what a strip 44 points
+            // tall can say is HOW FAR ALONG, and the hover readout already
+            // answers the exact time for anyone who wants the figure.
+            let stride = minute_stride(rect.size.x * 60.0 / duration.max(1e-6));
+            let last_minute = last_minute_inside(duration);
+            let mut minute = stride;
+            while minute <= last_minute {
+                let tall = if minute_is_major(minute, stride) {
+                    MINUTE_MAJOR_PX
+                } else {
+                    MINUTE_MINOR_PX
+                };
+                self.draw_minute.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(
+                            centre_of(minute as f64 * 60.0).round(),
+                            rect.pos.y + rect.size.y - tall,
+                        ),
+                        size: dvec2(1.0, tall),
+                    },
+                );
+                minute += stride;
             }
             // CUE's landing, under everything else. While dragged, the
             // solid chip holds its ground and a ghost shows the landing.
@@ -9055,6 +9192,76 @@ pub fn format_key_shift(semitones: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The minute ruler exists to be COUNTED, and everything about it
+    /// follows from that: a round step, a step that grows before the
+    /// ticks become a hatch, and a tall fifth to count in fives.
+    #[test]
+    fn the_minute_ruler_steps_in_round_numbers() {
+        // Room to spare: a tick a minute.
+        assert_eq!(minute_stride(120.0), 1, "a wide strip rules every minute");
+        assert_eq!(minute_stride(MINUTE_MIN_PX), 1, "exactly the gap is room enough");
+        // Squeeze it and the ruler coarsens rather than hatching.
+        assert_eq!(minute_stride(MINUTE_MIN_PX - 0.1), 2, "one short, and it steps up");
+        assert_eq!(minute_stride(6.0), 5, "5 x 6 px clears the gap, 2 x 6 does not");
+        assert_eq!(minute_stride(2.0), 15, "10 x 2 px is still under the gap");
+        assert_eq!(minute_stride(0.4), 60);
+        // The ceiling holds however narrow the strip, including the
+        // degenerate widths a layout can hand a draw.
+        assert_eq!(minute_stride(0.0), 60, "an hour a tick is the coarsest rule");
+        assert_eq!(minute_stride(-5.0), 60);
+        // Every answer is a step somebody can count in.
+        for hundredths in 0..4000 {
+            let stride = minute_stride(hundredths as f64 * 0.01);
+            assert!(
+                MINUTE_STRIDES.contains(&stride),
+                "{stride} is not a round step"
+            );
+        }
+    }
+
+    /// A tick on the end of the record is the edge it is measuring up to,
+    /// drawn a second time in a lighter colour.
+    #[test]
+    fn the_last_minute_tick_falls_inside_the_record() {
+        assert_eq!(last_minute_inside(300.0), 4, "five minutes exactly rules four");
+        assert_eq!(last_minute_inside(300.5), 5, "half a second more, and 5:00 is inside");
+        assert_eq!(last_minute_inside(60.0), 0, "a one-minute record rules nothing");
+        assert_eq!(last_minute_inside(60.1), 1);
+        assert_eq!(last_minute_inside(59.0), 0);
+        // A strip with no track on it, and a length arithmetic cannot use.
+        assert_eq!(last_minute_inside(0.0), 0);
+        assert_eq!(last_minute_inside(-1.0), 0);
+        assert_eq!(last_minute_inside(f64::NAN), 0);
+    }
+
+    #[test]
+    fn every_fifth_tick_stands_taller_at_whatever_step() {
+        assert!(minute_is_major(5, 1), "at a tick a minute, 5:00 is the tall one");
+        assert!(minute_is_major(10, 1));
+        assert!(!minute_is_major(1, 1));
+        assert!(!minute_is_major(4, 1));
+        // The fifth TICK, not the fifth minute: a coarse rule counts its
+        // own steps, so at ten minutes a step the tall one is at fifty.
+        assert!(minute_is_major(50, 10));
+        assert!(!minute_is_major(20, 10));
+        assert!(!minute_is_major(30, 15), "the fifth of a quarter-hour step is 1:15:00");
+        assert!(minute_is_major(75, 15));
+    }
+
+    /// The lane's gutter is one strip of pixels with two rulers over it.
+    #[test]
+    fn a_bar_number_gives_the_gutter_up_to_the_minute_it_lands_on() {
+        let minutes = [200.0];
+        assert!(!bar_label_clear(200.0, &minutes), "printed on top of it");
+        assert!(!bar_label_clear(200.0 + MINUTE_LABEL_CLEAR_PX - 0.1, &minutes));
+        assert!(!bar_label_clear(200.0 - MINUTE_LABEL_CLEAR_PX + 0.1, &minutes));
+        assert!(bar_label_clear(200.0 + MINUTE_LABEL_CLEAR_PX, &minutes), "clear by a hair");
+        assert!(bar_label_clear(200.0 - MINUTE_LABEL_CLEAR_PX, &minutes));
+        assert!(bar_label_clear(10.0, &[]), "nothing to give way to");
+        // Every minute in view is consulted, not just the first.
+        assert!(!bar_label_clear(600.0, &[200.0, 600.0]));
+    }
 
     /// The key cell says at a glance whether a record will sit with the
     /// room, and says nothing at all when there is nothing to sit with.
