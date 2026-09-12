@@ -16,20 +16,7 @@ script_mod! {
     let AppDock = Dock{
         height: Fill width: Fill
 
-        root := DockSplitter{
-            axis: SplitterAxis.Horizontal
-            align: SplitterAlign.FromA(0.0)
-            a: @tab_set_1
-            b: @tab_set_2
-        }
-
-        tab_set_1 := DockTabs{
-            tabs: [@tab_a]
-            selected: 0
-            closable: false
-        }
-
-        tab_set_2 := DockTabs{
+        root := DockTabs{
             tabs: [
                 @tOverview
                 @tLayoutDemos
@@ -65,12 +52,6 @@ script_mod! {
             ]
             selected: 0
             closable: false
-        }
-
-        tab_a := DockTab{
-            name: "Welcome"
-            template: @PermanentTab
-            kind: @TabOverview
         }
 
         tOverview := DockTab{name: "Intro" template: @PermanentTab kind: @TabOverview}
