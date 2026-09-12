@@ -12,8 +12,8 @@ use {
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
         event::{
-            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
-            WindowGeomChangeEvent,
+            CancelScope, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
+            NextFrame, Trigger, WindowGeomChangeEvent,
         },
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
@@ -100,6 +100,7 @@ pub struct Cx {
     pub(crate) permissions_request_id: i32,
 
     pub keyboard: CxKeyboard,
+    pub(crate) cancel_scopes: CxCancelScopes,
     pub fingers: CxFingers,
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
@@ -402,6 +403,27 @@ impl OsType {
 }
 
 impl Cx {
+    /// The caller becomes the foreground owner of cancel gestures — the `Escape` key and
+    /// the back gesture — until it ends the returned scope, drops it, or something begins
+    /// a scope in front of it.
+    ///
+    /// Begin one when the widget becomes the active thing (a modal opens, a drag starts,
+    /// a dictation session begins) and end it when it stops being.
+    pub fn begin_cancel_scope(&mut self) -> CancelScope {
+        self.cancel_scopes.begin()
+    }
+
+    /// Gives up a scope from [`Self::begin_cancel_scope()`]. Dropping it does the same.
+    pub fn end_cancel_scope(&mut self, scope: CancelScope) {
+        self.cancel_scopes.end(scope)
+    }
+
+    /// Whether the cancel gesture being delivered belongs to `scope`, which is the only
+    /// case in which that scope's owner should act on it.
+    pub fn owns_cancel(&self, scope: &CancelScope) -> bool {
+        self.cancel_scopes.owns_press(scope)
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
@@ -488,6 +510,7 @@ impl Cx {
             permissions_request_id: 0,
 
             keyboard: Default::default(),
+            cancel_scopes: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
             ime_area: Default::default(),

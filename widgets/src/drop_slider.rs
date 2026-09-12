@@ -132,6 +132,10 @@ pub struct DropSlider {
     value: f64,
     #[rust]
     open: bool,
+    /// Held while the popover is open, so `Escape` belongs to it rather than to
+    /// whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     #[rust]
     dragging: bool,
     /// The popover rect of the last draw (event-side hit tests use it).
@@ -183,6 +187,11 @@ impl DropSlider {
     fn set_open(&mut self, cx: &mut Cx, open: bool) {
         if self.open != open {
             self.open = open;
+            if open {
+                self.cancel_scope = Some(cx.begin_cancel_scope());
+            } else if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
             self.dragging = false;
             self.draw_bg.set_uniform(cx, id!(open), &[if open { 1.0 } else { 0.0 }]);
             self.redraw_all(cx);
@@ -269,6 +278,12 @@ impl Widget for DropSlider {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.set_open(cx, false);
+            return;
+        }
         // The popover owns the pointer while open: a press inside scrubs,
         // a press outside chip AND panel closes. The CHIP toggle itself
         // lives in the hits arm below — one press, one state change.
@@ -302,7 +317,10 @@ impl Widget for DropSlider {
                 Event::MouseUp(_) => {
                     self.dragging = false;
                 }
-                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                Event::KeyDown(ke)
+                    if ke.key_code == KeyCode::Escape
+                        && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
                     self.set_open(cx, false);
                 }
                 _ => {}

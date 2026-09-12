@@ -176,6 +176,11 @@ pub struct CommandTextInput {
     #[live]
     pub color_hover: Vec4f,
 
+    /// Held while the popup is shown, so `Escape` belongs to it rather than to
+    /// whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+
     /// To deal with focus requesting issues.
     #[rust]
     is_search_input_focus_pending: bool,
@@ -243,6 +248,14 @@ impl Widget for CommandTextInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && event.back_pressed()
+        {
+            self.is_text_input_focus_pending = true;
+            self.hide_popup(cx);
+            self.redraw(cx);
+            return;
+        }
         if cx.has_key_focus(self.key_controller_text_input_ref(cx).area()) {
             if let Event::KeyDown(key_event) = event {
                 let popup_visible = self.view(cx, ids!(popup)).visible();
@@ -265,9 +278,13 @@ impl Widget for CommandTextInput {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
                         KeyCode::Escape => {
-                            self.is_text_input_focus_pending = true;
-                            self.hide_popup(cx);
-                            self.redraw(cx);
+                            // Checked inside the arm, not as a guard: a failed guard falls
+                            // through to `_`, which un-eats the press.
+                            if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) {
+                                self.is_text_input_focus_pending = true;
+                                self.hide_popup(cx);
+                                self.redraw(cx);
+                            }
                         }
                         _ => {
                             eat_the_event = false;
@@ -374,6 +391,14 @@ impl Widget for CommandTextInput {
 impl CommandTextInput {
     // Ensure popup state consistency
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
+        // This popup's open state is a View's `visible`, which a live-edit reload
+        // re-applies from the DSL without running `hide_popup` — so reconcile here
+        // rather than trusting the close path alone.
+        if self.cancel_scope.is_some() && !self.view(cx, ids!(popup)).visible() {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
         if self.view(cx, ids!(popup)).visible() {
             if self.inline_search {
                 self.view(cx, ids!(search_input_wrapper))
@@ -496,11 +521,15 @@ impl CommandTextInput {
         }
         self.view(cx, ids!(popup)).set_visible(cx, true);
         self.view(cx, ids!(popup)).redraw(cx);
+        self.cancel_scope = Some(cx.begin_cancel_scope());
     }
 
     fn hide_popup(&mut self, cx: &mut Cx) {
         self.clear_popup(cx);
         self.view(cx, ids!(popup)).set_visible(cx, false);
+        if let Some(scope) = self.cancel_scope.take() {
+            cx.end_cancel_scope(scope);
+        }
     }
 
     /// Clear all text and hide the popup going back to initial state.

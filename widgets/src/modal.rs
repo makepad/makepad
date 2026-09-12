@@ -1,7 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_platform::{KeyCode, KeyEvent},
+    makepad_platform::KeyCode,
     view::*,
     widget::*,
 };
@@ -71,6 +71,11 @@ pub struct Modal {
 
     #[rust]
     is_open: bool,
+    /// Held while open, so an Escape belongs to this modal rather than to whatever
+    /// it was opened in front of. Kept even when `can_dismiss` is false: the modal
+    /// still owns the press, it just declines to act on it.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     /// Whether the modal can be dismissed via an external interaction, including:
     /// clicking outside the content view, pressing Escape, or performing
     /// the back navigational gesture (e.g., on Android).
@@ -131,28 +136,23 @@ impl Widget for Modal {
         let bg_area = self.draw_bg.area();
         let bg_area_hit = event.hits(cx, bg_area);
 
+        let owns_cancel = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
+        // Check ownership before consuming Back. A non-dismissible foreground
+        // modal still blocks navigation behind it, without dismissing itself.
+        let back_pressed = owns_cancel && event.back_pressed();
         if self.can_dismiss {
-            // This is fine, because we already let `content` handle this event above.
-            let content_area_hit = event.hits(cx, content.area());
-
             // Close the modal if any of the following conditions occur:
-            // * If the back navigational action/gesture was triggered (e.g., on Android),
-            // * If the Escape key was released while `content` has key focus.
-            //   We look for KeyUp (not KeyDown) to match the FingerUp dismissal,
-            //   which also prevents a widget behind the modal from handling that Escape keypress.
+            // * If this modal owns the back navigational action/gesture (e.g., on Android),
+            // * If an `Escape` press this modal owns was released. Ownership, not key
+            //   focus, is what keeps a widget behind the modal from acting on the press.
             // * If there was a click/tap in the background area, outside of the inner `content` view.
-            let should_close = event.back_pressed()
+            let should_close = back_pressed
                 || match bg_area_hit {
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
-                || match content_area_hit {
-                    Hit::KeyUp(KeyEvent {
-                        key_code: KeyCode::Escape,
-                        ..
-                    }) => true,
-                    _ => false,
-                };
+                || matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape
+                    && owns_cancel);
             if should_close {
                 // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
                 // action up by `self.widget_uid()`, so the content view's uid
@@ -202,6 +202,9 @@ impl Widget for Modal {
 impl Modal {
     pub fn open(&mut self, cx: &mut Cx) {
         self.is_open = true;
+        // Assigning drops any previous scope, which matters because `open()` has no
+        // already-open guard and callers re-open freely.
+        self.cancel_scope = Some(cx.begin_cancel_scope());
         // Redraw the overlay draw_list directly so the first open is visible
         // even before the overlay content has refreshed its draw area.
         if let Some(draw_list) = &self.draw_list {
@@ -222,6 +225,9 @@ impl Modal {
         // which on mobile then dismisses the soft keyboard.
         if !self.is_open {
             return;
+        }
+        if let Some(scope) = self.cancel_scope.take() {
+            cx.end_cancel_scope(scope);
         }
         // Inform the inner modal content that its modal is being dismissed.
         let content = self.view.widget(cx, ids!(content));
