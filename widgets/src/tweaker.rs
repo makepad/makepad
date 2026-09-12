@@ -2667,6 +2667,112 @@ fn field_number(text: &str, field: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
+/// The direction a container lays its children out in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FlowDir {
+    Right,
+    Down,
+    Overlay,
+}
+
+/// How the walks in one wrapped row line up vertically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowAlignText {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl RowAlignText {
+    fn name(self) -> &'static str {
+        match self {
+            RowAlignText::Top => "Top",
+            RowAlignText::Center => "Center",
+            RowAlignText::Bottom => "Bottom",
+        }
+    }
+}
+
+/// A `flow` row as the Props tab reads it: `Flow.Right{row_align:
+/// RowAlign.Top wrap: true}`, `Flow.Down`, or the bare `Right` of a
+/// hand-written source. The wrap and the row alignment only mean anything
+/// for `Right`; they are kept across a change of direction so that going
+/// Down and back does not lose them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FlowText {
+    dir: FlowDir,
+    wrap: bool,
+    row_align: RowAlignText,
+}
+
+impl FlowText {
+    /// Children go left to right and onto a new row when the width runs out.
+    fn wraps(&self) -> bool {
+        self.dir == FlowDir::Right && self.wrap
+    }
+
+    fn with_dir(self, dir: FlowDir) -> Self {
+        FlowText { dir, ..self }
+    }
+
+    /// The wrap button: on a Right flow it toggles; on any other it turns
+    /// the flow into a wrapping Right one, which is what pressing "wrap"
+    /// on a Down container can only mean.
+    fn toggled_wrap(self) -> Self {
+        FlowText { dir: FlowDir::Right, wrap: !self.wraps(), ..self }
+    }
+
+    fn with_row_align(self, row_align: RowAlignText) -> Self {
+        FlowText { dir: FlowDir::Right, row_align, ..self }
+    }
+
+    /// The chunk that sets it: always the whole value. A field of a
+    /// variant is not a property, so `flow.wrap: true` is never emitted.
+    fn chunk(&self) -> String {
+        match self.dir {
+            FlowDir::Down => "flow: Flow.Down".to_string(),
+            FlowDir::Overlay => "flow: Flow.Overlay".to_string(),
+            FlowDir::Right => format!(
+                "flow: Flow.Right{{wrap: {} row_align: RowAlign.{}}}",
+                self.wrap,
+                self.row_align.name()
+            ),
+        }
+    }
+}
+
+/// Read a flow row's text, in every spelling it has had: the printed
+/// `Flow.Right{row_align: RowAlign.Top wrap: true}`, a bare `Down`, the
+/// `Right{wrap: true}` of a source, and the `RightWrap` an older panel
+/// wrote. Anything else reads as Down, the commonest container.
+fn parse_flow_text(text: &str) -> FlowText {
+    let text = text.trim();
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    let variant = head.rsplit('.').next().unwrap_or("").trim();
+    let dir = match variant {
+        "Right" | "RightWrap" => FlowDir::Right,
+        "Overlay" => FlowDir::Overlay,
+        _ => FlowDir::Down,
+    };
+    let wrap = variant == "RightWrap" || text.contains("wrap: true");
+    let row_align = match field_word(text, "row_align") {
+        Some("Center") => RowAlignText::Center,
+        Some("Bottom") => RowAlignText::Bottom,
+        _ => RowAlignText::Top,
+    };
+    FlowText { dir, wrap, row_align }
+}
+
+/// `row_align: RowAlign.Center` out of a printed named variant, as the bare
+/// variant word after any enum prefix.
+fn field_word<'a>(text: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    let end = rest.find([' ', '}', ',']).unwrap_or(rest.len());
+    Some(rest[..end].rsplit('.').next().unwrap_or(""))
+}
+
 /// What a person typed into a size field, as the chunk that sets it. A bare
 /// word is a mode, a number is points, a percent or a viewport unit or a
 /// function is the CSS spelling and goes in quotes so the engine's string
@@ -6123,7 +6229,7 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
     match first {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
-        | "metrics" => return SectionKind::Layout,
+        | "metrics" | "distribute" | "container_id" => return SectionKind::Layout,
         "text" | "empty_text" | "label" | "title" | "suffix" => return SectionKind::Text,
         "visible" | "enabled" | "grab_key_focus" | "cursor" | "trigger_on_press"
         | "enable_long_press" | "reset_hover_on_click" | "block_signal_event"
@@ -6177,12 +6283,15 @@ fn section_rank(section: SectionKind, prop: &str) -> (u32, u32, String) {
                 "margin" => 3,
                 "padding" => 4,
                 "spacing" => 5,
-                "line_spacing" => 6,
-                "align" => 7,
-                "flow" => 8,
-                "clip_x" => 9,
-                "clip_y" => 10,
-                "scroll" => 11,
+                "wrap_spacing" => 6,
+                "line_spacing" => 7,
+                "align" => 8,
+                "distribute" => 9,
+                "flow" => 10,
+                "clip_x" => 11,
+                "clip_y" => 12,
+                "scroll" => 13,
+                "container_id" => 14,
                 _ => 20,
             };
             let minor = match first {
@@ -7286,21 +7395,46 @@ impl Tweaker {
                         text: ""
                     }
                 }
+                // The container's flow on two lines: the direction, the
+                // wrap and how a wrapped row lines up; then the gaps.
                 let FlowRowT = FabPropRow {
-                    spacing_input := FabValueInput {
-                        width: 70
-                        height: 18
-                    }
-                    flow_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 6 right: 0 top: 0 bottom: 0}
-                        f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    }
-                    flow_field := FabLabelSmall {
+                    height: Fit
+                    flow_col := View {
                         width: Fill
-                        margin: Inset{left: 4 top: 2 right: 0 bottom: 0}
-                        text: ""
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        dir_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            flow_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            ra_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 4 right: 0 top: 0 bottom: 0}
+                                ra_top := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_mid := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_bottom := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                        }
+                        gap_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            gap_label := FabLabelSmall { width: Fit text: "gap" }
+                            spacing_input := FabValueInput { width: 56 height: 18 }
+                            wrap_box := View { width: Fit height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                                wrap_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "rows" }
+                                wrap_input := FabValueInput { width: 56 height: 18 }
+                            }
+                        }
                     }
                 }
                 let AlignRowT = FabPropRow {
@@ -8409,11 +8543,16 @@ impl Tweaker {
             })
         {
             let item = &row.item;
-            let inner: [(&[LiveId], &str); 29] = [
-                (&[live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
-                (&[live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
-                (&[live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
-                (&[live_id!(flow_seg), live_id!(f_wrap)], "children flow left to right and wrap onto new rows"),
+            let inner: [(&[LiveId], &str); 33] = [
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(f_wrap)], "children that run out of width start a new row"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_top)], "the children of a row line up along its top"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_mid)], "the children of a row line up on its centre line"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_bottom)], "the children of a row sit on its baseline"),
+                (&[live_id!(flow_col), live_id!(gap_row), live_id!(spacing_input)], "space between the children, in points"),
+                (&[live_id!(flow_col), live_id!(gap_row), live_id!(wrap_box), live_id!(wrap_input)], "space between wrapped rows, in points"),
                 (&[live_id!(grid), live_id!(row0), live_id!(d0)], "align children top left"),
                 (&[live_id!(grid), live_id!(row0), live_id!(d1)], "align children top centre"),
                 (&[live_id!(grid), live_id!(row0), live_id!(d2)], "align children top right"),
@@ -8424,7 +8563,6 @@ impl Tweaker {
                 (&[live_id!(grid), live_id!(row2), live_id!(d7)], "align children bottom centre"),
                 (&[live_id!(grid), live_id!(row2), live_id!(d8)], "align children bottom right"),
                 (&[live_id!(link)], "one value for all four sides"),
-                (&[live_id!(spacing_input)], "space between the children, in points"),
                 (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fill)], "width: fill whatever the parent leaves"),
                 (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fit)], "width: fit the content"),
                 (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fix)], "width: a fixed size, in points"),
@@ -9184,7 +9322,7 @@ impl Tweaker {
         let first = prop.split('.').next().unwrap_or("");
         matches!(
             first,
-            "width" | "height" | "margin" | "padding" | "spacing" | "flow" | "align"
+            "width" | "height" | "margin" | "padding" | "spacing" | "wrap_spacing" | "flow" | "align"
         )
     }
 
@@ -9201,7 +9339,7 @@ impl Tweaker {
             VisKind::Size => "size width height fit fill",
             VisKind::BoxInset(BoxKind::Margin) => "margin",
             VisKind::BoxInset(BoxKind::Padding) => "padding",
-            VisKind::FlowSpacing => "spacing flow",
+            VisKind::FlowSpacing => "spacing flow gap wrap direction rows overlay",
             VisKind::AlignGrid => "align alignment",
             _ => "",
         }
@@ -9213,7 +9351,7 @@ impl Tweaker {
             "width" | "height" => Some(VisKind::Size),
             "margin" => Some(VisKind::BoxInset(BoxKind::Margin)),
             "padding" => Some(VisKind::BoxInset(BoxKind::Padding)),
-            "spacing" | "flow" => Some(VisKind::FlowSpacing),
+            "spacing" | "wrap_spacing" | "flow" => Some(VisKind::FlowSpacing),
             "align" => Some(VisKind::AlignGrid),
             _ => None,
         }
@@ -10452,8 +10590,56 @@ impl Tweaker {
                         self.box_link_uids[link_index] = link.widget_uid().0;
                     }
                     VisKind::FlowSpacing => {
-                        item.child(live_id!(name)).set_text(cx, "spacing");
-                        let field = item.child(live_id!(spacing_input));
+                        item.child(live_id!(name)).set_text(cx, "flow");
+                        // The row is one value -- `Flow.Right{wrap: true ..}`
+                        // -- and every button writes the whole of it back.
+                        let flow = parse_flow_text(self.row_value("flow").unwrap_or(""));
+                        let col = item.child(live_id!(flow_col));
+                        let dir_row = col.child(live_id!(dir_row));
+                        let seg = dir_row.child(live_id!(flow_seg));
+                        let dirs = [
+                            (live_id!(f_right), "\u{2192}", FlowDir::Right),
+                            (live_id!(f_down), "\u{2193}", FlowDir::Down),
+                            (live_id!(f_over), "stack", FlowDir::Overlay),
+                        ];
+                        for (child, label, dir) in dirs {
+                            let btn = seg.child(child);
+                            btn.set_text(cx, label);
+                            set_button_fill(cx, btn.clone(), flow.dir == dir);
+                            self.composite_clicks
+                                .push((btn.widget_uid().0, flow.with_dir(dir).chunk()));
+                        }
+                        let wrap_btn = dir_row.child(live_id!(f_wrap));
+                        wrap_btn.set_text(cx, "wrap");
+                        set_button_fill(cx, wrap_btn.clone(), flow.wraps());
+                        self.composite_clicks
+                            .push((wrap_btn.widget_uid().0, flow.toggled_wrap().chunk()));
+                        // How a row lines up only means anything left to
+                        // right; the segment is not shown otherwise.
+                        let ra_seg = dir_row.child(live_id!(ra_seg));
+                        ra_seg.set_visible(cx, flow.dir == FlowDir::Right);
+                        let aligns = [
+                            (live_id!(ra_top), "\u{2191}", RowAlignText::Top),
+                            (live_id!(ra_mid), "\u{2195}", RowAlignText::Center),
+                            (live_id!(ra_bottom), "\u{2193}", RowAlignText::Bottom),
+                        ];
+                        for (child, label, row_align) in aligns {
+                            let btn = ra_seg.child(child);
+                            btn.set_text(cx, label);
+                            set_button_fill(
+                                cx,
+                                btn.clone(),
+                                flow.dir == FlowDir::Right && flow.row_align == row_align,
+                            );
+                            self.composite_clicks
+                                .push((btn.widget_uid().0, flow.with_row_align(row_align).chunk()));
+                        }
+                        // The gaps: between children, and between wrapped
+                        // rows. A Label flows its text but has no spacing,
+                        // so the line only shows where there is one to set.
+                        let gap_row = col.child(live_id!(gap_row));
+                        gap_row.set_visible(cx, self.row_index("spacing").is_some());
+                        let field = gap_row.child(live_id!(spacing_input));
                         if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
                             let v = self
                                 .row_value("spacing")
@@ -10463,24 +10649,21 @@ impl Tweaker {
                         }
                         self.composite_fields
                             .push((field.widget_uid().0, "spacing".into()));
-                        let seg = item.child(live_id!(flow_seg));
-                        let flows = [
-                            (live_id!(f_right), "R", "flow: Right"),
-                            (live_id!(f_down), "D", "flow: Down"),
-                            (live_id!(f_over), "O", "flow: Overlay"),
-                            (live_id!(f_wrap), "W", "flow: RightWrap"),
-                        ];
-                        for (child, label, chunk) in flows {
-                            let btn = seg.child(child);
-                            btn.set_text(cx, label);
-                            self.composite_clicks
-                                .push((btn.widget_uid().0, chunk.to_string()));
+                        let wrap_box = gap_row.child(live_id!(wrap_box));
+                        wrap_box.set_visible(
+                            cx,
+                            flow.wraps() && self.row_index("wrap_spacing").is_some(),
+                        );
+                        let field = wrap_box.child(live_id!(wrap_input));
+                        if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                            let v = self
+                                .row_value("wrap_spacing")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            input.set_value(cx, v);
                         }
-                        let flow_text = self
-                            .row_value("flow")
-                            .map(|v| format!("flow {v}"))
-                            .unwrap_or_default();
-                        item.child(live_id!(flow_field)).set_text(cx, &flow_text);
+                        self.composite_fields
+                            .push((field.widget_uid().0, "wrap_spacing".into()));
                     }
                     VisKind::AlignGrid => {
                         item.child(live_id!(name)).set_text(cx, "align");
@@ -13875,6 +14058,34 @@ mod tests {
         assert_eq!(parse_size_text("25vw"), SizeText::Rel("25vw".into()));
         assert_eq!(parse_size_text("calc(100% - 20px)"), SizeText::Expr("calc(100% - 20px)".into()));
         assert_eq!(parse_size_text(""), SizeText::Fit);
+    }
+
+    #[test]
+    fn a_flow_row_reads_as_one_value_and_writes_back_whole() {
+        let printed = parse_flow_text("Flow.Right{row_align: RowAlign.Top wrap: true}");
+        assert_eq!(printed, FlowText { dir: FlowDir::Right, wrap: true, row_align: RowAlignText::Top });
+        assert!(printed.wraps());
+        assert_eq!(printed.chunk(), "flow: Flow.Right{wrap: true row_align: RowAlign.Top}");
+        let centred = parse_flow_text("Flow.Right{wrap: true, row_align: RowAlign.Center}");
+        assert_eq!(centred.row_align, RowAlignText::Center);
+        assert_eq!(parse_flow_text("Flow.Down").dir, FlowDir::Down);
+        assert_eq!(parse_flow_text("Down").chunk(), "flow: Flow.Down");
+        assert_eq!(parse_flow_text("Overlay").chunk(), "flow: Flow.Overlay");
+        assert_eq!(parse_flow_text("Right").chunk(), "flow: Flow.Right{wrap: false row_align: RowAlign.Top}");
+        assert_eq!(parse_flow_text("RightWrap").wraps(), true);
+        assert_eq!(parse_flow_text("").dir, FlowDir::Down);
+        // Going Down keeps the wrap for the way back; wrap on a Down flow
+        // makes it a wrapping Right one; a row alignment implies Right.
+        let down = printed.with_dir(FlowDir::Down);
+        assert_eq!(down.chunk(), "flow: Flow.Down");
+        assert!(!down.wraps());
+        assert!(down.toggled_wrap().wraps());
+        assert_eq!(down.with_dir(FlowDir::Right).wraps(), true);
+        assert!(!printed.toggled_wrap().wraps());
+        assert_eq!(
+            parse_flow_text("Down").with_row_align(RowAlignText::Bottom).chunk(),
+            "flow: Flow.Right{wrap: false row_align: RowAlign.Bottom}"
+        );
     }
 
     #[test]
