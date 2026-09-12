@@ -7006,6 +7006,14 @@ pub struct Tweaker {
     /// The filter box searches instead of filtering: every row stays on
     /// screen, the hits are counted, and the arrows (F3, Shift+F3) walk
     /// them.
+    /// What the edits and the prompt are aimed at: the file and whether it
+    /// is this instance, the type, or the isolated branch. Shown on the
+    /// prompt bar.
+    #[rust]
+    target_line: String,
+    /// The label's tooltip: what that file means under the scope.
+    #[rust]
+    target_tip: String,
     #[rust]
     search_mode: bool,
     /// Which hit the walk is on, modulo the count.
@@ -8641,11 +8649,17 @@ impl Tweaker {
                             height: Fit
                             flow: Right
                             align: Align{x: 0.0 y: 0.5}
-                            prompt_status := FabLabelSmall {
+                            target_label := FabLabelSmall {
                                 width: Fill
                                 text: ""
                                 max_lines: 1
                                 text_overflow: TextOverflow.Ellipsis
+                            }
+                            prompt_status := FabLabelSmall {
+                                width: Fit
+                                margin: Inset{left: 6 right: 6 top: 0 bottom: 0}
+                                text: ""
+                                max_lines: 1
                                 draw_text +: { color: #xffa040 }
                             }
                             queue := Button {
@@ -8714,7 +8728,6 @@ impl Tweaker {
                                 scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
                                 scope_isolated := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "isolated" draw_text +: { text_style +: { font_size: 8.0 } } }
                             }
-                            scope_origin := FabLabelSmall { width: Fill text: "" }
                             // What the buttons MEAN belongs on the buttons,
                             // not on a permanent line under them: it is read
                             // once and then it is just a line taking up the
@@ -9351,6 +9364,16 @@ impl Tweaker {
             }
             if let Some(r) = hit(cx, &w, abs) {
                 return Some(place(r, text));
+            }
+        }
+        // The target label's tip is the selection's, not a fixed line.
+        if !self.target_tip.is_empty() {
+            let label = sidebar
+                .child(live_id!(prompt_row))
+                .child(live_id!(prompt_bar))
+                .child(live_id!(target_label));
+            if let Some(r) = hit(cx, &label, abs) {
+                return Some(place(r, &self.target_tip));
             }
         }
         None
@@ -10532,7 +10555,9 @@ impl Tweaker {
                 .child(live_id!(title_label))
                 .set_text(cx, &format!("Theme  \u{2022}  {colours} colours  \u{2022}  {} values", self.rows.len() - colours));
             let site = self.theme_site.split(':').next().unwrap_or("").to_string();
-            footer.child(live_id!(path_row)).child(live_id!(path_label)).set_text(cx, &format!("edits land in {site}"));
+            footer.child(live_id!(path_row)).child(live_id!(path_label)).set_text(cx, &site);
+            self.target_line = format!("target {site}");
+            self.target_tip = format!("edits are written to {site}");
             footer.child(live_id!(scope_row)).set_visible(cx, false);
         } else {
             sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).set_visible(cx, sel.is_some());
@@ -10624,22 +10649,24 @@ impl Tweaker {
                     // type where it is defined. Two different questions, and
                     // a line that only named the file read as a contradiction
                     // of the path under it.
-                    let line = if base.is_empty() {
+                    self.target_line = if base.is_empty() { String::new() } else { format!("target {base}") };
+                    self.target_tip = if base.is_empty() {
                         String::new()
                     } else if all && confined && !root.is_empty() {
-                        format!("edits land in {base} (the isolated branch)")
+                        format!("edits are written to {base}: the isolated branch, so every {} in it", sel.ty)
                     } else if all {
-                        format!("edits land in {base} (the {} type, so every {})", sel.ty, sel.ty)
+                        format!("edits are written to {base}: the {} type, so every {}", sel.ty, sel.ty)
                     } else {
-                        format!("edits land in {base} (this instance)")
+                        format!("edits are written to {base}: this instance only")
                     };
-                    row.child(live_id!(scope_origin)).set_text(cx, &line);
                 }
             }
             None => {
                 let title = sidebar.child(live_id!(ident_footer)).child(live_id!(title_label));
                 title.set_visible(cx, true);
                 title.set_text(cx, "tweak");
+                self.target_line.clear();
+                self.target_tip.clear();
                 sidebar
                     .child(live_id!(ident_footer)).child(live_id!(path_row)).child(live_id!(path_label))
                     .set_text(cx, "click a widget to inspect it");
@@ -10819,6 +10846,7 @@ impl Tweaker {
                     }
                 };
                 bar.child(live_id!(prompt_status)).set_text(cx, &status);
+                bar.child(live_id!(target_label)).set_text(cx, &self.target_line);
                 let field = row.child(live_id!(prompt_field));
                 self.prompt_field_uid = field.widget_uid().0;
                 if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
