@@ -359,7 +359,7 @@ impl Widget for StoryFileTree {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/filetree/overview",
+    key: "data-display/filetree/overview",
     category: "Data display",
     component: "FileTree",
     also: &["FileTreeNode"],

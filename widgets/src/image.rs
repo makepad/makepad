@@ -30,6 +30,39 @@ script_mod! {
         sample_mode: 0.0
         image_dim_w: 0.0
         image_dim_h: 0.0
+        border_radius: 0.0
+        border_size: 0.0
+        border_color: #0000
+        letterbox_color: #0000
+
+        // The texture at `uv`, filtered or as one whole texel by `sample_mode`.
+        // Whole texels are had by snapping to the texel's centre and reading
+        // with the ordinary filter: at the magnification where it matters
+        // every tap then lands on that one texel. Snapping rather than asking
+        // the sampler for nearest keeps the read on `sample_as_bgra`, the one
+        // form whose channel order the web backend corrects; a nearest read
+        // there comes back with red and blue swapped. `scale` is the share of
+        // the texture the quad spans, so a cropped picture measures its texels
+        // at the size they are drawn.
+        sample_at: fn(uv: vec2, scale: vec2) -> vec4 {
+            // Nobody asked: the filtered read, and none of the arithmetic
+            // below is reached to arrive at it.
+            if self.sample_mode == 0.0 {
+                return self.image_texture.sample_as_bgra(uv)
+            }
+            let size = self.image_texture.size()
+            let texels_x = max(size.x, 1.0)
+            let texels_y = max(size.y, 1.0)
+            let device_px_per_texel = self.rect_size.x * self.sample_mode / (texels_x * max(scale.x, 0.0001))
+            if self.sample_mode < 0.0 || device_px_per_texel > 4.0 {
+                let snapped = vec2(
+                    (floor(uv.x * texels_x) + 0.5) / texels_x,
+                    (floor(uv.y * texels_y) + 0.5) / texels_y
+                )
+                return self.image_texture.sample_as_bgra(snapped)
+            }
+            return self.image_texture.sample_as_bgra(uv)
+        }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
             // When image_dim is set, rotate the image rigidly and aspect-correct:
@@ -44,15 +77,38 @@ script_mod! {
                 let iuv = cr / vec2(self.image_dim_w, self.image_dim_h) + vec2(0.5, 0.5)
                 let uv = iuv * scale + pan
                 if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
-                    return vec4(0.0, 0.0, 0.0, 0.0)
+                    return self.letterbox_color
                 }
-                return self.image_texture.sample_as_bgra(uv)
+                return self.sample_at(uv, scale)
             }
             let uv = self.pos * scale + pan
-            return self.image_texture.sample_as_bgra(uv)
+            return self.sample_at(uv, scale)
         }
 
         get_color: fn() {
+            // Where the FRAMING left the picture behind is a bar, not the edge
+            // texel smeared across the rest of the box: a picture the box
+            // cannot hold whole leaves its ends over, and `fit_scale` and
+            // `fit_pan` are where that is written down. What the caller pans
+            // and zooms for itself is not framing — `image_pan` is how a
+            // sprite sheet picks a cell and how a viewer moves a picture
+            // around under its window, and both still get the edge texel they
+            // always got, because at rest the framing is 1 and 0 and this
+            // never fires. The rotated path tests its own mapping for itself.
+            if self.image_dim_w <= 0.0 {
+                let framed = self.pos * self.fit_scale + self.fit_pan
+                // A framing that only just reaches the texture's own edge is
+                // still inside it. At rest the framing is exactly 1 and 0,
+                // which puts this comparison on the boundary at the quad's
+                // last pixel, and an edge fragment interpolated a hair past
+                // one would come back a clear bar where every caller has
+                // always had the edge texel. The slack is well under one
+                // texel of any texture, so a bar that was really asked for
+                // still begins where it began.
+                if framed.x < -0.0001 || framed.x > 1.0001 || framed.y < -0.0001 || framed.y > 1.0001 {
+                    return self.letterbox_color
+                }
+            }
             return self.get_color_scale_pan(
                 self.fit_scale * self.image_scale,
                 self.fit_pan * self.image_scale + self.image_pan
@@ -61,7 +117,29 @@ script_mod! {
 
         pixel: fn() {
             let color = mix(self.get_color(), #3, self.async_load)
-            return Pal.premul(vec4(color.xyz, color.w * self.opacity))
+            let picture = Pal.premul(vec4(color.xyz, color.w * self.opacity))
+            // No radius and no stroke is the plain quad, returned before any
+            // of the shape work below.
+            if self.border_radius <= 0.0 && self.border_size <= 0.0 {
+                return picture
+            }
+            // The box RoundedView draws, with the picture for its fill: the
+            // number that rounds a view rounds the picture in it the same, and
+            // the stroke sits on the edge where the view's does, half in and
+            // half out, so the two line up when they meet.
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(
+                self.border_size,
+                self.border_size,
+                self.rect_size.x - self.border_size * 2.0,
+                self.rect_size.y - self.border_size * 2.0,
+                self.border_radius
+            )
+            sdf.fill_keep_premul(picture)
+            if self.border_size > 0.0 {
+                sdf.stroke(vec4(self.border_color.xyz, self.border_color.w * self.opacity), self.border_size)
+            }
+            return sdf.result
         }
     }
 
@@ -70,6 +148,8 @@ script_mod! {
     mod.widgets.Image = set_type_default() do mod.widgets.ImageBase{
         width: 100
         height: 100
+        /** how much of a `CropToFill` picture's overflow is cropped away 0..1 step 0.05 */
+        crop: 1.0
     }
 }
 
@@ -92,6 +172,11 @@ pub struct DrawImage {
     async_load: f32,
     #[live]
     pub rotation: f32,
+    /// How the texture is read. Zero is filtered. Below zero every read is one
+    /// whole texel, for pixel art and for looking closely. Above zero is the
+    /// device pixel ratio: reads stay filtered until a texel is drawn more
+    /// than four device pixels wide, and snap to whole texels past that, where
+    /// filtering reads as blur rather than smoothness.
     #[live]
     pub sample_mode: f32,
     /// When non-zero, `get_color` rotates the image rigidly (aspect-correct):
@@ -102,6 +187,31 @@ pub struct DrawImage {
     pub image_dim_w: f32,
     #[live]
     pub image_dim_h: f32,
+    // The picture's own shape. A template that overrides `draw_bg` has two
+    // things to know about these four: write them as plain values, because an
+    // `instance(...)` declaration of a name a field already owns is dropped on
+    // the way in and the field keeps its own default; and they are the bitmap
+    // path's, because an `Image` handed an SVG draws through `draw_svg` and
+    // never reaches this shader at all.
+    /// Corner radius of the picture, in the number `RoundedView` takes for its
+    /// own `border_radius`, handed to the same box function. A view floors its
+    /// own radius at one and this does not, so the two round alike at every
+    /// radius a corner is visible at. Zero with no stroke is the plain quad,
+    /// returned before any shape work.
+    #[live]
+    pub border_radius: f32,
+    /// Width of the stroke on the picture's edge, placed where `RoundedView`
+    /// places its own: centred on the edge, so half the band lies over the
+    /// picture and half outside it. Zero is none.
+    #[live]
+    pub border_size: f32,
+    #[live]
+    pub border_color: Vec4f,
+    /// What shows where the picture does not reach: the bars of a picture
+    /// dialled towards contain, and the corners around a rotated one. Clear
+    /// by default, so the ground behind shows through.
+    #[live]
+    pub letterbox_color: Vec4f,
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
@@ -155,6 +265,14 @@ pub struct Image {
     next_frame: NextFrame,
     #[live]
     fit: ImageFit,
+    /// How much of the overflow a `CropToFill` picture crops away: one covers
+    /// the box and crops what will not fit, zero puts the whole picture inside
+    /// it and leaves `letterbox_color` over the ends, and between the two it is
+    /// between — the picture reads large without losing its middle. One is the
+    /// crop this fit has always done, so it is the default; the other fits read
+    /// nothing here, because they change the rect instead of the picture in it.
+    #[live(1.0)]
+    pub crop: f64,
     /// HTTP/file resource handle for loading image data (set via `http_resource()` or `crate_resource()`)
     #[live]
     src: Option<ScriptHandleRef>,
@@ -502,14 +620,33 @@ impl Image {
 
         let source_aspect = source_width / source_height;
         let target_aspect = target_width / target_height;
-        let mut crop_scale = vec2(1.0, 1.0);
-
-        if source_aspect > target_aspect {
-            crop_scale.x = (target_aspect / source_aspect) as f32;
+        // The window on the texture, as a share of it. Covering takes the
+        // smaller window — less of the texture, drawn bigger, the rest cropped
+        // off; containing takes the larger one — the whole texture with room
+        // to spare, and the room over is the bar. The two are one expression
+        // apart, so the dial between them is a mix of the pair; and because
+        // the window narrows on one axis exactly as fast as it widens on the
+        // other, the mix is the picture's own shape at every setting and not
+        // a squash somewhere in the middle.
+        let ratio = source_aspect / target_aspect;
+        // A dial past its ends is held at them, and a dial that is not a
+        // number at all is the crop this fit has always done. `clamp` hands
+        // NaN straight back, and a NaN window compares false against every
+        // pixel of the quad: not a bar and not a picture, just a sample taken
+        // nowhere.
+        let crop = if self.crop.is_nan() {
+            1.0
         } else {
-            crop_scale.y = (source_aspect / target_aspect) as f32;
-        }
+            self.crop.clamp(0.0, 1.0)
+        };
+        let axis = |contain: f64, cover: f64| contain + (cover - contain) * crop;
+        let crop_scale = vec2(
+            axis((1.0 / ratio).max(1.0), (1.0 / ratio).min(1.0)) as f32,
+            axis(ratio.max(1.0), ratio.min(1.0)) as f32,
+        );
 
+        // Centred either way: half the crop comes off each side, half the room
+        // over goes to each end.
         let crop_pan = (vec2(1.0, 1.0) - crop_scale) * 0.5;
         self.draw_bg.fit_scale = crop_scale;
         self.draw_bg.fit_pan = crop_pan;
@@ -1119,5 +1256,454 @@ mod flattened_walk_collision_tests {
                 assert!(props.contains_key(&field), "missing flattened/reflected field {field:?}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    /// Every number worked out here is a half, a quarter or an eighth, but
+    /// the aspect it starts from is two lengths divided by the same dpi, so
+    /// the comparison is given the slack of that one division.
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    /// A picture twice as wide as it is tall, with nothing loaded into it:
+    /// a placeholder size is a size, and the framing is worked out from the
+    /// aspect either way.
+    fn wide_picture_in_a_square(cx: &mut Cx) -> Image {
+        cx.with_vm(|vm| {
+            let source = script! {
+                use mod.prelude.widgets.*
+                Image{
+                    width: Fill height: Fill
+                    fit: ImageFit.CropToFill
+                    placeholder_width: 200 placeholder_height: 100
+                }
+            };
+            let value = vm.eval(source);
+            Image::script_from_value(vm, value)
+        })
+    }
+
+    /// One pass over a square box. The framing is written during the draw,
+    /// so reading it back has to go through the widget's own draw entry
+    /// rather than the arithmetic behind it.
+    fn draw_once(cx: &mut Cx, image: &mut Image) -> (Vec2f, Vec2f) {
+        let size = dvec2(100.0, 100.0);
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, size);
+        let mut draw_list = DrawList2d::new(cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(size, Layout::flow_down());
+        assert!(image
+            .draw_walk(&mut cx2d, &mut Scope::empty(), image.walk)
+            .is_done());
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+        drop(cx2d);
+        (image.draw_bg.fit_scale, image.draw_bg.fit_pan)
+    }
+
+    /// The dial's two ends and its middle. At one it is the crop this fit
+    /// has always done — a window on half the texture, centred, the sides
+    /// cropped off. At zero the window is bigger than the texture, which is
+    /// what leaves room over for a bar. Halfway is halfway: bigger than
+    /// contain, smaller than cover, still centred.
+    #[test]
+    fn crop_dials_between_the_whole_picture_and_a_covering_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        for (crop, scale, pan) in [
+            (1.0, (0.5, 1.0), (0.25, 0.0)),
+            (0.5, (0.75, 1.5), (0.125, -0.25)),
+            (0.0, (1.0, 2.0), (0.0, -0.5)),
+        ] {
+            image.crop = crop;
+            let (fit_scale, fit_pan) = draw_once(&mut cx, &mut image);
+            assert!(
+                close(fit_scale.x, scale.0) && close(fit_scale.y, scale.1),
+                "crop {crop}: window {fit_scale:?} is not {scale:?}"
+            );
+            assert!(
+                close(fit_pan.x, pan.0) && close(fit_pan.y, pan.1),
+                "crop {crop}: offset {fit_pan:?} is not {pan:?}"
+            );
+        }
+    }
+
+    /// A picture between contain and cover is drawn at a size between the
+    /// two, and it has to be the picture's own shape at every one of them —
+    /// a dial that squashed in the middle would be a dial nobody could use.
+    /// The window narrows on one axis exactly as fast as it widens on the
+    /// other, which is what keeps the ratio of the two fixed all the way
+    /// along: here the box is square and the picture twice as wide, so the
+    /// window is always half as wide as it is tall.
+    #[test]
+    fn the_dial_never_squashes_the_picture() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        for crop in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            image.crop = crop;
+            let (scale, _) = draw_once(&mut cx, &mut image);
+            assert!(
+                close(scale.x / scale.y, 0.5),
+                "crop {crop}: the window is {scale:?}, which is not the picture's shape"
+            );
+        }
+    }
+
+    /// The bar is drawn where the framing left the picture behind, so a
+    /// framing that reaches past the texture is the whole of what turns it
+    /// on. Out of range is not a second meaning: a dial past its ends is
+    /// held at them, and one that is not a number at all is the crop this
+    /// fit has always done.
+    #[test]
+    fn only_a_dialled_back_crop_asks_for_a_bar() {
+        fn frames_the_whole_box(scale: Vec2f, pan: Vec2f) -> bool {
+            pan.x >= 0.0 && pan.y >= 0.0 && pan.x + scale.x <= 1.0 && pan.y + scale.y <= 1.0
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        for crop in [1.0, 2.0, f64::INFINITY, f64::NAN] {
+            image.crop = crop;
+            let (scale, pan) = draw_once(&mut cx, &mut image);
+            assert!(frames_the_whole_box(scale, pan), "crop {crop} left a bar");
+        }
+        for crop in [0.0, 0.99, -1.0] {
+            image.crop = crop;
+            let (scale, pan) = draw_once(&mut cx, &mut image);
+            assert!(!frames_the_whole_box(scale, pan), "crop {crop} left no bar");
+        }
+    }
+
+    /// Every other fit resizes the rect and hands the picture the whole of
+    /// the texture, and the dial is not theirs to read. That is what keeps
+    /// the bar off every picture in the library that never asked for one.
+    #[test]
+    fn the_other_fits_frame_nothing_whatever_the_dial_says() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        for fit in [
+            ImageFit::Size,
+            ImageFit::Stretch,
+            ImageFit::Horizontal,
+            ImageFit::Vertical,
+            ImageFit::Smallest,
+            ImageFit::Biggest,
+        ] {
+            image.fit = fit;
+            image.crop = 0.0;
+            let (scale, pan) = draw_once(&mut cx, &mut image);
+            assert!(
+                close(scale.x, 1.0) && close(scale.y, 1.0) && close(pan.x, 0.0) && close(pan.y, 0.0),
+                "{fit:?} framed the picture: window {scale:?} at {pan:?}"
+            );
+        }
+    }
+
+    /// What a caller gets by writing `Image{}`: no radius, no stroke, a
+    /// clear bar colour and a filtered read, which together are the plain
+    /// quad this widget has always drawn.
+    #[test]
+    fn an_unasked_image_is_the_plain_quad() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let image = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+            Image::script_new_with_default(vm)
+        });
+        assert_eq!(makepad_platform::shader_error::take(), None, "the image shader failed to compile");
+        assert_eq!(image.draw_bg.border_radius, 0.0);
+        assert_eq!(image.draw_bg.border_size, 0.0);
+        assert_eq!(image.draw_bg.letterbox_color.w, 0.0);
+        assert_eq!(image.draw_bg.sample_mode, 0.0);
+        assert_eq!(image.crop, 1.0, "the crop it has always done is the one it still does");
+    }
+
+    /// The rounding, the stroke and the bar are read off the draw struct by
+    /// the shader, so a name that does not reach a field of it is a setting
+    /// that quietly does nothing — the DSL would take it either way and
+    /// declare a prop of its own. Building the shader with all four set is
+    /// also what turns a mistake in the pixel function into a failed test.
+    #[test]
+    fn a_rounded_and_stroked_picture_carries_what_the_dsl_wrote() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let image = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+            let source = script! {
+                use mod.prelude.widgets.*
+                Image{
+                    width: Fill height: Fill
+                    fit: ImageFit.CropToFill
+                    crop: 0.4
+                    draw_bg +: {
+                        border_radius: 8.0
+                        border_size: 1.5
+                        border_color: #f00
+                        letterbox_color: #000
+                        sample_mode: -1.0
+                    }
+                }
+            };
+            let value = vm.eval(source);
+            Image::script_from_value(vm, value)
+        });
+        assert_eq!(makepad_platform::shader_error::take(), None, "the image shader failed to compile");
+        assert_eq!(image.draw_bg.border_radius, 8.0);
+        assert_eq!(image.draw_bg.border_size, 1.5);
+        assert_eq!(image.draw_bg.border_color.x, 1.0);
+        assert_eq!(image.draw_bg.letterbox_color.w, 1.0);
+        assert_eq!(image.draw_bg.sample_mode, -1.0);
+        assert_eq!(image.crop, 0.4);
+    }
+
+    /// A dial that is not a number is the crop this fit has always done, and
+    /// not a window of NaNs: every comparison against one of those is false,
+    /// so nothing is a bar, nothing is inside the picture, and the read is
+    /// taken nowhere at all.
+    #[test]
+    fn a_dial_that_is_not_a_number_is_the_crop_it_always_did() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        image.crop = f64::NAN;
+        let (scale, pan) = draw_once(&mut cx, &mut image);
+        assert!(
+            close(scale.x, 0.5) && close(scale.y, 1.0) && close(pan.x, 0.25) && close(pan.y, 0.0),
+            "a dial that is not a number framed {scale:?} at {pan:?}"
+        );
+    }
+
+    /// The dial, the rounding, the stroke and the bar are all the bitmap
+    /// path's. A picture handed a vector source draws through the vector
+    /// call and never reaches this shader, so the dial leaves no mark on it
+    /// — and that is the one thing the markup accepts without a word, since
+    /// the settings are perfectly good names either way.
+    #[test]
+    fn a_vector_source_is_drawn_by_the_vector_call() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = wide_picture_in_a_square(&mut cx);
+        // A dial a bitmap of this shape would frame at (1, 2) offset (0, -0.5).
+        image.crop = 0.0;
+        image
+            .load_svg_from_data(
+                &mut cx,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="red"/></svg>"#,
+            )
+            .expect("the vector source loads");
+        let (scale, pan) = draw_once(&mut cx, &mut image);
+        assert!(
+            close(scale.x, 1.0) && close(scale.y, 1.0) && close(pan.x, 0.0) && close(pan.y, 0.0),
+            "a vector source reached the bitmap framing: window {scale:?} at {pan:?}"
+        );
+    }
+}
+
+/// The shape, the sampler and the bar are the shader's own work, and nothing
+/// in a `cargo test` can rasterize a quad to look at the result. So these
+/// read the code the shader compiles to instead: a test that only checked
+/// the four fields arrived would stay green with the whole of `pixel`
+/// replaced by `return picture`, or with `sample_at` collapsed to one
+/// filtered read, which is exactly the pair of traps this widget was asked
+/// to close.
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+
+    /// The picture's fragment source, compiled for the web backend — the one
+    /// whose sampler helpers carry the channel-order correction in their own
+    /// names, so the source says which read was asked for.
+    fn fragment_source(cx: &mut Cx) -> String {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let shader = vm
+                .bx
+                .heap
+                .type_default_for_id(DrawImage::script_type_id_static())
+                .expect("the picture's draw shader is registered");
+            let source = script! {
+                mod.shader.test_compile_draw_source(#(ScriptValue::from(shader)), "glsl", false)
+            };
+            let value = vm.eval(source);
+            let text = vm
+                .bx
+                .heap
+                .string_with(value, |_heap, text| text.to_string())
+                .expect("the compiler answers with source");
+            assert!(
+                !text.starts_with("ERRORS:"),
+                "the picture's shader did not compile: {text}"
+            );
+            assert!(!text.is_empty(), "the picture's shader compiled to nothing");
+            text
+        })
+    }
+
+    /// The one emitted line that mentions `needle`, so a call can be pinned
+    /// by what it was handed without pinning the whole of the expression the
+    /// compiler wrote around it.
+    fn line_with<'a>(source: &'a str, needle: &str) -> &'a str {
+        source
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("nothing in the compiled shader has {needle}"))
+    }
+
+    /// The `count` emitted lines from the one that mentions `needle`, for
+    /// pinning a branch together with what it returns.
+    fn block_from(source: &str, needle: &str, count: usize) -> String {
+        let start = source
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("nothing in the compiled shader has {needle}"));
+        source
+            .lines()
+            .skip(start)
+            .take(count)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The headline behaviour: the picture clips itself to a rounded box and
+    /// strokes its own edge, in the shader that draws the picture and
+    /// nowhere else.
+    #[test]
+    fn the_picture_clips_and_strokes_itself() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let source = fragment_source(&mut cx);
+        // The box a view draws: inset by the stroke on all four sides and
+        // rounded by the radius the caller wrote.
+        let shape = line_with(&source, "Sdf2d_box(l_sdf");
+        assert!(
+            shape.contains("rustinst_border_radius"),
+            "the box is not rounded by border_radius: {shape}"
+        );
+        assert!(
+            shape.contains("rustinst_border_size"),
+            "the box is not inset by the stroke: {shape}"
+        );
+        // The picture is that box's fill, which is what clips it.
+        assert!(
+            source.contains("Sdf2d_fill_keep_premul(l_sdf"),
+            "the picture is not the fill of the box, so nothing clips it"
+        );
+        // And the edge takes the stroke it was asked for.
+        let stroke = line_with(&source, "Sdf2d_stroke(l_sdf");
+        assert!(
+            stroke.contains("rustinst_border_color"),
+            "the edge is not stroked in border_color: {stroke}"
+        );
+        assert!(
+            stroke.contains("rustinst_border_size"),
+            "the stroke is not the width asked for: {stroke}"
+        );
+        // Neither one asked for leaves before any of it, so a picture that
+        // wanted no shape draws the quad it always drew.
+        let plain = line_with(&source, "rustinst_border_radius <= 0.0");
+        assert!(
+            plain.contains("rustinst_border_size <= 0.0"),
+            "an unasked picture no longer returns before the shape work: {plain}"
+        );
+    }
+
+    /// `sample_mode` reads the texture a whole texel at a time by snapping
+    /// the coordinate to the texel's centre and filtering anyway, never by
+    /// asking the sampler for a nearest read: only the corrected read has
+    /// its channel order fixed on the web target, where the helper's name is
+    /// which read it is, so a nearest one there comes back with red and blue
+    /// swapped. Zero reads straight through, as the picture always did.
+    #[test]
+    fn a_whole_texel_read_snaps_and_keeps_the_channel_order() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let source = fragment_source(&mut cx);
+        assert!(
+            source.contains("sample2d_bgra("),
+            "the picture does not read its texture through the corrected helper"
+        );
+        assert!(
+            !source.contains("sample2d("),
+            "a read in the picture's shader skips the channel-order correction"
+        );
+        // A whole texel is had by snapping, and the snapped coordinate is
+        // what gets read.
+        let snap = line_with(&source, "l_snapped =");
+        assert!(snap.contains("floor("), "the snapped read does not snap: {snap}");
+        assert!(
+            source.contains("sample2d_bgra(tex_image_texture, l_snapped)"),
+            "the snapped coordinate is worked out and then not read"
+        );
+        // Below zero every read is snapped; above zero the number is the
+        // device pixel ratio, and the read stays filtered until a texel is
+        // drawn more than four device pixels wide.
+        let choice = line_with(&source, "rustinst_sample_mode < 0.0");
+        assert!(
+            choice.contains("l_device_px_per_texel > 4.0"),
+            "the four-device-pixel threshold is gone: {choice}"
+        );
+        let ratio = line_with(&source, "l_device_px_per_texel =");
+        assert!(
+            ratio.contains("rustinst_sample_mode"),
+            "the ratio is not scaled by sample_mode: {ratio}"
+        );
+        assert!(
+            source.contains("rustinst_sample_mode == 0.0"),
+            "a picture that asked for nothing no longer reads straight through"
+        );
+    }
+
+    /// The bar is decided by the FRAMING — `fit_scale` and `fit_pan` — and
+    /// not by the coordinate the texture is finally read at, which carries
+    /// the caller's own pan and would turn a sprite sheet's cell or a zoomed
+    /// viewer into a transparent band. The rotated picture keeps its own
+    /// mapping and its own test.
+    #[test]
+    fn the_framing_is_what_turns_the_bar_on() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let source = fragment_source(&mut cx);
+        // The framing, the test on it and the bar, in the branch that says
+        // the picture is not rotated.
+        let bar = block_from(&source, "rustinst_image_dim_w <= 0.0", 4);
+        assert!(
+            bar.contains("rustinst_fit_scale") && bar.contains("rustinst_fit_pan"),
+            "the bar is not decided by the framing: {bar}"
+        );
+        assert!(
+            !bar.contains("rustinst_image_pan"),
+            "the caller's own pan reaches the bar test: {bar}"
+        );
+        assert!(
+            bar.contains("rustinst_letterbox_color"),
+            "past the framing is not the bar colour: {bar}"
+        );
+        assert!(
+            bar.contains("1.0001"),
+            "the framing test lost the slack that keeps an edge fragment out of the bar: {bar}"
+        );
+        // And the read itself tests nothing: past the edge of an unrotated
+        // picture is the edge texel, exactly as it always was.
+        let read = block_from(&source, "l_uv = ((var_pos", 2);
+        assert!(
+            read.contains("io_sample_at"),
+            "the unrotated read no longer samples: {read}"
+        );
+        assert!(
+            !read.contains("rustinst_letterbox_color"),
+            "the bar moved onto the final coordinate, where a pan would grow one: {read}"
+        );
     }
 }

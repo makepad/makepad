@@ -194,7 +194,7 @@ fn tile_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/tilelist/overview",
+    key: "data-display/tilelist/overview",
     category: "Data display",
     component: "TileList",
     also: &["TileRow"],

@@ -161,7 +161,7 @@ fn log_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data display/loglist/overview",
+    key: "data-display/loglist/overview",
     category: "Data display",
     component: "LogList",
     also: &["LogListRow", "LogListLink", "LogListEmpty", "LogListFloor"],
