@@ -1983,6 +1983,7 @@ pub fn window_intercept(
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 tw.doc_tip_hover(cx, abs);
                 tw.scope_tip_hover(cx, abs);
+                tw.chrome_tip_hover(cx, abs);
                 tw.states_hover(cx, abs);
                 tw.pulse_hover(cx, abs);
             }
@@ -6276,9 +6277,6 @@ pub struct Tweaker {
     /// the button comes up, wherever it travels.
     #[rust]
     spread_drag: bool,
-    /// The panel's note button: the same note as the Insert key, for
-    /// keyboards without one.
-    note_uid: u64,
     /// The scope toggle's buttons.
     #[rust]
     scope_this_uid: u64,
@@ -6320,6 +6318,10 @@ pub struct Tweaker {
     /// Which scope button the tooltip is up for (0 = none, 1 = this, 2 = all).
     #[rust]
     scope_tip_shown: u8,
+    /// The text the panel's own control under the pointer last showed in
+    /// that same bubble; empty when none. See `chrome_tip_hover`.
+    #[rust]
+    chrome_tip_shown: String,
     /// The tooltip's measured size. It sits ABOVE the buttons because the
     /// footer is pinned to the bottom of the panel and anything below the
     /// row would be off the window; and it is pulled left to stay inside the
@@ -7199,13 +7201,6 @@ impl Tweaker {
                                 color: #xd8d8d8
                                 svg: crate_resource("self:resources/icons/sploded.svg")
                             }
-                        }
-                        note := Button {
-                            width: Fit
-                            height: 24
-                            padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
-                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
-                            text: "note"
                         }
                     }
                     tab_row := View {
@@ -8109,6 +8104,128 @@ impl Tweaker {
         {
             self.spec_flush();
         }
+    }
+
+    /// A one-line explanation for the control under the pointer, if it is
+    /// one of the panel's own. The property rows already explain themselves
+    /// through `row_docs`; this covers everything else a person can press --
+    /// the tabs, the filter row, the tree head, the scope buttons, the Spec
+    /// tab's cross and splitters, the strip's buttons, the shader fold, the
+    /// footer's path line, the extrusion readout, and the segments inside a
+    /// hovered row (flow, align, size mode, the box legs).
+    ///
+    /// Shown through the same Tooltip the scope buttons use -- see
+    /// `chrome_tip_hover` -- so every control in the panel explains itself
+    /// in one voice.
+    fn chrome_doc(&self, cx: &Cx, abs: Vec2d) -> Option<(Rect, String)> {
+        fn place(rect: Rect, text: &str) -> (Rect, String) {
+            (rect, text.to_string())
+        }
+        fn hit(cx: &Cx, w: &WidgetRef, abs: Vec2d) -> Option<Rect> {
+            let r = w.area().rect(cx);
+            (r.size.x > 0.0 && r.size.y > 0.0 && r.contains(abs)).then_some(r)
+        }
+
+        // The extrusion readout floats over the app, outside the band.
+        if let Some(ui) = self.spread_ui.as_ref() {
+            if let Some(r) = hit(cx, &ui.child(live_id!(value)), abs) {
+                return Some(place(r, "how far the exploded layers stand apart \u{00b7} drag to scrub, wheel to extrude"));
+            }
+        }
+        let sidebar = self.sidebar.as_ref()?;
+        if self.band.size.x <= 0.0 || abs.x < self.band.pos.x {
+            return None;
+        }
+
+        // A hovered property row's own segments first: those ids repeat in
+        // every row, so they are only meaningful inside the row under the
+        // pointer.
+        if let Some(row) = self
+            .visible
+            .iter()
+            .find(|row| {
+                let r = row.item.area().clipped_rect(cx);
+                r.size.y > 0.0 && r.contains(abs)
+            })
+        {
+            let item = &row.item;
+            let inner: [(&[LiveId], &str); 29] = [
+                (&[live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
+                (&[live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
+                (&[live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
+                (&[live_id!(flow_seg), live_id!(f_wrap)], "children flow left to right and wrap onto new rows"),
+                (&[live_id!(grid), live_id!(row0), live_id!(d0)], "align children top left"),
+                (&[live_id!(grid), live_id!(row0), live_id!(d1)], "align children top centre"),
+                (&[live_id!(grid), live_id!(row0), live_id!(d2)], "align children top right"),
+                (&[live_id!(grid), live_id!(row1), live_id!(d3)], "align children middle left"),
+                (&[live_id!(grid), live_id!(row1), live_id!(d4)], "align children centre"),
+                (&[live_id!(grid), live_id!(row1), live_id!(d5)], "align children middle right"),
+                (&[live_id!(grid), live_id!(row2), live_id!(d6)], "align children bottom left"),
+                (&[live_id!(grid), live_id!(row2), live_id!(d7)], "align children bottom centre"),
+                (&[live_id!(grid), live_id!(row2), live_id!(d8)], "align children bottom right"),
+                (&[live_id!(link)], "one value for all four sides"),
+                (&[live_id!(spacing_input)], "space between the children, in points"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fill)], "width: fill whatever the parent leaves"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fit)], "width: fit the content"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fix)], "width: a fixed size, in points"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_input)], "the width \u{00b7} a number, or a size such as 50% or calc(100% - 20px)"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fill)], "height: fill whatever the parent leaves"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fit)], "height: fit the content"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fix)], "height: a fixed size, in points"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_input)], "the height \u{00b7} a number, or a size such as 50% or calc(100% - 20px)"),
+                (&[live_id!(box_col), live_id!(top_row), live_id!(leg_top)], "the top side, in points"),
+                (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_left)], "the left side, in points"),
+                (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_right)], "the right side, in points"),
+                (&[live_id!(box_col), live_id!(bot_row), live_id!(leg_bottom)], "the bottom side, in points"),
+                (&[live_id!(tname_wrap), live_id!(tname)], "ask the agent to give this widget a name in the source"),
+                (&[live_id!(value)], "the value \u{00b7} drag to scrub, double-click the label to reset"),
+            ];
+            for (path, text) in inner {
+                let mut w = item.clone();
+                for id in path {
+                    w = w.child(*id);
+                }
+                if let Some(r) = hit(cx, &w, abs) {
+                    return Some(place(r, text));
+                }
+            }
+        }
+
+        let chrome: [(&[LiveId], &str); 23] = [
+            (&[live_id!(filter_row), live_id!(search)], "filter the properties by name"),
+            (&[live_id!(filter_row), live_id!(select)], "hand the mouse back to the app: its buttons work, the selection stays"),
+            (&[live_id!(filter_row), live_id!(sploded)], "explode the widget tree into layers \u{00b7} wheel extrudes, drag orbits"),
+            (&[live_id!(tab_row), live_id!(tab_props)], "the selection's properties, edited live"),
+            (&[live_id!(tab_row), live_id!(tab_shader)], "the selection's draw layers: preview, source, states"),
+            (&[live_id!(tab_row), live_id!(tab_tree)], "the widget tree: isolate a branch, centre, zoom"),
+            (&[live_id!(tab_row), live_id!(tab_theme)], "the theme's colours and values, edited live everywhere"),
+            (&[live_id!(tab_row), live_id!(tab_spec)], "notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(isolate)], "show only the selection and what is inside it"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(center)], "keep the view centred on the selection"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(zoom)], "magnify the app view \u{00b7} 1 is life size"),
+            (&[live_id!(shader_col), live_id!(src_fold)], "show the shader's source \u{00b7} Ctrl+Enter applies an edit"),
+            (&[live_id!(shader_col), live_id!(states_row), live_id!(states_pause)], "pause the animated state previews"),
+            (&[live_id!(spec_col), live_id!(notes_head), live_id!(notes_clear)], "empty the notes"),
+            (&[live_id!(spec_col), live_id!(rules_head), live_id!(grip)], "drag to share the tab's height between the fields"),
+            (&[live_id!(spec_col), live_id!(app_head), live_id!(grip)], "drag to share the tab's height between the fields"),
+            (&[live_id!(prompt_row), live_id!(prompt_field)], "tell the agent what should change about the selection"),
+            (&[live_id!(prompt_row), live_id!(prompt_bar), live_id!(queue)], "hold this message for the next send (Alt+Enter)"),
+            (&[live_id!(prompt_row), live_id!(prompt_bar), live_id!(send)], "send to the agent now (Ctrl+Enter)"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_this)], "edits change this instance only"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_all)], "edits change the type, so every widget of this type"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_isolated)], "keep 'all' inside the isolated branch"),
+            (&[live_id!(ident_footer), live_id!(path_row), live_id!(path_label)], "the selection's address \u{00b7} click copies it"),
+        ];
+        for (path, text) in chrome {
+            let mut w = sidebar.clone();
+            for id in path {
+                w = w.child(*id);
+            }
+            if let Some(r) = hit(cx, &w, abs) {
+                return Some(place(r, text));
+            }
+        }
+        None
     }
 
     /// The Spec tab's rows by index -- 0 notes, 1 rules, 2 app rules -- as
@@ -9228,15 +9345,6 @@ impl Tweaker {
             let picking = !session().lock().unwrap().selection_locked;
             set_button_fill(cx, select, picking);
         }
-        {
-            let note = sidebar.child(live_id!(filter_row)).child(live_id!(note));
-            set_button_fill(cx, note, self.panel_tab == PanelTab::Spec);
-        }
-        self.note_uid = sidebar
-            .child(live_id!(filter_row))
-            .child(live_id!(note))
-            .widget_uid()
-            .0;
         self.scope_this_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
         self.scope_all_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
         self.scope_isolated_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_isolated)).widget_uid().0;
@@ -9287,6 +9395,38 @@ impl Tweaker {
                     (false, _) => String::new(),
                 };
                 head.child(live_id!(isolate_hint)).set_text(cx, &hint);
+            }
+            {
+                // The filter works on the row list, which the Shader and
+                // Spec tabs do not have. A box that looks live and does
+                // nothing is worse than none, so on those tabs it says so
+                // and goes quiet.
+                let filters_here = !matches!(tab, PanelTab::Shader | PanelTab::Spec);
+                let input = sidebar
+                    .child(live_id!(filter_row))
+                    .child(live_id!(search))
+                    .child(live_id!(input));
+                if let Some(mut input) = input.borrow_mut::<crate::TextInput>() {
+                    let hint = if filters_here { "Filter" } else { "no filter on this tab" };
+                    if input.empty_text() != hint {
+                        input.set_empty_text(cx, hint.to_string());
+                    }
+                }
+                let text: Vec4f = if filters_here {
+                    vec4(0.90, 0.90, 0.92, 1.0)
+                } else {
+                    vec4(0.42, 0.42, 0.46, 1.0)
+                };
+                let bg: Vec4f = if filters_here {
+                    vec4(0.106, 0.106, 0.106, 1.0)
+                } else {
+                    vec4(0.16, 0.16, 0.17, 1.0)
+                };
+                let mut input = input;
+                script_apply_eval!(cx, input, {
+                    draw_text +: { color: #(text) }
+                    draw_bg +: { color: #(bg) }
+                });
             }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
@@ -10362,37 +10502,6 @@ impl Tweaker {
             }
         }
         self.visible = visible_rects;
-        // The doc tooltip chip: annotation text for the hovered row,
-        // clamped into the band.
-        if let Some(hover) = self.hover_doc.clone() {
-            let label_height = 16.0;
-            // MEASURED, not counted. The plate used a per-character average
-            // while the words on it were drawn at their true advances, so it
-            // was visibly too wide on ordinary text and ran past the band on a
-            // long annotation. The run is available here because this is a
-            // draw pass; the count stays only as the fallback for text the
-            // layout engine returns no row for.
-            let approx = self
-                .draw_label
-                .prepare_single_line_run(cx, &hover.text)
-                .map(|run| run.width_in_lpxs as f64)
-                .unwrap_or_else(|| (hover.text.chars().count() as f64) * 5.4)
-                + 10.0;
-            let mut pos = hover.pos;
-            pos.x = pos
-                .x
-                .clamp(band.pos.x, (band.pos.x + band.size.x - approx).max(band.pos.x));
-            pos.y = pos.y.max(0.0);
-            self.draw_label_bg.draw_abs(
-                cx,
-                Rect {
-                    pos,
-                    size: dvec2(approx, label_height),
-                },
-            );
-            self.draw_label
-                .draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
-        }
     }
 
     /// Apply one sidebar-originated chunk to the selection (same path the
@@ -10643,6 +10752,51 @@ impl Tweaker {
     /// who else takes the edit AND in which file it lands in, and a single
     /// line covering both was the reason the old standing text had to be
     /// truncated to fit.
+    /// The panel's own controls explain themselves on hover, through the
+    /// scope buttons' Tooltip: one bubble, one look. Called from the pointer
+    /// intercept on every move over the panel, after `scope_tip_hover`,
+    /// which owns the bubble while the pointer is on a scope button and
+    /// leaves it alone otherwise.
+    fn chrome_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.scope_tip_shown != 0 {
+            return;
+        }
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let found = if tweak_is_on() { self.chrome_doc(cx, abs) } else { None };
+        let text = found.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+        if text == self.chrome_tip_shown {
+            return;
+        }
+        let tip = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(scope_row))
+            .child(live_id!(scope_tip));
+        // Measure what is on screen before it changes, so the next show can
+        // place itself against a real height instead of the fallback.
+        let measured = tip.child(live_id!(content)).area().clipped_rect(cx);
+        if measured.size.y > 0.0 {
+            self.scope_tip_size = measured.size;
+        }
+        self.chrome_tip_shown = text.clone();
+        let Some(mut tip) = tip.borrow_mut::<Tooltip>() else { return };
+        let Some((rect, _)) = found else {
+            tip.hide(cx);
+            return;
+        };
+        // Above the control, or below it for the two rows at the very top,
+        // where "above" is off the window. Kept inside the window's right
+        // edge, which is the band's.
+        let size = self.scope_tip_size;
+        let window_x = self.band.pos.x + self.band.size.x;
+        let y = if rect.pos.y < 44.0 {
+            rect.pos.y + rect.size.y + 4.0
+        } else {
+            rect.pos.y - size.y - 4.0
+        };
+        let x = rect.pos.x.min(window_x - size.x - 6.0).max(4.0);
+        tip.show_with_options(cx, dvec2(x, y), &text);
+    }
+
     fn scope_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
         let Some(sidebar) = self.sidebar.as_ref() else { return };
         let row = sidebar
@@ -11433,13 +11587,6 @@ impl Tweaker {
                     self.apply_view_focus(cx);
                     self.redraw_sidebar(cx);
                     self.redraw_overlay(cx);
-                }
-                continue;
-            }
-            if self.note_uid != 0 && action_uid == self.note_uid {
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    self.note_request = true;
-                    cx.redraw_all();
                 }
                 continue;
             }
@@ -12455,6 +12602,7 @@ impl Widget for Tweaker {
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
             self.scope_tip_hover(cx, e.abs);
+            self.chrome_tip_hover(cx, e.abs);
             self.states_hover(cx, e.abs);
             self.pulse_hover(cx, e.abs);
         }
@@ -13406,6 +13554,32 @@ impl Widget for Tweaker {
                 cx.set_key_focus(area);
                 self.next_frame = cx.new_next_frame();
             }
+        }
+        // The doc chip for whatever the pointer is over -- a property row's
+        // annotation, or one of the panel's own controls. Drawn HERE, after
+        // the sidebar, rather than inside its draw: painted in there, every
+        // widget the panel drew afterwards lay on top of it, and a chip under
+        // the tab row was a dark plate with the tabs showing through.
+        if let Some(hover) = self.hover_doc.clone() {
+            let band = self.band;
+            let label_height = 16.0;
+            // MEASURED, not counted: the words are drawn at their true
+            // advances, so the plate is sized from the same run. The count
+            // is only the fallback for text the layout engine returns no
+            // row for.
+            let approx = self
+                .draw_label
+                .prepare_single_line_run(cx, &hover.text)
+                .map(|run| run.width_in_lpxs as f64)
+                .unwrap_or_else(|| (hover.text.chars().count() as f64) * 5.4)
+                + 10.0;
+            let mut pos = hover.pos;
+            pos.x = pos
+                .x
+                .clamp(band.pos.x, (band.pos.x + band.size.x - approx).max(band.pos.x));
+            pos.y = pos.y.max(0.0);
+            self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(approx, label_height) });
+            self.draw_label.draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
         }
         // Last into the topmost list, so it lies over the panel too.
         if draw_hands_off_frame(cx, &mut self.draw_outline) {
