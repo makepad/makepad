@@ -610,6 +610,14 @@ fn derive_script_impl_inner(
                     tb.add("vm.bx.heap.set_value(enum_object, id!(")
                         .ident(&item.name)
                         .add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
+                    // Which enum this variant belongs to. The variant id is
+                    // the root of the proto chain; the enum's name is nowhere
+                    // else, and a reflected value has to print as Size.Fill
+                    // rather than as a bag of fields. Hidden: `__` keys are
+                    // invisible to reflection and to type checks.
+                    tb.add("vm.bx.heap.set_value(bare, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("vm.bx.heap.freeze(bare);");
                 }
                 EnumKind::Tuple(args) => {
@@ -624,6 +632,14 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
+                    // Which enum this variant belongs to. The variant id is
+                    // the root of the proto chain; the enum's name is nowhere
+                    // else, and a reflected value has to print as Size.Fill
+                    // rather than as a bag of fields. Hidden: `__` keys are
+                    // invisible to reflection and to type checks.
+                    tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("    if vm.bx.heap.vec_len(args) != ")
                         .unsuf_usize(args.len())
                         .add("{");
@@ -680,6 +696,16 @@ fn derive_script_impl_inner(
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None, is_repr_u32_enum: false};");
                     tb.add("let ty_index = vm.bx.heap.register_type(None, ty_check);");
+                    // Which enum this variant belongs to. The variant id is
+                    // the root of the proto chain; the enum's name is nowhere
+                    // else, and a reflected value has to print as Size.Fill
+                    // rather than as a bag of fields. Hidden: `__` keys are
+                    // invisible to reflection and to type checks. Set BEFORE the
+                    // type is attached: a typed object refuses a key its props do
+                    // not list.
+                    tb.add("vm.bx.heap.set_value(named, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("vm.bx.heap.set_type(named, ty_index);");
                     tb.add("vm.bx.heap.freeze_component(named);");
                     tb.add("vm.bx.heap.set_value(enum_object, id!(")
@@ -838,6 +864,14 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
+                    // Which enum this variant belongs to. The variant id is
+                    // the root of the proto chain; the enum's name is nowhere
+                    // else, and a reflected value has to print as Size.Fill
+                    // rather than as a bag of fields. Hidden: `__` keys are
+                    // invisible to reflection and to type checks.
+                    tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     for (i, arg) in args.iter().enumerate() {
                         tb.add("let value = <")
                             .stream(Some(arg.clone()))
