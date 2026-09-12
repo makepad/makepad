@@ -46,7 +46,7 @@ pub struct LinuxDisplaySnapshot {
 /// environment must forward this variable explicitly.
 pub const LINUX_VULKAN_DEVICE_ENV: &str = "MAKEPAD_VULKAN_DEVICE_UUID";
 
-#[cfg(all(not(headless), linux_direct, use_vulkan))]
+#[cfg(all(not(gpusim), linux_direct, use_vulkan))]
 impl crate::cx::Cx {
     /// The direct backend's current display inventory. Cheap: it copies the
     /// renderer's bookkeeping, no Vulkan or DRM queries happen here.
@@ -85,7 +85,7 @@ impl crate::cx::Cx {
     }
 }
 
-#[cfg(not(all(not(headless), linux_direct, use_vulkan)))]
+#[cfg(not(all(not(gpusim), linux_direct, use_vulkan)))]
 impl crate::cx::Cx {
     /// Windowed, hosted and headless builds do not own displays; the snapshot
     /// is empty.

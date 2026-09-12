@@ -9,7 +9,7 @@ use {
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::{Event, TimerEvent, WindowGeom, WindowGeomChangeEvent},
+        event::{Event, TimerEvent, WindowGeom},
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::*,
@@ -21,6 +21,8 @@ use {
     std::rc::Rc,
     std::time::Instant,
 };
+#[cfg(use_vulkan)]
+use crate::event::WindowGeomChangeEvent;
 
 /// Retry deadline while the source output's image or the frame fence is in
 /// flight: short enough to keep a 240 Hz source paced by its own vblank, and

@@ -1513,6 +1513,9 @@ impl Cx {
     /// is replaced by it (a frame can only show the pointer's latest
     /// position). Everything else keeps its order, so a Down/Up/Scroll
     /// still sees the move that preceded it.
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(not(linux_direct), use_vulkan))]
     pub(crate) fn stdin_coalesce_host_batch(msgs: &mut Vec<StudioToApp>) {
         let ticks = msgs
             .iter()
