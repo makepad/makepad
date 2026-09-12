@@ -17,27 +17,27 @@ script_mod! {
             Rotary{
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(10.)
-                    val_padding: uniform(2.)
-                    gap: uniform(0.)
+                    val_size: 10.
+                    val_padding: 2.
+                    gap: 0.
                 }
             }
 
             Rotary{
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(5.)
-                    val_padding: uniform(2.5)
-                    gap: uniform(180.)
+                    val_size: 5.
+                    val_padding: 2.5
+                    gap: 180.
                 }
             }
 
             Rotary{
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(5.)
-                    val_padding: uniform(0.)
-                    gap: uniform(180.)
+                    val_size: 5.
+                    val_padding: 0.
+                    gap: 180.
                 }
                 animator +: {
                     disabled: {
@@ -51,8 +51,8 @@ script_mod! {
                 height: 150
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(10.)
-                    val_padding: uniform(5.)
+                    val_size: 10.
+                    val_padding: 5.
                 }
             }
         }
@@ -64,11 +64,11 @@ script_mod! {
             RotaryGradientY{text: "Label"}
             RotaryGradientY{
                 text: "Label"
-                draw_bg +: {gap: uniform(0.)}
+                draw_bg +: {gap: 0.}
             }
             RotaryGradientY{
                 text: "Label"
-                draw_bg +: {gap: uniform(180.)}
+                draw_bg +: {gap: 180.}
             }
             RotaryGradientY{
                 text: "Label"
@@ -77,15 +77,15 @@ script_mod! {
                         default: @on
                     }
                 }
-                draw_bg +: {val_size: uniform(20.)}
+                draw_bg +: {val_size: 20.}
             }
             RotaryGradientY{
                 width: Fill
                 height: 150
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(10.)
-                    val_padding: uniform(5.)
+                    val_size: 10.
+                    val_padding: 5.
                 }
             }
         }
@@ -97,11 +97,11 @@ script_mod! {
             RotaryFlat{text: "Label"}
             RotaryFlat{
                 text: "Label"
-                draw_bg +: {gap: uniform(0.)}
+                draw_bg +: {gap: 0.}
             }
             RotaryFlat{
                 text: "Label"
-                draw_bg +: {gap: uniform(180.)}
+                draw_bg +: {gap: 180.}
             }
             RotaryFlat{
                 text: "Label"
@@ -110,15 +110,15 @@ script_mod! {
                         default: @on
                     }
                 }
-                draw_bg +: {val_size: uniform(10.)}
+                draw_bg +: {val_size: 10.}
             }
             RotaryFlat{
                 width: Fill
                 height: 150
                 text: "Label"
                 draw_bg +: {
-                    val_size: uniform(10.)
-                    val_padding: uniform(8.)
+                    val_size: 10.
+                    val_padding: 8.
                 }
             }
         }
@@ -207,14 +207,14 @@ script_mod! {
         StoryNote{text: "A gap of 25 nearly closes the groove; 160 leaves a quarter of it open. The sidebar stops at 20 because at 0 both stops land on the same angle and the needle points the same way at the minimum and at the maximum. A fat groove reads across a room, a thin one with a long needle reads as an instrument. The last one is the same drawing on a paler material, which is the one line it takes to move the disc off the darkest step -- and it costs something: the unlit groove and the lit arc are spaced off the material by a rule, and a paler material leaves them less room. At color_opaque_d_4 the two steps fall from about 3.2 and 3.6 to 1 to about 3.1 and 3.7 in the dark theme, and to 2.5 and 2.8 in the light ones. The darkest step is the darkest step for a reason."}
         StoryRow{
             align: Align{x: 0. y: 1.}
-            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {gap: uniform(25.)}}
-            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {gap: uniform(160.)}}
-            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {ring_size: uniform(0.28)}}
-            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {ring_size: uniform(0.05) pointer_length: uniform(0.9)}}
+            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {gap: 25.}}
+            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {gap: 160.}}
+            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {ring_size: 0.28}}
+            RotaryKnob{width: 44. height: 44. default: 0.62 draw_bg +: {ring_size: 0.05 pointer_length: 0.9}}
             RotaryKnob{
                 width: 44. height: 44. default: 0.62
                 draw_bg +: {
-                    color: uniform(theme.color_opaque_d_4)
+                    color: theme.color_opaque_d_4
                 }
             }
             RotaryKnob{
@@ -225,7 +225,7 @@ script_mod! {
                     }
                 }
                 draw_bg +: {
-                    color: uniform(theme.color_opaque_d_4)
+                    color: theme.color_opaque_d_4
                 }
             }
         }

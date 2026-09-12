@@ -25,7 +25,8 @@ script_mod! {
             page_a := View{
                 align: Align{x: 0.5 y: 0.5}
                 show_bg: true
-                draw_bg +: {color: uniform(#f00)}
+                // A plain View's pixel is transparent and never reads `color`: paint it here.
+                draw_bg +: {color: uniform(#f00) pixel: fn() {return Pal.premul(self.color)}}
                 width: Fill height: Fill
                 H3{width: Fit text: "Page A"}
             }
@@ -33,7 +34,7 @@ script_mod! {
             page_b := View{
                 align: Align{x: 0.5 y: 0.5}
                 show_bg: true
-                draw_bg +: {color: uniform(#080)}
+                draw_bg +: {color: uniform(#080) pixel: fn() {return Pal.premul(self.color)}}
                 width: Fill height: Fill
                 H3{width: Fit text: "Page B"}
             }
@@ -41,7 +42,7 @@ script_mod! {
             page_c := View{
                 align: Align{x: 0.5 y: 0.5}
                 show_bg: true
-                draw_bg +: {color: uniform(#008)}
+                draw_bg +: {color: uniform(#008) pixel: fn() {return Pal.premul(self.color)}}
                 width: Fill height: Fill
                 H3{width: Fit text: "Page C"}
             }

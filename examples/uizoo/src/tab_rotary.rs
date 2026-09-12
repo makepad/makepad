@@ -18,27 +18,27 @@ script_mod! {
                 Rotary{
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(10.)
-                        val_padding: uniform(2.)
-                        gap: uniform(0.)
+                        val_size: 10.
+                        val_padding: 2.
+                        gap: 0.
                     }
                 }
 
                 Rotary{
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(5.)
-                        val_padding: uniform(2.5)
-                        gap: uniform(180.)
+                        val_size: 5.
+                        val_padding: 2.5
+                        gap: 180.
                     }
                 }
 
                 Rotary{
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(5.)
-                        val_padding: uniform(0.)
-                        gap: uniform(180.)
+                        val_size: 5.
+                        val_padding: 0.
+                        gap: 180.
                     }
                     animator +: {
                         disabled: {
@@ -52,8 +52,8 @@ script_mod! {
                     height: 150
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(10.)
-                        val_padding: uniform(5.)
+                        val_size: 10.
+                        val_padding: 5.
                     }
                 }
             }
@@ -65,11 +65,11 @@ script_mod! {
                 RotaryGradientY{text: "Label"}
                 RotaryGradientY{
                     text: "Label"
-                    draw_bg +: {gap: uniform(0.)}
+                    draw_bg +: {gap: 0.}
                 }
                 RotaryGradientY{
                     text: "Label"
-                    draw_bg +: {gap: uniform(180.)}
+                    draw_bg +: {gap: 180.}
                 }
                 RotaryGradientY{
                     text: "Label"
@@ -78,15 +78,15 @@ script_mod! {
                             default: @on
                         }
                     }
-                    draw_bg +: {val_size: uniform(20.)}
+                    draw_bg +: {val_size: 20.}
                 }
                 RotaryGradientY{
                     width: Fill
                     height: 150
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(10.)
-                        val_padding: uniform(5.)
+                        val_size: 10.
+                        val_padding: 5.
                     }
                 }
             }
@@ -98,11 +98,11 @@ script_mod! {
                 RotaryFlat{text: "Label"}
                 RotaryFlat{
                     text: "Label"
-                    draw_bg +: {gap: uniform(0.)}
+                    draw_bg +: {gap: 0.}
                 }
                 RotaryFlat{
                     text: "Label"
-                    draw_bg +: {gap: uniform(180.)}
+                    draw_bg +: {gap: 180.}
                 }
                 RotaryFlat{
                     text: "Label"
@@ -111,15 +111,15 @@ script_mod! {
                             default: @on
                         }
                     }
-                    draw_bg +: {val_size: uniform(10.)}
+                    draw_bg +: {val_size: 10.}
                 }
                 RotaryFlat{
                     width: Fill
                     height: 150
                     text: "Label"
                     draw_bg +: {
-                        val_size: uniform(10.)
-                        val_padding: uniform(8.)
+                        val_size: 10.
+                        val_padding: 8.
                     }
                 }
             }

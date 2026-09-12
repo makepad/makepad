@@ -46,7 +46,8 @@ script_mod! {
                 width: 50.
                 margin: 10.
             }
-            draw_bg +: {color: uniform(#f00)}
+            // Plain value: a uniform(..) in this merge redeclares the input instead of setting it, and the red ground never drew.
+            draw_bg +: {color: #f00}
             draw_icon +: {
                 svg: crate_resource("self:resources/Icon_Favorite.svg")
                 color: #f0f
