@@ -1246,11 +1246,11 @@ impl MacosApp {
                 self.pin_restore = None;
                 return;
             }
-            crate::log!(
-                "PIN stats: ns_moves={} sum_dx={:.1}",
-                self.pin_ns_moves,
-                self.pin_sum_dx
-            );
+            // crate::log!(
+            //     "PIN stats: ns_moves={} sum_dx={:.1}",
+            //     self.pin_ns_moves,
+            //     self.pin_sum_dx
+            // );
             self.mouse_pointer_lock = false;
             self.pointer_lock_applied = false;
             self.pointer_pin_mode = false;
@@ -1345,7 +1345,7 @@ impl MacosApp {
                 }
                 // Runtime availability is the contract here: referring to the
                 // class by name keeps the binary loadable before macOS 14.
-                let mut is_metal_link = false;
+                let mut _is_metal_link = false;
                 let mut link = nil;
                 // Opt-in until it paces at the display's rate: measured 11 fps
                 // visible on 2026-08-25 against 62 fps on the CVDisplayLink path.
@@ -1390,7 +1390,7 @@ impl MacosApp {
                                     requested_fps,
                                 );
                             }
-                            is_metal_link = true;
+                            _is_metal_link = true;
                         }
                     }
                 }
@@ -1428,10 +1428,10 @@ impl MacosApp {
                                 preferred: fps,
                             };
                             let () = msg_send![link, setPreferredFrameRateRange: range];
-                            crate::log!(
-                                "macos: display link pinned to {}fps (panel maximum)",
-                                maximum_fps
-                            );
+                            // crate::log!(
+                            //     "macos: display link pinned to {}fps (panel maximum)",
+                            //     maximum_fps
+                            // );
                         } else {
                             crate::log!("macos: display link has no rate-range API");
                         }
@@ -1447,11 +1447,11 @@ impl MacosApp {
                     let () = msg_send![link, setPaused: YES];
                 }
                 self.display_links.push((window, link));
-                crate::log!(
-                    "macos: paint pacing on {} (frame-flip clock), window {}",
-                    if is_metal_link { "CAMetalDisplayLink" } else { "CADisplayLink" },
-                    self.display_links.len()
-                );
+                // crate::log!(
+                //     "macos: paint pacing on {} (frame-flip clock), window {}",
+                //     if _is_metal_link { "CAMetalDisplayLink" } else { "CADisplayLink" },
+                //     self.display_links.len()
+                // );
             }
             if self.display_links_paused {
                 for (_w, link) in &self.display_links {

@@ -203,7 +203,7 @@ impl MacosWindow {
             return;
         }
         object_setClass(container, subclass as ObjcId);
-        crate::log!("defang: titlebar container swapped — WindowDragQuery decides drags");
+        // crate::log!("defang: titlebar container swapped — WindowDragQuery decides drags");
     }
 
     pub fn set_window_level(&mut self, level: MacosWindowLevel) {
