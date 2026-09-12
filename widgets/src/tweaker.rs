@@ -233,6 +233,30 @@ impl BadgeKind {
     }
 }
 
+/// How tall the Spec tab's fields start out, and the range a drag may take
+/// them through. The floor is two lines plus the padding -- below that the
+/// box says less than its own placeholder -- and the ceiling is there so a
+/// field cannot swallow the tab and strand the others off the bottom.
+const SPEC_FIELD_H: f64 = 110.0;
+const SPEC_FIELD_MIN: f64 = 48.0;
+const SPEC_FIELD_MAX: f64 = 420.0;
+
+/// The grab strip under each field, in points.
+const SPEC_GRIP_H: f64 = 6.0;
+
+/// How tall each Spec field is right now. Zero means "never dragged" and
+/// resolves to the default, the way `sidebar_width` does -- and like the
+/// panel's own width it lives on the session and not on disk, so a drag
+/// lasts the run. The three are notes, rules, app rules, in that order.
+fn spec_height(index: usize) -> f64 {
+    let h = session().lock().unwrap().spec_heights[index];
+    if h <= 0.0 {
+        SPEC_FIELD_H
+    } else {
+        h
+    }
+}
+
 /// The pin badge's clickable square, in points.
 const BADGE_SIZE: f64 = 13.0;
 /// How often the badge targets are re-resolved (a whole-tree walk).
@@ -674,6 +698,9 @@ pub(crate) struct TweakSession {
     /// A remote pulse request: a theme colour name (or #rrggbbaa) to pulse
     /// app-wide until an empty request clears it; consumed by the tweaker.
     pulse_req: Option<String>,
+    /// The Spec tab's three field heights, dragged by the grips under them.
+    /// See [`spec_height`].
+    spec_heights: [f64; 3],
     /// The open colour popover's window rect, for /tweak/state.
     popup: Option<Rect>,
     /// A remote lock on the pulse mix (deterministic grabs): the pulse
@@ -6456,6 +6483,16 @@ pub struct Tweaker {
     /// are claimed only while the caret is actually there.
     #[rust]
     prompt_focus_pending: bool,
+    /// A field height being dragged: which of the three, where the press
+    /// landed, and how tall it was when it started. Held rather than
+    /// recomputed so the drag tracks the pointer from where it was grabbed
+    /// instead of jumping the field's edge to it.
+    #[rust]
+    spec_resize: Option<(usize, f64, f64)>,
+    /// The heights last pushed at the fields. An apply per frame would be
+    /// three applies per frame forever; this makes it three per drag step.
+    #[rust]
+    spec_applied_h: [f64; 3],
     /// The cross that empties the notes field.
     #[rust]
     spec_clear_uid: u64,
@@ -7333,6 +7370,19 @@ impl Tweaker {
                                 text_style +: { font_size: 8.5 }
                             }
                         }
+                        notes_grip := View {
+                            width: Fill
+                            height: 6
+                            align: Align{x: 0.5 y: 0.5}
+                            // A plain View's draw_bg is a bare DrawQuad whose
+                            // default pixel fn returns #0000, so show_bg plus a
+                            // colour paints nothing. RoundedView has a pixel fn.
+                            bar := RoundedView {
+                                width: 28
+                                height: 3
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
                         rules_head := FabHeaderLabel {
                             width: Fill
                             text: "rules"
@@ -7352,12 +7402,24 @@ impl Tweaker {
                             }
                         }
                         }
-                        spec_div := View {
+                        rules_grip := View {
+                            width: Fill
+                            height: 6
+                            align: Align{x: 0.5 y: 0.5}
+                            // A plain View's draw_bg is a bare DrawQuad whose
+                            // default pixel fn returns #0000, so show_bg plus a
+                            // colour paints nothing. RoundedView has a pixel fn.
+                            bar := RoundedView {
+                                width: 28
+                                height: 3
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
+                        spec_div := RoundedView {
                             width: Fill
                             height: 1
                             margin: Inset{left: 0 top: 4 right: 0 bottom: 0}
-                            show_bg: true
-                            draw_bg +: { color: #x4a4a52 }
+                            draw_bg +: { color: #x4a4a52 radius: 0.5 }
                         }
                         app_head := FabHeaderLabel {
                             width: Fill
@@ -7452,6 +7514,19 @@ impl Tweaker {
                         SizeFieldRow := SizeFieldRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
+                        app_grip := View {
+                            width: Fill
+                            height: 6
+                            align: Align{x: 0.5 y: 0.5}
+                            // A plain View's draw_bg is a bare DrawQuad whose
+                            // default pixel fn returns #0000, so show_bg plus a
+                            // colour paints nothing. RoundedView has a pixel fn.
+                            bar := RoundedView {
+                                width: 28
+                                height: 3
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
                     }
                     prompt_row := View {
                         width: Fill
@@ -7901,6 +7976,24 @@ impl Tweaker {
         // and writing one widget's text into another's is how a note is lost.
         self.note_key_shown = path.clone().unwrap_or_default();
         self.note_text_uid = widget_col.child(live_id!(spec_notes)).widget_uid().0;
+        // The dragged heights. Applied from here rather than left in the
+        // markup so a grip can move them, and only when one has actually
+        // changed -- see `spec_applied_h`.
+        for (i, field) in [
+            widget_col.child(live_id!(spec_notes)),
+            widget_col.child(live_id!(spec_rules)),
+            col.child(live_id!(spec_app)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let h = spec_height(i);
+            if (self.spec_applied_h[i] - h).abs() > 0.01 {
+                self.spec_applied_h[i] = h;
+                let mut field = field;
+                script_apply_eval!(cx, field, { height: #(h) });
+            }
+        }
         {
             // The cross is only there when there is something to clear: an
             // always-present one invites a click that does nothing, and this
@@ -7986,6 +8079,39 @@ impl Tweaker {
         {
             self.spec_flush();
         }
+    }
+
+    /// Which field's grab strip is under this point, if any: 0 notes,
+    /// 1 rules, 2 app rules.
+    ///
+    /// The strips are read at event time, so they answer for the frame
+    /// already on screen -- the same rule the property rows follow. The two
+    /// per-widget strips live inside the wrapper that hides with them, so
+    /// with nothing selected their rects are empty and only the app rules
+    /// strip answers.
+    fn spec_grip_hit(&self, cx: &Cx, abs: Vec2d) -> Option<usize> {
+        if self.panel_tab != PanelTab::Spec {
+            return None;
+        }
+        let sidebar = self.sidebar.as_ref()?;
+        let col = sidebar.child(live_id!(spec_col));
+        let widget_col = col.child(live_id!(spec_widget));
+        [
+            widget_col.child(live_id!(notes_grip)),
+            widget_col.child(live_id!(rules_grip)),
+            col.child(live_id!(app_grip)),
+        ]
+        .into_iter()
+        .position(|grip| {
+            let r = grip.area().rect(cx);
+            // Six points is a small thing to hit, so the band it answers to
+            // is a little taller than the strip it draws.
+            r.size.y > 0.0
+                && abs.x >= r.pos.x
+                && abs.x <= r.pos.x + r.size.x
+                && abs.y >= r.pos.y - 2.0
+                && abs.y <= r.pos.y + r.size.y + 2.0
+        })
     }
 
     /// Empty the notes field, and the record behind it. Written through
@@ -12314,11 +12440,16 @@ impl Widget for Tweaker {
         match event {
             Event::MouseDown(e) if Some(e.window_id.id()) == self.my_window => {
                 let x = self.band.pos.x;
+                let grip = self.spec_grip_hit(cx, e.abs);
                 if e.abs.x >= x - 3.0
                     && e.abs.x <= x + SPLITTER_WIDTH + 3.0
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
+                } else if let Some(index) = grip {
+                    // Grab where it was grabbed: the field grows by how far
+                    // the pointer has moved since, not by where it is.
+                    self.spec_resize = Some((index, e.abs.y, spec_height(index)));
                 } else if e.abs.x > x && self.footer_path_hit(cx, e.abs) {
                     // The footer's path line is the selection's ADDRESS, and
                     // it is shown head-clipped because it does not fit. One
@@ -12588,6 +12719,23 @@ impl Widget for Tweaker {
                 // overlay with the freshly-read rects.
                 self.redraw_overlay(cx);
             }
+            // A field is being resized: its height follows the pointer from
+            // where the strip was grabbed.
+            Event::MouseMove(e) if self.spec_resize.is_some() => {
+                let (index, from_y, from_h) = self.spec_resize.unwrap();
+                let h = (from_h + e.abs.y - from_y).clamp(SPEC_FIELD_MIN, SPEC_FIELD_MAX);
+                session().lock().unwrap().spec_heights[index] = h;
+                cx.set_cursor(MouseCursor::NsResize);
+                self.redraw_sidebar(cx);
+            }
+            // The strip says what it is before it is grabbed.
+            Event::MouseMove(e)
+                if Some(e.window_id.id()) == self.my_window
+                    && tweak_is_on()
+                    && self.spec_grip_hit(cx, e.abs).is_some() =>
+            {
+                cx.set_cursor(MouseCursor::NsResize);
+            }
             Event::MouseMove(e)
                 if Some(e.window_id.id()) == self.my_window
                     && !self.splitter_drag
@@ -12685,13 +12833,19 @@ impl Widget for Tweaker {
             // must never outlive the press.
             Event::MouseUp(_) => {
                 self.splitter_drag = false;
+                self.spec_resize = None;
             }
             // Safeties: focus loss or Escape frees the pointer too.
             Event::WindowLostFocus(_) => {
                 self.splitter_drag = false;
+                self.spec_resize = None;
             }
-            Event::KeyDown(ke) if ke.key_code == KeyCode::Escape && self.splitter_drag => {
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::Escape
+                    && (self.splitter_drag || self.spec_resize.is_some()) =>
+            {
                 self.splitter_drag = false;
+                self.spec_resize = None;
             }
             _ => {}
         }
