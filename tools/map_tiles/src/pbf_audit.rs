@@ -1,4 +1,4 @@
-use osmpbf::{BlobReader, BlobType, Element, ElementReader};
+use makepad_map_build::osm_pbf::{BlobReader, BlobType, Element, ElementReader};
 use std::path::Path;
 use std::time::Instant;
 

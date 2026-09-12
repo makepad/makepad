@@ -11,6 +11,7 @@ use crate::mvt::{command, zigzag, AttrVal, GeomType, PreFeature, TileEnc, EXTENT
 use crate::wkb::Geometry;
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::MbtilesWriter;
+use makepad_micro_serde::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -429,6 +430,22 @@ impl Tileset {
 // Shared writer helpers (also used by spool.rs)
 // ---------------------------------------------------------------------------
 
+/// The TileJSON `json` metadata row: one entry per MVT layer with its
+/// attribute names and types.
+#[derive(SerJson)]
+struct TileJson {
+    vector_layers: Vec<VectorLayer>,
+}
+
+#[derive(SerJson)]
+struct VectorLayer {
+    id: String,
+    /// Attribute name -> MVT type name, as an object.
+    fields: JsonValue,
+    minzoom: u8,
+    maxzoom: u8,
+}
+
 pub(crate) fn note_fields(
     fields: &mut HashMap<String, HashMap<String, &'static str>>,
     layer: &str,
@@ -474,21 +491,22 @@ pub(crate) fn create_writer(
             ),
         );
     }
-    let vector_layers: Vec<serde_json::Value> = fields
+    let mut vector_layers: Vec<VectorLayer> = fields
         .iter()
-        .map(|(layer_name, layer_fields)| {
-            serde_json::json!({
-                "id": layer_name,
-                "fields": layer_fields,
-                "minzoom": config.minzoom,
-                "maxzoom": config.maxzoom,
-            })
+        .map(|(layer_name, layer_fields)| VectorLayer {
+            id: layer_name.clone(),
+            fields: JsonValue::Object(
+                layer_fields
+                    .iter()
+                    .map(|(field, type_name)| (field.clone(), JsonValue::from(*type_name)))
+                    .collect(),
+            ),
+            minzoom: config.minzoom,
+            maxzoom: config.maxzoom,
         })
         .collect();
-    writer.set_metadata(
-        "json",
-        serde_json::json!({ "vector_layers": vector_layers }).to_string(),
-    );
+    vector_layers.sort_by(|a, b| a.id.cmp(&b.id));
+    writer.set_metadata("json", TileJson { vector_layers }.serialize_json());
     writer.set_metadata(
         "geodata_built_unix",
         crate::clock::now_unix().to_string(),

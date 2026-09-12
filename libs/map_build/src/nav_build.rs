@@ -8,7 +8,7 @@ use makepad_map_nav::graph::{BuildRestriction, GraphBuilder, RouteGraph, TravelM
 use makepad_map_nav::search::{
     category_from_osm_tags, Category, SearchIndex, SearchIndexBuilder,
 };
-use osmpbf::{Element, ElementReader, RelMemberType};
+use crate::osm_pbf::{Element, ElementReader, RelMemberType};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

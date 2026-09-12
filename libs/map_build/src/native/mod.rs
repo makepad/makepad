@@ -14,8 +14,9 @@ use geom::{
     project_path, PolygonPart, SourcePath,
 };
 use makepad_mbtile_reader::MbtilesWriter;
+use makepad_micro_serde::*;
 use mvt::{encode_tile_with_profile, Layer, OsmType, TagPair};
-use osmpbf::{BlobDecode, BlobReader, Element, RelMemberType};
+use crate::osm_pbf::{BlobDecode, BlobReader, Element, RelMemberType};
 use smallvec::SmallVec;
 use spool::{records_to_tiles, BlockSpoolWriter, SortedBlock};
 use std::borrow::Cow;
@@ -80,7 +81,9 @@ pub struct DetailOptions {
     pub full: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// Pass-resume stamps carry these counters as JSON; `DeJson` fails closed on a
+/// missing field, so an added counter also has to be in the stamp to resume.
+#[derive(Clone, Copy, Debug, Default, SerJson, DeJson)]
 struct ConversionStats {
     nodes: u64,
     tagged_nodes: u64,
@@ -118,41 +121,41 @@ struct ConversionStats {
     missing_relation_ways: u64,
 }
 
-/// Serialize/deserialize ConversionStats for pass-resume stamps. The field
-/// list must track the struct: from_json fails closed on a missing field,
-/// but a NEW struct field also has to be added here to survive a resume.
-macro_rules! conversion_stats_json {
-    ($($field:ident),* $(,)?) => {
-        impl ConversionStats {
-            fn to_json(&self) -> serde_json::Value {
-                let mut map = serde_json::Map::new();
-                $(map.insert(stringify!($field).to_string(), self.$field.into());)*
-                serde_json::Value::Object(map)
-            }
-            fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-                let mut stats = Self::default();
-                $(stats.$field = value
-                    .get(stringify!($field))
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| format!(
-                        "pass stamp stats missing field {}", stringify!($field)
-                    ))?;)*
-                Ok(stats)
-            }
-        }
-    };
+const PASS_STAMP_FORMAT: &str = "makepad-native-detail-pass-stamp-v1";
+const COMPLETE_MARKER_FORMAT: &str = "makepad-native-detail-spool-v1";
+
+/// `spool.pass{N}.json`: the durable record of a finished detail pass, with
+/// everything a resume needs to roll the spool back to that boundary.
+#[derive(Clone, Debug, SerJson, DeJson)]
+struct PassStamp {
+    format: String,
+    pass: u8,
+    source_bytes: u64,
+    zoom: u8,
+    records: u64,
+    bytes: u64,
+    stats: ConversionStats,
+    blocks: HashMap<String, u64>,
 }
-conversion_stats_json!(
-    nodes, tagged_nodes, ways, tagged_ways, relations, tagged_relations,
-    relation_way_members, relation_node_members, relation_relation_members,
-    source_tags, building, building_part, height, min_height, building_levels,
-    building_min_level, roof_shape, roof_height, roof_levels, roof_direction,
-    roof_orientation, roof_angle, building_material, building_colour,
-    roof_material, roof_colour, node_tile_records, way_line_tile_records,
-    way_polygon_tile_records, relation_point_tile_records,
-    relation_line_tile_records, relation_polygon_tile_records,
-    missing_relation_nodes, missing_relation_ways,
-);
+
+/// `spool.complete`: the commit record of a finished scratch store.
+#[derive(Clone, Debug, SerJson, DeJson)]
+struct CompleteMarker {
+    format: String,
+    source: String,
+    source_bytes: u64,
+    zoom: u8,
+    blocks: usize,
+    records: u64,
+    spool_bytes: u64,
+}
+
+/// Decode a marker file; unknown fields are skipped, missing ones fail.
+fn parse_marker<T: DeJson>(bytes: &[u8], path: &Path) -> Result<T, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    T::deserialize_json_lenient(text).map_err(|err| format!("parse {}: {err}", path.display()))
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TagFlags {
@@ -448,23 +451,18 @@ fn write_pass_stamp(
         .metadata()
         .map_err(|err| format!("stat {}: {err}", options.source.display()))?
         .len();
-    let mut block_map = serde_json::Map::new();
-    for (name, len) in blocks {
-        block_map.insert(name, len.into());
-    }
-    let marker = serde_json::json!({
-        "format": "makepad-native-detail-pass-stamp-v1",
-        "pass": pass,
-        "source_bytes": source_bytes,
-        "zoom": options.zoom,
-        "records": records,
-        "bytes": bytes,
-        "stats": stats.to_json(),
-        "blocks": block_map,
-    });
+    let stamp = PassStamp {
+        format: PASS_STAMP_FORMAT.to_string(),
+        pass,
+        source_bytes,
+        zoom: options.zoom,
+        records,
+        bytes,
+        stats: *stats,
+        blocks: blocks.into_iter().collect(),
+    };
     let path = options.store.join(format!("spool.pass{pass}.json"));
-    let bytes = serde_json::to_vec_pretty(&marker)
-        .map_err(|err| format!("serialize {}: {err}", path.display()))?;
+    let bytes = stamp.serialize_json_pretty().into_bytes();
     let tmp = path.with_extension("json.tmp");
     write_durable_marker(&tmp, &path, &bytes)
 }
@@ -479,17 +477,16 @@ fn write_complete_marker(
         .metadata()
         .map_err(|err| format!("stat {}: {err}", options.source.display()))?
         .len();
-    let marker = serde_json::json!({
-        "format": "makepad-native-detail-spool-v1",
-        "source": options.source.display().to_string(),
-        "source_bytes": source_bytes,
-        "zoom": options.zoom,
-        "blocks": spool.blocks.len(),
-        "records": spool.records,
-        "spool_bytes": spool.bytes,
-    });
-    let bytes = serde_json::to_vec_pretty(&marker)
-        .map_err(|err| format!("serialize {}: {err}", paths.complete.display()))?;
+    let marker = CompleteMarker {
+        format: COMPLETE_MARKER_FORMAT.to_string(),
+        source: options.source.display().to_string(),
+        source_bytes,
+        zoom: options.zoom,
+        blocks: spool.blocks.len(),
+        records: spool.records,
+        spool_bytes: spool.bytes,
+    };
+    let bytes = marker.serialize_json_pretty().into_bytes();
     // The marker is the commit record for the scratch store. Everything it
     // describes must be on stable storage before that record can appear.
     sync_tree(&options.store)?;
@@ -566,21 +563,15 @@ fn finish_existing_detail(
             paths.complete.display()
         )
     })?;
-    let marker: serde_json::Value = serde_json::from_slice(&marker_bytes)
-        .map_err(|err| format!("parse {}: {err}", paths.complete.display()))?;
-    if marker.get("format").and_then(|value| value.as_str())
-        != Some("makepad-native-detail-spool-v1")
-    {
+    let marker: CompleteMarker = parse_marker(&marker_bytes, &paths.complete)?;
+    if marker.format != COMPLETE_MARKER_FORMAT {
         return Err(format!(
             "{} has an unsupported native detail marker",
             paths.complete.display()
         ));
     }
-    let marker_zoom = marker
-        .get("zoom")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no zoom", paths.complete.display()))?;
-    if marker_zoom != u64::from(options.zoom) {
+    let marker_zoom = marker.zoom;
+    if marker_zoom != options.zoom {
         return Err(format!(
             "scratch zoom {marker_zoom} does not match requested zoom {}",
             options.zoom
@@ -591,10 +582,7 @@ fn finish_existing_detail(
         .metadata()
         .map_err(|err| format!("stat {}: {err}", options.source.display()))?
         .len();
-    let marker_source_bytes = marker
-        .get("source_bytes")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no source_bytes", paths.complete.display()))?;
+    let marker_source_bytes = marker.source_bytes;
     if marker_source_bytes != source_bytes {
         return Err(format!(
             "scratch source size {marker_source_bytes} does not match {} bytes for {}",
@@ -656,18 +644,12 @@ fn open_partial_detail(
         let opened = (|| -> Result<PartialDetail, String> {
             let bytes = fs::read(&path)
                 .map_err(|err| format!("read {}: {err}", path.display()))?;
-            let stamp: serde_json::Value = serde_json::from_slice(&bytes)
-                .map_err(|err| format!("parse {}: {err}", path.display()))?;
-            if stamp.get("format").and_then(|v| v.as_str())
-                != Some("makepad-native-detail-pass-stamp-v1")
-            {
+            let stamp: PassStamp = parse_marker(&bytes, &path)?;
+            if stamp.format != PASS_STAMP_FORMAT {
                 return Err(format!("{} has an unsupported pass stamp", path.display()));
             }
-            let stamp_zoom = stamp
-                .get("zoom")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("{} has no zoom", path.display()))?;
-            if stamp_zoom != u64::from(options.zoom) {
+            let stamp_zoom = stamp.zoom;
+            if stamp_zoom != options.zoom {
                 return Err(format!(
                     "scratch zoom {stamp_zoom} does not match requested zoom {}",
                     options.zoom
@@ -678,10 +660,7 @@ fn open_partial_detail(
                 .metadata()
                 .map_err(|err| format!("stat {}: {err}", options.source.display()))?
                 .len();
-            let stamp_source_bytes = stamp
-                .get("source_bytes")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("{} has no source_bytes", path.display()))?;
+            let stamp_source_bytes = stamp.source_bytes;
             if stamp_source_bytes != source_bytes {
                 return Err(format!(
                     "scratch source size {stamp_source_bytes} does not match {} bytes for {}",
@@ -689,30 +668,13 @@ fn open_partial_detail(
                     options.source.display()
                 ));
             }
-            let records = stamp
-                .get("records")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("{} has no records", path.display()))?;
-            let spool_bytes = stamp
-                .get("bytes")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("{} has no bytes", path.display()))?;
-            let blocks = stamp
-                .get("blocks")
-                .and_then(|v| v.as_object())
-                .ok_or_else(|| format!("{} has no blocks", path.display()))?;
-            let mut stamped = Vec::with_capacity(blocks.len());
-            for (name, len) in blocks {
-                let len = len
-                    .as_u64()
-                    .ok_or_else(|| format!("{} block {name} has no length", path.display()))?;
-                stamped.push((name.clone(), len));
-            }
-            let stats = ConversionStats::from_json(
-                stamp
-                    .get("stats")
-                    .ok_or_else(|| format!("{} has no stats", path.display()))?,
-            )?;
+            let records = stamp.records;
+            let spool_bytes = stamp.bytes;
+            // The stamp's block map has no order; resume in name order, the
+            // order the sorted JSON object carried before.
+            let mut stamped: Vec<(String, u64)> = stamp.blocks.into_iter().collect();
+            stamped.sort_by(|a, b| a.0.cmp(&b.0));
+            let stats = stamp.stats;
             if pass == 2 {
                 // Pass 3 creates these with create_new. They are not part of
                 // the pass-2 commit and must not survive its rollback.
@@ -892,15 +854,13 @@ fn visit_pbf<F>(path: &Path, mut callback: F) -> Result<(), String>
 where
     F: for<'a> FnMut(Element<'a>) -> Result<(), String>,
 {
-    use osmpbf::PrimitiveBlock;
+    use crate::osm_pbf::PrimitiveBlock;
     use std::collections::BinaryHeap;
     use std::sync::mpsc::sync_channel;
     use std::sync::{Arc, Mutex};
 
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2).max(2))
-        .unwrap_or(4);
-    let (blob_tx, blob_rx) = sync_channel::<(u64, osmpbf::Blob)>(workers * 4);
+    let workers = crate::osm_pbf::decode_workers();
+    let (blob_tx, blob_rx) = sync_channel::<(u64, crate::osm_pbf::Blob)>(workers * 4);
     let blob_rx = Arc::new(Mutex::new(blob_rx));
     let (block_tx, block_rx) =
         sync_channel::<(u64, Result<Option<PrimitiveBlock>, String>)>(workers * 4);
@@ -1014,7 +974,7 @@ fn build_nodes(
                 collect_tags(node.tags()),
             ),
             Element::DenseNode(node) => (
-                node.id,
+                node.id(),
                 node.decimicro_lon(),
                 node.decimicro_lat(),
                 collect_tags(node.tags()),
@@ -1935,24 +1895,17 @@ mod tests {
         drop(spool);
         fs::write(&paths.way_data, b"unfinished pass 3").unwrap();
         fs::write(&paths.way_index, b"unfinished pass 3").unwrap();
-        let marker = serde_json::json!({
-            "format": "makepad-native-detail-pass-stamp-v1",
-            "pass": 2,
-            "source_bytes": fs::metadata(&source).unwrap().len(),
-            "zoom": DEFAULT_ZOOM,
-            "records": records,
-            "bytes": bytes,
-            "stats": ConversionStats::default().to_json(),
-            "blocks": blocks
-                .into_iter()
-                .map(|(name, len)| (name, len.into()))
-                .collect::<serde_json::Map<_, _>>(),
-        });
-        fs::write(
-            store.join("spool.pass2.json"),
-            serde_json::to_vec(&marker).unwrap(),
-        )
-        .unwrap();
+        let marker = PassStamp {
+            format: PASS_STAMP_FORMAT.to_string(),
+            pass: 2,
+            source_bytes: fs::metadata(&source).unwrap().len(),
+            zoom: DEFAULT_ZOOM,
+            records,
+            bytes,
+            stats: ConversionStats::default(),
+            blocks: blocks.into_iter().collect(),
+        };
+        fs::write(store.join("spool.pass2.json"), marker.serialize_json()).unwrap();
         let options = default_detail_options(source, root.join("unused.mbtiles"), store);
         let resume = open_partial_detail(&options, &paths).unwrap();
         assert_eq!(resume.pass, 2);

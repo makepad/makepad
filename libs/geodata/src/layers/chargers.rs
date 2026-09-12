@@ -6,6 +6,7 @@ use crate::fetch::SourceSpec;
 use crate::mvt::AttrVal;
 use crate::tiler::{Tileset, TilesetConfig};
 use crate::wkb::Geometry;
+use makepad_micro_serde::{DeJson, JsonValue};
 
 const ZMIN: u8 = 8;
 const ZMAX: u8 = 14;
@@ -41,8 +42,8 @@ impl Layer for ChargersLayer {
             return Err("source not fetched yet (run: geodata fetch chargers)".into());
         }
         let bytes = read_gz(&path)?;
-        let root: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| format!("parse OCPI json: {e}"))?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("parse OCPI json: {e}"))?;
+        let root = JsonValue::deserialize_json(text).map_err(|e| format!("parse OCPI json: {e}"))?;
 
         // OCPI dumps come either as a bare array of locations or wrapped in
         // {"data": [...]}. Find the location array defensively.
@@ -138,7 +139,7 @@ impl Layer for ChargersLayer {
     }
 }
 
-fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+fn json_f64(value: Option<&JsonValue>) -> Option<f64> {
     let value = value?;
     if let Some(f) = value.as_f64() {
         return Some(f);

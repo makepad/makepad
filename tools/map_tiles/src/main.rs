@@ -11,8 +11,8 @@ use makepad_map_build::{nav_build, native, versatiles};
 
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
-use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use makepad_micro_serde::{DeJson, JsonValue, SerJson};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -908,9 +908,11 @@ fn add_metadata(
     max_zoom: u8,
 ) -> Result<(), String> {
     let source = if source_json.is_empty() {
-        Value::Object(Map::new())
+        JsonValue::Object(HashMap::new())
     } else {
-        serde_json::from_slice(source_json)
+        let text = std::str::from_utf8(source_json)
+            .map_err(|err| format!("parse source TileJSON metadata: {err}"))?;
+        JsonValue::deserialize_json(text)
             .map_err(|err| format!("parse source TileJSON metadata: {err}"))?
     };
     let source_object = source.as_object();
@@ -945,7 +947,7 @@ fn add_metadata(
         writer.set_metadata("author", "OpenStreetMap contributors");
     }
 
-    let mut json_metadata = Map::new();
+    let mut json_metadata = HashMap::new();
     if let Some(object) = source_object {
         for key in ["vector_layers", "tilestats"] {
             if let Some(value) = object.get(key) {
@@ -954,17 +956,13 @@ fn add_metadata(
         }
     }
     json_metadata
-        .entry("vector_layers")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    writer.set_metadata(
-        "json",
-        serde_json::to_string(&json_metadata)
-            .map_err(|err| format!("serialize MBTiles JSON metadata: {err}"))?,
-    );
+        .entry("vector_layers".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    writer.set_metadata("json", JsonValue::Object(json_metadata).serialize_json());
     Ok(())
 }
 
-fn json_string<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
+fn json_string<'a>(object: Option<&'a HashMap<String, JsonValue>>, key: &str) -> Option<&'a str> {
     object?.get(key)?.as_str()
 }
 

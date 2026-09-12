@@ -5,6 +5,7 @@
 //! (the feature degrades, the app doesn't).
 
 use makepad_widgets::*;
+use makepad_widgets::makepad_micro_serde::{DeJson, JsonValue};
 
 const USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
@@ -166,7 +167,7 @@ impl DdgState {
                     out.push(DdgEvent::Done(id, "image search failed (results)".into(), true));
                     return out;
                 };
-                let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+                let parsed: Option<JsonValue> = JsonValue::deserialize_json(&body).ok();
                 let results = parsed
                     .as_ref()
                     .and_then(|v| v.get("results"))

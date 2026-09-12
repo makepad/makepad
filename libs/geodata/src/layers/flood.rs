@@ -8,7 +8,7 @@
 
 use super::{BuildCtx, BuildReport, Layer};
 use crate::fetch::SourceSpec;
-use crate::raster::{build_raster, RasterConfig, RasterEncoding};
+use crate::raster::{build_raster, ClassEntry, RasterConfig, RasterEncoding};
 use crate::tiff::Tiff;
 
 const JRC_RP100: SourceSpec = SourceSpec {
@@ -64,13 +64,13 @@ impl Layer for FloodLayer {
             Some(f32::from(class))
         };
 
-        let classmap = serde_json::json!([
-            {"class": 1, "label": "< 0.5 m", "color": "#c6dbef"},
-            {"class": 2, "label": "0.5-1 m", "color": "#9ecae1"},
-            {"class": 3, "label": "1-2 m",   "color": "#6baed6"},
-            {"class": 4, "label": "2-4 m",   "color": "#3182bd"},
-            {"class": 5, "label": ">= 4 m",  "color": "#08519c"}
-        ]);
+        let classmap = vec![
+            ClassEntry::new(1, "< 0.5 m", "#c6dbef"),
+            ClassEntry::new(2, "0.5-1 m", "#9ecae1"),
+            ClassEntry::new(3, "1-2 m", "#6baed6"),
+            ClassEntry::new(4, "2-4 m", "#3182bd"),
+            ClassEntry::new(5, ">= 4 m", "#08519c"),
+        ];
 
         let out = ctx.out_file(self.id());
         let stats = build_raster(

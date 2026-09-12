@@ -20,6 +20,7 @@ pub mod faces;
 pub mod mkmap;
 pub mod nav_build;
 pub mod native;
+pub mod osm_pbf;
 pub mod progress;
 pub mod repack;
 pub mod testmap;

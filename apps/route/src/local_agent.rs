@@ -7,6 +7,7 @@ use makepad_ai_hub::{
     local_llm::{ChatEvent, LocalLlmConfig, ToolSpec},
 };
 use makepad_widgets::*;
+use makepad_widgets::makepad_micro_serde::{DeJson, JsonValue, SerJson};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -206,16 +207,33 @@ fn tool_args_json(args: Vec<(String, String)>) -> String {
         if index != 0 {
             out.push(',');
         }
-        out.push_str(&serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".into()));
+        out.push_str(&key.serialize_json());
         out.push(':');
-        let encoded = match serde_json::from_str::<serde_json::Value>(&value) {
-            Ok(parsed) if !parsed.is_string() => parsed.to_string(),
-            _ => serde_json::to_string(&value).unwrap_or_else(|_| "\"\"".into()),
-        };
-        out.push_str(&encoded);
+        out.push_str(&typed_arg_json(&value));
     }
     out.push('}');
     out
+}
+
+/// A value that reads as exactly one JSON number, bool, null, array or
+/// object is passed through as that; anything else (including a number
+/// followed by text, like "12 apples", or an array followed by a note)
+/// stays a string.
+fn typed_arg_json(value: &str) -> String {
+    let trimmed = value.trim();
+    let is_number = trimmed.parse::<f64>().is_ok()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E'));
+    let is_composite = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if is_number || is_composite || matches!(trimmed, "true" | "false" | "null") {
+        if let Ok(parsed) = JsonValue::deserialize_json_strict(trimmed) {
+            if !parsed.is_string() {
+                return parsed.serialize_json();
+            }
+        }
+    }
+    value.serialize_json()
 }
 
 #[cfg(test)]
@@ -228,10 +246,11 @@ mod tests {
             ("to".into(), "utrecht".into()),
             ("zoom".into(), "14".into()),
             ("on".into(), "true".into()),
+            ("note".into(), "[1, 2] {x}".into()),
         ];
         assert_eq!(
             tool_args_json(args),
-            r#"{"to":"utrecht","zoom":14,"on":true}"#
+            r#"{"to":"utrecht","zoom":14,"on":true,"note":"[1, 2] {x}"}"#
         );
     }
 }

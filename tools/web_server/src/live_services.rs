@@ -585,6 +585,7 @@ fn live_method_not_allowed() -> makepad_network::http_server::HttpServerResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_micro_serde::{DeJson, JsonValue};
 
     fn radar_package() -> RadarPackage {
         let frame = KnmiFrame {
@@ -618,15 +619,40 @@ mod tests {
             north: 56.0,
         });
 
-        let manifest: serde_json::Value = serde_json::from_slice(&registry.radar_manifest_response().body).unwrap();
-        assert_eq!(manifest["display"]["width"], 1024);
-        assert_eq!(manifest["hires_now"]["height"], 2560);
-        let wind: serde_json::Value = serde_json::from_slice(&registry.wind_response().body).unwrap();
-        assert_eq!(wind["nx"], 2);
-        assert_eq!(wind["u"].as_array().unwrap().len(), 2);
-        let weather: serde_json::Value = serde_json::from_slice(&registry.weather_response(Some("at=4.9,52.3")).body).unwrap();
-        assert_eq!(weather["at"], serde_json::json!([4.9, 52.3]));
-        assert_eq!(weather["samples"][0]["class"], "dry");
+        let manifest = parse_json(&registry.radar_manifest_response().body);
+        assert_eq!(field_u64(&manifest, &["display", "width"]), Some(1024));
+        assert_eq!(field_u64(&manifest, &["hires_now", "height"]), Some(2560));
+        let wind = parse_json(&registry.wind_response().body);
+        assert_eq!(field_u64(&wind, &["nx"]), Some(2));
+        assert_eq!(wind.get("u").and_then(|v| v.as_array()).unwrap().len(), 2);
+        let weather = parse_json(&registry.weather_response(Some("at=4.9,52.3")).body);
+        let at: Vec<f64> = weather
+            .get("at")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        assert_eq!(at, [4.9, 52.3]);
+        let first_class = weather
+            .get("samples")
+            .and_then(|v| v.as_array())
+            .and_then(|samples| samples.first())
+            .and_then(|sample| sample.get("class"))
+            .and_then(|v| v.as_str());
+        assert_eq!(first_class, Some("dry"));
+    }
+
+    fn parse_json(body: &[u8]) -> JsonValue {
+        JsonValue::deserialize_json(std::str::from_utf8(body).unwrap()).unwrap()
+    }
+
+    fn field_u64(value: &JsonValue, path: &[&str]) -> Option<u64> {
+        let mut cursor = value;
+        for key in path {
+            cursor = cursor.get(key)?;
+        }
+        cursor.as_u64()
     }
 
     #[test]
