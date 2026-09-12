@@ -29,18 +29,23 @@ script_mod! {
 /// Subsequent uses of this `CachedWidget` with the same child id (`my_widget`) will reuse the cached instance.
 /// Note that only one child is supported per `CachedWidget`.
 ///
-/// CachedWidget supports Makepad's widget finding mechanism, allowing child widgets to be located as expected.
+/// # Caveat: only one use site may be live at a time
+///
+/// A widget has a single parent in the widget tree, so the last `CachedWidget` to
+/// apply takes the shared child for its own. Use sites that are live at the same time
+/// therefore do *not* all find it: `widget()` and the typed accessors built on it search
+/// a subtree, and from every other use site the child is no longer in that subtree, so
+/// they return an empty ref with no error. Use sites that are mutually exclusive — the
+/// variants of an `AdaptiveView`, say — are fine, and are what this widget is for.
+///
+/// To reach a child currently owned by another live use site, use the `_flood` lookups
+/// (`WidgetRef::widget_flood()`), which search outward past the subtree.
 ///
 /// # Implementation Details
 ///
 /// - Uses a global `WidgetWrapperCache` to store cached widgets
 /// - Handles widget creation and caching in the `on_after_apply` hook
 /// - Delegates most widget operations (like event handling and drawing) to the cached child widget
-///
-/// # Note
-///
-/// While `CachedWidget` can significantly improve performance for complex, frequently used widgets,
-/// it should be used judiciously. Overuse of caching can lead to unexpected behavior if not managed properly.
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct CachedWidget {
     #[uid]

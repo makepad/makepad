@@ -97,6 +97,9 @@ fn widget_screen_rect(area: &Area, cx: &Cx) -> Option<Rect> {
 // WidgetTree: persistent graph + dense query index
 // ============================================================================
 
+/// How many distinct re-parenting conflicts to report before going quiet.
+const REPARENT_WARN_LIMIT: usize = 64;
+
 pub struct WidgetTree {
     inner: RefCell<WidgetTreeInner>,
 }
@@ -127,6 +130,9 @@ struct WidgetTreeInner {
     // Only set when tree topology changes (nodes added/removed, parent changes).
     // Property-only changes (name, widget ref, skip_search) are patched in-place.
     structure_dirty: bool,
+    /// One entry per (child, old parent, new parent) already reported by
+    /// `insert_child`, so a conflict that repeats every apply is said once.
+    reparent_warned: HashSet<(WidgetUid, WidgetUid, WidgetUid)>,
 }
 
 struct WidgetTreeNode {
@@ -595,6 +601,34 @@ impl WidgetTree {
                         prev_parent.children.remove(pos);
                         inner.structure_dirty = true;
                     }
+                }
+            }
+        }
+
+        // A widget has a single parent, so taking one away from a parent that is
+        // still alive silently breaks that parent's lookups: they search a subtree
+        // the child has just left. Say so once per pairing, since the applies that
+        // cause this repeat every frame.
+        if parent_changed {
+            if let Some(prev_parent_uid) = old_parent {
+                let prev_is_live = inner.graph.get(&prev_parent_uid).map_or(false, |prev| {
+                    !prev.placeholder && prev.widget.upgrade().is_some()
+                });
+                let within_limit = inner.reparent_warned.len() < REPARENT_WARN_LIMIT;
+                if prev_is_live
+                    && within_limit
+                    && inner
+                        .reparent_warned
+                        .insert((child_uid, prev_parent_uid, parent_uid))
+                {
+                    warning!(
+                        "Widget {} moved from parent {} to parent {}, but {} is still alive, so \
+                         its lookups for that child now find nothing. This usually means one \
+                         CachedWidget id is used by two places that are live at the same time: \
+                         give them separate ids, or look the child up with the `_flood` lookups, \
+                         which search past the subtree.",
+                        child_uid.0, prev_parent_uid.0, parent_uid.0, prev_parent_uid.0,
+                    );
                 }
             }
         }
@@ -3127,6 +3161,42 @@ mod tests {
     // ------------------------------------------------------------------
     // Basic tree construction and lookup
     // ------------------------------------------------------------------
+
+    #[test]
+    fn a_live_parent_losing_its_child_is_reported_once_per_pairing() {
+        // Two parents naming one child, as two CachedWidgets sharing an id do.
+        let tree = WidgetTree::default();
+        let first_uid = WidgetUid::new();
+        let second_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let child = make_widget(child_uid, vec![]);
+        // Kept in locals: the graph holds only weak refs, and a parent that has been
+        // dropped is not one whose lookups this is meant to warn about.
+        let first = make_widget(first_uid, vec![]);
+        let second = make_widget(second_uid, vec![]);
+        tree.observe_node(first_uid, name("first"), first.clone(), None);
+        tree.observe_node(second_uid, name("second"), second.clone(), None);
+
+        // The first claim is not a conflict: the child had no parent to lose.
+        tree.insert_child(first_uid, name("shared"), child.clone());
+        assert_eq!(tree.parent_of(child_uid), Some(first_uid));
+        assert_eq!(tree.inner.borrow().reparent_warned.len(), 0);
+
+        // The second use site takes it away from the first, which is still alive,
+        // unlinking it from the first's children so lookups rooted there cannot reach it.
+        tree.insert_child(second_uid, name("shared"), child.clone());
+        assert_eq!(tree.parent_of(child_uid), Some(second_uid));
+        assert!(!tree.inner.borrow().graph[&first_uid].children.contains(&child_uid));
+        assert!(tree.inner.borrow().graph[&second_uid].children.contains(&child_uid));
+        assert_eq!(tree.inner.borrow().reparent_warned.len(), 1);
+
+        // Taking it back is a new pairing, but repeating either is not.
+        tree.insert_child(first_uid, name("shared"), child.clone());
+        assert_eq!(tree.inner.borrow().reparent_warned.len(), 2);
+        tree.insert_child(second_uid, name("shared"), child.clone());
+        tree.insert_child(first_uid, name("shared"), child.clone());
+        assert_eq!(tree.inner.borrow().reparent_warned.len(), 2);
+    }
 
     #[test]
     fn test_observe_and_find_single_node() {
