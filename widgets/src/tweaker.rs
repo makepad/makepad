@@ -1452,6 +1452,18 @@ fn pick_of_widget(
     Some(TweakPick { uid: uid.0, path, ty, rect, window_id, band, level })
 }
 
+/// The registered type name of a widget, `View`, `Grid`, `Label`.
+fn type_name_of(cx: &mut Cx, uid: u64) -> Option<String> {
+    let widget = cx.widget_tree().widget(WidgetUid(uid));
+    if widget.is_empty() {
+        return None;
+    }
+    widget
+        .widget_type_id()
+        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+        .map(live_id_token)
+}
+
 /// Is `ancestor` on `uid`'s parent chain?
 fn is_ancestor_of(cx: &mut Cx, ancestor: u64, uid: u64) -> bool {
     let mut cur = cx.widget_tree().parent_of(WidgetUid(uid));
@@ -2965,6 +2977,147 @@ fn field_word<'a>(text: &'a str, field: &str) -> Option<&'a str> {
     Some(rest[..end].rsplit('.').next().unwrap_or(""))
 }
 
+/// The strings out of a printed list -- `["70px" "20%" "1fr"]` -- joined
+/// with `sep`; a list that is not strings comes back as it was printed.
+fn quoted_list_text(printed: &str, sep: &str) -> String {
+    let inner = printed.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if inner.is_empty() {
+        return String::new();
+    }
+    if !inner.starts_with('"') {
+        return inner.to_string();
+    }
+    let mut out = Vec::new();
+    let mut rest = inner;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        out.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out.join(sep)
+}
+
+/// Split a track list on spaces, keeping `minmax(60px, 1fr)` together.
+fn split_tracks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                cur.push(ch);
+            }
+            ' ' | '\t' | ',' if depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A track length as the engine's parser takes it: a number, or one with
+/// `px`, `%` or `fr`, or a balanced expression such as `calc(...)`.
+fn track_len_ok(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let bare = text
+        .strip_suffix("px")
+        .or_else(|| text.strip_suffix("fr"))
+        .or_else(|| text.strip_suffix('%'))
+        .unwrap_or(text);
+    if bare.trim().parse::<f64>().is_ok_and(|v| v >= 0.0) {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    ["calc(", "min(", "max(", "clamp("].iter().any(|f| lower.starts_with(f))
+        && lower.ends_with(')')
+        && lower.matches('(').count() == lower.matches(')').count()
+}
+
+/// One track as the engine's parser takes it: a length, `minmax(a, b)`, or
+/// `repeat(n | auto-fill | auto-fit, minmax(a, b))`.
+fn track_ok(text: &str) -> bool {
+    let text = text.trim();
+    if let Some(body) = text.strip_prefix("minmax(").and_then(|b| b.strip_suffix(')')) {
+        let parts: Vec<&str> = body.splitn(2, ',').collect();
+        return parts.len() == 2 && parts.iter().all(|p| track_len_ok(p));
+    }
+    if let Some(body) = text.strip_prefix("repeat(").and_then(|b| b.strip_suffix(')')) {
+        let Some((count, segment)) = body.split_once(',') else { return false };
+        let count = count.trim();
+        let count_ok = count == "auto-fill" || count == "auto-fit" || count.parse::<u32>().is_ok();
+        return count_ok && segment.trim().starts_with("minmax(") && track_ok(segment.trim());
+    }
+    track_len_ok(text)
+}
+
+/// What was typed into a tracks field, as the list the engine takes; a
+/// half-typed track is not sent, and no tracks at all is an empty list.
+fn tracks_chunk(prop: &str, typed: &str) -> Option<String> {
+    let tracks = split_tracks(typed);
+    if !tracks.iter().all(|t| track_ok(t)) {
+        return None;
+    }
+    let quoted: Vec<String> = tracks.iter().map(|t| format!("\"{}\"", t.trim())).collect();
+    Some(format!("{prop}: [{}]", quoted.join(" ")))
+}
+
+/// What was typed into the areas field: rows separated by `/`, each a row
+/// of names with `.` for an empty cell. Rows of unequal length are a row
+/// still being typed, and are not sent.
+fn areas_chunk(typed: &str) -> Option<String> {
+    let rows: Vec<String> = typed
+        .split('/')
+        .map(|row| row.trim().replace('"', ""))
+        .filter(|row| !row.is_empty())
+        .collect();
+    let width = rows.first().map(|row| row.split_whitespace().count());
+    if rows.iter().any(|row| Some(row.split_whitespace().count()) != width) {
+        return None;
+    }
+    let quoted: Vec<String> = rows.iter().map(|row| format!("\"{row}\"")).collect();
+    Some(format!("areas: [{}]", quoted.join(" ")))
+}
+
+/// Where a child sits in its Grid, as the rows say: 0 is wherever the
+/// fill order puts it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CellText {
+    col: u32,
+    row: u32,
+    col_span: u32,
+    row_span: u32,
+    area: String,
+}
+
+impl CellText {
+    /// The chunk that places it; a cell that says nothing is no cell.
+    fn chunk(&self) -> String {
+        if self.col == 0 && self.row == 0 && self.col_span == 0 && self.row_span == 0 && self.area.is_empty() {
+            return "cell: nil".to_string();
+        }
+        let area = if self.area.is_empty() { "nil".to_string() } else { format!("@{}", self.area) };
+        format!(
+            "cell: CellPlacement{{col: {} row: {} col_span: {} row_span: {} area: {area}}}",
+            self.col, self.row, self.col_span, self.row_span
+        )
+    }
+}
+
 /// A container name as the chunk that sets it: an id, so letters, digits
 /// and underscores, not starting with a digit; anything else is not sent.
 fn container_chunk(typed: &str) -> Option<String> {
@@ -3227,6 +3380,12 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
                                 out.push((name, text, false));
                             }
                         }
+                        continue;
+                    }
+                    // The live value already answered for this key as one
+                    // whole -- `cell: null` after it was cleared -- so the
+                    // source's fields under it are what WAS, not what is.
+                    if out.iter().any(|(existing, _, _)| *existing == name) {
                         continue;
                     }
                     let mut sub_keys = Vec::new();
@@ -6463,7 +6622,9 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
         | "metrics" | "distribute" | "container_id" | "min_width" | "max_width"
-        | "min_height" | "max_height" | "aspect" | "cell" => return SectionKind::Layout,
+        | "min_height" | "max_height" | "aspect" | "cell" | "columns" | "rows" | "areas"
+        | "column_gap" | "row_gap" | "auto_flow" | "justify_items" | "align_items"
+        | "implicit_column_size" | "implicit_row_size" => return SectionKind::Layout,
         "text" | "empty_text" | "label" | "title" | "suffix" => return SectionKind::Text,
         "visible" | "enabled" | "grab_key_focus" | "cursor" | "trigger_on_press"
         | "enable_long_press" | "reset_hover_on_click" | "block_signal_event"
@@ -6532,6 +6693,16 @@ fn section_rank(section: SectionKind, prop: &str) -> (u32, u32, String) {
                 "clip_y" => 18,
                 "scroll" => 19,
                 "container_id" => 20,
+                "columns" => 21,
+                "rows" => 22,
+                "column_gap" => 23,
+                "row_gap" => 24,
+                "auto_flow" => 25,
+                "areas" => 26,
+                "justify_items" => 27,
+                "align_items" => 28,
+                "implicit_column_size" => 29,
+                "implicit_row_size" => 29,
                 _ => 30,
             };
             let minor = match first {
@@ -6727,6 +6898,10 @@ enum VisKind {
     Container,
     /// Out of the flow, at a position in the parent.
     Absolute,
+    /// A Grid's tracks, gaps, fill order and named areas.
+    GridTracks,
+    /// Where the selection sits in its parent Grid.
+    Cell,
     /// "show all (N)": the section's long tail, folded by default.
     More(SectionKind, usize),
     /// A material card header: layer name + live shader preview swatch
@@ -6762,7 +6937,9 @@ impl VisKind {
             | (VisKind::FlowSpacing, VisKind::FlowSpacing)
             | (VisKind::AlignGrid, VisKind::AlignGrid)
             | (VisKind::Container, VisKind::Container)
-            | (VisKind::Absolute, VisKind::Absolute) => true,
+            | (VisKind::Absolute, VisKind::Absolute)
+            | (VisKind::GridTracks, VisKind::GridTracks)
+            | (VisKind::Cell, VisKind::Cell) => true,
             (VisKind::BoxInset(a), VisKind::BoxInset(b)) => a == b,
             (VisKind::Group(a), VisKind::Group(b)) => a == b,
             _ => false,
@@ -7112,6 +7289,12 @@ pub struct Tweaker {
     /// The absolute row's checkbox.
     #[rust]
     abs_uid: u64,
+    /// The selection is a Grid: its children's half shows tracks, not a
+    /// flow. It sits in a Grid: its own half shows a cell.
+    #[rust]
+    sel_is_grid: bool,
+    #[rust]
+    sel_in_grid: bool,
     /// The footer's copy receipt is shown until this time: a click on the
     /// path line put it on the clipboard, and that has to be visible.
     #[rust]
@@ -7774,6 +7957,7 @@ impl Tweaker {
                         just_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             just_label := FabLabelSmall { width: 34 text: "justify" }
                             just_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                j_stretch := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 j_start := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 j_mid := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 j_end := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -7791,6 +7975,7 @@ impl Tweaker {
                         cross_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             cross_label := FabLabelSmall { width: 34 text: "align" }
                             cross_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                c_stretch := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 c_start := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 c_mid := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 c_end := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -7845,6 +8030,71 @@ impl Tweaker {
                             abs_x := FabValueInput { width: 44 height: 18 }
                             y_label := FabLabelSmall { width: Fit text: "y" }
                             abs_y := FabValueInput { width: 44 height: 18 }
+                        }
+                    }
+                }
+                // A Grid's own layout: the tracks as CSS, the gaps, which way
+                // cells without a place are filled in, and the named areas.
+                let GridRowT = FabPropRow {
+                    height: Fit
+                    grid_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        cols_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            cols_label := FabLabelSmall { width: 40 text: "columns" }
+                            cols_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                        rows_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            rows_label := FabLabelSmall { width: 40 text: "rows" }
+                            rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                        gaps_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            gap_label := FabLabelSmall { width: 34 text: "gap" }
+                            gap_x := FabLabelSmall { width: Fit text: "\u{2194}" }
+                            gap_col := FabValueInput { width: 40 height: 18 }
+                            gap_y := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
+                            gap_row_in := FabValueInput { width: 40 height: 18 }
+                        }
+                        fill_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            fill_label := FabLabelSmall { width: 40 text: "fill" }
+                            fill_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                f_rows := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_cols := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                        }
+                        areas_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            areas_label := FabLabelSmall { width: 40 text: "areas" }
+                            areas_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                    }
+                }
+                // Where a child of a Grid sits: a column and row (0 is wherever
+                // the fill order puts it), how many of each it spans, or an
+                // area by name.
+                let CellRowT = FabPropRow {
+                    height: Fit
+                    cell_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        place_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            col_label := FabLabelSmall { width: Fit text: "col" }
+                            cell_c := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                            row_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
+                            cell_r := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                        }
+                        span_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            span_label := FabLabelSmall { width: Fit text: "span" }
+                            cell_cs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                            by_label := FabLabelSmall { width: Fit text: "\u{00d7}" }
+                            cell_rs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                        }
+                        area_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            area_label := FabLabelSmall { width: Fit text: "area" }
+                            cell_area := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                     }
                 }
@@ -8067,6 +8317,8 @@ impl Tweaker {
                             GroupRow := GroupRowT {}
                             ContainerRow := ContainerRowT {}
                             AbsRow := AbsRowT {}
+                            GridRow := GridRowT {}
+                            CellRow := CellRowT {}
                             MoreRow := MoreRowT {}
                             ColorRow := ColorRowT {}
                             VecRow := VecRowT {}
@@ -8314,6 +8566,8 @@ impl Tweaker {
                         GroupRow := GroupRowT {}
                         ContainerRow := ContainerRowT {}
                         AbsRow := AbsRowT {}
+                        GridRow := GridRowT {}
+                        CellRow := CellRowT {}
                         MoreRow := MoreRowT {}
                         ColorRow := ColorRowT {}
                         VecRow := VecRowT {}
@@ -8962,7 +9216,7 @@ impl Tweaker {
             })
         {
             let item = &row.item;
-            let inner: [(&[LiveId], &str); 49] = [
+            let inner: [(&[LiveId], &str); 63] = [
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
@@ -8986,6 +9240,20 @@ impl Tweaker {
                 (&[live_id!(abs_col), live_id!(abs_check)], "take it out of the flow and place it at x, y in its parent"),
                 (&[live_id!(abs_col), live_id!(abs_xy), live_id!(abs_x)], "points from the parent's left"),
                 (&[live_id!(abs_col), live_id!(abs_xy), live_id!(abs_y)], "points from the parent's top"),
+                (&[live_id!(align_col), live_id!(just_row), live_id!(just_seg), live_id!(j_stretch)], "each cell's child stretches across its column"),
+                (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_stretch)], "each cell's child stretches down its row"),
+                (&[live_id!(grid_col), live_id!(cols_row), live_id!(cols_in)], "the columns, as CSS \u{00b7} 70px 20% 1fr minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))"),
+                (&[live_id!(grid_col), live_id!(rows_row), live_id!(rows_in)], "the rows, as CSS \u{00b7} 48px 1fr minmax(40px, auto-fit)"),
+                (&[live_id!(grid_col), live_id!(gaps_row), live_id!(gap_col)], "space between columns, in points"),
+                (&[live_id!(grid_col), live_id!(gaps_row), live_id!(gap_row_in)], "space between rows, in points"),
+                (&[live_id!(grid_col), live_id!(fill_row), live_id!(fill_seg), live_id!(f_rows)], "children without a place fill each row before the next"),
+                (&[live_id!(grid_col), live_id!(fill_row), live_id!(fill_seg), live_id!(f_cols)], "children without a place fill each column before the next"),
+                (&[live_id!(grid_col), live_id!(areas_row), live_id!(areas_in)], "named areas: one row per / and a . for an empty cell \u{00b7} hero hero . / . . ."),
+                (&[live_id!(cell_col), live_id!(place_row), live_id!(cell_c)], "the column it starts in, from 1 \u{00b7} 0 lets the fill order place it"),
+                (&[live_id!(cell_col), live_id!(place_row), live_id!(cell_r)], "the row it starts in, from 1 \u{00b7} 0 lets the fill order place it"),
+                (&[live_id!(cell_col), live_id!(span_row), live_id!(cell_cs)], "how many columns it spans \u{00b7} 0 for one"),
+                (&[live_id!(cell_col), live_id!(span_row), live_id!(cell_rs)], "how many rows it spans \u{00b7} 0 for one"),
+                (&[live_id!(cell_col), live_id!(area_row), live_id!(cell_area)], "the named area it fills, from the grid's areas"),
                 (&[live_id!(link)], "one value for all four sides"),
                 (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fill)], "width: fill whatever the parent leaves"),
                 (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fit)], "width: fit the content"),
@@ -9596,6 +9864,13 @@ impl Tweaker {
         }
         self.rows.clear();
         self.doc_row = None;
+        self.sel_is_grid = type_name_of(cx, sel_uid).as_deref() == Some("Grid");
+        self.sel_in_grid = cx
+            .widget_tree()
+            .parent_of(WidgetUid(sel_uid))
+            .and_then(|parent| type_name_of(cx, parent.0))
+            .as_deref()
+            == Some("Grid");
         for (name, value, is_set) in reflect_flat(cx, &widget) {
             let (kind, display, quoted) = if value.starts_with('#') && parse_hex(&value).is_some()
             {
@@ -9759,7 +10034,9 @@ impl Tweaker {
             first,
             "width" | "height" | "min_width" | "max_width" | "min_height" | "max_height" | "aspect"
                 | "margin" | "padding" | "spacing" | "wrap_spacing" | "flow" | "align"
-                | "distribute" | "abs_pos" | "container_id"
+                | "distribute" | "abs_pos" | "container_id" | "cell" | "columns" | "rows"
+                | "areas" | "column_gap" | "row_gap" | "auto_flow" | "justify_items"
+                | "align_items"
         )
     }
 
@@ -9780,8 +10057,18 @@ impl Tweaker {
             VisKind::AlignGrid => "align alignment justify distribute space between around evenly centre center start end",
             VisKind::Container => "layout container flex grid name cqw cqh",
             VisKind::Absolute => "absolute position abs_pos x y",
+            VisKind::GridTracks => "grid columns rows tracks gap areas fill auto_flow fr minmax repeat",
+            VisKind::Cell => "cell col row span area place",
             _ => "",
         }
+    }
+
+    /// The rows a View lays its children out by, which a Grid ignores.
+    fn flow_only(prop: &str) -> bool {
+        matches!(
+            prop.split('.').next().unwrap_or(""),
+            "flow" | "spacing" | "wrap_spacing" | "align" | "distribute"
+        )
     }
 
     /// Which composite, if any, has swallowed `prop`.
@@ -9796,6 +10083,11 @@ impl Tweaker {
             "align" | "distribute" => Some(VisKind::AlignGrid),
             "container_id" => Some(VisKind::Container),
             "abs_pos" => Some(VisKind::Absolute),
+            "cell" => Some(VisKind::Cell),
+            "columns" | "rows" | "areas" | "column_gap" | "row_gap" | "auto_flow" => {
+                Some(VisKind::GridTracks)
+            }
+            "justify_items" | "align_items" => Some(VisKind::AlignGrid),
             _ => None,
         }
     }
@@ -9824,6 +10116,58 @@ impl Tweaker {
             .iter()
             .find(|row| row.prop == prop)
             .map(|row| row.value.as_str())
+    }
+
+    /// The selection's cell as the rows say it.
+    fn cell_text(&self) -> CellText {
+        let num = |key: &str| {
+            self.row_value(&format!("cell.{key}"))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                .max(0.0) as u32
+        };
+        CellText {
+            col: num("col"),
+            row: num("row"),
+            col_span: num("col_span"),
+            row_span: num("row_span"),
+            area: self
+                .row_value("cell.area")
+                .map(|v| v.trim_start_matches('@'))
+                .filter(|v| *v != "-")
+                .unwrap_or("")
+                .to_string(),
+        }
+    }
+
+    /// The cell with one field -- col, row, a span, the area -- replaced by
+    /// what was typed, as the chunk that places the whole of it. An area
+    /// that is not an id is not sent.
+    fn cell_chunk(&self, key: &str, typed: &str) -> Option<String> {
+        let mut cell = self.cell_text();
+        match key {
+            "area" => {
+                let name = typed.trim().trim_start_matches('@');
+                let valid = name.is_empty()
+                    || (name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && !name.starts_with(|c: char| c.is_ascii_digit()));
+                if !valid {
+                    return None;
+                }
+                cell.area = name.to_string();
+            }
+            _ => {
+                let value = typed.trim().parse::<f64>().ok()?.max(0.0) as u32;
+                match key {
+                    "col" => cell.col = value,
+                    "row" => cell.row = value,
+                    "col_span" => cell.col_span = value,
+                    "row_span" => cell.row_span = value,
+                    _ => return None,
+                }
+            }
+        }
+        Some(cell.chunk())
     }
 
     /// The absolute position with one coordinate replaced.
@@ -9944,18 +10288,29 @@ impl Tweaker {
                     list.push(VisKind::BoxInset(BoxKind::Margin));
                 }
                 list.push(VisKind::Absolute);
+                if self.sel_in_grid {
+                    list.push(VisKind::Cell);
+                }
                 // The second half is what it holds. A spacing row is what
                 // makes it a container; a Label flows its text and has a
-                // flow row, but nothing to space.
+                // flow row, but nothing to space. A Grid places its
+                // children by track, so it shows tracks where a View shows
+                // a flow, and its cells' alignment where a View shows the
+                // children's.
                 if self.row_index("spacing").is_some() {
                     list.push(VisKind::Group(GroupKind::Container));
                     list.push(VisKind::Container);
                 }
-                if self.row_index("spacing").is_some() || self.row_index("flow").is_some() {
-                    list.push(VisKind::FlowSpacing);
-                }
-                if self.row_index("align.x").is_some() {
+                if self.sel_is_grid {
+                    list.push(VisKind::GridTracks);
                     list.push(VisKind::AlignGrid);
+                } else {
+                    if self.row_index("spacing").is_some() || self.row_index("flow").is_some() {
+                        list.push(VisKind::FlowSpacing);
+                    }
+                    if self.row_index("align.x").is_some() {
+                        list.push(VisKind::AlignGrid);
+                    }
                 }
                 if self.rows.iter().any(|r| r.prop.starts_with("padding")) {
                     list.push(VisKind::BoxInset(BoxKind::Padding));
@@ -10003,6 +10358,7 @@ impl Tweaker {
                         Self::composite_of(&row.prop)
                             .is_some_and(|kind| composites.iter().any(|c| c.same_row(&kind)))
                             || (!expanded && !Self::layout_composited(&row.prop))
+                            || (self.sel_is_grid && Self::flow_only(&row.prop))
                     }
                     SectionKind::Style => !expanded && !Self::style_curated(row),
                     _ => false,
@@ -10806,6 +11162,8 @@ impl Tweaker {
                     VisKind::Group(_) => live_id!(GroupRow),
                     VisKind::Container => live_id!(ContainerRow),
                     VisKind::Absolute => live_id!(AbsRow),
+                    VisKind::GridTracks => live_id!(GridRow),
+                    VisKind::Cell => live_id!(CellRow),
                     VisKind::TweakHeader(..) | VisKind::InputsHeader(_) => live_id!(SectionRow),
                     VisKind::CascadeLevel(_) => live_id!(CascadeRow),
                     VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
@@ -11200,84 +11558,206 @@ impl Tweaker {
                         self.composite_fields
                             .push((field.widget_uid().0, "wrap_spacing".into()));
                     }
-                    VisKind::AlignGrid => {
-                        item.child(live_id!(name)).set_text(cx, "align");
-                        let ax = self
-                            .row_value("align.x")
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        let ay = self
-                            .row_value("align.y")
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        // Which axis is along the flow and which across
-                        // follows the direction; the labels carry the arrow.
-                        let dir = parse_flow_text(self.row_value("flow").unwrap_or("")).dir;
-                        let down = dir == FlowDir::Down;
-                        let (main, cross) = if down { (ay, ax) } else { (ax, ay) };
-                        let distribute = self
-                            .row_value("distribute")
-                            .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
-                            .unwrap_or_else(|| "Start".to_string());
+                    VisKind::AlignGrid => if self.sel_is_grid {
+                        // A Grid aligns each child inside its cell: along
+                        // the columns and along the rows, stretch included.
+                        item.child(live_id!(name)).set_text(cx, "cells");
                         let col = item.child(live_id!(align_col));
-                        let just_row = col.child(live_id!(just_row));
-                        just_row
-                            .child(live_id!(just_axis))
-                            .set_text(cx, if down { "\u{2195}" } else { "\u{2194}" });
-                        let seg = just_row.child(live_id!(just_seg));
-                        for (child, label, value) in [
-                            (live_id!(j_start), "start", 0.0),
-                            (live_id!(j_mid), "centre", 0.5),
-                            (live_id!(j_end), "end", 1.0),
+                        col.child(live_id!(space_row)).set_visible(cx, false);
+                        for (row_id, seg_id, axis_id, prop, arrow, ids) in [
+                            (
+                                live_id!(just_row),
+                                live_id!(just_seg),
+                                live_id!(just_axis),
+                                "justify_items",
+                                "",
+                                [live_id!(j_stretch), live_id!(j_start), live_id!(j_mid), live_id!(j_end)],
+                            ),
+                            (
+                                live_id!(cross_row),
+                                live_id!(cross_seg),
+                                live_id!(cross_axis),
+                                "align_items",
+                                "",
+                                [live_id!(c_stretch), live_id!(c_start), live_id!(c_mid), live_id!(c_end)],
+                            ),
                         ] {
-                            let btn = seg.child(child);
-                            btn.set_text(cx, label);
-                            set_button_fill(
-                                cx,
-                                btn.clone(),
-                                distribute == "Start" && (main - value).abs() < 0.25,
-                            );
-                            let (x, y) = if down { (ax, value) } else { (value, ay) };
-                            self.composite_clicks.push((
-                                btn.widget_uid().0,
-                                format!(
-                                    "align: Align{{x: {} y: {}}} distribute: Distribute.Start",
-                                    fmt_f64(x),
-                                    fmt_f64(y)
-                                ),
-                            ));
+                            let row = col.child(row_id);
+                            row.child(axis_id).set_text(cx, arrow);
+                            let current = self
+                                .row_value(prop)
+                                .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                                .unwrap_or_else(|| "Stretch".to_string());
+                            let seg = row.child(seg_id);
+                            for (child, label, variant) in [
+                                (ids[0], "stretch", "Stretch"),
+                                (ids[1], "start", "Start"),
+                                (ids[2], "centre", "Center"),
+                                (ids[3], "end", "End"),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_visible(cx, true);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), current == variant);
+                                self.composite_clicks
+                                    .push((btn.widget_uid().0, format!("{prop}: CellAlign.{variant}")));
+                            }
                         }
-                        let seg = col.child(live_id!(space_row)).child(live_id!(space_seg));
+                    } else {
+                            item.child(live_id!(name)).set_text(cx, "align");
+                            let ax = self
+                                .row_value("align.x")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let ay = self
+                                .row_value("align.y")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            // Which axis is along the flow and which across
+                            // follows the direction; the labels carry the arrow.
+                            let dir = parse_flow_text(self.row_value("flow").unwrap_or("")).dir;
+                            let down = dir == FlowDir::Down;
+                            let (main, cross) = if down { (ay, ax) } else { (ax, ay) };
+                            let distribute = self
+                                .row_value("distribute")
+                                .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                                .unwrap_or_else(|| "Start".to_string());
+                            let col = item.child(live_id!(align_col));
+                            col.child(live_id!(space_row)).set_visible(cx, true);
+                            let just_row = col.child(live_id!(just_row));
+                            just_row
+                                .child(live_id!(just_axis))
+                                .set_text(cx, if down { "\u{2195}" } else { "\u{2194}" });
+                            let seg = just_row.child(live_id!(just_seg));
+                            seg.child(live_id!(j_stretch)).set_visible(cx, false);
+                            for (child, label, value) in [
+                                (live_id!(j_start), "start", 0.0),
+                                (live_id!(j_mid), "centre", 0.5),
+                                (live_id!(j_end), "end", 1.0),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(
+                                    cx,
+                                    btn.clone(),
+                                    distribute == "Start" && (main - value).abs() < 0.25,
+                                );
+                                let (x, y) = if down { (ax, value) } else { (value, ay) };
+                                self.composite_clicks.push((
+                                    btn.widget_uid().0,
+                                    format!(
+                                        "align: Align{{x: {} y: {}}} distribute: Distribute.Start",
+                                        fmt_f64(x),
+                                        fmt_f64(y)
+                                    ),
+                                ));
+                            }
+                            let seg = col.child(live_id!(space_row)).child(live_id!(space_seg));
+                            for (child, label, variant) in [
+                                (live_id!(s_between), "between", "SpaceBetween"),
+                                (live_id!(s_around), "around", "SpaceAround"),
+                                (live_id!(s_evenly), "evenly", "SpaceEvenly"),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), distribute == variant);
+                                self.composite_clicks
+                                    .push((btn.widget_uid().0, format!("distribute: Distribute.{variant}")));
+                            }
+                            let cross_row = col.child(live_id!(cross_row));
+                            cross_row
+                                .child(live_id!(cross_axis))
+                                .set_text(cx, if down { "\u{2194}" } else { "\u{2195}" });
+                            let seg = cross_row.child(live_id!(cross_seg));
+                            seg.child(live_id!(c_stretch)).set_visible(cx, false);
+                            for (child, label, value) in [
+                                (live_id!(c_start), "start", 0.0),
+                                (live_id!(c_mid), "centre", 0.5),
+                                (live_id!(c_end), "end", 1.0),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), (cross - value).abs() < 0.25);
+                                let (x, y) = if down { (value, ay) } else { (ax, value) };
+                                self.composite_clicks.push((
+                                    btn.widget_uid().0,
+                                    format!("align: Align{{x: {} y: {}}}", fmt_f64(x), fmt_f64(y)),
+                                ));
+                            }
+                        }
+                    VisKind::GridTracks => {
+                        item.child(live_id!(name)).set_text(cx, "grid");
+                        let col = item.child(live_id!(grid_col));
+                        // The tracks, as the CSS they were written in.
+                        for (row_id, input_id, prop) in [
+                            (live_id!(cols_row), live_id!(cols_in), "columns"),
+                            (live_id!(rows_row), live_id!(rows_in), "rows"),
+                        ] {
+                            let field = col.child(row_id).child(input_id);
+                            if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                field.set_text(cx, &quoted_list_text(self.row_value(prop).unwrap_or(""), " "));
+                            }
+                            self.composite_fields.push((field.widget_uid().0, prop.to_string()));
+                        }
+                        let gaps = col.child(live_id!(gaps_row));
+                        for (child, prop) in
+                            [(live_id!(gap_col), "column_gap"), (live_id!(gap_row_in), "row_gap")]
+                        {
+                            let field = gaps.child(child);
+                            if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                let v = self
+                                    .row_value(prop)
+                                    .and_then(|v| v.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                input.set_value(cx, v);
+                            }
+                            self.composite_fields.push((field.widget_uid().0, prop.to_string()));
+                        }
+                        // Which way the cells without a place are filled in.
+                        let auto = self
+                            .row_value("auto_flow")
+                            .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                            .unwrap_or_else(|| "Row".to_string());
+                        let seg = col.child(live_id!(fill_row)).child(live_id!(fill_seg));
                         for (child, label, variant) in [
-                            (live_id!(s_between), "between", "SpaceBetween"),
-                            (live_id!(s_around), "around", "SpaceAround"),
-                            (live_id!(s_evenly), "evenly", "SpaceEvenly"),
+                            (live_id!(f_rows), "by row", "Row"),
+                            (live_id!(f_cols), "by column", "Column"),
                         ] {
                             let btn = seg.child(child);
                             btn.set_text(cx, label);
-                            set_button_fill(cx, btn.clone(), distribute == variant);
+                            set_button_fill(cx, btn.clone(), auto == variant);
                             self.composite_clicks
-                                .push((btn.widget_uid().0, format!("distribute: Distribute.{variant}")));
+                                .push((btn.widget_uid().0, format!("auto_flow: AutoFlow.{variant}")));
                         }
-                        let cross_row = col.child(live_id!(cross_row));
-                        cross_row
-                            .child(live_id!(cross_axis))
-                            .set_text(cx, if down { "\u{2194}" } else { "\u{2195}" });
-                        let seg = cross_row.child(live_id!(cross_seg));
-                        for (child, label, value) in [
-                            (live_id!(c_start), "start", 0.0),
-                            (live_id!(c_mid), "centre", 0.5),
-                            (live_id!(c_end), "end", 1.0),
+                        let field = col.child(live_id!(areas_row)).child(live_id!(areas_in));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, &quoted_list_text(self.row_value("areas").unwrap_or(""), " / "));
+                        }
+                        self.composite_fields.push((field.widget_uid().0, "areas".to_string()));
+                    }
+                    VisKind::Cell => {
+                        item.child(live_id!(name)).set_text(cx, "cell");
+                        let cell = self.cell_text();
+                        let col = item.child(live_id!(cell_col));
+                        for (row_id, child, key, value) in [
+                            (live_id!(place_row), live_id!(cell_c), "col", cell.col),
+                            (live_id!(place_row), live_id!(cell_r), "row", cell.row),
+                            (live_id!(span_row), live_id!(cell_cs), "col_span", cell.col_span),
+                            (live_id!(span_row), live_id!(cell_rs), "row_span", cell.row_span),
                         ] {
-                            let btn = seg.child(child);
-                            btn.set_text(cx, label);
-                            set_button_fill(cx, btn.clone(), (cross - value).abs() < 0.25);
-                            let (x, y) = if down { (value, ay) } else { (ax, value) };
-                            self.composite_clicks.push((
-                                btn.widget_uid().0,
-                                format!("align: Align{{x: {} y: {}}}", fmt_f64(x), fmt_f64(y)),
-                            ));
+                            let field = col.child(row_id).child(child);
+                            if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                input.set_value(cx, value as f64);
+                            }
+                            self.composite_fields
+                                .push((field.widget_uid().0, format!("cell#{key}")));
                         }
+                        let field = col.child(live_id!(area_row)).child(live_id!(cell_area));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, &cell.area);
+                        }
+                        self.composite_fields
+                            .push((field.widget_uid().0, "cell#area".to_string()));
                     }
                     VisKind::Group(kind) => {
                         item.child(live_id!(title)).set_text(
@@ -12738,11 +13218,15 @@ impl Tweaker {
                         // back, with the one field changed.
                         if let Some((axis, key)) = prop.split_once('#') {
                             let chunk = if axis == "abs_pos" {
-                                self.abs_chunk(key, v)
+                                Some(self.abs_chunk(key, v))
+                            } else if axis == "cell" {
+                                self.cell_chunk(key, &fmt_f64(v))
                             } else {
-                                self.fill_chunk(axis, key, &fmt_f64(v))
+                                Some(self.fill_chunk(axis, key, &fmt_f64(v)))
                             };
-                            edits.push(Edit::Apply(chunk));
+                            if let Some(chunk) = chunk {
+                                edits.push(Edit::Apply(chunk));
+                            }
                             continue;
                         }
                         // Linked box editor: one leg drives all four.
@@ -12781,7 +13265,15 @@ impl Tweaker {
                         let chunk = if prop == "width" || prop == "height" {
                             size_chunk(&prop, &text)
                         } else if let Some((axis, key)) = prop.split_once('#') {
-                            (!text.is_empty()).then(|| self.fill_chunk(axis, key, &text))
+                            if axis == "cell" {
+                                self.cell_chunk(key, &text)
+                            } else {
+                                (!text.is_empty()).then(|| self.fill_chunk(axis, key, &text))
+                            }
+                        } else if prop == "columns" || prop == "rows" {
+                            tracks_chunk(&prop, &text)
+                        } else if prop == "areas" {
+                            areas_chunk(&text)
                         } else if prop.starts_with("min_") || prop.starts_with("max_") {
                             bound_chunk(&prop, &text)
                         } else if prop == "aspect" {
@@ -13940,7 +14432,9 @@ impl Widget for Tweaker {
                             | VisKind::AlignGrid
                             | VisKind::Group(_)
                             | VisKind::Container
-                            | VisKind::Absolute => {}
+                            | VisKind::Absolute
+                            | VisKind::GridTracks
+                            | VisKind::Cell => {}
                             VisKind::Prop(row_index) => {
                                 // The origin-dot zone is the right edge:
                                 // click jumps the cascade to that level.
@@ -14812,6 +15306,40 @@ mod tests {
         assert_eq!(parse_vec2_text("vec2f(10 20)"), Some((10.0, 20.0)));
         assert_eq!(parse_vec2_text("vec2(10, 20.5)"), Some((10.0, 20.5)));
         assert_eq!(parse_vec2_text("null"), None);
+    }
+
+    #[test]
+    fn grid_tracks_read_as_css_and_write_back_as_a_list() {
+        let printed = "[\"70px\" \"20%\" \"minmax(60px, 1fr)\" \"repeat(2, minmax(50px, 1fr))\"]";
+        assert_eq!(quoted_list_text(printed, " "), "70px 20% minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))");
+        assert_eq!(quoted_list_text("[]", " "), "");
+        assert_eq!(quoted_list_text("[\"hero hero . . .\" \". . . . .\"]", " / "), "hero hero . . . / . . . . .");
+        assert_eq!(
+            split_tracks("70px 20% minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))"),
+            vec!["70px", "20%", "minmax(60px, 1fr)", "repeat(2, minmax(50px, 1fr))"]
+        );
+        assert_eq!(
+            tracks_chunk("columns", "70px 20% minmax(60px, 1fr) repeat(auto-fill, minmax(50px, 1fr))").as_deref(),
+            Some("columns: [\"70px\" \"20%\" \"minmax(60px, 1fr)\" \"repeat(auto-fill, minmax(50px, 1fr))\"]")
+        );
+        assert_eq!(tracks_chunk("rows", "48 1fr").as_deref(), Some("rows: [\"48\" \"1fr\"]"));
+        assert_eq!(tracks_chunk("rows", "").as_deref(), Some("rows: []"));
+        assert_eq!(tracks_chunk("rows", "1f"), None);
+        assert_eq!(tracks_chunk("rows", "minmax(60px"), None);
+        assert_eq!(tracks_chunk("rows", "repeat(2, 50px)"), None);
+        assert_eq!(tracks_chunk("rows", "calc(100% - 20px)").as_deref(), Some("rows: [\"calc(100% - 20px)\"]"));
+        assert_eq!(areas_chunk("hero hero . / . . .").as_deref(), Some("areas: [\"hero hero .\" \". . .\"]"));
+        assert_eq!(areas_chunk("").as_deref(), Some("areas: []"));
+        assert_eq!(areas_chunk("hero hero . / . ."), None);
+    }
+
+    #[test]
+    fn a_cell_that_says_nothing_is_no_cell() {
+        assert_eq!(CellText::default().chunk(), "cell: nil");
+        let placed = CellText { col: 4, row: 1, col_span: 0, row_span: 0, area: String::new() };
+        assert_eq!(placed.chunk(), "cell: CellPlacement{col: 4 row: 1 col_span: 0 row_span: 0 area: nil}");
+        let named = CellText { area: "hero".to_string(), ..CellText::default() };
+        assert_eq!(named.chunk(), "cell: CellPlacement{col: 0 row: 0 col_span: 0 row_span: 0 area: @hero}");
     }
 
     #[test]
