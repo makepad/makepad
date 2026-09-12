@@ -55,20 +55,23 @@ let ScenePad = Button{
         color_down: #xffffff
         color_focus: #xffffff
     }
+    // Plain values only for consistency: Button declares these inputs as uniforms, so a
+    // uniform(..) here did set them. It is an input the base declares as an instance that a
+    // uniform(..) does not set, in a merge that adds no function of its own.
     draw_bg +: {
-        border_radius: uniform(7.)
-        color: uniform(#x162638)
-        color_hover: uniform(#x1d3249)
-        color_down: uniform(#x304f73)
-        color_focus: uniform(#x365d87)
-        border_color: uniform(#x2f4966)
-        border_color_hover: uniform(#x48698f)
-        border_color_down: uniform(#x66a0e2)
-        border_color_focus: uniform(#x78bcff)
-        border_color_2: uniform(#x223447)
-        border_color_2_hover: uniform(#x37516c)
-        border_color_2_down: uniform(#x6fa5e2)
-        border_color_2_focus: uniform(#x86c7ff)
+        border_radius: 7.
+        color: #x162638
+        color_hover: #x1d3249
+        color_down: #x304f73
+        color_focus: #x365d87
+        border_color: #x2f4966
+        border_color_hover: #x48698f
+        border_color_down: #x66a0e2
+        border_color_focus: #x78bcff
+        border_color_2: #x223447
+        border_color_2_hover: #x37516c
+        border_color_2_down: #x6fa5e2
+        border_color_2_focus: #x86c7ff
     }
 }
 
@@ -81,22 +84,24 @@ let TransportToggle = Toggle{
         color_down: #xffffff
         color_active: #xd6ffe2
     }
+    // Plain values only for consistency: Toggle declares these inputs as uniforms, so a
+    // uniform(..) here did set them.
     draw_bg +: {
-        color: uniform(#x131f2f)
-        color_hover: uniform(#x1a2a3f)
-        color_down: uniform(#x102134)
-        color_active: uniform(#x1f3f33)
-        color_focus: uniform(#x2a4664)
-        border_color: uniform(#x34465a)
-        border_color_hover: uniform(#x4d6683)
-        border_color_down: uniform(#x3b4f68)
-        border_color_active: uniform(#x4d8f6d)
-        border_color_focus: uniform(#x68a7e8)
-        mark_color: uniform(#x8b99ab)
-        mark_color_hover: uniform(#xb5c6de)
-        mark_color_down: uniform(#xd4e0ee)
-        mark_color_active: uniform(#x84f0b0)
-        mark_color_active_hover: uniform(#xa6ffca)
+        color: #x131f2f
+        color_hover: #x1a2a3f
+        color_down: #x102134
+        color_active: #x1f3f33
+        color_focus: #x2a4664
+        border_color: #x34465a
+        border_color_hover: #x4d6683
+        border_color_down: #x3b4f68
+        border_color_active: #x4d8f6d
+        border_color_focus: #x68a7e8
+        mark_color: #x8b99ab
+        mark_color_hover: #xb5c6de
+        mark_color_down: #xd4e0ee
+        mark_color_active: #x84f0b0
+        mark_color_active_hover: #xa6ffca
     }
 }
 
