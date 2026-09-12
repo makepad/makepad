@@ -2591,7 +2591,9 @@ fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String
                 _ => None,
             };
             if let Some(unit) = unit {
-                return Some(format!("{}{unit}", fmt_f64(factor * 100.0)));
+                // Quoted: this text is what a reset or an undo re-applies,
+                // and `50%` bare is an operator with nothing after it.
+                return Some(format!("\"{}{unit}\"", fmt_f64(factor * 100.0)));
             }
         }
     }
@@ -2760,6 +2762,9 @@ fn fill_field<'a>(text: &'a str, field: &str) -> Option<&'a str> {
 /// -- as the text of its field: `120`, `50%`, `calc(100% - 20px)`.
 fn bound_text(printed: &str) -> String {
     let text = printed.trim().trim_matches('"').trim();
+    if text == "null" {
+        return String::new(); // cleared: the row stays, the bound is gone
+    }
     let head = text.split(['{', '(']).next().unwrap_or("").trim();
     if head.rsplit('.').next() == Some("Abs") {
         let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
@@ -2831,16 +2836,27 @@ fn parse_size_text(text: &str) -> SizeText {
         "Fill" => return SizeText::Fill(parse_fill_text(text)),
         "Fit" => return SizeText::Fit,
         "Fixed" => {
+            // `Fixed(` on the way to `Fixed(300)` is not a size yet, and
+            // certainly not a size of nothing.
             let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
-            return SizeText::Fixed(inner.parse().unwrap_or(0.0));
+            return match inner.parse() {
+                Ok(v) => SizeText::Fixed(v),
+                Err(_) => SizeText::Fit,
+            };
         }
         _ => {}
     }
     let lower = text.to_ascii_lowercase();
-    // A relative size or an expression is kept as written: the field shows
-    // it as such, and it is emitted back as the same string.
+    // An expression is kept as written and emitted back as the same
+    // string -- once it is one: `calc(` on the way to `calc(100% - 20px)`
+    // reads as nothing, so nothing is sent for it.
     if lower.contains('(') {
-        return SizeText::Expr(text.to_string());
+        let balanced = lower.matches('(').count() == lower.matches(')').count();
+        return if balanced && lower.ends_with(')') {
+            SizeText::Expr(text.to_string())
+        } else {
+            SizeText::Fit
+        };
     }
     if let Some(num) = lower
         .strip_suffix("cqw")
@@ -2851,10 +2867,12 @@ fn parse_size_text(text: &str) -> SizeText {
         .or_else(|| lower.strip_suffix("px"))
     {
         if num.trim().parse::<f64>().is_ok() {
+            // The unit goes lowercase: the engine's parser knows `vw`,
+            // not `VW`, and the field shows what was accepted.
             return if lower.ends_with("px") {
                 SizeText::Fixed(num.trim().parse().unwrap_or(0.0))
             } else {
-                SizeText::Rel(text.to_string())
+                SizeText::Rel(lower.clone())
             };
         }
     }
@@ -3048,19 +3066,43 @@ fn track_len_ok(text: &str) -> bool {
         && lower.matches('(').count() == lower.matches(')').count()
 }
 
+/// A function's arguments, split on the commas at its own depth, so
+/// `minmax(min(10px, 5%), 1fr)` gives two, the way the engine reads it.
+fn split_args(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(body[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(body[start..].trim());
+    out
+}
+
 /// One track as the engine's parser takes it: a length, `minmax(a, b)`, or
 /// `repeat(n | auto-fill | auto-fit, minmax(a, b))`.
 fn track_ok(text: &str) -> bool {
     let text = text.trim();
     if let Some(body) = text.strip_prefix("minmax(").and_then(|b| b.strip_suffix(')')) {
-        let parts: Vec<&str> = body.splitn(2, ',').collect();
+        let parts = split_args(body);
         return parts.len() == 2 && parts.iter().all(|p| track_len_ok(p));
     }
     if let Some(body) = text.strip_prefix("repeat(").and_then(|b| b.strip_suffix(')')) {
-        let Some((count, segment)) = body.split_once(',') else { return false };
-        let count = count.trim();
+        let parts = split_args(body);
+        if parts.len() != 2 {
+            return false;
+        }
+        let (count, segment) = (parts[0], parts[1]);
         let count_ok = count == "auto-fill" || count == "auto-fit" || count.parse::<u32>().is_ok();
-        return count_ok && segment.trim().starts_with("minmax(") && track_ok(segment.trim());
+        return count_ok && segment.starts_with("minmax(") && track_ok(segment);
     }
     track_len_ok(text)
 }
@@ -3163,7 +3205,12 @@ fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<Stri
     }
     if let Some(array) = value.as_array() {
         let mut out = String::from("[");
-        let len = heap.array_len(array).min(8);
+        // A list of plain values -- tracks, area rows -- prints whole, since
+        // an editor writes the printed list back; a list of objects is a
+        // dump and stops at eight.
+        let full = heap.array_len(array);
+        let objects = full > 0 && heap.array_index(array, 0, NoTrap).as_object().is_some();
+        let len = if objects { full.min(8) } else { full.min(4096) };
         for index in 0..len {
             if index > 0 {
                 out.push(' ');
@@ -10761,7 +10808,7 @@ impl Tweaker {
                 if let Some(mut input) = input.borrow_mut::<crate::TextInput>() {
                     let hint = if !filters_here {
                         "no filter on this tab"
-                    } else if self.search_mode {
+                    } else if self.search_mode && tab != PanelTab::Tree {
                         "Search"
                     } else {
                         "Filter"
@@ -15445,8 +15492,14 @@ mod tests {
         assert_eq!(parse_size_text("24px"), SizeText::Fixed(24.0));
         assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
         assert_eq!(parse_size_text("25vw"), SizeText::Rel("25vw".into()));
+        assert_eq!(parse_size_text("25VW"), SizeText::Rel("25vw".into()));
         assert_eq!(parse_size_text("calc(100% - 20px)"), SizeText::Expr("calc(100% - 20px)".into()));
         assert_eq!(parse_size_text(""), SizeText::Fit);
+        // Half-typed: not a size yet, so never a size of nothing.
+        assert_eq!(parse_size_text("Fixed("), SizeText::Fit);
+        assert_eq!(parse_size_text("Fixed(abc)"), SizeText::Fit);
+        assert_eq!(parse_size_text("calc("), SizeText::Fit);
+        assert_eq!(parse_size_text("clamp(200px, 50%"), SizeText::Fit);
     }
 
     #[test]
@@ -15471,6 +15524,8 @@ mod tests {
         assert_eq!(bound_text("FitBound.Abs(120)"), "120");
         assert_eq!(bound_text("50%"), "50%");
         assert_eq!(bound_text("\"calc(100% - 20px)\""), "calc(100% - 20px)");
+        assert_eq!(bound_text("null"), "");
+        assert_eq!(bound_chunk("min_width", "calc("), None);
         assert_eq!(bound_chunk("min_width", "120").as_deref(), Some("min_width: 120"));
         assert_eq!(bound_chunk("max_width", "50%").as_deref(), Some("max_width: \"50%\""));
         assert_eq!(bound_chunk("max_height", "clamp(200px, 50%, 600px)").as_deref(), Some("max_height: \"clamp(200px, 50%, 600px)\""));
@@ -15519,6 +15574,9 @@ mod tests {
         assert_eq!(tracks_chunk("rows", "minmax(60px"), None);
         assert_eq!(tracks_chunk("rows", "repeat(2, 50px)"), None);
         assert_eq!(tracks_chunk("rows", "calc(100% - 20px)").as_deref(), Some("rows: [\"calc(100% - 20px)\"]"));
+        assert!(track_ok("minmax(min(10px, 5%), 1fr)"));
+        assert!(track_ok("repeat(2, minmax(clamp(1px, 5%, 10px), 1fr))"));
+        assert!(!track_ok("minmax(10px, 5%, 1fr)"));
         assert_eq!(areas_chunk("hero hero . / . . .").as_deref(), Some("areas: [\"hero hero .\" \". . .\"]"));
         assert_eq!(areas_chunk("").as_deref(), Some("areas: []"));
         assert_eq!(areas_chunk("hero hero . / . ."), None);
@@ -15574,6 +15632,9 @@ mod tests {
         // Half a word on its way to being one is not sent.
         assert_eq!(size_chunk("width", "12p"), None);
         assert_eq!(size_chunk("width", "fi"), None);
+        assert_eq!(size_chunk("width", "Fixed("), None);
+        assert_eq!(size_chunk("width", "calc(100%"), None);
+        assert_eq!(size_chunk("width", "25VW").as_deref(), Some("width: \"25vw\""));
     }
 
     #[test]
@@ -15601,6 +15662,7 @@ mod tests {
             }
             .script_to_value(vm);
             let fixed = Size::Fixed(200.0).script_to_value(vm);
+            let rel = Size::Rel { base: Base::Parent, factor: 0.5 }.script_to_value(vm);
             let down = Flow::Down.script_to_value(vm);
             let heap = &vm.bx.heap;
             let fill_obj = fill.as_object().expect("a named variant is an object");
@@ -15614,6 +15676,10 @@ mod tests {
             );
             assert_eq!(fmt_value(heap, fixed, 2).as_deref(), Some("Size.Fixed(200)"));
             assert_eq!(fmt_value(heap, down, 2).as_deref(), Some("Flow.Down"));
+            // A relative size prints quoted: the text is what a reset
+            // re-applies, and the panel reads it back the same.
+            assert_eq!(fmt_value(heap, rel, 2).as_deref(), Some("\"50%\""));
+            assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
             // Display drops the enum and the fields equal to the defaults.
             assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
         });

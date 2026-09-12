@@ -1005,10 +1005,11 @@ mod imp {
                     }
                 };
                 cx.push_unique_platform_op(crate::cx_api::CxOsOp::ResizeWindow(window_id, size));
-                // The size lands on the next frame or the one after; the
-                // reply carries what was asked, the following `/s` what is.
+                // The window's own size event paints once; the reply goes
+                // out with that frame and carries what was asked, the
+                // following `/s` what is.
                 frame_waiters().lock().unwrap().push((
-                    cx.repaint_id + 2,
+                    cx.repaint_id + 1,
                     tx,
                     Some(format!("{{\"resize\":[{},{}]}}", size.x, size.y)),
                 ));
@@ -1228,8 +1229,9 @@ mod imp {
                 // `w` is the width here, so the window goes by `window=`.
                 let window = p.get(&["window"]).and_then(|v| v.parse::<usize>().ok());
                 let (w, h) = (p.f64(&["w"], 0.0), p.f64(&["h"], 0.0));
-                if w < 1.0 || h < 1.0 {
-                    return Out::Text(400, "give w= and h= in layout points".to_string());
+                let sane = |v: f64| v.is_finite() && (1.0..=16384.0).contains(&v);
+                if !sane(w) || !sane(h) {
+                    return Out::Text(400, "give w= and h= in layout points, 1 to 16384".to_string());
                 }
                 reply_to_out(ask(move |tx| Cmd::Resize { window, size: dvec2(w, h), tx }, 6))
             }
