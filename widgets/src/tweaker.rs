@@ -6466,6 +6466,19 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
 
+    // The inspector panel's own ink, over the fab palette its chrome is
+    // built from. The fab grades of dim and muted are set for 8.5 pt words
+    // on a fab row, and the menu bar reads them too; the panel's small
+    // words are 7.5 pt and its placeholders sit on the wells, so they take
+    // a brighter grade — 6:1 and 3.8:1 on the panel ground. `face_off` is
+    // where a control that answers nothing sinks to: the well tone, under
+    // the muted ink.
+    mod.tweak_panel = {
+        text_dim: #xb4b4b4
+        text_muted: #x8c8c8c
+        face_off: #x1d1d1d
+    }
+
     set_type_default() do #(DrawTweakOutline::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn() {
@@ -7692,12 +7705,148 @@ impl Tweaker {
         let sidebar = cx.with_vm(|vm| {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
+                use mod.prelude.fab_internal.*
                 use mod.widgets.*
+
+                // The panel's own ink. Its chrome is the fab palette whatever
+                // the app's theme, so every word on it has to be too: a stock
+                // Button or TextInput takes the theme's label colour, which
+                // over a light app is dark grey on the panel's dark grey.
+                // The dim grades are the panel's, not fab's: see
+                // `mod.tweak_panel`.
+                let panel = mod.tweak_panel
+                let PanelButton = Button {
+                    draw_bg +: {
+                        color: fab.color_button
+                        color_hover: fab.color_button_hover
+                        color_down: fab.color_button_down
+                        color_focus: fab.color_button
+                        color_disabled: panel.face_off
+                        // Flat, in every state. The stock Button's face and
+                        // bevel are gradients, and the shader decides on the
+                        // REST stop alone whether to run them: with that one
+                        // left on, the other states' -1 stops are mixed in
+                        // as colours, and the off state grows a bright rim.
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_down: fab.color_border
+                        border_color_focus: fab.color_focus_ring
+                        border_color_disabled: fab.color_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_focus: fab.color_text
+                        color_disabled: panel.text_muted
+                    }
+                }
+                let PanelInput = TextInput {
+                    draw_bg +: {
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_focus: fab.color_input_active
+                        color_down: fab.color_input_active
+                        color_empty: fab.color_input
+                        color_disabled: fab.color_input
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_focus: fab.color_focus_ring
+                        border_color_down: fab.color_border
+                        border_color_empty: fab.color_border
+                        border_color_disabled: fab.color_border
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_focus: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        color_empty: panel.text_muted
+                        color_empty_hover: panel.text_dim
+                        color_empty_focus: panel.text_dim
+                    }
+                    draw_selection +: {
+                        color: fab.color_selection_bg
+                        color_hover: fab.color_selection_bg
+                        color_focus: fab.color_selection_bg
+                        color_down: fab.color_selection_bg
+                        color_empty: fab.color_selection_bg
+                        color_disabled: fab.color_selection_bg
+                    }
+                    draw_cursor +: {
+                        color: fab.color_text_active
+                    }
+                }
+                // The Tree tab's rows, on the panel's surfaces.
+                let PanelTreeNode = FileTreeNode {
+                    draw_bg +: {
+                        color_1: fab.color_area
+                        color_2: fab.color_panel_sub
+                        color_active: fab.color_selection_bg
+                    }
+                    draw_icon +: {
+                        color: panel.text_dim
+                        color_active: fab.color_text_active
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_active: fab.color_text_active
+                    }
+                }
+                // The panel's small words, in its own dim grade.
+                let PanelLabelDim = FabLabelDim {
+                    draw_text +: { color: panel.text_dim }
+                }
+                let PanelLabelSmall = FabLabelSmall {
+                    draw_text +: { color: panel.text_dim }
+                }
+                // The Props tab's booleans, as wells: a stock CheckBox takes
+                // the theme's inset and bevel, which over a light app is a
+                // (43,43,43) box on the panel's (48,48,48) ground.
+                let PanelCheckBox = CheckBox {
+                    draw_bg +: {
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_down: fab.color_input_active
+                        color_active: fab.color_input
+                        color_focus: fab.color_input
+                        color_disabled: fab.color_input
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_down: fab.color_border
+                        border_color_active: fab.color_border
+                        border_color_focus: fab.color_focus_ring
+                        border_color_disabled: fab.color_border
+                        mark_color_active: fab.color_text_active
+                        mark_color_active_hover: fab.color_text_active
+                        mark_color_mixed: fab.color_text_active
+                        mark_color_disabled: panel.text_muted
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_focus: fab.color_text
+                        color_active: fab.color_text
+                        color_disabled: panel.text_muted
+                    }
+                }
 
                 // Row templates, hoisted: one source of truth for the Props list,
                 // the Shader tab INPUTS list and the shader-constant rows.
                 let SectionRowT = FabSection {
-                    count := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 1 right: 0 bottom: 0} text: "" }
+                    count := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 1 right: 0 bottom: 0} text: "" }
                 }
                 let CascadeRowT = View {
                     width: Fill
@@ -7727,15 +7876,15 @@ impl Tweaker {
                             width: Fit height: Fit
                             padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
                             draw_bg +: { color: #x555555 radius: 3. }
-                            lbl := FabLabelSmall { width: Fit text: "L0" draw_text +: { color: #x151515 } }
+                            lbl := PanelLabelSmall { width: Fit text: "L0" draw_text +: { color: #x151515 } }
                         }
-                        loc := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        loc := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     }
                     sets_wrap := View { width: Fill height: Fit visible: false
-                        sets := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                        sets := PanelLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
                     }
                     overridden_wrap := View { width: Fill height: Fit visible: false
-                        overridden := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                        overridden := PanelLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
                     }
                 }
                 let MaterialRowT = View {
@@ -7745,7 +7894,7 @@ impl Tweaker {
                     spacing: 6
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 3 bottom: 3}
-                    name := mod.widgets.FabLabelDim {
+                    name := PanelLabelDim {
                         width: 70
                         text: ""
                     }
@@ -7773,7 +7922,7 @@ impl Tweaker {
                     // the name is the thing that was being truncated.
                     padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
                     spacing: 4
-                    name := FabLabelDim {
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
@@ -7787,7 +7936,7 @@ impl Tweaker {
                         width: 106
                         height: 18
                     }
-                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let BoolRowT = View {
                     width: Fill
@@ -7799,18 +7948,18 @@ impl Tweaker {
                     // the name is the thing that was being truncated.
                     padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
                     spacing: 4
-                    name := FabLabelDim {
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
-                    value := CheckBox {
+                    value := PanelCheckBox {
                         width: Fit
                         height: Fit
                         text: ""
                     }
-                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let TextRowT = View {
                     width: Fill
@@ -7822,32 +7971,30 @@ impl Tweaker {
                     // the name is the thing that was being truncated.
                     padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
                     spacing: 4
-                    name := FabLabelDim {
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
-                    value := TextInput {
+                    value := PanelInput {
                         width: 106
                         height: 18
                         empty_text: ""
                         draw_bg +: {
-                            color: #x1d1d1d
                             border_radius: 2.0
                         }
                         draw_text +: {
                             ink_centered: true
-                            color: #xe6e6e6
                             text_style +: {
                                 font_size: 8.5
                             }
                         }
                     }
-                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let InfoRowT = FabPropRow {
-                    value := FabLabelSmall {
+                    value := PanelLabelSmall {
                         width: Fill
                         margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
                         text: ""
@@ -7855,17 +8002,15 @@ impl Tweaker {
                 }
                 // One size field, in the person's own words: a number, a
                 // percentage, an expression.
-                let SizeInputT = TextInput {
+                let SizeInputT = PanelInput {
                     height: 18
                     empty_text: ""
                     label_align: Align{x: 0.5 y: 0.5}
                     draw_bg +: {
-                        color: #x1d1d1d
                         border_radius: 2.0
                     }
                     draw_text +: {
                         ink_centered: true
-                        color: #xe6e6e6
                         text_style +: { font_size: 8.5 }
                     }
                 }
@@ -7882,11 +8027,11 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            w_axis := FabLabelSmall { width: 12 text: "W" }
+                            w_axis := PanelLabelSmall { width: 12 text: "W" }
                             w_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                w_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                w_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                w_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fill := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fit := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fix := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                             w_input := SizeInputT { width: Fill }
                         }
@@ -7897,9 +8042,9 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            w_min_label := FabLabelSmall { width: Fit text: "min" }
+                            w_min_label := PanelLabelSmall { width: Fit text: "min" }
                             w_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
-                            w_max_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            w_max_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
                             w_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
                         }
                         // A Fill's own fields; the lines are not there otherwise.
@@ -7909,9 +8054,9 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            w_grow_label := FabLabelSmall { width: Fit text: "grow" }
+                            w_grow_label := PanelLabelSmall { width: Fit text: "grow" }
                             w_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
-                            w_shrink_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            w_shrink_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
                             w_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
                         }
                         w_basis := View {
@@ -7920,7 +8065,7 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            w_basis_label := FabLabelSmall { width: Fit text: "basis" }
+                            w_basis_label := PanelLabelSmall { width: Fit text: "basis" }
                             w_basis_in := SizeInputT { width: Fill }
                         }
                         h_row := View {
@@ -7929,11 +8074,11 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            h_axis := FabLabelSmall { width: 12 text: "H" }
+                            h_axis := PanelLabelSmall { width: 12 text: "H" }
                             h_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                h_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                h_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                h_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fill := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fit := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fix := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                             h_input := SizeInputT { width: Fill }
                         }
@@ -7944,9 +8089,9 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            h_min_label := FabLabelSmall { width: Fit text: "min" }
+                            h_min_label := PanelLabelSmall { width: Fit text: "min" }
                             h_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
-                            h_max_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            h_max_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
                             h_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
                         }
                         // A Fill's own fields; the lines are not there otherwise.
@@ -7956,9 +8101,9 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            h_grow_label := FabLabelSmall { width: Fit text: "grow" }
+                            h_grow_label := PanelLabelSmall { width: Fit text: "grow" }
                             h_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
-                            h_shrink_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            h_shrink_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
                             h_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
                         }
                         h_basis := View {
@@ -7967,7 +8112,7 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            h_basis_label := FabLabelSmall { width: Fit text: "basis" }
+                            h_basis_label := PanelLabelSmall { width: Fit text: "basis" }
                             h_basis_in := SizeInputT { width: Fill }
                         }
                         aspect_row := View {
@@ -7976,9 +8121,9 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            aspect_label := FabLabelSmall { width: Fit text: "aspect" }
+                            aspect_label := PanelLabelSmall { width: Fit text: "aspect" }
                             aspect_in := SizeInputT { width: 42 empty_text: "\u{2013}" }
-                            aspect_hint := FabLabelSmall { width: Fit text: "width : height" }
+                            aspect_hint := PanelLabelSmall { width: Fit text: "width : height" }
                         }
                     }
                 }
@@ -7997,7 +8142,7 @@ impl Tweaker {
                     spacing: 6
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 8 top: 3 bottom: 5}
-                    name_field := TextInput {
+                    name_field := PanelInput {
                         // 70 / 30 against the type beside it: a name is
                         // usually short, and a type that gets ellipsised is
                         // no use at all.
@@ -8005,15 +8150,13 @@ impl Tweaker {
                         height: 20
                         empty_text: "unnamed \u{2014} type a name"
                         draw_bg +: {
-                            color: #x1d1d1d
                             border_radius: 2.0
                         }
                         draw_text +: {
-                            color: #xe6e6e6
                             text_style +: { font_size: 8.5 }
                         }
                     }
-                    type_label := FabLabelDim {
+                    type_label := PanelLabelDim {
                         width: Fill{weight: 30.0}
                         text: ""
                         max_lines: 1
@@ -8025,7 +8168,7 @@ impl Tweaker {
                     height: Fit
                     flow: Right
                     padding: Inset{left: 8 right: 8 top: 1 bottom: 3}
-                    measured := FabLabelSmall {
+                    measured := PanelLabelSmall {
                         width: Fill
                         text: ""
                         max_lines: 1
@@ -8076,7 +8219,7 @@ impl Tweaker {
                             leg_bottom := FabValueInput { width: 64 height: 16 }
                         }
                     }
-                    link := CheckBox {
+                    link := PanelCheckBox {
                         width: Fit
                         height: Fit
                         text: ""
@@ -8098,15 +8241,15 @@ impl Tweaker {
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             flow_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_right := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_down := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_over := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            f_wrap := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             ra_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 4 right: 0 top: 0 bottom: 0}
-                                ra_top := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                ra_mid := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                ra_bottom := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_top := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_bottom := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
                         gap_row := View {
@@ -8115,10 +8258,10 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            gap_label := FabLabelSmall { width: Fit text: "gap" }
+                            gap_label := PanelLabelSmall { width: Fit text: "gap" }
                             spacing_input := FabValueInput { width: 56 height: 18 }
                             wrap_box := View { width: Fit height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                                wrap_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "rows" }
+                                wrap_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "rows" }
                                 wrap_input := FabValueInput { width: 56 height: 18 }
                             }
                         }
@@ -8134,32 +8277,32 @@ impl Tweaker {
                         flow: Down
                         spacing: 2
                         just_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            just_label := FabLabelSmall { width: 34 text: "justify" }
+                            just_label := PanelLabelSmall { width: 34 text: "justify" }
                             just_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                j_stretch := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                j_start := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                j_mid := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                j_end := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_start := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_end := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            just_axis := FabLabelSmall { width: Fit text: "" }
+                            just_axis := PanelLabelSmall { width: Fit text: "" }
                         }
                         space_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            space_label := FabLabelSmall { width: 34 text: "space" }
+                            space_label := PanelLabelSmall { width: 34 text: "space" }
                             space_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                s_between := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                s_around := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                s_evenly := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                s_between := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                s_around := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                s_evenly := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
                         cross_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            cross_label := FabLabelSmall { width: 34 text: "align" }
+                            cross_label := PanelLabelSmall { width: 34 text: "align" }
                             cross_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                c_stretch := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                c_start := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                c_mid := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                c_end := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_start := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_end := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            cross_axis := FabLabelSmall { width: Fit text: "" }
+                            cross_axis := PanelLabelSmall { width: Fit text: "" }
                         }
                     }
                 }
@@ -8171,7 +8314,7 @@ impl Tweaker {
                     flow: Right
                     align: Align{x: 0.0 y: 1.0}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 2}
-                    title := FabLabelSmall { width: Fill text: "" }
+                    title := PanelLabelSmall { width: Fill text: "" }
                 }
                 // What kind of container it is, the ask to become the other
                 // kind, and the name its children can size against.
@@ -8183,11 +8326,11 @@ impl Tweaker {
                         flow: Down
                         spacing: 2
                         mode_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
-                            mode_label := FabLabelSmall { width: Fit text: "" }
-                            convert := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            mode_label := PanelLabelSmall { width: Fit text: "" }
+                            convert := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                         }
                         name_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            ctr_label := FabLabelSmall { width: Fit text: "named" }
+                            ctr_label := PanelLabelSmall { width: Fit text: "named" }
                             ctr_name := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                     }
@@ -8202,12 +8345,12 @@ impl Tweaker {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0 y: 0.5}
-                        abs_check := CheckBox { width: Fit height: Fit text: "" }
-                        abs_label := FabLabelSmall { width: Fit text: "absolute" }
+                        abs_check := PanelCheckBox { width: Fit height: Fit text: "" }
+                        abs_label := PanelLabelSmall { width: Fit text: "absolute" }
                         abs_xy := View { width: Fit height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            x_label := FabLabelSmall { width: Fit text: "x" }
+                            x_label := PanelLabelSmall { width: Fit text: "x" }
                             abs_x := FabValueInput { width: 44 height: 18 }
-                            y_label := FabLabelSmall { width: Fit text: "y" }
+                            y_label := PanelLabelSmall { width: Fit text: "y" }
                             abs_y := FabValueInput { width: 44 height: 18 }
                         }
                     }
@@ -8222,29 +8365,29 @@ impl Tweaker {
                         flow: Down
                         spacing: 2
                         cols_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            cols_label := FabLabelSmall { width: 40 text: "columns" }
+                            cols_label := PanelLabelSmall { width: 40 text: "columns" }
                             cols_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                         rows_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            rows_label := FabLabelSmall { width: 40 text: "rows" }
+                            rows_label := PanelLabelSmall { width: 40 text: "rows" }
                             rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                         gaps_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            gap_label := FabLabelSmall { width: 34 text: "gap" }
-                            gap_x := FabLabelSmall { width: Fit text: "\u{2194}" }
+                            gap_label := PanelLabelSmall { width: 34 text: "gap" }
+                            gap_x := PanelLabelSmall { width: Fit text: "\u{2194}" }
                             gap_col := FabValueInput { width: 40 height: 18 }
-                            gap_y := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
+                            gap_y := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
                             gap_row_in := FabValueInput { width: 40 height: 18 }
                         }
                         fill_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            fill_label := FabLabelSmall { width: 40 text: "fill" }
+                            fill_label := PanelLabelSmall { width: 40 text: "fill" }
                             fill_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                f_rows := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_cols := Button { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_rows := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_cols := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
                         areas_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            areas_label := FabLabelSmall { width: 40 text: "areas" }
+                            areas_label := PanelLabelSmall { width: 40 text: "areas" }
                             areas_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                     }
@@ -8260,19 +8403,19 @@ impl Tweaker {
                         flow: Down
                         spacing: 2
                         place_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            col_label := FabLabelSmall { width: Fit text: "col" }
+                            col_label := PanelLabelSmall { width: Fit text: "col" }
                             cell_c := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
-                            row_label := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
+                            row_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
                             cell_r := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
                         span_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            span_label := FabLabelSmall { width: Fit text: "span" }
+                            span_label := PanelLabelSmall { width: Fit text: "span" }
                             cell_cs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
-                            by_label := FabLabelSmall { width: Fit text: "\u{00d7}" }
+                            by_label := PanelLabelSmall { width: Fit text: "\u{00d7}" }
                             cell_rs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
                         area_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
-                            area_label := FabLabelSmall { width: Fit text: "area" }
+                            area_label := PanelLabelSmall { width: Fit text: "area" }
                             cell_area := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
                     }
@@ -8288,7 +8431,7 @@ impl Tweaker {
                     // the name is the thing that was being truncated.
                     padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
                     spacing: 4
-                    name := FabLabelDim {
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
@@ -8297,17 +8440,15 @@ impl Tweaker {
                     // 80 + spacing + the swatch is exactly the 106 the number
                     // rows use, so both columns end on the same edge — and 80
                     // is what `#00000000` actually needs.
-                    value := TextInput {
+                    value := PanelInput {
                         width: 80
                         height: 18
                         empty_text: "#rrggbbaa"
                         draw_bg +: {
-                            color: #x1d1d1d
                             border_radius: 2.0
                         }
                         draw_text +: {
                             ink_centered: true
-                            color: #xe6e6e6
                             text_style +: {
                                 font_size: 8.5
                             }
@@ -8318,14 +8459,14 @@ impl Tweaker {
                         height: 16
                     }
                     tname_wrap := View { width: Fit height: Fit visible: false
-                        tname := Button { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        tname := PanelButton { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                     }
-                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let VecRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     vx := FabValueInput { width: 46 height: 18 }
                     vy := FabValueInput { width: 46 height: 18 }
                     vz_wrap := View { width: Fit height: Fit visible: false
@@ -8338,7 +8479,7 @@ impl Tweaker {
                 let InsetRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 3
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     il := FabValueInput { width: 40 height: 18 }
                     it := FabValueInput { width: 40 height: 18 }
                     ir := FabValueInput { width: 40 height: 18 }
@@ -8347,7 +8488,7 @@ impl Tweaker {
                 let MetricsRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     m0 := FabValueInput { width: 44 height: 18 }
                     m1 := FabValueInput { width: 44 height: 18 }
                     m2 := FabValueInput { width: 44 height: 18 }
@@ -8355,8 +8496,8 @@ impl Tweaker {
                 let NoEditorRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                    ne := FabLabelSmall { width: Fit text: "no editor yet" }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    ne := PanelLabelSmall { width: Fit text: "no editor yet" }
                 }
                 View {
                     width: Fill
@@ -8384,11 +8525,11 @@ impl Tweaker {
                             spacing: 1
                             align: Align{x: 0.0 y: 0.5}
                             visible: false
-                            hits := FabLabelSmall { width: Fit margin: Inset{left: 0 right: 3 top: 0 bottom: 0} text: "" }
-                            prev := Button { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{2039}" draw_text +: { text_style +: { font_size: 10.0 } } }
-                            next := Button { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{203a}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                            hits := PanelLabelSmall { width: Fit margin: Inset{left: 0 right: 3 top: 0 bottom: 0} text: "" }
+                            prev := PanelButton { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{2039}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                            next := PanelButton { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{203a}" draw_text +: { text_style +: { font_size: 10.0 } } }
                         }
-                        find := Button {
+                        find := PanelButton {
                             width: 28
                             height: 24
                             padding: Inset{left: 7 right: 7 top: 5 bottom: 5}
@@ -8400,7 +8541,7 @@ impl Tweaker {
                                 svg: crate_resource("self:resources/icons/icon_search.svg")
                             }
                         }
-                        select := Button {
+                        select := PanelButton {
                             width: 28
                             height: 24
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
@@ -8412,7 +8553,7 @@ impl Tweaker {
                                 svg: crate_resource("self:resources/icons/icon_select.svg")
                             }
                         }
-                        sploded := Button {
+                        sploded := PanelButton {
                             width: 28
                             height: 24
                             padding: Inset{left: 5 right: 5 top: 3 bottom: 3}
@@ -8431,11 +8572,11 @@ impl Tweaker {
                         flow: Right
                         spacing: 2
                         padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
-                        tab_props := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_theme := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_spec := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_props := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_shader := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -8447,7 +8588,7 @@ impl Tweaker {
                             width: Fill
                             text: ""
                         }
-                        shader_doc := FabLabelSmall {
+                        shader_doc := PanelLabelSmall {
                             width: Fill
                             text: ""
                             max_lines: 1
@@ -8463,29 +8604,29 @@ impl Tweaker {
                             flow: Down
                             spacing: 8
                             visible: false
-                            states_pause := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            states_pause := PanelButton { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
                             st0 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st1 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st2 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st3 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st4 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st5 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                         }
@@ -8523,7 +8664,7 @@ impl Tweaker {
                             NoEditorRow := NoEditorRowT {}
                         }
                         }
-                        src_fold := Button {
+                        src_fold := PanelButton {
                             width: Fit
                             height: 20
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
@@ -8536,7 +8677,7 @@ impl Tweaker {
                             show_bg: true
                             draw_bg +: { color: #x1b1b1b }
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                            shader_src := TextInput {
+                            shader_src := PanelInput {
                                 width: Fill
                                 height: Fit
                                 is_multiline: true
@@ -8563,7 +8704,7 @@ impl Tweaker {
                                     border_color: #x555555
                                     radius: 3.
                                 }
-                                tooltip_label := FabLabelSmall {
+                                tooltip_label := PanelLabelSmall {
                                     width: 220
                                     text: ""
                                 }
@@ -8576,7 +8717,7 @@ impl Tweaker {
                         flow: Down
                         spacing: 4
                         padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
-                        spec_for := FabLabelSmall {
+                        spec_for := PanelLabelSmall {
                             width: Fill
                             text: ""
                             max_lines: 1
@@ -8591,7 +8732,7 @@ impl Tweaker {
                                 width: Fill
                                 text: "notes"
                             }
-                            notes_clear := Button {
+                            notes_clear := PanelButton {
                                 width: 15
                                 height: 15
                                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
@@ -8608,7 +8749,7 @@ impl Tweaker {
                         notes_box := View {
                             width: Fill
                             height: Fill{weight: 1.0 min: 48.0}
-                            spec_notes := TextInput {
+                            spec_notes := PanelInput {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
@@ -8618,7 +8759,6 @@ impl Tweaker {
                                     border_radius: 3.0
                                 }
                                 draw_text +: {
-                                    color: #xe6e6e6
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
@@ -8642,7 +8782,7 @@ impl Tweaker {
                         rules_box := View {
                             width: Fill
                             height: Fill{weight: 1.0 min: 48.0}
-                            spec_rules := TextInput {
+                            spec_rules := PanelInput {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
@@ -8652,7 +8792,6 @@ impl Tweaker {
                                     border_radius: 3.0
                                 }
                                 draw_text +: {
-                                    color: #xe6e6e6
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
@@ -8676,7 +8815,7 @@ impl Tweaker {
                         app_box := View {
                             width: Fill
                             height: Fill{weight: 1.0 min: 48.0}
-                            spec_app := TextInput {
+                            spec_app := PanelInput {
                                 width: Fill
                                 height: Fill
                                 is_multiline: true
@@ -8686,7 +8825,6 @@ impl Tweaker {
                                     border_radius: 3.0
                                 }
                                 draw_text +: {
-                                    color: #xe6e6e6
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
@@ -8703,33 +8841,57 @@ impl Tweaker {
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
-                            isolate := Button {
+                            isolate := PanelButton {
                                 width: Fit
                                 height: 18
                                 padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
                                 text: "Isolate"
                                 draw_text +: { text_style +: { font_size: 8.0 } }
                             }
-                            center := Button {
+                            center := PanelButton {
                                 width: Fit
                                 height: 18
                                 padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
                                 text: "Center"
                                 draw_text +: { text_style +: { font_size: 8.0 } }
                             }
-                            zoom_label := FabLabelSmall { width: Fit text: "zoom" }
+                            zoom_label := PanelLabelSmall { width: Fit text: "zoom" }
                             // 1.00 is life size and the floor: below it the
                             // view would shrink the app away from the very
                             // detail Zoom exists to bring closer.
                             zoom := FabValueInput { width: 44 height: 18 min: 1.0 max: 4.0 }
-                            isolate_hint := FabLabelSmall {
+                            isolate_hint := PanelLabelSmall {
                                 width: Fill
                                 text: ""
                                 max_lines: 1
                                 text_overflow: TextOverflow.Ellipsis
                             }
                         }
-                        tree := FileTree {}
+                        tree := FileTree {
+                            file_node: PanelTreeNode {
+                                is_folder: false
+                                draw_bg +: {is_folder: 0.0}
+                                draw_text +: {is_folder: 0.0}
+                                draw_icon +: {
+                                    color: panel.text_muted
+                                    color_active: panel.text_muted
+                                }
+                            }
+                            folder_node: PanelTreeNode {
+                                is_folder: true
+                                draw_bg +: {is_folder: 1.0}
+                                draw_text +: {is_folder: 1.0}
+                            }
+                            filler +: {
+                                pixel: fn() {
+                                    return mix(
+                                        mix(fab.color_area, fab.color_panel_sub, self.is_even),
+                                        fab.color_selection_bg,
+                                        self.active
+                                    )
+                                }
+                            }
+                        }
                     }
                     props_wrap := View {
                         width: Fill
@@ -8792,7 +8954,7 @@ impl Tweaker {
                         padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
                         show_bg: true
                         draw_bg +: { color: #x242429 }
-                        prompt_field := TextInput {
+                        prompt_field := PanelInput {
                             width: Fill
                             height: 56
                             is_multiline: true
@@ -8814,21 +8976,21 @@ impl Tweaker {
                             target_wrap := View {
                                 width: Fill
                                 height: Fit
-                                target_label := FabLabelSmall {
+                                target_label := PanelLabelSmall {
                                     width: Fill
                                     text: ""
                                     max_lines: 1
                                     text_overflow: TextOverflow.Ellipsis
                                 }
                             }
-                            prompt_status := FabLabelSmall {
+                            prompt_status := PanelLabelSmall {
                                 width: Fit
                                 margin: Inset{left: 6 right: 6 top: 0 bottom: 0}
                                 text: ""
                                 max_lines: 1
                                 draw_text +: { color: #xffa040 }
                             }
-                            queue := Button {
+                            queue := PanelButton {
                                 width: Fit
                                 height: 15
                                 padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
@@ -8847,7 +9009,7 @@ impl Tweaker {
                                     svg: crate_resource("self:resources/icons/note_queue.svg")
                                 }
                             }
-                            send := Button {
+                            send := PanelButton {
                                 width: Fit
                                 height: 15
                                 padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
@@ -8889,10 +9051,10 @@ impl Tweaker {
                                 flow: Right
                                 spacing: 4
                                 align: Align{x: 0.0 y: 0.5}
-                                scope_label := FabLabelSmall { width: Fit text: "scope" }
-                                scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
-                                scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
-                                scope_isolated := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "isolated" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_label := PanelLabelSmall { width: Fit text: "scope" }
+                                scope_this := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_all := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_isolated := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "isolated" draw_text +: { text_style +: { font_size: 8.0 } } }
                             }
                             // What the buttons MEAN belongs on the buttons,
                             // not on a permanent line under them: it is read
@@ -8913,14 +9075,14 @@ impl Tweaker {
                                         border_color: #x555555
                                         radius: 3.
                                     }
-                                    tooltip_label := FabLabelSmall {
+                                    tooltip_label := PanelLabelSmall {
                                         width: 230
                                         text: ""
                                     }
                                 }
                             }
                         }
-                        title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        title_label := PanelLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                         // The path line is wrapped so the CLICK has a rect
                         // to hit: a Label's own area reports a few points
                         // wide whatever it renders, a View's is the real
@@ -8929,7 +9091,7 @@ impl Tweaker {
                             width: Fill
                             height: Fit
                             flow: Down
-                            path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            path_label := PanelLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                         }
                     }
                 }
