@@ -762,7 +762,27 @@ impl<'a> ScriptVm<'a> {
     #[inline(never)]
     #[cold]
     fn handle_errors(&mut self) {
-        if self.bx.threads.cur().call_has_try() {
+        if self.bx.threads.cur_ref().call_stack_has_try() {
+            // Discard younger script calls until the active frame owns a try
+            // frame, restoring that frame's instruction body. Hard VM bails
+            // (ScriptTrapOn::Bail) never enter this path.
+            while !self.bx.threads.cur_ref().call_has_try() {
+                let Some(call) = self.bx.threads.cur().calls.pop() else {
+                    self.bail("calls empty while unwinding to a try frame");
+                    return;
+                };
+                let return_ip = call.return_ip;
+                self.bx.threads.cur().slot_base = call.prev_slot_base;
+                self.bx
+                    .threads
+                    .cur()
+                    .truncate_bases(call.bases, &mut self.bx.heap);
+                let Some(return_ip) = return_ip else {
+                    self.bail("root call reached while unwinding to a try frame");
+                    return;
+                };
+                self.bx.threads.cur().trap.ip = return_ip;
+            }
             // pop all errors
             self.bx.threads.cur().trap.err_clear();
             let try_frame = self.bx.threads.cur().tries.pop().unwrap();
@@ -1785,5 +1805,128 @@ mod tests {
         // The replacement body intentionally makes the outer VM result
         // unspecified. Under Miri or ASan this path used to dereference the
         // old parser's freed opcode allocation before it could return.
+    }
+
+    fn plain_vm(host: &mut ScriptVmHost<(), ()>) -> ScriptVm<'_> {
+        ScriptVm {
+            host,
+            bx: Box::new(ScriptVmBase::new()),
+        }
+    }
+
+    #[test]
+    fn streaming_try_catch_restores_the_contextual_separator_state() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let script_mod = || ScriptMod {
+            file: "streaming-try-catch.octoscript".to_owned(),
+            ..Default::default()
+        };
+        // The trailing space makes the tokenizer emit the separator in the
+        // first pass, so the checkpoint must retain that it was consumed and
+        // the appended identifier `catch` must parse as the fallback.
+        let prefix = "use mod.std.assert\n\
+                      let catch = 41\n\
+                      try {\n\
+                          assert(false)\n\
+                      } catch ";
+
+        let _ = vm.eval_with_append_source(script_mod(), prefix, ScriptObject::ZERO);
+        let result = vm.eval_with_append_source(
+            script_mod(),
+            &format!("{prefix}catch + 1\n;"),
+            ScriptObject::ZERO,
+        );
+
+        assert_eq!(result.as_f64(), Some(42.0));
+    }
+
+    #[test]
+    fn streaming_logical_precedence_repatches_pending_short_circuits() {
+        for (prefix, suffix, expected) in [
+            ("true || false ", "&& false", true),
+            ("false && true ", "|| true", true),
+            ("true == 2 ", "> 1", true),
+        ] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = plain_vm(&mut host);
+            let module = || ScriptMod {
+                file: "streaming-precedence.octoscript".into(),
+                ..Default::default()
+            };
+            let partial = vm.with_instruction_limit(1000, |vm| {
+                vm.eval_with_append_source(module(), prefix, ScriptObject::ZERO)
+            });
+            assert!(
+                !partial.is_err(),
+                "unfinished logical expression must terminate: {prefix}"
+            );
+            let result = vm.with_instruction_limit(1000, |vm| {
+                vm.eval_with_append_source(
+                    module(),
+                    &format!("{prefix}{suffix}\n;"),
+                    ScriptObject::ZERO,
+                )
+            });
+            assert_eq!(result.as_bool(), Some(expected), "{prefix}{suffix}");
+        }
+    }
+
+    #[test]
+    fn streaming_legacy_try_ok_repatches_the_success_jump() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let script_mod = || ScriptMod {
+            file: "streaming-try-ok.octoscript".to_owned(),
+            ..Default::default()
+        };
+        let prefix = "let marker = 0\ntry { 7 } { marker = 1 }";
+
+        let _ = vm.eval_with_append_source(script_mod(), prefix, ScriptObject::ZERO);
+        let result = vm.eval_with_append_source(
+            script_mod(),
+            &format!("{prefix} ok {{ marker = 2 }}\nreturn marker\n;"),
+            ScriptObject::ZERO,
+        );
+
+        assert_eq!(result.as_u40(), Some(2));
+    }
+
+    #[test]
+    fn hard_time_budget_drains_its_uncatchable_error() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        vm.bx.captured_errors = Some(Vec::new());
+        vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+            Duration::ZERO,
+            Duration::ZERO,
+            1,
+        ));
+
+        let result = vm.eval(ScriptMod {
+            file: "hard-time-budget.octoscript".to_owned(),
+            code: "try { loop {} } catch { 42 }\n;".to_owned(),
+            ..Default::default()
+        });
+
+        assert!(result.is_err());
+        assert!(vm.bx.threads.cur_ref().trap.err_is_empty());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script time budget exceeded")));
+    }
+
+    #[test]
+    fn malformed_ok_end_bails_instead_of_ignoring_the_missing_try_frame() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+
+        vm.handle_ok_end();
+
+        assert!(matches!(
+            vm.bx.threads.cur_ref().trap.get_on(),
+            Some(ScriptTrapOn::Bail(_))
+        ));
     }
 }
