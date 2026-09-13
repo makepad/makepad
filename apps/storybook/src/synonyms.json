@@ -84,18 +84,6 @@
    ]
   },
   {
-   "component": "AlignScroll",
-   "aka": [
-    "content too big"
-   ],
-   "does": [
-    "overflowing content",
-    "oversized child",
-    "content larger than parent",
-    "centres when it fits"
-   ]
-  },
-  {
    "component": "AnimatedImageGif",
    "aka": [
     "moving picture",
@@ -833,7 +821,9 @@
     "accent colour",
     "accent color",
     "stretches to its parent",
-    "separate list rows"
+    "separate list rows",
+    "horizontal rule",
+    "vertical rule"
    ]
   },
   {
@@ -2355,6 +2345,20 @@
     "handle thickness",
     "bring into view",
     "smooth motion"
+   ]
+  },
+  {
+   "component": "Scrolling",
+   "aka": [
+    "content too big"
+   ],
+   "does": [
+    "overflowing content",
+    "oversized child",
+    "content larger than parent",
+    "centres when it fits",
+    "scroll one axis",
+    "scroll both axes"
    ]
   },
   {

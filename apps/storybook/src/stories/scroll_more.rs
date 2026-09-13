@@ -174,11 +174,11 @@ fn scroll_more_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/annotatedscrollbar/overview",
-    category: "Containers",
-    component: "AnnotatedScrollBar",
-    also: &["AnnotatedScrollBarX", "ScrollShadowView", "ScrollShadowXYView"],
-    name: "Overview",
+    key: "layout/scrolling/marks-and-shadows",
+    category: "Layout",
+    component: "Scrolling",
+    also: &["AnnotatedScrollBar", "AnnotatedScrollBarX", "ScrollShadowView", "ScrollShadowXYView"],
+    name: "Marks and shadows",
     dsl: "ScrollMoreOverview",
     added: "2026-09-10",
     tags: &[
