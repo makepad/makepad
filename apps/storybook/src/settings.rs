@@ -1,10 +1,12 @@
-//! Settings that survive a run: the theme, the baseline date, the last story.
+//! Settings that survive a run: the theme, the baseline date, the last story,
+//! the two switches and the folders the person closed.
 //!
 //! One tab-separated `key<TAB>value` line per setting in a file under the
 //! user's config directory, or wherever `MAKEPAD_STORYBOOK_SETTINGS` points
 //! (the tests point it at a scratch file). Missing or unreadable means
 //! defaults; every write rewrites the whole file.
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -15,6 +17,8 @@ pub const BASELINE: &str = "baseline";
 pub const LAST_STORY: &str = "last_story";
 pub const NEW_ONLY: &str = "new_only";
 pub const SEARCH_FILTER: &str = "search_filter";
+/// The navigator folders the person closed, as [`format_folded`] writes them.
+pub const FOLDED: &str = "folded";
 
 pub fn path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MAKEPAD_STORYBOOK_SETTINGS") {
@@ -65,4 +69,41 @@ pub fn baseline() -> String {
     get(BASELINE)
         .filter(|b| crate::registry::is_iso_date(b))
         .unwrap_or_else(|| crate::registry::DEFAULT_BASELINE.to_string())
+}
+
+/// The closed folders, read back from one line. A folder is named by its
+/// slug path (`buttons`, or `data-display/datagrid` for a component), so
+/// a comma can join them: a slug has no comma, and the store's own line
+/// has no tab or newline to trip over.
+pub fn parse_folded(text: &str) -> BTreeSet<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The closed folders as the one line [`parse_folded`] reads.
+pub fn format_folded(folded: &BTreeSet<String>) -> String {
+    folded.iter().map(String::as_str).collect::<Vec<_>>().join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_folders_round_trip_through_one_line() {
+        let folded = parse_folded("data-display/datagrid,buttons, buttons ,,");
+        assert_eq!(
+            folded.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["buttons", "data-display/datagrid"]
+        );
+        let line = format_folded(&folded);
+        assert_eq!(line, "buttons,data-display/datagrid");
+        assert_eq!(parse_folded(&line), folded);
+        assert!(parse_folded("").is_empty());
+        assert_eq!(format_folded(&BTreeSet::new()), "");
+        assert!(!line.contains('\t') && !line.contains('\n'));
+    }
 }

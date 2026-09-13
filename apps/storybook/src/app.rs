@@ -146,7 +146,11 @@ impl App {
         };
         self.current = Some(story.key.to_string());
         self.ui.story_canvas(cx, ids!(canvas)).open(cx, story.dsl);
-        self.ui.story_navigator(cx, ids!(navigator)).select(cx, story.key);
+        // Selecting the row opens the folders over it; one the person
+        // had closed is closed no longer, and the settings say so.
+        if self.ui.story_navigator(cx, ids!(navigator)).select(cx, story.key) {
+            self.persist_folds(cx);
+        }
         self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
         self.ui.controls_panel(cx, ids!(controls)).set_story(cx, story);
         self.ui.actions_panel(cx, ids!(actions)).clear(cx);
@@ -220,6 +224,15 @@ impl App {
             .set_text(cx, &format!("{} new since {}", n, settings::baseline()));
     }
 
+    /// Write the closed folders down when they differ from what is
+    /// written; every open or close of a folder comes through here.
+    fn persist_folds(&self, cx: &mut Cx) {
+        let folded = self.ui.story_navigator(cx, ids!(navigator)).folded();
+        if settings::get(settings::FOLDED).unwrap_or_default() != folded {
+            settings::set(settings::FOLDED, &folded);
+        }
+    }
+
     fn apply_control(&self, cx: &mut Cx, control: &registry::Control, value: &ControlValue) {
         let canvas = self.ui.story_canvas(cx, ids!(canvas));
         if let registry::ControlKind::Disabled { .. } = control.kind {
@@ -248,6 +261,8 @@ impl MatchEvent for App {
         let baseline = settings::baseline();
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         navigator.set_baseline(cx, &baseline);
+        // Before the first draw, which is the one that sets the folders.
+        navigator.set_folded(cx, &settings::get(settings::FOLDED).unwrap_or_default());
         // Filtering unless the person turned it off last time. Told to
         // the switch as well as the navigator, for the reason the
         // new-only switch below says at length.
@@ -290,6 +305,9 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if let Some(key) = self.ui.story_navigator(cx, ids!(navigator)).opened(actions) {
             self.open_story(cx, &key);
+        }
+        if self.ui.story_navigator(cx, ids!(navigator)).folded_changed(actions) {
+            self.persist_folds(cx);
         }
         if let Some(text) = self.ui.text_input(cx, ids!(story_search)).changed(actions) {
             self.ui.story_navigator(cx, ids!(navigator)).set_filter(cx, &text);

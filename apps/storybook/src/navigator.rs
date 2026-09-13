@@ -2,21 +2,30 @@
 //! story, with a dot on every story that is new since the baseline.
 //!
 //! The tree is rebuilt from the registry on every draw, filtered by the
-//! search text and the new-only switch. Folders open on the first draw, and
-//! every folder is held open while a filter is in force so a match is never
-//! hidden under a closed folder. Clicking a story row raises
-//! [`NavigatorAction::Open`] with the story's key.
+//! search text and the new-only switch. Folders open on the first draw
+//! unless the person closed them last time: a click on a folder's row
+//! folds it or unfolds it, and the set of closed folders is handed to the
+//! app to keep, so the tree comes back the way it was left. A folder
+//! holding the story on the canvas opens itself, whatever it was told:
+//! a selected row nobody can see is no selection. Clicking a story row
+//! raises [`NavigatorAction::Open`] with the story's key.
 //!
 //! The search text is read two ways. **Filtering** hides everything that
-//! does not match, which is what the tree has always done. **Finding**
-//! leaves the tree whole and walks the matches one at a time, opening
-//! only the folders on the way to the one being visited. Either way the
-//! same set of stories matches, so the count means the same thing in
-//! both and the arrows step through the same list.
+//! does not match, which is what the tree has always done, and holds
+//! every folder open while it does so: something is being hidden, so
+//! nothing else may be, or a match sits under a closed folder where
+//! nobody can see it. **Finding** leaves the tree whole and walks the
+//! matches one at a time; the folders on the way open as each match is
+//! selected. Either way the same set of stories matches, so the count
+//! means the same thing in both and the arrows step through the same
+//! list. The new-only switch hides rows in both modes, so it holds every
+//! folder open the way filtering does: a folder closed earlier would
+//! otherwise keep the new stories folded away.
 use crate::makepad_widgets::file_tree::*;
 use crate::makepad_widgets::*;
 use crate::registry::{self, Story};
-use std::collections::{HashMap, HashSet};
+use crate::settings;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -32,6 +41,8 @@ script_mod! {
 pub enum NavigatorAction {
     /// A story row was clicked; the payload is the story key.
     Open(String),
+    /// A folder row was clicked and the set of closed folders changed.
+    Folded,
     #[default]
     None,
 }
@@ -63,9 +74,21 @@ pub struct StoryNavigator {
     /// Row id to story key.
     #[rust]
     keys: HashMap<LiveId, &'static str>,
-    /// Folders already opened once; a folder the user closed stays closed.
+    /// Folder row id to the folder's slug path, the name it is kept by.
     #[rust]
-    opened: HashSet<LiveId>,
+    folders: HashMap<LiveId, String>,
+    /// The folders the person closed, by slug path. What the app keeps
+    /// between runs; everything else is open.
+    #[rust]
+    closed: BTreeSet<String>,
+    /// Folders drawn at least once, so a folder's first draw is the one
+    /// that sets it open or closed and the later ones leave it alone.
+    #[rust]
+    seen: HashSet<LiveId>,
+    /// The switches and the text the last draw was made under. A change
+    /// puts every folder back to what the new state wants.
+    #[rust]
+    drawn_under: Option<(bool, bool, String)>,
     #[rust]
     selected: Option<String>,
     /// How many stories the last draw listed, so a log line can say so.
@@ -75,14 +98,46 @@ pub struct StoryNavigator {
 
 struct Component {
     name: &'static str,
+    /// `category/component` in slug form, from the stories' keys.
+    path: String,
     stories: Vec<&'static Story>,
     any_new: bool,
 }
 
 struct Category {
     name: &'static str,
+    /// The category in slug form, from the stories' keys.
+    path: String,
     components: Vec<Component>,
     any_new: bool,
+}
+
+/// The row id of the folder kept under this slug path. A path has one
+/// or two segments and a story key has three, so no folder shares a row
+/// id with a story.
+fn folder_id(path: &str) -> LiveId {
+    LiveId::from_str(path)
+}
+
+/// The slug paths of the folders a story sits under: its category, and
+/// its component when the component has a folder at all. A component
+/// with one page has none: the row IS the page.
+fn folders_of(key: &str) -> Vec<String> {
+    let Some(story) = registry::find(key) else {
+        return Vec::new();
+    };
+    let mut segments = key.splitn(3, '/');
+    let (Some(category), Some(component)) = (segments.next(), segments.next()) else {
+        return Vec::new();
+    };
+    let mut out = vec![category.to_string()];
+    let siblings = registry::all()
+        .filter(|s| s.category == story.category && s.component == story.component)
+        .count();
+    if siblings > 1 {
+        out.push(format!("{category}/{component}"));
+    }
+    out
 }
 
 impl StoryNavigator {
@@ -117,12 +172,6 @@ impl StoryNavigator {
             .filter(|s| !self.new_only || registry::is_new(s, &self.baseline))
             .map(|s| s.key)
             .collect()
-    }
-
-    /// The story the arrows are standing on, if they have moved.
-    fn current_match(&self) -> Option<&'static str> {
-        let keys = self.match_keys();
-        keys.get(self.cursor?).copied()
     }
 
     /// Step to the next match (`1`) or the previous one (`-1`) and
@@ -177,10 +226,31 @@ impl StoryNavigator {
         &self.baseline
     }
 
-    /// Highlight the row of this story.
-    pub fn select(&mut self, cx: &mut Cx, key: &str) {
+    /// The closed folders, as the settings keep them.
+    pub fn folded(&self) -> String {
+        settings::format_folded(&self.closed)
+    }
+
+    /// Close the folders a previous run left closed. Told before the
+    /// first draw, which is the draw that sets every folder.
+    pub fn set_folded(&mut self, cx: &mut Cx, folded: &str) {
+        self.closed = settings::parse_folded(folded);
+        self.seen.clear();
+        self.file_tree.redraw(cx);
+    }
+
+    /// Highlight the row of this story and open the folders over it.
+    /// Returns whether a closed folder had to be opened to show it, so
+    /// the app knows the closed set moved.
+    pub fn select(&mut self, cx: &mut Cx, key: &str) -> bool {
         self.selected = Some(key.to_string());
+        let mut unfolded = false;
+        for path in folders_of(key) {
+            unfolded |= self.closed.remove(&path);
+            self.file_tree.set_folder_is_open(cx, folder_id(&path), true, Animate::No);
+        }
         self.file_tree.select_node(cx, LiveId::from_str(key));
+        unfolded
     }
 
     /// The first story the search text picks out, whichever way the
@@ -208,31 +278,10 @@ impl StoryNavigator {
             && (!self.new_only || registry::is_new(story, &self.baseline))
     }
 
-    /// The folders that have to be open for the match being visited to
-    /// be on screen. Empty while filtering, which opens everything.
-    fn on_the_way(&self, outline: &[Category]) -> HashSet<LiveId> {
-        let mut open = HashSet::new();
-        let Some(key) = self.current_match() else {
-            return open;
-        };
-        for category in outline {
-            for component in &category.components {
-                if !component.stories.iter().any(|s| s.key == key) {
-                    continue;
-                }
-                open.insert(LiveId::from_str(&format!("category:{}", category.name)));
-                // A component with one page has no folder of its own:
-                // the row IS the page, and the category above it is the
-                // only thing in the way.
-                if component.stories.len() > 1 {
-                    open.insert(LiveId::from_str(&format!(
-                        "component:{}/{}",
-                        category.name, component.name
-                    )));
-                }
-            }
-        }
-        open
+    /// True while the new-only switch or the search text is taking rows
+    /// away, which holds every folder open.
+    fn hiding(&self) -> bool {
+        self.new_only || (self.filtering && !self.filter.is_empty())
     }
 
     fn outline(&self) -> Vec<Category> {
@@ -245,7 +294,8 @@ impl StoryNavigator {
             let category = match categories.iter_mut().find(|c| c.name == story.category) {
                 Some(c) => c,
                 None => {
-                    categories.push(Category { name: story.category, components: Vec::new(), any_new: false });
+                    let path = story.key.split('/').next().unwrap_or_default().to_string();
+                    categories.push(Category { name: story.category, path, components: Vec::new(), any_new: false });
                     categories.last_mut().unwrap()
                 }
             };
@@ -253,7 +303,8 @@ impl StoryNavigator {
             let component = match category.components.iter_mut().find(|c| c.name == story.component) {
                 Some(c) => c,
                 None => {
-                    category.components.push(Component { name: story.component, stories: Vec::new(), any_new: false });
+                    let path = story.key.rsplit_once('/').map(|(p, _)| p).unwrap_or_default().to_string();
+                    category.components.push(Component { name: story.component, path, stories: Vec::new(), any_new: false });
                     category.components.last_mut().unwrap()
                 }
             };
@@ -263,26 +314,31 @@ impl StoryNavigator {
         categories
     }
 
-    fn folder_open(&mut self, cx: &mut Cx2d, id: LiveId, on_the_way: &HashSet<LiveId>) {
-        // Something is being hidden, so nothing else may be: a match
-        // under a closed folder is a match nobody can see. Finding
-        // hides nothing, so it opens only what stands between the
-        // person and the match they asked to be taken to.
-        let hiding = self.new_only || (self.filtering && !self.filter.is_empty());
-        let force = hiding || on_the_way.contains(&id);
-        if force || self.opened.insert(id) {
-            self.file_tree.set_folder_is_open(cx, id, true, Animate::No);
+    /// Set a folder open or closed on the draws that decide it: its
+    /// first, and the first after the switches or the text changed.
+    /// Every other draw leaves it as the person left it.
+    fn fold(&mut self, cx: &mut Cx2d, id: LiveId, path: &str, reopen: bool) {
+        self.folders.insert(id, path.to_string());
+        if self.seen.insert(id) || reopen {
+            let open = self.hiding() || !self.closed.contains(path);
+            self.file_tree.set_folder_is_open(cx, id, open, Animate::No);
         }
     }
 
     fn draw_tree(&mut self, cx: &mut Cx2d) {
         let outline = self.outline();
-        let on_the_way = self.on_the_way(&outline);
+        // The switches or the text changing puts every folder back to
+        // what the new state wants: open while New only or the text is
+        // hiding rows, and the way the person left it otherwise.
+        let under = (self.new_only, self.filtering, self.filter.clone());
+        let reopen = self.drawn_under.as_ref() != Some(&under);
+        self.drawn_under = Some(under);
         self.keys.clear();
+        self.folders.clear();
         self.listed = 0;
         for category in &outline {
-            let cat_id = LiveId::from_str(&format!("category:{}", category.name));
-            self.folder_open(cx, cat_id, &on_the_way);
+            let cat_id = folder_id(&category.path);
+            self.fold(cx, cat_id, &category.path, reopen);
             let dot = if category.any_new { StatusDotKind::New } else { StatusDotKind::None };
             if self.file_tree.begin_folder_with_status(cx, cat_id, category.name, dot).is_err() {
                 continue;
@@ -304,8 +360,8 @@ impl StoryNavigator {
                     self.listed += 1;
                     continue;
                 }
-                let comp_id = LiveId::from_str(&format!("component:{}/{}", category.name, component.name));
-                self.folder_open(cx, comp_id, &on_the_way);
+                let comp_id = folder_id(&component.path);
+                self.fold(cx, comp_id, &component.path, reopen);
                 let dot = if component.any_new { StatusDotKind::New } else { StatusDotKind::None };
                 if self.file_tree.begin_folder_with_status(cx, comp_id, component.name, dot).is_err() {
                     continue;
@@ -340,12 +396,30 @@ impl Widget for StoryNavigator {
         self.file_tree.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
             if let Some(item) = actions.find_widget_action(self.file_tree.widget_uid()) {
-                if let FileTreeAction::FileClicked(id) = item.cast() {
-                    if let Some(key) = self.keys.get(&id) {
-                        let key = key.to_string();
-                        self.selected = Some(key.clone());
-                        cx.widget_action(self.uid, NavigatorAction::Open(key));
+                match item.cast() {
+                    FileTreeAction::FileClicked(id) => {
+                        if let Some(key) = self.keys.get(&id) {
+                            let key = key.to_string();
+                            self.selected = Some(key.clone());
+                            cx.widget_action(self.uid, NavigatorAction::Open(key));
+                        }
                     }
+                    // The tree has already folded or unfolded the row by
+                    // the time the click is reported; what is left is to
+                    // remember which way it went.
+                    FileTreeAction::FolderClicked(id) => {
+                        if let Some(path) = self.folders.get(&id) {
+                            let changed = if self.file_tree.is_folder_open(id) {
+                                self.closed.remove(path)
+                            } else {
+                                self.closed.insert(path.clone())
+                            };
+                            if changed {
+                                cx.widget_action(self.uid, NavigatorAction::Folded);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -361,6 +435,16 @@ impl StoryNavigatorRef {
             }
         }
         None
+    }
+
+    /// True when a click folded or unfolded a folder this pass.
+    pub fn folded_changed(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let NavigatorAction::Folded = item.cast() {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn set_filter(&self, cx: &mut Cx, filter: &str) {
@@ -381,13 +465,26 @@ impl StoryNavigatorRef {
         }
     }
 
-    pub fn select(&self, cx: &mut Cx, key: &str) {
+    pub fn folded(&self) -> String {
+        self.borrow().map(|inner| inner.folded()).unwrap_or_default()
+    }
+
+    pub fn set_folded(&self, cx: &mut Cx, folded: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_folded(cx, folded);
+        }
+    }
+
+    /// Select the story's row; true when a closed folder was opened
+    /// to show it.
+    pub fn select(&self, cx: &mut Cx, key: &str) -> bool {
         if let Some(mut inner) = self.borrow_mut() {
             // Named explicitly: the library's `Select` widget generates a
             // `select(cx, ids)` accessor that is otherwise a better match
             // for this call than the navigator's own method.
-            StoryNavigator::select(&mut inner, cx, key);
+            return StoryNavigator::select(&mut inner, cx, key);
         }
+        false
     }
 
     pub fn first_match(&self) -> Option<&'static Story> {
@@ -424,5 +521,35 @@ impl StoryNavigatorRef {
 
     pub fn listed(&self) -> usize {
         self.borrow().map(|inner| inner.listed()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_story_sits_under_its_category_and_its_component_folder() {
+        for story in registry::all() {
+            let folders = folders_of(story.key);
+            let mut segments = story.key.split('/');
+            let category = segments.next().unwrap();
+            let component = segments.next().unwrap();
+            assert_eq!(folders[0], category, "{}", story.key);
+            let siblings = registry::all()
+                .filter(|s| s.category == story.category && s.component == story.component)
+                .count();
+            if siblings > 1 {
+                assert_eq!(folders.len(), 2, "{}", story.key);
+                assert_eq!(folders[1], format!("{category}/{component}"));
+            } else {
+                assert_eq!(folders.len(), 1, "{}: a component with one page has no folder", story.key);
+            }
+            // No folder shares a row id with a story.
+            for path in &folders {
+                assert_ne!(folder_id(path), LiveId::from_str(story.key));
+            }
+        }
+        assert!(folders_of("no/such/story").is_empty());
     }
 }
