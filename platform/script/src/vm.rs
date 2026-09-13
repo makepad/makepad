@@ -861,6 +861,13 @@ impl<'a> ScriptVm<'a> {
             // The diagnostic is drained first so it reaches the captured
             // sink or the log exactly once; the error value then rides the
             // Bail back to the host as the evaluation result.
+            //
+            // Incremental (streaming) evaluation is the one exception: the
+            // host set `silence_errors` because incomplete source inevitably
+            // raises errors that are meaningless until the rest arrives, and
+            // Splash's live widget tree relies on the evaluation continuing
+            // past them. Those evals keep the historical drain-and-continue
+            // behaviour; every other eval terminates.
             let error = self
                 .bx
                 .threads
@@ -870,6 +877,9 @@ impl<'a> ScriptVm<'a> {
                 .front()
                 .map(|e| e.value);
             self.drain_errors();
+            if self.bx.silence_errors {
+                return;
+            }
             if let Some(error) = error {
                 self.bx
                     .threads
@@ -2057,6 +2067,35 @@ mod tests {
         assert_eq!(vm.thread().stack.len(), 1);
         assert_eq!(vm.thread().stack[0].as_f64(), Some(7.0));
         assert_eq!(vm.bx.heap.vec_len(receiver), 0);
+    }
+
+    #[test]
+    fn uncaught_error_terminates_a_plain_eval_but_not_a_silenced_streaming_eval() {
+        // `f()` on a number raises an uncaught script error; `42` follows it.
+        let source = "let f = 1\nf()\n42";
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        vm.bx.captured_errors = Some(Vec::new());
+        let plain = vm.eval(ScriptMod {
+            file: "uncaught-plain.octoscript".to_owned(),
+            code: format!("{source}\n;"),
+            ..Default::default()
+        });
+        assert!(plain.is_err(), "{plain:?}");
+        assert!(!vm.take_errors().is_empty());
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let streaming = vm.eval_with_append_source(
+            ScriptMod {
+                file: "uncaught-streaming.octoscript".to_owned(),
+                ..Default::default()
+            },
+            &format!("{source}\n;"),
+            ScriptObject::ZERO,
+        );
+        assert_eq!(streaming.as_number(), Some(42.0), "{streaming:?}");
     }
 
     #[test]
