@@ -336,8 +336,10 @@ fn app_rules_save(text: &str) {
 /// after a rebuild, which is exactly when a rename lands.
 const NAME_STORE: &str = ".makepad-names.txt";
 /// Layout conversions asked for on the Props tab -- a View that should be
-/// a Grid, or the other way -- one per line, the same three columns as the
-/// name store. A widget cannot change its type while it runs; the agent
+/// a Grid, or the other way, or a container that should sit in a Dock as
+/// its one tab -- one per line, the same three columns as the name store
+/// and, on a dock line only, a fourth with the size it was asked at. A
+/// widget cannot change its type or its parent while it runs; the agent
 /// edits the source, and the ask survives here until it has.
 const LAYOUT_STORE: &str = ".makepad-layouts.txt";
 
@@ -396,18 +398,29 @@ fn name_store_save(renames: &[TweakRename]) {
 }
 
 /// One layout conversion asked for: which widget, what it is, what it
-/// should become (`grid` or `flex`).
-#[derive(Clone, Debug)]
+/// should become (`grid`, `flex` or `dock`).
+#[derive(Clone, Debug, PartialEq)]
 pub struct TweakConvert {
     pub reference: String,
     pub from: String,
     pub to: String,
+    /// A dock ask's size when it was made, in layout points. A Dock cannot
+    /// fit its content, so an axis that fits today needs a number in the
+    /// source, and the one the person was looking at is the honest one.
+    /// `None` for grid and flex, and for a dock ask with nothing measured.
+    pub size: Option<(f64, f64)>,
 }
 
 fn layout_store_load() -> Vec<TweakConvert> {
     let Ok(body) = std::fs::read_to_string(LAYOUT_STORE) else {
         return Vec::new();
     };
+    layout_store_parse(&body)
+}
+
+/// The parser on its own, so the file's shapes can be tested without one
+/// on disk.
+fn layout_store_parse(body: &str) -> Vec<TweakConvert> {
     let mut out = Vec::new();
     for line in body.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -417,11 +430,40 @@ fn layout_store_load() -> Vec<TweakConvert> {
         if cols.len() < 3 {
             continue;
         }
+        // The fourth column is a dock ask's `WxH`. Files from before dock
+        // asks have three, and a size that does not read is no size rather
+        // than no ask: the ask is what matters, the size only helps.
+        let size = cols.get(3).and_then(|cell| {
+            let (w, h) = cell.trim().split_once('x')?;
+            let (w, h) = (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?);
+            (w > 0.0 && h > 0.0).then_some((w, h))
+        });
         out.push(TweakConvert {
             reference: cols[0].to_string(),
             from: cols[1].to_string(),
             to: cols[2].to_string(),
+            size,
         });
+    }
+    out
+}
+
+/// The file's text. Grid and flex lines come first: a binary from before
+/// dock asks reads only the first three columns and keeps the first ask it
+/// meets for a widget, so this way the one it keeps is one it understands.
+fn layout_store_text(converts: &[TweakConvert]) -> String {
+    let mut out = String::from(
+        "# makepad layout conversions \u{2014} asked for in the Shift+F10 Props tab, one per line\n\
+         # reference\tcurrent type\twanted layout\tsize asked at (dock only, WxH points)\n",
+    );
+    let layout = converts.iter().filter(|c| !is_dock_ask(&c.to));
+    let dock = converts.iter().filter(|c| is_dock_ask(&c.to));
+    for convert in layout.chain(dock) {
+        out.push_str(&format!("{}\t{}\t{}", convert.reference, convert.from, convert.to));
+        if let (true, Some((w, h))) = (is_dock_ask(&convert.to), convert.size) {
+            out.push_str(&format!("\t{}x{}", fmt_measure(w), fmt_measure(h)));
+        }
+        out.push('\n');
     }
     out
 }
@@ -431,16 +473,325 @@ fn layout_store_save(converts: &[TweakConvert]) {
         let _ = std::fs::remove_file(LAYOUT_STORE);
         return;
     }
-    let mut out = String::from(
-        "# makepad layout conversions \u{2014} asked for in the Shift+F10 Props tab, one per line\n\
-         # reference\tcurrent type\twanted layout\n",
-    );
-    for convert in converts {
-        out.push_str(&format!("{}\t{}\t{}\n", convert.reference, convert.from, convert.to));
-    }
-    if let Err(error) = std::fs::write(LAYOUT_STORE, out) {
+    if let Err(error) = std::fs::write(LAYOUT_STORE, layout_store_text(converts)) {
         log!("TWEAK layout store write failed: {error}");
     }
+}
+
+/// Is this ask the dock kind? Asks come in two families and one widget can
+/// hold one of each: `grid` / `flex` changes the container's own type,
+/// `dock` wraps it in a Dock inside its parent. The two source edits never
+/// touch the same text and both can be done (the tab's body becomes the
+/// Grid), so standing one up must never take the other back.
+fn is_dock_ask(to: &str) -> bool {
+    to == "dock"
+}
+
+/// The standing ask of one family (`dock` or not) for a widget.
+fn convert_for<'a>(
+    converts: &'a [TweakConvert],
+    reference: &str,
+    dock: bool,
+) -> Option<&'a TweakConvert> {
+    converts
+        .iter()
+        .find(|c| c.reference == reference && is_dock_ask(&c.to) == dock)
+}
+
+/// Stand an ask up (`want`) or take it back. It replaces whatever stood in
+/// its own family for the same widget and leaves the other family alone.
+/// Returns whether one stood before.
+fn converts_set(converts: &mut Vec<TweakConvert>, ask: TweakConvert, want: bool) -> bool {
+    let dock = is_dock_ask(&ask.to);
+    let same = |c: &TweakConvert| c.reference == ask.reference && is_dock_ask(&c.to) == dock;
+    let had = converts.iter().any(same);
+    converts.retain(|c| !same(c));
+    if want {
+        converts.push(ask);
+    }
+    had
+}
+
+/// Fold the stored asks in behind the session's own: an ask made this run
+/// wins over what the file said, and there is one per widget per family.
+fn converts_merge(session: &mut Vec<TweakConvert>, stored: Vec<TweakConvert>) {
+    for convert in stored {
+        if convert_for(session, &convert.reference, is_dock_ask(&convert.to)).is_none() {
+            session.push(convert);
+        }
+    }
+}
+
+/// `/tweak/state`'s `converts` array. Grid and flex entries are the three
+/// fields they always were. A dock entry also carries the name it wraps
+/// under, the size it was asked at and `do`, the whole edit spelled out:
+/// the person ticked a box, and the agent reading this has nothing else
+/// to go on. It is written here, when the state is read, from the ask and
+/// whatever else stands for the widget, so the store never holds prose
+/// that a later rename or grid ask would make wrong.
+fn converts_json(converts: &[TweakConvert], renames: &[TweakRename]) -> String {
+    let mut out = String::from("[");
+    for (i, convert) in converts.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"ref\":{},\"from\":{},\"to\":{}",
+            json_str(&convert.reference),
+            json_str(&convert.from),
+            json_str(&convert.to)
+        ));
+        if is_dock_ask(&convert.to) {
+            let rename = renames
+                .iter()
+                .find(|r| r.reference == convert.reference)
+                .map(|r| r.to.as_str());
+            let layout = convert_for(converts, &convert.reference, false).map(|c| c.to.as_str());
+            out.push_str(&format!(
+                ",\"name\":{}",
+                json_str(&dock_name(&convert.reference, rename))
+            ));
+            if let Some((w, h)) = convert.size {
+                out.push_str(&format!(",\"size\":[{},{}]", fmt_measure(w), fmt_measure(h)));
+            }
+            out.push_str(&format!(
+                ",\"do\":{}",
+                json_str(&dock_transform_text(
+                    &convert.reference,
+                    &convert.from,
+                    convert.size,
+                    rename,
+                    layout
+                ))
+            ));
+        }
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// Whether the Props tab offers a dock ask for the selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum DockGate {
+    /// Not a container a Dock can take: no dock row.
+    #[default]
+    No,
+    /// A named container with something in it: the checkbox shows.
+    Can,
+    /// Already a tab's body in a Dock: the ask has been carried out.
+    InDock,
+}
+
+/// What the tree says about a selection, as far as a dock ask cares. Kept
+/// apart from the tree so the rules can be tested without one.
+#[derive(Clone, Copy)]
+struct DockFacts<'a> {
+    /// The registered type: the Rust struct's name, so a SolidView and a
+    /// RoundedView both read `View`.
+    ty: &'a str,
+    parent_ty: &'a str,
+    has_children: bool,
+    /// It has a name in the tree, or a rename ask gives it one.
+    named: bool,
+    /// Some ancestor builds its items from a template.
+    in_list: bool,
+    /// It is under the window's body: the app's content, not the window's
+    /// own chrome (its caption bar and what is in that) and not the
+    /// inspector, which sits beside the body.
+    in_body: bool,
+    /// It is part of the inspector itself.
+    in_panel: bool,
+}
+
+/// Lists whose items are built from a template: nothing under one has a
+/// spot of its own in the source for a Dock to go.
+const TEMPLATE_LISTS: [&str; 4] = ["PortalList", "FlatList", "TileList", "NavList"];
+
+/// Parents a wrapped container can sit in: the ones that lay their children
+/// out by flow and never look one up by name. The wrap renames the slot to
+/// `<name>_dock`, and any other parent may depend on it: a PageFlip finds
+/// its pages by name, a Popover its `content`, a Window its `body`, and a
+/// widget that inserts its children from Rust has none written in the
+/// source for the edit to find.
+const FLOW_PARENTS: [&str; 3] = ["View", "Grid", "KeyboardView"];
+
+/// Which selections a dock ask is offered for. Only `View` and `Grid`: the
+/// wrap moves the container's walk onto the Dock and makes the body fill
+/// the tab, and only the plain containers size the way that promises -- a
+/// Button, a Window or a Dock itself does not. Only in a flow parent (see
+/// [`FLOW_PARENTS`]) and under the window's body, since the window's own
+/// chrome is not the app's source; a list item is a template; an anonymous
+/// container has no findable spot in the source and no id to name the
+/// dock, tab and body after; an empty one has nothing for a tab. A parent
+/// whose type cannot be read (borrowed mid-dispatch) is no flow parent.
+fn dock_gate_of(facts: &DockFacts) -> DockGate {
+    if facts.in_panel || !facts.in_body || !matches!(facts.ty, "View" | "Grid") {
+        return DockGate::No;
+    }
+    // A Dock registers a tab's body in the tree under itself, so a parent
+    // that is a Dock means the wrap is done: say so, rather than offer it.
+    if facts.parent_ty == "Dock" {
+        return DockGate::InDock;
+    }
+    if !FLOW_PARENTS.contains(&facts.parent_ty)
+        || facts.in_list
+        || !facts.has_children
+        || !facts.named
+    {
+        return DockGate::No;
+    }
+    DockGate::Can
+}
+
+/// The dock ask a tab's body in a Dock was made from, if one stands. The
+/// wrap moves the container a level down, `<parent>/<name>` to
+/// `<parent>/<dock>/<name>`, so the ask no longer matches the reference it
+/// was made on, and without this nothing could show it again to be taken
+/// back. The tab is named after the container, or after a rename that
+/// stands with the ask (done in the same edit); the dock's own name is not
+/// read, since the edit may have had to pick another.
+fn dock_ask_done_by<'a>(
+    converts: &'a [TweakConvert],
+    renames: &[TweakRename],
+    body: &str,
+) -> Option<&'a TweakConvert> {
+    let (dock_path, _) = body.rsplit_once('/')?;
+    let (parent, _) = dock_path.rsplit_once('/')?;
+    let tab = dock_name(body, None);
+    converts.iter().find(|ask| {
+        let rename = renames
+            .iter()
+            .find(|r| r.reference == ask.reference)
+            .map(|r| r.to.as_str());
+        is_dock_ask(&ask.to)
+            && ask.reference.rsplit_once('/').is_some_and(|(p, _)| p == parent)
+            && dock_name(&ask.reference, rename) == tab
+    })
+}
+
+/// The name a dock ask wraps under: the wanted name when a rename ask
+/// stands, since that rename is done in the same edit, else the reference's
+/// last segment without its sibling index (`frame.2` is still `frame`).
+fn dock_name(reference: &str, rename: Option<&str>) -> String {
+    if let Some(to) = rename.filter(|to| !to.is_empty()) {
+        return to.to_string();
+    }
+    let last = reference.rsplit('/').next().unwrap_or(reference);
+    match last.rsplit_once('.') {
+        Some((head, index))
+            if !head.is_empty() && !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            head.to_string()
+        }
+        _ => last.to_string(),
+    }
+}
+
+/// The ids a dock wrap uses, from the container's name: (dock, tab, body
+/// template, tab title). The tab takes the container's own name because a
+/// Dock registers a body under its tab id, so `ids!(name)` still finds it.
+/// The body template needs a different key (tab ids and template keys share
+/// the Dock's key space), and `<PascalName>Body` reads as what it is.
+/// The title is the name as words: `side_panel` is "Side panel".
+fn dock_ids(name: &str) -> (String, String, String, String) {
+    fn capitalised(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    }
+    let pascal: String = name.split('_').map(capitalised).collect();
+    let title = capitalised(name.replace('_', " ").trim());
+    (format!("{name}_dock"), name.to_string(), format!("{pascal}Body"), title)
+}
+
+/// A size in points the way the DSL writes a float: `412.`, `412.5`.
+fn dsl_points(v: f64) -> String {
+    let text = fmt_measure(v);
+    if text.contains('.') { text } else { format!("{text}.") }
+}
+
+/// The dock ask's `do`: the edit, whole, for the container at `reference`.
+/// `from` is the Rust type the ask was made on, `size` what it measured,
+/// `rename` a standing rename's wanted name, `layout` a standing `grid` or
+/// `flex` ask for the same widget.
+fn dock_transform_text(
+    reference: &str,
+    from: &str,
+    size: Option<(f64, f64)>,
+    rename: Option<&str>,
+    layout: Option<&str>,
+) -> String {
+    let name = dock_name(reference, rename);
+    let (dock, tab, body, title) = dock_ids(&name);
+    // The Dock's tab bar is a TabBar, whose height is this expression.
+    let bar = "max(theme.tab_height, 25.)";
+    let mut out = format!(
+        "Put `{name}` ({reference}) in a Dock as its one tab. In its parent, where it is written, it becomes \
+         `{dock} := Dock{{<its walk> root := DockTabs{{tabs: [@{tab}] selected: 0 closable: false}} \
+         {tab} := DockTab{{name: \"{title}\" template: @PermanentTab kind: @{body}}} \
+         {body} := <its type as written>{{width: Fill height: Fill <the rest of it>}}}}`. "
+    );
+    if let Some(to) = rename.filter(|to| !to.is_empty()) {
+        out.push_str(&format!(
+            "A rename to `{to}` stands for it: these names already use it, so do the rename in the same edit. "
+        ));
+    }
+    out.push_str(&format!(
+        "If `{dock}` is taken among its siblings, use another free name. \
+         `root` is required: a Dock draws from it and nothing else. \
+         The Dock takes every width, height, margin, abs_pos, min_width, max_width, min_height, max_height, \
+         aspect and cell the container sets, values and theme references moved as written, but it draws its \
+         tab bar inside its own height: a height, min_height or max_height that is a number or a theme \
+         reference gets the bar added, `<value> + {bar}`, so the body keeps the height it had. An axis it \
+         does not set stays at the Dock's Fill default. A Dock cannot size to its content, so it needs a fixed \
+         size on an axis that is Fit, set or inherited, and on one that is Fill or not set where the parent \
+         fits that axis, since a Fill Dock collapses to nothing there. "
+    ));
+    match size {
+        Some((w, h)) => out.push_str(&format!(
+            "That size is the one measured when this was asked, the bar added to the height: width: {} and \
+             height: {} + {bar}. A fixed size clips content that grows later. ",
+            dsl_points(w),
+            dsl_points(h)
+        )),
+        None => out.push_str(&format!(
+            "Nothing was measured when this was asked, so read that size off the running app and add {bar} \
+             to the height. "
+        )),
+    }
+    out.push_str(
+        "If the app's theme sets dock_border_size, the Dock pads its body by it on the left, right and bottom: \
+         add that to the size as well. ",
+    );
+    out.push_str(&format!(
+        "`{body}` fills the tab: width: Fill height: Fill, and no margin, abs_pos or cell. Everything else \
+         stays: its type as written in the source (`{from}` is only the Rust type), its layout, draw props, \
+         container_id and children. "
+    ));
+    match layout {
+        Some("grid") => out.push_str(&format!(
+            "A grid ask stands for it too: `{body}` is a Grid instead of the type it has now. "
+        )),
+        Some("flex") => out.push_str(&format!(
+            "A flex ask stands for it too: `{body}` is a View instead of a Grid. "
+        )),
+        _ => {}
+    }
+    let parent = reference.rsplit_once('/').map_or("", |(parent, _)| parent);
+    out.push_str(&format!(
+        "One tab, @PermanentTab and closable: false: no cross and nothing can empty the dock, so no drag or \
+         close handlers are needed; wire them as the Dock story does only if more tabs or docks should trade \
+         places. Rust code that applies walk properties to `{name}` (a script_apply_eval! of width, height or \
+         margin) now targets `{dock}`; lookups of its layout, draw props and children stay on `{name}`. \
+         If `{name}` already sits in a Dock as a tab's body, the wrap is done: do not wrap it again. \
+         The ask stands until dockable is unticked in the Props tab. Once the source is changed this \
+         reference is {parent}/{dock}/{tab}; picking that shows the box still ticked, as a tab in a dock, \
+         and unticking it there clears the ask."
+    ));
+    out
 }
 
 fn note_store_escape(text: &str) -> String {
@@ -852,7 +1203,8 @@ pub(crate) struct TweakSession {
     /// The name store has been read back: once per process.
     renames_loaded: bool,
     /// Layout conversions asked for on the Props tab (`make grid`, `make
-    /// flex`), reported in `/tweak/state` and kept in [`LAYOUT_STORE`].
+    /// flex`, `dockable`), reported in `/tweak/state` and kept in
+    /// [`LAYOUT_STORE`].
     converts: Vec<TweakConvert>,
     converts_loaded: bool,
     /// Messages written and queued but not yet sent: (note key, text). They
@@ -962,11 +1314,7 @@ impl TweakSession {
         if !stored.is_empty() {
             log!("TWEAK layout store: {} conversion(s) asked for, from {LAYOUT_STORE}", stored.len());
         }
-        for convert in stored {
-            if !self.converts.iter().any(|c| c.reference == convert.reference) {
-                self.converts.push(convert);
-            }
-        }
+        converts_merge(&mut self.converts, stored);
     }
 }
 
@@ -6381,10 +6729,13 @@ pub fn tweak_callback(
                 }
             }
             {
-                let renames = {
+                // Both under one lock: a dock ask's `do` names the widget by
+                // the rename that stands for it.
+                let (renames, converts) = {
                     let mut s = session().lock().unwrap();
                     s.load_renames();
-                    s.renames.clone()
+                    s.load_converts();
+                    (s.renames.clone(), s.converts.clone())
                 };
                 if !renames.is_empty() {
                     out.push_str(",\"renames\":[");
@@ -6401,27 +6752,9 @@ pub fn tweak_callback(
                     }
                     out.push(']');
                 }
-            }
-            {
-                let converts = {
-                    let mut s = session().lock().unwrap();
-                    s.load_converts();
-                    s.converts.clone()
-                };
                 if !converts.is_empty() {
-                    out.push_str(",\"converts\":[");
-                    for (i, convert) in converts.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        out.push_str(&format!(
-                            "{{\"ref\":{},\"from\":{},\"to\":{}}}",
-                            json_str(&convert.reference),
-                            json_str(&convert.from),
-                            json_str(&convert.to)
-                        ));
-                    }
-                    out.push(']');
+                    out.push_str(",\"converts\":");
+                    out.push_str(&converts_json(&converts, &renames));
                 }
             }
             if let Some(pick) = &hover {
@@ -7755,6 +8088,13 @@ pub struct Tweaker {
     /// The absolute row's checkbox.
     #[rust]
     abs_uid: u64,
+    /// The container row's `dockable` checkbox, 0 while it is not offered.
+    #[rust]
+    dock_uid: u64,
+    /// Whether the selection can be asked into a Dock, already is a tab's
+    /// body in one, or is not a container a Dock can take.
+    #[rust]
+    sel_dock: DockGate,
     /// The selection is a Grid: its children's half shows tracks, not a
     /// flow. It sits in a Grid: its own half shows a cell.
     #[rust]
@@ -8603,6 +8943,18 @@ impl Tweaker {
                             mode_label := PanelLabelSmall { width: Fit text: "" }
                             convert := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                         }
+                        // The ask to put it in a Dock as its one tab. Beside
+                        // the grid/flex ask, not instead of it: that one
+                        // changes the container's type, this one wraps it in
+                        // its parent, and both can stand.
+                        dock_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                            dock_check := PanelCheckBox { width: Fit height: Fit text: "" }
+                            dock_label := PanelLabelSmall { width: Fit text: "dockable" }
+                        }
+                        // What a standing ask means, on a line of its own: the
+                        // column is too narrow for it beside the box, and a
+                        // Fill label wraps where a Fit one runs off the panel.
+                        dock_hint := PanelLabelSmall { width: Fill text: "" }
                         name_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             ctr_label := PanelLabelSmall { width: Fit text: "named" }
                             ctr_name := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
@@ -9465,35 +9817,116 @@ impl Tweaker {
         } else {
             log!("TWEAK rename request {reference} ({}) -> {to}", sel.ty);
         }
+        // A dock ask needs a name to derive its ids from, and a rename ask
+        // gives an anonymous container one: the dock row comes and goes
+        // with it.
+        self.sel_dock = self.dock_gate(cx, sel.uid);
         self.redraw_sidebar(cx);
     }
 
     /// Ask for the selection to become a grid or a flex container. A
     /// widget's type cannot change through an apply, so this is recorded the
     /// way a rename is and the agent edits the source; asking again takes
-    /// the request back.
+    /// the request back. Only a grid or flex ask counts as the one to take
+    /// back: a dock ask on the same widget stands on its own.
     fn request_convert(&mut self, cx: &mut Cx, to: &str) {
-        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
-        let reference = self.sel_ref(cx, sel.uid);
-        let (converts, asked) = {
+        let Some(uid) = session().lock().unwrap().pinned.as_ref().map(|p| p.uid) else { return };
+        let reference = self.sel_ref(cx, uid);
+        let had = {
             let mut s = session().lock().unwrap();
             s.load_converts();
-            let had = s.converts.iter().any(|c| c.reference == reference);
-            s.converts.retain(|c| c.reference != reference);
-            if !had {
-                s.converts.push(TweakConvert {
-                    reference: reference.clone(),
-                    from: sel.ty.clone(),
-                    to: to.to_string(),
-                });
-                s.vibe_status = format!("wants to be a {to} \u{2014} the AI changes the type");
-            }
-            (s.converts.clone(), !had)
+            convert_for(&s.converts, &reference, false).is_some()
         };
-        layout_store_save(&converts);
-        if asked {
+        self.set_convert(cx, reference, to, !had, None);
+    }
+
+    /// Ask for the pinned container to sit in a Dock as its one tab, or take
+    /// the ask back. Moving a widget into a new parent is no more a live
+    /// apply than changing its type, so it is recorded beside the grid and
+    /// flex asks. The size goes with it, off the widget's own rect: the
+    /// pick's rect is clipped by whatever scrolls the widget, and the size
+    /// is what the Dock is written with where the container fits today.
+    /// An untick takes back the ask the box shows, which on a tab's body is
+    /// the one made on the container before it was wrapped.
+    fn request_dock(&mut self, cx: &mut Cx, on: bool) {
+        let Some(uid) = session().lock().unwrap().pinned.as_ref().map(|p| p.uid) else { return };
+        if !on {
+            let Some(reference) = self.dock_ask_ref(cx, uid) else { return };
+            self.set_convert(cx, reference, "dock", false, None);
+            return;
+        }
+        // The box only shows for a container that qualifies; a tick that
+        // lands on anything else (the selection moved under it) is no ask,
+        // and the next draw puts the box back.
+        if self.sel_dock != DockGate::Can {
+            return;
+        }
+        let rect = cx.widget_tree().widget(WidgetUid(uid)).area().rect(cx);
+        let size = (rect.size.x > 0.0 && rect.size.y > 0.0).then_some((rect.size.x, rect.size.y));
+        let reference = self.sel_ref(cx, uid);
+        self.set_convert(cx, reference, "dock", true, size);
+    }
+
+    /// The reference the pinned selection's dock ask stands at, if one
+    /// does: its own, or on a tab's body in a Dock the ask that put it
+    /// there, so the box shows that ask and an untick takes it back.
+    fn dock_ask_ref(&mut self, cx: &Cx, uid: u64) -> Option<String> {
+        let reference = self.sel_ref(cx, uid);
+        let in_dock = self.sel_dock == DockGate::InDock;
+        let mut s = session().lock().unwrap();
+        s.load_converts();
+        if let Some(ask) = convert_for(&s.converts, &reference, true) {
+            return Some(ask.reference.clone());
+        }
+        if !in_dock {
+            return None;
+        }
+        s.load_renames();
+        let s = &*s;
+        dock_ask_done_by(&s.converts, &s.renames, &reference).map(|ask| ask.reference.clone())
+    }
+
+    /// Stand a layout ask up at `reference` or take it back, keyed by the
+    /// widget and the ask's family, then save the store.
+    fn set_convert(
+        &mut self,
+        cx: &mut Cx,
+        reference: String,
+        to: &str,
+        want: bool,
+        size: Option<(f64, f64)>,
+    ) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        let dock = is_dock_ask(to);
+        let (converts, had) = {
+            let mut s = session().lock().unwrap();
+            s.load_converts();
+            let ask = TweakConvert {
+                reference: reference.clone(),
+                from: sel.ty.clone(),
+                to: to.to_string(),
+                size,
+            };
+            let had = converts_set(&mut s.converts, ask, want);
+            if want {
+                s.vibe_status = if dock {
+                    "wants to be dockable \u{2014} the AI wraps it in a Dock".to_string()
+                } else {
+                    format!("wants to be a {to} \u{2014} the AI changes the type")
+                };
+            } else if dock && had {
+                s.vibe_status = "dock ask taken back".to_string();
+            }
+            (s.converts.clone(), had)
+        };
+        if want || had {
+            layout_store_save(&converts);
+        }
+        if want {
             log!("TWEAK layout request {reference} ({}) -> {to}", sel.ty);
-        } else {
+        } else if dock && had {
+            log!("TWEAK layout request taken back for {reference} -> dock");
+        } else if had {
             log!("TWEAK layout request taken back for {reference}");
         }
         self.redraw_sidebar(cx);
@@ -9505,6 +9938,62 @@ impl Tweaker {
     /// the subtree to leave out.
     fn sidebar_uid(&self) -> u64 {
         self.sidebar.as_ref().map_or(0, |sidebar| sidebar.widget_uid().0)
+    }
+
+    /// Read a selection's [`DockFacts`] off the tree and judge them. The
+    /// type names are looked up once: a list ancestor can be many levels up.
+    fn dock_gate(&mut self, cx: &mut Cx, uid: u64) -> DockGate {
+        let names = widget_type_names(cx);
+        let type_of = |cx: &mut Cx, uid: WidgetUid| {
+            cx.widget_tree()
+                .widget(uid)
+                .widget_type_id()
+                .and_then(|type_id| names.get(&type_id).copied())
+                .map(live_id_token)
+                .unwrap_or_default()
+        };
+        let ty = type_of(cx, WidgetUid(uid));
+        let parent = cx.widget_tree().parent_of(WidgetUid(uid));
+        let parent_ty = parent.map(|p| type_of(cx, p)).unwrap_or_default();
+        let mut has_children = false;
+        cx.widget_tree()
+            .widget(WidgetUid(uid))
+            .children(&mut |_id, _child| has_children = true);
+        let mut in_list = false;
+        let mut cur = parent;
+        for _ in 0..64 {
+            let Some(up) = cur else { break };
+            if TEMPLATE_LISTS.contains(&type_of(cx, up).as_str()) {
+                in_list = true;
+                break;
+            }
+            cur = cx.widget_tree().parent_of(up);
+        }
+        let named = !tree_name_of(cx, uid).is_empty() || {
+            let reference = self.sel_ref(cx, uid);
+            let mut s = session().lock().unwrap();
+            s.load_renames();
+            s.renames.iter().any(|r| r.reference == reference && !r.to.is_empty())
+        };
+        // Picks already skip the inspector and the Tree tab cuts its panel
+        // out; this is the guard for a selection that arrives some other
+        // way. The inspector puts more than the panel in the tree (the
+        // spread readout sits under the inspector itself), so all of it.
+        let inspector = [self.uid.0, self.sidebar_uid()];
+        let in_panel = inspector
+            .into_iter()
+            .any(|root| root != 0 && (uid == root || is_ancestor_of(cx, root, uid)));
+        let body = self.find_body(cx).map_or(0, |body| body.widget_uid().0);
+        let in_body = body != 0 && is_ancestor_of(cx, body, uid);
+        dock_gate_of(&DockFacts {
+            ty: &ty,
+            parent_ty: &parent_ty,
+            has_children,
+            named,
+            in_list,
+            in_body,
+            in_panel,
+        })
     }
 
     /// The lock and the view on it, as `ViewState` reads them.
@@ -9917,7 +10406,7 @@ impl Tweaker {
             })
         {
             let item = &row.item;
-            let inner: [(&[LiveId], &str); 63] = [
+            let inner: [(&[LiveId], &str); 64] = [
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
                 (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
@@ -9937,6 +10426,7 @@ impl Tweaker {
                 (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_mid)], "across the flow, children sit in the middle"),
                 (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_end)], "across the flow, children sit at the end"),
                 (&[live_id!(ctr_col), live_id!(mode_row), live_id!(convert)], "ask the agent to change this container's type in the source \u{00b7} press again to take it back"),
+                (&[live_id!(ctr_col), live_id!(dock_row), live_id!(dock_check)], "ask the agent to put this container in a Dock as its one tab \u{00b7} untick to take the ask back"),
                 (&[live_id!(ctr_col), live_id!(name_row), live_id!(ctr_name)], "name this container so its children can size in cqw / cqh of it"),
                 (&[live_id!(abs_col), live_id!(abs_check)], "take it out of the flow and place it at x, y in its parent"),
                 (&[live_id!(abs_col), live_id!(abs_xy), live_id!(abs_x)], "points from the parent's left"),
@@ -10589,6 +11079,7 @@ impl Tweaker {
             .and_then(|parent| type_name_of(cx, parent.0))
             .as_deref()
             == Some("Grid");
+        self.sel_dock = self.dock_gate(cx, sel_uid);
         for (name, value, is_set) in reflect_flat(cx, &widget) {
             let (kind, display, quoted) = if value.starts_with('#') && parse_hex(&value).is_some()
             {
@@ -10771,7 +11262,7 @@ impl Tweaker {
             VisKind::BoxInset(BoxKind::Padding) => "padding",
             VisKind::FlowSpacing => "spacing flow gap wrap direction rows overlay",
             VisKind::AlignGrid => "align alignment justify distribute space between around evenly centre center start end",
-            VisKind::Container => "layout container flex grid name cqw cqh",
+            VisKind::Container => "layout container flex grid name cqw cqh dock dockable tab panel",
             VisKind::Absolute => "absolute position abs_pos x y",
             VisKind::GridTracks => "grid columns rows tracks gap areas fill auto_flow fr minmax repeat",
             VisKind::Cell => "cell col row span area place",
@@ -12602,20 +13093,20 @@ impl Tweaker {
                     VisKind::Container => {
                         item.child(live_id!(name)).set_text(cx, "layout");
                         let sel = session().lock().unwrap().pinned.clone();
-                        let (ty, wanted) = match sel {
+                        let (ty, wanted, dock_wanted) = match sel {
                             Some(sel) => {
                                 let reference = self.sel_ref(cx, sel.uid);
+                                // Each family lights its own control: a dock
+                                // ask must not light `make grid`.
                                 let wanted = {
                                     let mut s = session().lock().unwrap();
                                     s.load_converts();
-                                    s.converts
-                                        .iter()
-                                        .find(|c| c.reference == reference)
-                                        .map(|c| c.to.clone())
+                                    convert_for(&s.converts, &reference, false).map(|c| c.to.clone())
                                 };
-                                (sel.ty, wanted)
+                                let dock_wanted = self.dock_ask_ref(cx, sel.uid).is_some();
+                                (sel.ty, wanted, dock_wanted)
                             }
-                            None => (String::new(), None),
+                            None => (String::new(), None, false),
                         };
                         let is_grid = ty == "Grid";
                         let col = item.child(live_id!(ctr_col));
@@ -12629,6 +13120,43 @@ impl Tweaker {
                         btn.set_text(cx, if is_grid { "make flex" } else { "make grid" });
                         set_button_fill(cx, btn.clone(), wanted.is_some());
                         self.convert_uid = btn.widget_uid().0;
+                        // A standing dock ask keeps its box even when the
+                        // selection no longer qualifies (a stored ask, a
+                        // name taken away), and a tab's body shows the ask
+                        // that put it in its Dock: the person must be able
+                        // to take back what they can see was asked, before
+                        // the source is changed or after.
+                        let gate = self.sel_dock;
+                        let can_tick = gate == DockGate::Can || dock_wanted;
+                        let in_dock = gate == DockGate::InDock;
+                        let dock_row = col.child(live_id!(dock_row));
+                        dock_row.set_visible(cx, can_tick || in_dock);
+                        let check = dock_row.child(live_id!(dock_check));
+                        check.set_visible(cx, can_tick);
+                        if let Some(mut check) = check.borrow_mut::<CheckBox>() {
+                            check.set_active(cx, dock_wanted, Animate::No);
+                        }
+                        self.dock_uid = if can_tick { check.widget_uid().0 } else { 0 };
+                        let mut label = dock_row.child(live_id!(dock_label));
+                        label.set_text(cx, if in_dock { "a tab in a dock" } else { "dockable" });
+                        // Amber while the ask stands, as a wanted name is: it
+                        // is what the person wants, not what the source says.
+                        let color: Vec4f = if dock_wanted {
+                            vec4(1.0, 0.78, 0.29, 1.0)
+                        } else {
+                            vec4(0.706, 0.706, 0.706, 1.0)
+                        };
+                        script_apply_eval!(cx, label, { draw_text +: { color: #(color) } });
+                        let hint = col.child(live_id!(dock_hint));
+                        hint.set_visible(cx, dock_wanted);
+                        hint.set_text(
+                            cx,
+                            match (dock_wanted, in_dock) {
+                                (true, true) => "done \u{00b7} untick to clear the ask",
+                                (true, false) => "asked \u{00b7} the AI wraps it in a Dock",
+                                (false, _) => "",
+                            },
+                        );
                         let field = col.child(live_id!(name_row)).child(live_id!(ctr_name));
                         if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
                             let text = self
@@ -14198,6 +14726,12 @@ impl Tweaker {
                     edits.push(Edit::Apply(
                         if on { "abs_pos: vec2(0, 0)" } else { "abs_pos: nil" }.to_string(),
                     ));
+                }
+                continue;
+            }
+            if self.dock_uid != 0 && action_uid == self.dock_uid {
+                if let CheckBoxAction::Change(on) = widget_action.cast::<CheckBoxAction>() {
+                    self.request_dock(cx, on);
                 }
                 continue;
             }
@@ -16734,5 +17268,279 @@ line two");
         let mut unread = rows.clone();
         unread[0].uid = 0;
         assert_eq!(uids(&rows_without_subtree(unread.clone(), 0, 0)), uids(&unread));
+    }
+
+    fn layout_ask(reference: &str, from: &str, to: &str) -> TweakConvert {
+        TweakConvert {
+            reference: reference.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            size: None,
+        }
+    }
+
+    #[test]
+    fn a_dock_ask_is_offered_for_a_named_plain_container_with_something_in_it() {
+        let frame = DockFacts {
+            ty: "View",
+            parent_ty: "View",
+            has_children: true,
+            named: true,
+            in_list: false,
+            in_body: true,
+            in_panel: false,
+        };
+        assert_eq!(dock_gate_of(&frame), DockGate::Can);
+        assert_eq!(dock_gate_of(&DockFacts { ty: "Grid", ..frame }), DockGate::Can);
+        // Types whose sizing the wrap cannot speak for, the Dock included.
+        for ty in ["Button", "Dock", "Window", "KeyboardView", "Label", "", "-"] {
+            assert_eq!(dock_gate_of(&DockFacts { ty, ..frame }), DockGate::No, "{ty}");
+        }
+        // Only parents that lay children out by flow: the window's body and
+        // the plain containers. Parents that find a child by its name, one
+        // whose children come from Rust, and one that cannot be read, not.
+        for parent_ty in ["Grid", "KeyboardView"] {
+            assert_eq!(dock_gate_of(&DockFacts { parent_ty, ..frame }), DockGate::Can, "{parent_ty}");
+        }
+        for parent_ty in ["Window", "PageFlip", "Popover", "Splitter", "StoryCanvas", ""] {
+            assert_eq!(dock_gate_of(&DockFacts { parent_ty, ..frame }), DockGate::No, "{parent_ty}");
+        }
+        // The window's own chrome, a list item, an empty or anonymous one.
+        assert_eq!(dock_gate_of(&DockFacts { in_body: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_list: true, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { has_children: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { named: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_panel: true, ..frame }), DockGate::No);
+        // Already a tab's body: said, not offered -- whatever else is true.
+        let body = DockFacts { parent_ty: "Dock", named: false, has_children: false, ..frame };
+        assert_eq!(dock_gate_of(&body), DockGate::InDock);
+        assert_eq!(dock_gate_of(&DockFacts { ty: "Tab", ..body }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_panel: true, ..body }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_body: false, ..body }), DockGate::No);
+    }
+
+    #[test]
+    fn a_carried_out_dock_ask_is_found_again_from_the_tab_body() {
+        let converts = vec![
+            layout_ask("/w/frame", "View", "grid"),
+            layout_ask("/w/frame", "View", "dock"),
+            layout_ask("/w/View.2", "View", "dock"),
+            layout_ask("/w/side/panel", "View", "dock"),
+        ];
+        let renames = vec![TweakRename {
+            reference: "/w/View.2".to_string(),
+            from: String::new(),
+            to: "stage".to_string(),
+        }];
+        let found = |body: &str| dock_ask_done_by(&converts, &renames, body);
+        // The wrap as asked, under another dock name the edit had to pick,
+        // and a tab with a sibling index.
+        for body in ["/w/frame_dock/frame", "/w/frames/frame", "/w/frame_dock/frame.2"] {
+            assert_eq!(found(body), Some(&converts[1]), "{body}");
+        }
+        // A rename done in the same edit names the tab.
+        assert_eq!(found("/w/stage_dock/stage"), Some(&converts[2]));
+        assert_eq!(found("/w/side/panel_dock/panel"), Some(&converts[3]));
+        // Another parent, another tab name, or no dock level: no ask's body.
+        for body in [
+            "/w/side/frame_dock/frame",
+            "/w/frame_dock/other",
+            "/w/panel_dock/panel",
+            "/w/frame",
+            "/frame",
+            "frame",
+        ] {
+            assert_eq!(found(body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_dock_ask_toggles_on_and_off_and_leaves_a_grid_ask_standing() {
+        let mut converts = Vec::new();
+        // Ticked, then ticked again (a repeated change): one ask, the newer.
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "dock"), true));
+        let mut sized = layout_ask("/w/frame", "View", "dock");
+        sized.size = Some((820.0, 412.0));
+        assert!(converts_set(&mut converts, sized.clone(), true));
+        assert_eq!(converts, vec![sized.clone()]);
+        // A grid ask on the same widget stands beside it.
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "grid"), true));
+        assert_eq!(convert_for(&converts, "/w/frame", false).map(|c| c.to.as_str()), Some("grid"));
+        assert_eq!(convert_for(&converts, "/w/frame", true), Some(&sized));
+        // `make flex` replaces the grid ask in its own family only.
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "flex"), true));
+        assert_eq!(converts.len(), 2);
+        assert_eq!(convert_for(&converts, "/w/frame", false).map(|c| c.to.as_str()), Some("flex"));
+        // Taking the layout ask back leaves the dock ask, and the other way.
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "flex"), false));
+        assert_eq!(converts, vec![sized.clone()]);
+        assert!(!converts_set(&mut converts, layout_ask("/w/side", "View", "dock"), false));
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "grid"), true));
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "dock"), false));
+        assert_eq!(converts, vec![layout_ask("/w/frame", "View", "grid")]);
+        assert!(convert_for(&converts, "/w/frame", true).is_none());
+    }
+
+    #[test]
+    fn stored_asks_fold_in_behind_the_sessions_own_one_per_family() {
+        let mut session = vec![layout_ask("/w/frame", "View", "flex")];
+        converts_merge(
+            &mut session,
+            vec![
+                layout_ask("/w/frame", "View", "grid"),
+                layout_ask("/w/frame", "View", "dock"),
+                layout_ask("/w/frame", "Grid", "dock"),
+                layout_ask("/w/side", "View", "grid"),
+            ],
+        );
+        assert_eq!(
+            session,
+            vec![
+                layout_ask("/w/frame", "View", "flex"),
+                layout_ask("/w/frame", "View", "dock"),
+                layout_ask("/w/side", "View", "grid"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_layout_store_reads_old_and_new_lines_and_an_old_reader_keeps_its_asks() {
+        // A file from before dock asks: three columns, CRLF or not.
+        let old = layout_store_parse(
+            "# makepad layout conversions\n# reference\tcurrent type\twanted layout\n\
+             /w/frame\tView\tgrid\r\n\n/w/side\tGrid\tflex\n/w/short\tView\n",
+        );
+        assert_eq!(
+            old,
+            vec![layout_ask("/w/frame", "View", "grid"), layout_ask("/w/side", "Grid", "flex")]
+        );
+        // The new shape round-trips, layout lines first whatever the order
+        // the asks were made in, the size only on a dock line that has one.
+        let mut dock = layout_ask("/w/frame", "View", "dock");
+        dock.size = Some((820.0, 412.5));
+        let mut flex = layout_ask("/w/side", "Grid", "flex");
+        flex.size = Some((10.0, 10.0));
+        let asks = vec![
+            dock.clone(),
+            layout_ask("/w/frame", "View", "grid"),
+            layout_ask("/w/list", "View", "dock"),
+            flex.clone(),
+        ];
+        let text = layout_store_text(&asks);
+        let lines: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "/w/frame\tView\tgrid",
+                "/w/side\tGrid\tflex",
+                "/w/frame\tView\tdock\t820x412.5",
+                "/w/list\tView\tdock",
+            ]
+        );
+        assert_eq!(
+            layout_store_parse(&text),
+            vec![
+                layout_ask("/w/frame", "View", "grid"),
+                layout_ask("/w/side", "Grid", "flex"),
+                dock.clone(),
+                layout_ask("/w/list", "View", "dock"),
+            ]
+        );
+        // The reader from before dock asks, as it was: columns 0-2 of every
+        // line with at least three, the first ask per widget kept.
+        let mut old_reader: Vec<(&str, &str, &str)> = Vec::new();
+        for line in text.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 3 {
+                continue;
+            }
+            if !old_reader.iter().any(|(reference, _, _)| *reference == cols[0]) {
+                old_reader.push((cols[0], cols[1], cols[2]));
+            }
+        }
+        assert_eq!(
+            old_reader,
+            vec![("/w/frame", "View", "grid"), ("/w/side", "Grid", "flex"), ("/w/list", "View", "dock")]
+        );
+        // A size that does not read is no size, not no ask.
+        for cell in ["wide", "820x", "0x400", "820x400x2", ""] {
+            let read = layout_store_parse(&format!("/w/frame\tView\tdock\t{cell}\n"));
+            assert_eq!(read, vec![layout_ask("/w/frame", "View", "dock")], "{cell}");
+        }
+    }
+
+    #[test]
+    fn a_dock_wrap_takes_its_ids_from_the_container_name() {
+        let ids = |a: &str, b: &str, c: &str, d: &str| {
+            (a.to_string(), b.to_string(), c.to_string(), d.to_string())
+        };
+        assert_eq!(dock_ids("frame"), ids("frame_dock", "frame", "FrameBody", "Frame"));
+        assert_eq!(
+            dock_ids("side_panel"),
+            ids("side_panel_dock", "side_panel", "SidePanelBody", "Side panel")
+        );
+        assert_eq!(dock_ids("stage2"), ids("stage2_dock", "stage2", "Stage2Body", "Stage2"));
+        assert_eq!(dock_name("/window/body/frame", None), "frame");
+        assert_eq!(dock_name("/window/body/frame.2", None), "frame");
+        assert_eq!(dock_name("frame", None), "frame");
+        assert_eq!(dock_name("/window/body/frame", Some("stage")), "stage");
+        assert_eq!(dock_name("/window/body/frame", Some("")), "frame");
+        assert_eq!(dsl_points(412.0), "412.");
+        assert_eq!(dsl_points(412.46), "412.5");
+    }
+
+    #[test]
+    fn the_dock_instructions_carry_the_ids_the_measured_size_and_a_standing_grid_ask() {
+        let text = dock_transform_text("/window/body/frame", "View", Some((820.0, 412.0)), None, None);
+        for want in [
+            "frame_dock := Dock{",
+            "root := DockTabs{tabs: [@frame] selected: 0 closable: false}",
+            "frame := DockTab{name: \"Frame\" template: @PermanentTab kind: @FrameBody}",
+            "FrameBody := <its type as written>{width: Fill height: Fill",
+            "width: 820. and height: 412. + max(theme.tab_height, 25.)",
+            "`<value> + max(theme.tab_height, 25.)`",
+            "where the parent fits that axis",
+            "dock_border_size",
+            "`View` is only the Rust type",
+            "targets `frame_dock`",
+            "/window/body/frame_dock/frame",
+            "do not wrap it again",
+        ] {
+            assert!(text.contains(want), "missing `{want}` in: {text}");
+        }
+        assert!(!text.contains("  "), "a line break leaked spaces: {text}");
+        assert!(!text.contains("Grid") && !text.contains("rename"), "{text}");
+        let grid = dock_transform_text("/window/body/frame", "View", None, None, Some("grid"));
+        assert!(grid.contains("`FrameBody` is a Grid"), "{grid}");
+        assert!(
+            grid.contains("read that size off the running app and add max(theme.tab_height, 25.)"),
+            "{grid}"
+        );
+        let renamed =
+            dock_transform_text("/window/body/-", "Grid", None, Some("stage"), Some("flex"));
+        for want in ["stage_dock := Dock{", "@StageBody", "rename to `stage`", "`StageBody` is a View"] {
+            assert!(renamed.contains(want), "missing `{want}` in: {renamed}");
+        }
+    }
+
+    #[test]
+    fn state_reports_a_grid_ask_as_before_and_a_dock_ask_with_its_instructions() {
+        let mut dock = layout_ask("/w/frame", "View", "dock");
+        dock.size = Some((820.0, 412.5));
+        let converts = vec![layout_ask("/w/frame", "View", "grid"), dock];
+        let renames = vec![TweakRename {
+            reference: "/w/frame".to_string(),
+            from: "frame".to_string(),
+            to: "stage".to_string(),
+        }];
+        let json = converts_json(&converts, &renames);
+        assert!(json.starts_with("[{\"ref\":\"/w/frame\",\"from\":\"View\",\"to\":\"grid\"},{"), "{json}");
+        assert!(json.contains(",\"to\":\"dock\",\"name\":\"stage\",\"size\":[820,412.5],\"do\":\""), "{json}");
+        assert!(json.contains("`StageBody` is a Grid"), "{json}");
+        assert!(json.ends_with("\"}]"), "{json}");
+        assert_eq!(json.matches("\"do\"").count(), 1);
     }
 }
