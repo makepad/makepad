@@ -116,8 +116,8 @@ fn pie_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "navigation/pie-menu/overview",
-    category: "Navigation",
+    key: "overlay/pie-menu/overview",
+    category: "Overlay",
     component: "PieMenu",
     also: &[],
     name: "Overview",

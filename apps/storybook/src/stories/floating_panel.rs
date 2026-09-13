@@ -88,7 +88,7 @@ That last clause is the whole difference from a `Dialog`, and it decides every s
 
 Position is reported, never stored: `placed` says where a drag left it, and a caller that wants it back next run keeps the value itself. A widget that writes files has learned something it has no business knowing.
 
-Promoted from the design overlay's note card, which has carried this mechanism for months; its notes file, session singleton and leader line stayed behind.",
+A floating sheet made of glass, moved by its body and sized by its edges and corners, is `GlassFloatingSurface`, on Containers > Glass > Floating surface.",
     subject: "inspector",
     feature: None,
     controls: &[],

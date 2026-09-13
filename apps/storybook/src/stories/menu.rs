@@ -77,8 +77,8 @@ fn edit_rows() -> Vec<MenuRow> {
         MenuRow::new(live_id!(paste), "Paste").key("Ctrl+V"),
         MenuRow::separator(),
         MenuRow::section("Line endings"),
-        MenuRow::new(live_id!(lf), "Unix").radio(true),
-        MenuRow::new(live_id!(crlf), "Windows").radio(false),
+        MenuRow::new(live_id!(lf), "LF").radio(true),
+        MenuRow::new(live_id!(crlf), "CRLF").radio(false),
     ]
 }
 
@@ -113,15 +113,15 @@ fn menu_actions_handler(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "navigation/menu/overview",
-    category: "Navigation",
+    key: "overlay/menu/overview",
+    category: "Overlay",
     component: "Menu",
     also: &["MenuLayer"],
     name: "Overview",
     dsl: "MenuOverview",
     added: "2026-09-05",
     tags: &["new"],
-    doc: "# Menu\n\nOne `MenuLayer` draws every menu in an app: dropdowns, context menus, flyouts. Declare it once, last in the window body or inside an `OverlayLayers` host, and no other widget has to own a menu.\n\nA control raises one by calling `open` on the layer (or by broadcasting `MenuAction::Open`) with a list of `MenuRow` and the rect it measured from its own drawn area. The pick comes back as `MenuAction::Picked`, carrying the owner id the caller chose, so a control can tell its own menus apart.\n\nA row can be a command, a heading, a rule, a checked or radio item, a dangerous action, or a submenu. While a menu is up the layer holds the sweep lock, so the press that picks a row cannot also reach whatever sits under it; the lock nests, so a menu raised inside a dialog hands the lock back when it closes.\n\nKeyboard: the arrows walk the rows and skip anything that cannot be chosen, Right opens a flyout and Left leaves it, Home and End jump to the ends, a letter jumps to the next row starting with it, Return chooses and Escape closes.",
+    doc: "# Menu\n\nOne `MenuLayer` draws every menu in an app: dropdowns, context menus, flyouts. Declare it once, last in the window body or inside an `OverlayLayers` host, and no other widget has to own a menu.\n\nA control raises one by calling `open` on the layer (or by broadcasting `MenuAction::Open`) with a list of `MenuRow` and the rect it measured from its own drawn area. The pick comes back as `MenuAction::Picked`, carrying the owner id the caller chose, so a control can tell its own menus apart.\n\nA row can be a command, a heading, a rule, a checked or radio item, a dangerous action, or a submenu. While a menu is up the layer holds the sweep lock, so the press that picks a row cannot also reach whatever sits under it; the lock nests, so a menu raised inside a dialog hands the lock back when it closes.\n\nKeyboard: the arrows walk the rows and skip anything that cannot be chosen, Right opens a flyout and Left leaves it, Home and End jump to the ends, a letter jumps to the next row starting with it, Return chooses and Escape closes.\n\n## Which menu\n\n`Menu` is a list raised from a control or at the pointer, and reads a direction and a distance. `PieMenu`, the next page, is a ring for a handful of short commands, and reads a direction only. `CommandPalette` finds a command by its name, for the one whose place has been forgotten. The menus along the top of a window are `MenuBar`, on Toolbar > Window chrome.",
     subject: "",
     feature: None,
     controls: &[],

@@ -18,7 +18,7 @@ script_mod! {
     }
 
     mod.stories.ModalOverview = StoryPage{
-        StoryNote{text: "A dimming layer over the whole window with something on top of it. Twelve places in this repository use one, and it is the container under the dialog and the command palette."}
+        StoryNote{text: "A dimming layer over the whole window with something on top of it. It is the container under the dialog and the command palette."}
 
         StoryHeading{text: "Open one"}
         StoryNote{text: "It reports when it was dismissed, so a host can put its own state back. Escape closes it, and so does a press on the dark ground outside the card."}
@@ -36,6 +36,7 @@ script_mod! {
 
         StoryHeading{text: "A modal takes no room"}
         StoryNote{text: "Both modals are declared inside the row below, between the two chips. They claim no width and no height in their parent, so the row is laid out as though they were not there — the chips sit side by side. A modal that asked for Fill would quietly take a share of every spare point in the row whether or not it was ever opened."}
+        StoryNote{text: "Not everything that draws over the page does the same. Tooltip and PopupNotification claim no room either, but a CalloutTooltip takes a full-width slot in the column it is declared in, so where one is written changes the layout around it. Overlay > Tip declares its callout at the end of the page for that reason."}
         StoryRow{
             Chip{text: "before"}
             plain := Modal{
@@ -87,23 +88,25 @@ fn modal_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "overlay/modal/overview",
+    key: "overlay/dialog/modal",
     category: "Overlay",
-    component: "Modal",
-    also: &["Card"],
-    name: "Overview",
+    component: "Dialog",
+    also: &["Card", "Modal"],
+    name: "Modal",
     dsl: "ModalOverview",
     added: "2025-05-06",
     tags: &["overlay"],
     doc: "# Modal
 
-A dimming layer over the whole window with `content` on top of it. It is the container the dialog and the command palette are built on, and twelve places in this repository use one.
+A dimming layer over the whole window with `content` on top of it. It is the container the dialog and the command palette are built on.
 
 `open` and `close` drive it, `is_open` asks, and it raises `Dismissed` when it was closed by the person rather than by the host. Ask rather than track: it closes for reasons a page never hears about, and a host that only listened would go on believing it was open.
 
 `can_dismiss` is `true` by default, which gives you Escape, a press on the ground outside the content, and the platform's back gesture. Setting it `false` removes all three at once, so the only way out is a control you put inside — right for a question with consequences, wrong for anything else, because a person who cannot leave will try the window's close box instead.
 
-**A modal claims no room.** It is an overlay: the walk it reports to its parent is empty, and the overlay itself is sized by the pass rather than by the layout around it. That is why it can be declared in the middle of a row without moving anything in that row. It is also load-bearing — giving a modal `width: Fill` makes it a *deferred fill* of its parent, taking a share of the parent's spare length whether or not it is ever opened.",
+**A modal claims no room.** It is an overlay: the walk it reports to its parent is empty, and the overlay itself is sized by the pass rather than by the layout around it. That is why it can be declared in the middle of a row without moving anything in that row. It is also load-bearing — giving a modal `width: Fill` makes it a *deferred fill* of its parent, taking a share of the parent's spare length whether or not it is ever opened.
+
+Not everything that draws over the page behaves this way. `Tooltip` and `PopupNotification` claim no room either, but `CalloutTooltip` takes a full-width slot in the column it is declared in, so where one is written changes the layout around it: declare it where that room does no harm, such as the end of a page.",
     subject: "plain",
     feature: None,
     controls: &[],
