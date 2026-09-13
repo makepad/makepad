@@ -365,7 +365,7 @@ mod tests {
             "Media",
             &[
                 ("Icon", &["Overview"]),
-                ("Image", &["Overview", "Loading and fallback"]),
+                ("Image", &["Overview", "Loading and fallback", "Nine-slice"]),
                 ("Svg", &["Overview", "Vector"]),
                 ("PlaybackBar", &["Overview"]),
                 ("Waveform", &["Overview"]),

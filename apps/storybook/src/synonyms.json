@@ -1237,7 +1237,16 @@
     "turned picture",
     "tilted picture",
     "angled photo",
-    "picture at an angle"
+    "picture at an angle",
+    "nine slice",
+    "9-slice",
+    "nine patch",
+    "scalable border",
+    "9 slice",
+    "sliced panel",
+    "panel skin",
+    "frame texture",
+    "stretchable frame"
    ],
    "does": [
     "stretch to fit",
@@ -1250,7 +1259,13 @@
     "async decode",
     "load from bytes",
     "decode png jpeg",
-    "webp and gif decoding"
+    "webp and gif decoding",
+    "corners keep their size",
+    "tile the edges",
+    "tile the middle",
+    "stretch the middle",
+    "hollow frame",
+    "repeat a texture"
    ]
   },
   {

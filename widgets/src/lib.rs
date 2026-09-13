@@ -58,6 +58,7 @@ pub mod icon;
 pub mod image;
 pub mod image_blend;
 pub mod image_cache;
+pub mod image_slice;
 pub mod label;
 pub mod link_label;
 pub mod radio_button;
@@ -278,6 +279,7 @@ pub use crate::{
     image::*,
     image_blend::*,
     image_cache::*,
+    image_slice::*,
     keyboard_view::*,
     // view_ui - no public exports
     label::*,
@@ -1066,5 +1068,31 @@ mod overlay_layers_registration_tests {
         assert!(layers.contains("mod.widgets.OverlayLayers = set_type_default() do mod.widgets.OverlayLayersBase{"));
         assert_eq!(layers.matches("set_type_default() do mod.widgets.OverlayLayersBase").count(), 1);
         assert!(layers.contains("tip_layer := TipLayer{}"));
+    }
+}
+
+/// The text of `widgets_mod`, where registration order is decided. The new
+/// widgets' tests read order from here rather than from the whole file: the
+/// tests themselves name every call, so a search of the whole file would
+/// still find a call that had gone missing from the function.
+#[cfg(test)]
+fn widgets_mod_source() -> &'static str {
+    let lib = include_str!("lib.rs");
+    let start = lib.find("pub fn widgets_mod(vm: &mut ScriptVm)").expect("widgets_mod");
+    let end = lib.find("pub fn script_mod(vm: &mut ScriptVm)").expect("script_mod");
+    &lib[start..end]
+}
+
+#[cfg(test)]
+mod image_slice_registration_tests {
+    /// The slicing arithmetic is a module of its own beside the image cache
+    /// whose fit it extends. It has no script module: its enums are exported
+    /// to the DSL by the image widget, next to `ImageFit`.
+    #[test]
+    fn test_image_slice_is_a_module_without_a_registration() {
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("\npub mod image_slice;"));
+        assert!(lib.contains("\n    image_slice::*,"));
+        assert!(!crate::widgets_mod_source().contains("crate::image_slice::"));
     }
 }
