@@ -126,8 +126,8 @@ fn dock_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/dock/overview",
-    category: "Containers",
+    key: "layout/dock/overview",
+    category: "Layout",
     component: "Dock",
     also: &["Tab", "TabBar"],
     name: "Overview",

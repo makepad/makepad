@@ -1,6 +1,9 @@
-//! The layout stories: width and height, margin, padding, spacing, flow and alignment, including the under-filling Fill cases, ported from the widget zoo.
+//! The layout stories: width and height, margin, padding, spacing, flow and
+//! alignment, including the under-filling Fill cases; and the responsive page,
+//! where weights, clamps, wrapping and an adaptive view answer a changing width.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
+use std::sync::Mutex;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -231,7 +234,7 @@ script_mod! {
     let CellLabel = Label{width: Fit draw_text.color: theme.color_text_meta}
 
     mod.stories.LayoutResponsive = StoryPage{
-        StoryNote{text: "A row hands its slack to its children by WEIGHT, and a child can refuse to grow past a maximum or to shrink below a minimum. A wrapping row spends the width it has and moves the rest to the next line. Drag the width below and watch each rule answer."}
+        StoryNote{text: "A row hands its slack to its children by WEIGHT, and a child can refuse to grow past a maximum or to shrink below a minimum. A wrapping row spends the width it has and moves the rest to the next line. An adaptive view answers in a step instead, and swaps one arrangement for another. Drag the width below and watch each rule answer."}
 
         StoryRow{
             frame_width := Slider{
@@ -239,14 +242,14 @@ script_mod! {
                 text: "Frame width"
                 min: 280.0
                 max: 900.0
-                default: 820.0
+                default: 600.0
                 step: 10.0
             }
-            width_note := Label{text: "820 points, 6 per row"}
+            width_note := Label{text: "600 points, 4 per row"}
         }
 
         frame := RoundedView{
-            width: 820.
+            width: 600.
             height: Fit
             flow: Down
             spacing: theme.space_3
@@ -285,13 +288,36 @@ script_mod! {
                 Cell{width: Fill{max: 220.0} height: Fill CellLabel{text: "side, max 220"}}
                 Cell{width: Fill height: Fill CellLabel{text: "body"}}
             }
+
+            CellLabel{text: "Steps: under 440 points of room the side goes above the body"}
+            // The variants keep the default selector's names, Desktop and
+            // Mobile: that selector picks on the window until the page's
+            // handler installs one that reads the room this frame gives.
+            adaptive := AdaptiveView{
+                width: Fill
+                height: Fit
+                Desktop := View{
+                    width: Fill height: 72.
+                    flow: Right
+                    spacing: theme.space_2
+                    Cell{width: 160. height: Fill CellLabel{text: "side, beside the body"}}
+                    Cell{width: Fill height: Fill CellLabel{text: "body"}}
+                }
+                Mobile := View{
+                    width: Fill height: Fit
+                    flow: Down
+                    spacing: theme.space_2
+                    Cell{width: Fill CellLabel{text: "side, above the body"}}
+                    Cell{width: Fill height: 72. CellLabel{text: "body"}}
+                }
+            }
         }
     }
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/layout/overview",
-    category: "Containers",
+    key: "layout/layout/overview",
+    category: "Layout",
     component: "Layout",
     also: &[],
     name: "Overview",
@@ -304,17 +330,17 @@ pub const STORIES: &[Story] = &[Story {
     controls: &[],
     on_actions: None,
 }, Story {
-    key: "containers/layout/responsive",
-    category: "Containers",
+    key: "layout/layout/responsive",
+    category: "Layout",
     component: "Layout",
-    also: &[],
+    also: &["AdaptiveView"],
     name: "Responsive",
     dsl: "LayoutResponsive",
     added: "2026-09-05",
     tags: &["new"],
     doc: "# Responsive layout
 
-Three rules do the work, and the width slider is there so each one can be seen answering.
+Three rules answer a changing width smoothly and a fourth answers it in a step. The width slider is there so each one can be seen answering.
 
 **Weight** splits the slack. `Fill{weight: 2.0}` takes twice the share of `Fill{weight: 1.0}`, and the proportion holds at every width rather than being a set of numbers that only add up at one size.
 
@@ -322,13 +348,39 @@ Three rules do the work, and the width slider is there so each one can be seen a
 
 **Wrapping** answers with rows instead of size. `flow: Flow.Right{wrap: true}` keeps every cell the width it asked for and moves what does not fit to the next line, which is the grid behaviour a catalogue of cards wants: the cells stay legible and the column count is what changes.
 
-`Fit{min, max}` is the fourth member of the family, for a box that takes its content's size but refuses to get silly about it.",
+**Steps** answer with a different arrangement. Below 440 points of room the shell at the bottom of the frame stops putting its side column beside the body and puts it above. Nothing between the two sizes is interpolated: past the breakpoint it is simply the other layout.
+
+`Fit{min, max}` is the last member of the sizing family, for a box that takes its content's size but refuses to get silly about it.
+
+## AdaptiveView
+
+`AdaptiveView` holds named templates and shows one of them. A selector picks which, and the view builds the chosen template when the choice changes. The template it stops showing is dropped with its state, unless `retain_unused_variants` is on.
+
+**By default it picks on the window, not on its parent.** The default selector returns `Desktop` for a window 860 points wide or more and `Mobile` below that, so a view inside a panel that a person resizes never changes on its own. This page installs a selector that reads the room the parent hands the view, which is what lets the width slider flip it:
+
+```rust
+root.adaptive_view(cx, ids!(adaptive)).set_variant_selector(|_cx, parent| {
+    if parent.x < 440.0 { live_id!(Mobile) } else { live_id!(Desktop) }
+});
+```
+
+The selector runs when the view is drawn at a new parent size, and when the window changes. It may return the name of any template the view declares, so three steps are three templates. `set_default_variant_selector` puts the window rule back.
+
+Because the handler installs the selector, the first frame after the page opens is picked by the window rule. The demo's templates keep the default names for that reason, and the frame starts wide enough that in a window 860 points or wider both rules pick the same one.",
     subject: "frame",
     feature: None,
     controls: &[],
     on_actions: Some(responsive_actions),
 }];
 
+/// Where the step demo changes arrangement, in points of the room its parent
+/// gives it rather than of the window.
+const STEP_AT: f64 = 440.0;
+
+/// The adaptive view the parent-width selector was last installed on. A
+/// story is rebuilt when it is opened again, and the new view starts out with
+/// the window rule, so a changed id is the signal to install it again.
+static STEP_SELECTOR_ON: Mutex<u64> = Mutex::new(0);
 
 /// Cells are 120 wide with `space_2` between them inside `mspace_3` padding;
 /// the count is what the wrap rule works out, said in words so the reflow is
@@ -344,7 +396,32 @@ fn cells_per_row(frame_width: f64) -> usize {
     (((room + GAP) / (CELL + GAP)).floor() as usize).clamp(1, 8)
 }
 
+/// The default selector reads the window, which the width slider never
+/// changes, so the page gives the view one that reads its parent instead.
+fn install_step_selector(cx: &mut Cx, root: &WidgetRef) {
+    let widget = root.widget(cx, ids!(adaptive));
+    let uid = widget.widget_uid().0;
+    if uid == 0 {
+        return;
+    }
+    let Ok(mut installed) = STEP_SELECTOR_ON.lock() else {
+        return;
+    };
+    if *installed == uid {
+        return;
+    }
+    widget.as_adaptive_view().set_variant_selector(|_cx, parent| {
+        if parent.x < STEP_AT {
+            live_id!(Mobile)
+        } else {
+            live_id!(Desktop)
+        }
+    });
+    *installed = uid;
+}
+
 fn responsive_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    install_step_selector(cx, root);
     let Some(w) = root.slider(cx, ids!(frame_width)).slided(actions) else {
         return;
     };

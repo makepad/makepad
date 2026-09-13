@@ -144,8 +144,8 @@ fn masonry_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/masonry/overview",
-    category: "Containers",
+    key: "layout/masonry/overview",
+    category: "Layout",
     component: "Masonry",
     also: &[],
     name: "Overview",

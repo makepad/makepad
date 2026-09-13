@@ -8,11 +8,12 @@ script_mod! {
     use mod.storybook.*
 
     mod.stories.DividerOverview = StoryPage{
-        StoryHeading{text: "Orientations"}
-        StoryNote{text: "A horizontal rule fills its parent's width; the vertical one stands as tall as the row it is in."}
         StoryHeading{text: "One divider, under the controls"}
         StoryNote{text: "One divider. The controls write its label, where the label sits, its style, weight and inset."}
         subject := Divider{text: "or"}
+
+        StoryHeading{text: "Orientations"}
+        StoryNote{text: "A horizontal rule fills its parent's width; the vertical one stands as tall as the row it is in."}
         Divider{}
         StoryRow{
             height: 40.
@@ -44,6 +45,28 @@ script_mod! {
         Divider{inset: DividerInset.None, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Start, appearance: DividerAppearance.Strong}
         Divider{inset: DividerInset.Middle, appearance: DividerAppearance.Strong}
+
+        StoryHeading{text: "The bevelled rules"}
+        StoryNote{text: "Hr and Vr are Views whose background draws the theme's bevelled groove: Hr across its parent, Vr as tall as the row it stands in. They take none of the settings above, and each reserves more room around its line than a Divider does."}
+        StoryRow{
+            View{
+                width: 240. height: Fit
+                flow: Down
+                spacing: theme.space_2
+                Label{text: "above the rule"}
+                Hr{}
+                Label{text: "below it"}
+            }
+            View{
+                width: Fit height: 60.
+                flow: Right
+                spacing: theme.space_2
+                align: Align{y: 0.5}
+                Label{text: "left"}
+                Vr{}
+                Label{text: "right"}
+            }
+        }
     }
 }
 
@@ -52,12 +75,12 @@ pub const STORIES: &[Story] = &[
         key: "layout/divider/overview",
         category: "Layout",
         component: "Divider",
-        also: &["DividerLabelled", "DividerVertical"],
+        also: &["DividerLabelled", "DividerVertical", "Hr", "Vr"],
         name: "Overview",
         dsl: "DividerOverview",
         added: "2026-09-05",
         tags: &["controls", "new"],
-        doc: "# Divider\n\nA hairline between two things. `Divider` lies across its parent, `DividerVertical` stands as tall as its parent lets it, `DividerLabelled` carries an \"or\" in the middle. The label can sit at the start, the centre or the end and splits the rule into two segments; the style is solid, dashed or dotted; the appearance is subtle, strong or brand; the inset keeps the rule off the leading edge or off both.\n\n`Hr` and `Vr` keep drawing the theme's bevelled groove and are untouched.",
+        doc: "# Divider\n\nA hairline between two things. `Divider` lies across its parent, `DividerVertical` stands as tall as its parent lets it, `DividerLabelled` carries an \"or\" in the middle. The label can sit at the start, the centre or the end and splits the rule into two segments; the style is solid, dashed or dotted; the appearance is subtle, strong or brand; the inset keeps the rule off the leading edge or off both.\n\n## Hr and Vr\n\n`Hr` and `Vr` draw the theme's bevelled groove rather than a hairline, and take none of these settings. `Hr` fills its parent's width and `Vr` its row's height, and each reserves more room around the groove than a `Divider` takes.",
         subject: "labelled",
         feature: None,
         controls: &[

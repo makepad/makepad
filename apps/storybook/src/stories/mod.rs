@@ -9,12 +9,19 @@ use std::sync::Mutex;
 pub mod welcome;
 pub mod slug;
 pub mod foundations;
+pub mod layout;
+pub mod grid;
+pub mod masonry;
+pub mod splitter_more;
+pub mod dock;
+pub mod align_scroll;
+pub mod scroll_more;
+pub mod divider;
 pub mod badge;
 pub mod placeholder;
 pub mod button_more;
 pub mod checkbox_more;
 pub mod alert;
-pub mod divider;
 pub mod progress;
 pub mod playback_bar;
 pub mod level_meter;
@@ -67,12 +74,9 @@ pub mod pie_menu;
 pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
-pub mod masonry;
 pub mod kanban;
-pub mod splitter_more;
 pub mod svg_select;
 pub mod rich_text;
-pub mod scroll_more;
 pub mod tour;
 pub mod range_slider;
 pub mod slider;
@@ -99,17 +103,12 @@ pub mod fab_controls;
 pub mod glass_controls;
 pub mod code_view;
 pub mod data_grid;
-pub mod dock;
 pub mod modal;
 pub mod svg;
-pub mod splitter;
 pub mod floating_panel;
-pub mod layout;
 pub mod nav_list;
 pub mod pagination;
 pub mod marquee;
-pub mod grid;
-pub mod align_scroll;
 pub mod icon;
 pub mod iconset;
 pub mod image;
@@ -123,9 +122,7 @@ pub mod html;
 pub mod pageflip;
 pub mod tabs;
 pub mod stacknavigation;
-pub mod adaptiveview;
 pub mod slidesview;
-pub mod scrollbar;
 pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
@@ -142,6 +139,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
     slug::script_mod(vm);
     // 1 Foundations
     foundations::script_mod(vm);
+    // 2 Layout
+    layout::script_mod(vm);
+    grid::script_mod(vm);
+    masonry::script_mod(vm);
+    splitter_more::script_mod(vm);
+    dock::script_mod(vm);
+    align_scroll::script_mod(vm);
+    scroll_more::script_mod(vm);
+    divider::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
     combobox::script_mod(vm);
@@ -150,12 +156,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
     slider::script_mod(vm);
     range_slider::script_mod(vm);
     tour::script_mod(vm);
-    scroll_more::script_mod(vm);
     rich_text::script_mod(vm);
     svg_select::script_mod(vm);
-    splitter_more::script_mod(vm);
     kanban::script_mod(vm);
-    masonry::script_mod(vm);
     toolbar::script_mod(vm);
     chart_more::script_mod(vm);
     drag_number::script_mod(vm);
@@ -211,17 +214,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
     glass_controls::script_mod(vm);
     code_view::script_mod(vm);
     data_grid::script_mod(vm);
-    dock::script_mod(vm);
     modal::script_mod(vm);
     svg::script_mod(vm);
-    splitter::script_mod(vm);
     floating_panel::script_mod(vm);
-    layout::script_mod(vm);
     nav_list::script_mod(vm);
     pagination::script_mod(vm);
     marquee::script_mod(vm);
-    grid::script_mod(vm);
-    align_scroll::script_mod(vm);
     icon::script_mod(vm);
     iconset::script_mod(vm);
     image::script_mod(vm);
@@ -235,9 +233,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     pageflip::script_mod(vm);
     tabs::script_mod(vm);
     stacknavigation::script_mod(vm);
-    adaptiveview::script_mod(vm);
     slidesview::script_mod(vm);
-    scrollbar::script_mod(vm);
     portallist::script_mod(vm);
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
@@ -261,7 +257,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     popover::script_mod(vm);
     toast::script_mod(vm);
     alert::script_mod(vm);
-    divider::script_mod(vm);
     progress::script_mod(vm);
     playback_bar::script_mod(vm);
     level_meter::script_mod(vm);
@@ -279,6 +274,15 @@ pub fn tables() -> &'static [&'static [Story]] {
         slug::STORIES,
         // 1 Foundations
         foundations::STORIES,
+        // 2 Layout
+        layout::STORIES,
+        grid::STORIES,
+        masonry::STORIES,
+        splitter_more::STORIES,
+        dock::STORIES,
+        align_scroll::STORIES,
+        scroll_more::STORIES,
+        divider::STORIES,
         button::STORIES,
         checkbox::STORIES,
         combobox::STORIES,
@@ -287,12 +291,9 @@ pub fn tables() -> &'static [&'static [Story]] {
         slider::STORIES,
         range_slider::STORIES,
         tour::STORIES,
-        scroll_more::STORIES,
         rich_text::STORIES,
         svg_select::STORIES,
-        splitter_more::STORIES,
         kanban::STORIES,
-        masonry::STORIES,
         toolbar::STORIES,
         chart_more::STORIES,
         drag_number::STORIES,
@@ -348,17 +349,12 @@ pub fn tables() -> &'static [&'static [Story]] {
         glass_controls::STORIES,
         code_view::STORIES,
         data_grid::STORIES,
-        dock::STORIES,
         modal::STORIES,
         svg::STORIES,
-        splitter::STORIES,
         floating_panel::STORIES,
-        layout::STORIES,
         nav_list::STORIES,
         pagination::STORIES,
         marquee::STORIES,
-        grid::STORIES,
-        align_scroll::STORIES,
         icon::STORIES,
         iconset::STORIES,
         image::STORIES,
@@ -372,9 +368,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         pageflip::STORIES,
         tabs::STORIES,
         stacknavigation::STORIES,
-        adaptiveview::STORIES,
         slidesview::STORIES,
-        scrollbar::STORIES,
         portallist::STORIES,
         tile_list::STORIES,
         item_grid::STORIES,
@@ -398,7 +392,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         popover::STORIES,
         toast::STORIES,
         alert::STORIES,
-        divider::STORIES,
         progress::STORIES,
         playback_bar::STORIES,
         level_meter::STORIES,

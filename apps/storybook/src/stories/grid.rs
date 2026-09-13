@@ -157,8 +157,8 @@ fn grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/grid/overview",
-    category: "Containers",
+    key: "layout/grid/overview",
+    category: "Layout",
     component: "Grid",
     also: &[],
     name: "Overview",
