@@ -894,23 +894,43 @@ impl ModelDraw<'_> {
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.
-    fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) {
-        self.base().fur = Default::default();
+    ///
+    /// The material values are the shader's UNIFORMS, not instance lanes: the
+    /// vertex stage ran out of D3D11 input registers (`vs_5_0` allows 32), and
+    /// a layer is exactly one draw item — its geometry and its textures are
+    /// bound in the same breath below — so a uniform states what they always
+    /// were. Returns the layer's fur LENGTH, because `submit` still needs it
+    /// on the CPU to count shells and can no longer read it back off the draw
+    /// struct.
+    fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) -> f32 {
+        let mut fur = Vec4f::default();
         self.base().fur_layer.x = 0.0;
         if let ModelDraw::Pbr(d) = self {
-            d.metallic = m.metallic;
-            d.roughness = m.roughness;
-            d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
-            d.surface_on=if m.surface.is_some(){1.0}else{0.0};
-            d.material_alpha=1.0;d.alpha_mode=0.0;d.alpha_cutoff=0.5;d.normal_scale=0.0;d.occlusion_strength=0.0;d.emissive=vec3f(0.0,0.0,0.0);d.double_sided=0.0;
+            let surface_on=if m.surface.is_some(){1.0}else{0.0};
+            let (mut material_alpha,mut alpha_mode,mut alpha_cutoff)=(1.0f32,0.0f32,0.5f32);
+            let (mut normal_scale,mut occlusion_strength)=(0.0f32,0.0f32);
+            let mut emissive=vec3f(0.0,0.0,0.0);
+            let mut double_sided=0.0f32;
             d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
-                d.skinned.fur = crate::material_surface::fur_params(definition.fur);
-                d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
-                d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                fur = crate::material_surface::fur_params(definition.fur);
+                material_alpha=definition.base_alpha;alpha_mode=definition.alpha_mode as f32;alpha_cutoff=definition.alpha_cutoff;
+                normal_scale=definition.normal_scale;occlusion_strength=definition.occlusion_strength;emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
+            let vars=&mut d.skinned.draw_vars;
+            vars.set_uniform(cx,live_id!(metallic),&[m.metallic]);
+            vars.set_uniform(cx,live_id!(roughness),&[m.roughness]);
+            vars.set_uniform(cx,live_id!(orm_on),&[if m.orm_on{1.0}else{0.0}]);
+            vars.set_uniform(cx,live_id!(surface_on),&[surface_on]);
+            vars.set_uniform(cx,live_id!(material_alpha),&[material_alpha]);
+            vars.set_uniform(cx,live_id!(alpha_mode),&[alpha_mode]);
+            vars.set_uniform(cx,live_id!(alpha_cutoff),&[alpha_cutoff]);
+            vars.set_uniform(cx,live_id!(normal_scale),&[normal_scale]);
+            vars.set_uniform(cx,live_id!(occlusion_strength),&[occlusion_strength]);
+            vars.set_uniform(cx,live_id!(double_sided),&[double_sided]);
+            vars.set_uniform(cx,live_id!(emissive),&[emissive.x,emissive.y,emissive.z]);
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {
                 for (name,texture) in [(live_id!(normal_map),m.surface.as_ref().map(|s|&s.normal)),(live_id!(occlusion_map),m.surface.as_ref().map(|s|&s.occlusion)),(live_id!(emissive_map),m.surface.as_ref().map(|s|&s.emissive))] {
                     if let Some(slot)=cx.draw_shaders[id.index].mapping.textures.iter().position(|t|t.id==name){d.skinned.draw_vars.set_texture(slot,texture.unwrap_or(&m.orm));}
@@ -925,13 +945,17 @@ impl ModelDraw<'_> {
                 }
             }
         }
+        // One recipe per layer. Only the shell FRACTION differs between the
+        // instances a layer emits, and that stays on the instance stream.
+        self.base().draw_vars.set_uniform(cx, live_id!(fur), &[fur.x, fur.y, fur.z, fur.w]);
+        fur.x
     }
 
-    fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize) -> usize {
+    fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_length: f32, fur_budget: &mut usize) -> usize {
         let draw = self.base();
         if !draw.draw_vars.can_instance() { return 0; }
         let triangles = draw.draw_vars.geometry_id.map_or(0, |id| cx.cx.geometries[id].indices.len() / 3);
-        let shells = crate::material_surface::fur_shell_count(draw.fur.x, &draw.transform, distance, triangles, fur_budget);
+        let shells = crate::material_surface::fur_shell_count(fur_length, &draw.transform, distance, triangles, fur_budget);
         for layer in 0..=shells {
             draw.fur_layer.x = layer as f32 / shells.max(1) as f32;
             let area = cx.add_instance(&draw.draw_vars);
@@ -6321,18 +6345,19 @@ impl Renderer {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
         };
+        // Sun, fog and the debug switches, once for the whole lane. They are
+        // uniforms rather than instance lanes — the vertex stage ran out of
+        // D3D11 input registers — which is also what they describe: one frame
+        // has one sun and one fog, whatever draws under them.
         {
-            let draw = draw.base();
-            sun.write_into(
-                &mut draw.light_dir,
-                &mut draw.sun_color,
-                &mut draw.sun_sky,
-                &mut draw.sun_ground,
-            );
-            draw.fog_color = fog.0;
-            draw.fog_density = fog.1;
-            draw.depth_clip = 1.0;
-            draw.lm_debug = self.lm_debug;
+            let lm_debug = self.lm_debug;
+            let vars = &mut draw.base().draw_vars;
+            sun.write_uniforms(cx.cx, vars);
+            vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+            vars.set_uniform(cx.cx, live_id!(fog_color), &[fog.0.x, fog.0.y, fog.0.z]);
+            vars.set_uniform(cx.cx, live_id!(fog_density), &[fog.1]);
+            vars.set_uniform(cx.cx, live_id!(depth_clip), &[1.0]);
+            vars.set_uniform(cx.cx, live_id!(lm_debug), &[lm_debug]);
         }
         // Shading space, once for the whole lane: written before anything
         // binds, so every draw item of the frame reads the same value.
@@ -6464,11 +6489,14 @@ impl Renderer {
             }
             // Hoisted: `loaded` borrows self, and the per-instance light
             // block below needs `&mut self` (cell hysteresis).
-            draw.base().morph_ctl=Vec4f::default();
+            // Per draw item: the morph source belongs to this model LOD, the
+            // same `loaded` that picks the geometry and binds `morph_map`
+            // below. The per-instance weights stay on the instance stream.
+            draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[0.0,0.0,0.0,0.0]);
             if let Some(morph)=&loaded.morph{
                 let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
                 let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
-                draw.base().morph_ctl=vec4(morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32);
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32]);
                 draw.base().morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
                 draw.base().morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
                 draw.base().morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
@@ -6530,12 +6558,15 @@ impl Renderer {
                 .find(|(m, _)| *m == inst.model)
                 .and_then(|(_, pack)| self.ao_textures.iter().find(|(k, _)| k == pack))
                 .map(|(_, t)| t);
+            // Per draw item: the atlas follows the pack and the top LOD, and
+            // both are what select the geometry, so no two instances sharing a
+            // draw item can disagree about it.
             if let Some(t) = ao_tex.filter(|_|lod_index==0) {
                 draw.base().draw_vars.set_texture(1, t);
-                draw.base().ao_enabled = 1.0;
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(ao_enabled),&[1.0]);
                 stats.ao_bound += 1;
             } else {
-                draw.base().ao_enabled = 0.0;
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(ao_enabled),&[0.0]);
                 stats.ao_missing += 1;
             }
             draw.base().transform = inst.transform;
@@ -6610,10 +6641,13 @@ impl Renderer {
                 draw.base().draw_vars.geometry_id = Some(*geometry_id);
                 draw.base().draw_vars.set_texture(0, texture);
                 draw.base().draw_vars.set_texture(5, detail);
-                draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                // The overlay scale belongs to this LAYER, bound beside its
+                // own detail texture, so it is a uniform like the rest of the
+                // layer's material state.
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(detail_st),&[dscale[0], dscale[1]]);
                 draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                draw.set_material(cx.cx, material);
-                stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
+                let fur_length = draw.set_material(cx.cx, material);
+                stats.fur_triangles += draw.submit(cx, distance, fur_length, &mut fur_budget);
             }
             // Rigid parts (doors, lifts). Each is one extra draw on the
             // PARENT's material — same shader, same textures, usually the
@@ -6676,10 +6710,10 @@ impl Renderer {
                     draw.base().draw_vars.geometry_id = Some(*geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
-                    draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                    draw.base().draw_vars.set_uniform(cx.cx,live_id!(detail_st),&[dscale[0], dscale[1]]);
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                    draw.set_material(cx.cx, material);
-                    stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
+                    let fur_length = draw.set_material(cx.cx, material);
+                    stats.fur_triangles += draw.submit(cx, distance, fur_length, &mut fur_budget);
                 }
                 match lane {
                     WorldModelLane::Placed => stats.model_triangles += part_tris,
@@ -7239,15 +7273,19 @@ impl Renderer {
         stats: &mut RenderStats,
         eye:Vec3f,
     ) {
-        batch.skinned.eye=eye;
         self.clustered.bind(cx.cx, &mut batch.skinned.draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut batch.skinned.draw_vars);
-        sun.write_into(
-            &mut batch.skinned.light_dir,
-            &mut batch.skinned.sun_color,
-            &mut batch.skinned.sun_sky,
-            &mut batch.skinned.sun_ground,
-        );
+        // Per CALL, before the character loop: one eye, one sun, one fog and
+        // one clip flag for the whole crowd. These are uniforms rather than
+        // instance lanes — the vertex stage ran out of D3D11 input registers —
+        // and every character of the batch reads the same values anyway, so
+        // the loop no longer rewrites them per character.
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z]);
+        sun.write_uniforms(cx.cx, &mut batch.skinned.draw_vars);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(depth_clip), &[1.0]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(fog_color), &[fog.0.x, fog.0.y, fog.0.z]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(fog_density), &[fog.1]);
         // Dynamic lights are PER-CHARACTER: each looks up its own
         // precomputed grid cell (O(1), hysteresis-stable — light_grid.rs)
         // inside the draw loop below, so a villager standing under a lamp
@@ -7365,9 +7403,6 @@ impl Renderer {
             batch.skinned.transform = item.transform;
             batch.skinned.tint = item.tint;
             batch.skinned.color_adjust_ctl = item.color_adjust;
-            batch.skinned.depth_clip = 1.0;
-            batch.skinned.fog_color = fog.0;
-            batch.skinned.fog_density = fog.1;
             // Clamp rather than index blindly: a bad texture index would
             // otherwise panic mid-frame, and a character wearing the wrong
             // atlas is a visible bug worth surviving to see.
@@ -7403,10 +7438,21 @@ impl Renderer {
                 for part in parts {
                     let definition=&part.surface.definition;
                     batch.skinned.fur = crate::material_surface::fur_params(definition.fur);
-                    batch.skinned.surface_on=1.0;batch.skinned.metallic=part.metallic;batch.skinned.roughness=part.roughness;
-                    batch.skinned.material_alpha=definition.base_alpha;batch.skinned.alpha_mode=definition.alpha_mode as f32;batch.skinned.alpha_cutoff=definition.alpha_cutoff;
-                    batch.skinned.normal_scale=definition.normal_scale;batch.skinned.occlusion_strength=definition.occlusion_strength;
-                    batch.skinned.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);batch.skinned.double_sided=if definition.double_sided{1.0}else{0.0};
+                    // Per material PART: uniforms, written beside that part's
+                    // own geometry, textures and blend options below. One part
+                    // is one draw item, so no character sharing it can want a
+                    // different value.
+                    let vars=&mut batch.skinned.draw_vars;
+                    vars.set_uniform(cx.cx,live_id!(surface_on),&[1.0]);
+                    vars.set_uniform(cx.cx,live_id!(metallic),&[part.metallic]);
+                    vars.set_uniform(cx.cx,live_id!(roughness),&[part.roughness]);
+                    vars.set_uniform(cx.cx,live_id!(material_alpha),&[definition.base_alpha]);
+                    vars.set_uniform(cx.cx,live_id!(alpha_mode),&[definition.alpha_mode as f32]);
+                    vars.set_uniform(cx.cx,live_id!(alpha_cutoff),&[definition.alpha_cutoff]);
+                    vars.set_uniform(cx.cx,live_id!(normal_scale),&[definition.normal_scale]);
+                    vars.set_uniform(cx.cx,live_id!(occlusion_strength),&[definition.occlusion_strength]);
+                    vars.set_uniform(cx.cx,live_id!(emissive),&[definition.emissive[0],definition.emissive[1],definition.emissive[2]]);
+                    vars.set_uniform(cx.cx,live_id!(double_sided),&[if definition.double_sided{1.0}else{0.0}]);
                     batch.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;batch.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;batch.skinned.draw_vars.options.backface_culling=!definition.double_sided;
                     batch.skinned.draw_vars.geometry_id=Some(part.geometry.geometry_id());
                     batch.skinned.draw_vars.set_texture(0,&part.base);
@@ -7429,7 +7475,7 @@ impl Renderer {
                 }
             } else {
                 batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
-                batch.skinned.surface_on=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
+                batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(surface_on),&[0.0]);batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =
