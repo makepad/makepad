@@ -46,7 +46,10 @@ use crate::{
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{claim_escape, place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{
+        claim_escape, place_overlay, pointer_on_edge, slide_for_pointer, PlaceAlign, PlaceRequest, Placed,
+        Placement, Pointer, Side,
+    },
     view::*,
     widget::*,
     widget_tree::CxWidgetExt,
@@ -76,8 +79,8 @@ script_mod! {
     mod.widgets.PopoverPlacement = set_type_default() do #(PopoverPlacement::script_api(vm))
     mod.widgets.splat(mod.widgets.PopoverPlacement)
 
-    mod.widgets.DrawPopoverArrowBase = #(DrawPopoverArrow::script_component(vm))
-    set_type_default() do #(DrawPopoverArrow::script_shader(vm)){
+    mod.widgets.DrawPopoverPanelBase = #(DrawPopoverPanel::script_component(vm))
+    set_type_default() do #(DrawPopoverPanel::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
 
@@ -114,8 +117,11 @@ script_mod! {
         /** room between the panel's edge and the content */
         panel_padding: theme.mspace_2
 
-        /** The panel behind the content: a rounded box whose shadow is drawn
-         * outside its rect, so the walk it takes stays the content's. */
+        /** The panel behind the content and its pointer, drawn as ONE shape:
+         * the rounded box unioned with the pointer, so the fill, the outline
+         * and the shadow all come from the same distance field. The quad
+         * reaches past the panel's rect for the shadow and the pointer, so
+         * the walk it takes stays the content's. */
         draw_panel +: {
             /** panel fill */
             color: uniform(theme.color_surface_container)
@@ -123,6 +129,8 @@ script_mod! {
             border_color: uniform(theme.color_outline)
             /** second outline stop; a negative alpha keeps the outline flat */
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            /** the pointer's outline when the outline has two stops */
+            arrow_border_color: uniform(theme.color_outline)
             /** outline width in pixels 0..4 step 0.5 */
             border_size: uniform(1.0)
             /** corner rounding 0..24 step 0.5 */
@@ -136,92 +144,78 @@ script_mod! {
             /** dither the outline gradient to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
 
-            rect_size2: varying(vec2(0))
-            rect_size3: varying(vec2(0))
-            rect_pos2: varying(vec2(0))
-            rect_shift: varying(vec2(0))
-            sdf_rect_pos: varying(vec2(0))
-            sdf_rect_size: varying(vec2(0))
+            quad_shift: varying(vec2(0))
+            quad_size: varying(vec2(0))
 
             vertex: fn() {
-                let min_offset = min(self.shadow_offset, vec2(0))
-                self.rect_size2 = self.rect_size + 2.0 * vec2(self.shadow_radius)
-                self.rect_size3 = self.rect_size2 + abs(self.shadow_offset)
-                self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset
-                self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_size * 2.0)
-                self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius)
-                self.rect_shift = -min_offset
-                return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
+                // The panel's rect, grown by the shadow's reach all round, by
+                // the drop on the side it falls to, and by the pointer (its
+                // outline included) past the edge it stands out of. A quad
+                // the panel's own size cuts the point off, shadow and all.
+                // The reach is half as far again as the blur: the shade has
+                // faded to well under a level there, so the quad's edge
+                // leaves no step in it.
+                let tip = self.arrow_tip
+                let has_arrow = step(0.001, length(tip - self.arrow_base))
+                let edge = vec2(self.border_size)
+                let reach = vec2(self.shadow_radius * 1.5)
+                let lead = reach - min(self.shadow_offset, vec2(0)) + max(edge - tip, vec2(0)) * has_arrow
+                let trail = reach + max(self.shadow_offset, vec2(0)) + max(tip + edge - self.rect_size, vec2(0)) * has_arrow
+                self.quad_shift = -lead
+                self.quad_size = self.rect_size + lead + trail
+                return self.clip_and_transform_vertex(self.rect_pos - lead, self.quad_size)
             }
 
             pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
+                // Everything below is in the panel's own points, so the
+                // pointer the widget placed lands where it was put.
+                let p = self.pos * self.quad_size + self.quad_shift
+                let inner = self.rect_size - vec2(self.border_size * 2.0)
+                let radius = max(1.0, self.border_radius)
+                let sdf = Sdf2d.viewport(p)
+                sdf.box(self.border_size, self.border_size, inner.x, inner.y, radius)
+                let panel_d = sdf.shape
+                sdf.pointer(self.arrow_base.x, self.arrow_base.y, self.arrow_tip.x, self.arrow_tip.y)
+                // How much of the outline here is the pointer's: none along
+                // the panel's edges, all of it on the pointer's flanks, and
+                // shading from one to the other over the point or so where
+                // they meet. With no pointer its distance is out of reach
+                // and this is nothing everywhere.
+                let on_arrow = clamp((panel_d - sdf.dist) * 0.5 + 0.5, 0.0, 1.0)
+                // The shadow is the same union, moved by the drop. A blurred
+                // edge fades along the tail of the normal curve, so the shade
+                // at a point is read off its distance to the shape: exact
+                // along a straight edge, and it wraps the pointer, which the
+                // shadow of a lone box cannot do.
+                let shade = Sdf2d.viewport(p - self.shadow_offset)
+                shade.box(self.border_size, self.border_size, inner.x, inner.y, radius)
+                shade.pointer(self.arrow_base.x, self.arrow_base.y, self.arrow_tip.x, self.arrow_tip.y)
                 let mut stroke_color = self.border_color
                 if self.border_color_2.x > -0.5 {
+                    // Measured over the panel and its shadow's reach, as it was
+                    // before the pointer shared this quad: a pointer must not
+                    // stretch the bevel of the panel it hangs off.
+                    let t = clamp((p.y + self.shadow_radius) / (self.rect_size.y + 2.0 * self.shadow_radius), 0.0, 1.0)
                     let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
-                    stroke_color = mix(self.border_color, self.border_color_2, self.pos.y + dither)
+                    // A bevel lights the top edge, and a pointer standing out
+                    // of it in that light all but vanishes against a light
+                    // ground, whose colour the fill is close to. So the
+                    // pointer keeps an outline of its own.
+                    stroke_color = mix(mix(self.border_color, self.border_color_2, t + dither), self.arrow_border_color, on_arrow)
                 }
-                sdf.box(
-                    self.sdf_rect_pos.x,
-                    self.sdf_rect_pos.y,
-                    self.sdf_rect_size.x,
-                    self.sdf_rect_size.y,
-                    max(1.0, self.border_radius)
-                )
                 if sdf.shape > -1.0 {
-                    let m = self.shadow_radius
-                    let o = self.shadow_offset + self.rect_shift
-                    let v = GaussShadow.rounded_box_shadow(vec2(m) + o, self.rect_size2 + o, self.pos * (self.rect_size3 + vec2(m)), self.shadow_radius * 0.5, self.border_radius * 2.0)
+                    // The logistic curve standing in for the normal one, half
+                    // way down at the outline's OUTER edge: the panel's
+                    // silhouette ends there, not at the middle of the outline
+                    // where the box that carries it is drawn.
+                    let sigma = max(self.shadow_radius * 0.5, 0.001)
+                    let v = 1.0 / (1.0 + exp(clamp(1.702 * (shade.shape - self.border_size) / sigma, -30.0, 30.0)))
                     sdf.clear(self.shadow_color * v)
                 }
                 sdf.fill_keep(self.color)
                 if self.border_size > 0.0 {
                     sdf.stroke(stroke_color, self.border_size)
                 }
-                return sdf.result
-            }
-        }
-
-        /** The pointer: a triangle filled like the panel and outlined on its
-         * two slanted edges, so it reads as part of the panel's outline. */
-        draw_arrow +: {
-            // `side` is the ONE instance here (it rides in the widget struct),
-            // so every other prop is a uniform or the slots stop lining up.
-            side: 0.0
-            /** arrow fill */
-            color: uniform(theme.color_surface_container)
-            /** arrow outline */
-            border_color: uniform(theme.color_outline)
-            /** outline width in pixels 0..4 step 0.5 */
-            border_size: uniform(1.0)
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let w = self.rect_size.x
-                let h = self.rect_size.y
-                // A square turned by a quarter turn, centred on the middle
-                // of the arrow's base: the half inside this quad is the
-                // triangle, the other half lies past the quad's edge and is
-                // never painted. The base sits one pixel inside the quad, on
-                // the row that overlaps the panel, so the fill covers the
-                // panel's outline under it. Side 1 (content below the
-                // anchor) points up and is the default; 0 points down, 2
-                // points right, 3 points left.
-                let mut c = vec2(w * 0.5, h - 1.0)
-                let mut r = w * 0.5
-                if self.side < 0.5 {
-                    c = vec2(w * 0.5, 1.0)
-                } else if self.side > 2.5 {
-                    c = vec2(w - 1.0, h * 0.5)
-                    r = h * 0.5
-                } else if self.side > 1.5 {
-                    c = vec2(1.0, h * 0.5)
-                    r = h * 0.5
-                }
-                sdf.rotate(PI * 0.25, c.x, c.y)
-                let s = r * 1.41421356
-                sdf.rect(c.x - s * 0.5, c.y - s * 0.5, s, s)
-                sdf.fill_keep(self.color)
-                sdf.stroke(self.border_color, self.border_size)
                 return sdf.result
             }
         }
@@ -430,14 +424,82 @@ impl PopoverPlacement {
     }
 }
 
+/// The panel and its pointer, drawn as one shape. The pointer rides in the
+/// instance because every popover places its own; everything else about the
+/// panel is a uniform its style sets.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawPopoverArrow {
+pub struct DrawPopoverPanel {
     #[deref]
     draw_super: DrawQuad,
-    /// 0 points down, 1 up, 2 right, 3 left: toward the anchor.
+    /// The middle of the pointer's base, in the panel's own points.
     #[live]
-    side: f32,
+    pub arrow_base: Vec2f,
+    /// The pointer's point, in the panel's own points; the same as the base
+    /// when the panel has no pointer.
+    #[live]
+    pub arrow_tip: Vec2f,
+}
+
+/// How far a rounded corner of a panel of `size` reaches along its edges
+/// from each end: the corner the panel shader draws, on a box inset by the
+/// outline's width whose corners reach twice the radius it is given, never
+/// past half the box.
+fn panel_corner(size: DVec2, border_size: f64, border_radius: f64) -> f64 {
+    let half = (size.x.min(size.y) * 0.5 - border_size).max(0.0);
+    border_size + (2.0 * border_radius.max(1.0)).min(half)
+}
+
+/// What a popover's pointer is sized and placed with, for [`hang_panel`].
+#[derive(Clone, Copy, Debug)]
+struct PanelPointer {
+    /** How far the point stands out; its base is twice that. */
+    arrow_size: f64,
+    /** The outline's width, read off the panel. */
+    border_size: f64,
+    /** The corner radius the panel's box is given, read off the panel. */
+    border_radius: f64,
+}
+
+/// Hang a panel of `size` off `anchor` in a pass of `pass`: where it goes,
+/// and the pointer it draws when it has one, in its own points.
+///
+/// The placement comes first, then the slide off an anchor too small for
+/// the pointer to reach its middle from where the panel lines up, then the
+/// pointer, placed against the outline and the corners the panel's shape is
+/// drawn with. The draw goes through here, and so do the tests.
+fn hang_panel(
+    anchor: Rect,
+    size: DVec2,
+    pass: DVec2,
+    placement: Placement,
+    offset: f64,
+    pointer: Option<PanelPointer>,
+) -> (Placed, Option<Pointer>) {
+    let bounds = Rect {
+        pos: dvec2(EDGE, EDGE),
+        size: pass - dvec2(EDGE * 2.0, EDGE * 2.0),
+    };
+    let gap = offset + pointer.map_or(0.0, |p| p.arrow_size);
+    let mut placed = place_overlay(&PlaceRequest {
+        anchor,
+        size,
+        bounds,
+        gap,
+        placement,
+        match_anchor_width: false,
+    });
+    // The helper may shorten a popup to the room; the panel keeps its drawn
+    // size and overruns instead, the lesser fault.
+    placed.rect.size = size;
+    let Some(p) = pointer else {
+        return (placed, None);
+    };
+    let corner = panel_corner(size, p.border_size, p.border_radius);
+    let placed = slide_for_pointer(placed, anchor, bounds, corner + p.arrow_size.max(0.0));
+    let at = placed.arrow_at - placed.rect.pos;
+    let pointer = pointer_on_edge(placed.side, size, at, p.arrow_size, p.border_size, corner);
+    (placed, Some(pointer))
 }
 
 /// Inset kept between the content and the window's edges.
@@ -454,9 +516,7 @@ pub struct Popover {
     #[deref]
     view: View,
     #[live]
-    draw_panel: DrawQuad,
-    #[live]
-    draw_arrow: DrawPopoverArrow,
+    draw_panel: DrawPopoverPanel,
 
     /// Which edge of the anchor the content hangs off, and how it lines up.
     #[live]
@@ -898,55 +958,6 @@ impl Popover {
         }
         walk
     }
-
-    fn arrow_rect(&self, side: Side, panel: Rect, arrow_at: DVec2) -> Rect {
-        let a = self.arrow_size;
-        let ov = 1.0;
-        // Keep the tip clear of the rounded corners.
-        let inset = a * 1.5;
-        match side {
-            Side::Bottom => {
-                let x = arrow_at
-                    .x
-                    .max(panel.pos.x + inset)
-                    .min(panel.pos.x + panel.size.x - inset);
-                Rect {
-                    pos: dvec2(x - a, panel.pos.y - a),
-                    size: dvec2(a * 2.0, a + ov),
-                }
-            }
-            Side::Top => {
-                let x = arrow_at
-                    .x
-                    .max(panel.pos.x + inset)
-                    .min(panel.pos.x + panel.size.x - inset);
-                Rect {
-                    pos: dvec2(x - a, panel.pos.y + panel.size.y - ov),
-                    size: dvec2(a * 2.0, a + ov),
-                }
-            }
-            Side::Right => {
-                let y = arrow_at
-                    .y
-                    .max(panel.pos.y + inset)
-                    .min(panel.pos.y + panel.size.y - inset);
-                Rect {
-                    pos: dvec2(panel.pos.x - a, y - a),
-                    size: dvec2(a + ov, a * 2.0),
-                }
-            }
-            Side::Left => {
-                let y = arrow_at
-                    .y
-                    .max(panel.pos.y + inset)
-                    .min(panel.pos.y + panel.size.y - inset);
-                Rect {
-                    pos: dvec2(panel.pos.x + panel.size.x - ov, y - a),
-                    size: dvec2(a + ov, a * 2.0),
-                }
-            }
-        }
-    }
 }
 
 impl Widget for Popover {
@@ -984,6 +995,10 @@ impl Widget for Popover {
                 let cx: &mut Cx = cx;
                 self.content_walk(cx)
             };
+            // No pointer until this draw has placed one: the instance is
+            // written when the panel begins, before it has a size or a place.
+            self.draw_panel.arrow_base = Vec2f::default();
+            self.draw_panel.arrow_tip = Vec2f::default();
             // Unclipped: the panel's shadow is painted outside its rect, and
             // a turtle that clipped to the rect would cut it to the corners.
             self.draw_panel.begin(
@@ -1008,35 +1023,29 @@ impl Widget for Popover {
                     self.view.area().rect(cx)
                 }
             };
-            let gap = self.offset + if self.arrow { self.arrow_size } else { 0.0 };
-            let placed = place_overlay(&PlaceRequest {
-                anchor,
-                size: panel.size,
-                bounds: Rect {
-                    pos: dvec2(EDGE, EDGE),
-                    size: pass - dvec2(EDGE * 2.0, EDGE * 2.0),
-                },
-                gap,
-                placement: self.placement.placement(),
-                match_anchor_width: false,
+            // The pointer is placed against the outline and the corners the
+            // panel's shape is drawn with, so it reads them off the panel.
+            let pointer = self.arrow.then(|| {
+                let mut border_size = [0.0f32];
+                let mut border_radius = [0.0f32];
+                self.draw_panel.get_uniform(cx, live_id!(border_size), &mut border_size);
+                self.draw_panel.get_uniform(cx, live_id!(border_radius), &mut border_radius);
+                PanelPointer {
+                    arrow_size: self.arrow_size,
+                    border_size: border_size[0] as f64,
+                    border_radius: border_radius[0] as f64,
+                }
             });
-            // The helper may shorten a popup to the room; the panel keeps
-            // its drawn size and overruns instead, the lesser fault.
-            let placed_rect = Rect {
-                pos: placed.rect.pos,
-                size: panel.size,
-            };
-            if self.arrow {
-                self.draw_arrow.side = match placed.side {
-                    Side::Top => 0.0,
-                    Side::Bottom => 1.0,
-                    Side::Left => 2.0,
-                    Side::Right => 3.0,
-                };
-                // Root-local: the panel sits at `panel.pos` before the shift.
-                let local_at = placed.arrow_at - placed_rect.pos + panel.pos;
-                let rect = self.arrow_rect(placed.side, panel, local_at);
-                self.draw_arrow.draw_abs(cx, rect);
+            let (placed, pointer) =
+                hang_panel(anchor, panel.size, pass, self.placement.placement(), self.offset, pointer);
+            let placed_rect = placed.rect;
+            if let Some(pointer) = pointer {
+                // The pointer is part of the panel's own shape, so it goes
+                // into the instance the panel has already written.
+                self.draw_panel.arrow_base = pointer.base.into();
+                self.draw_panel.arrow_tip = pointer.tip.into();
+                self.draw_panel.update_instance_area_value(cx, ids!(arrow_base));
+                self.draw_panel.update_instance_area_value(cx, ids!(arrow_tip));
             }
             self.panel_rect = placed_rect;
             self.placed_side = Some(placed.side);
@@ -1507,5 +1516,156 @@ impl FocusTrap {
         };
         cx.set_key_focus(next);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PASS: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+    const OFFSET: f64 = 4.0;
+    const ARROW: f64 = 7.0;
+    const BORDER: f64 = 1.0;
+    const RADIUS: f64 = 5.0;
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            pos: dvec2(x, y),
+            size: dvec2(w, h),
+        }
+    }
+
+    const POINTER: PanelPointer = PanelPointer {
+        arrow_size: ARROW,
+        border_size: BORDER,
+        border_radius: RADIUS,
+    };
+
+    /// Hang a panel with a pointer off `anchor`, and give back where it
+    /// went, the side it took, and its pointer's point, window-absolute.
+    fn hang(anchor: Rect, size: DVec2, placement: Placement) -> (Rect, Side, DVec2) {
+        let (placed, pointer) = hang_panel(anchor, size, PASS, placement, OFFSET, Some(POINTER));
+        (placed.rect, placed.side, placed.rect.pos + pointer.unwrap().tip)
+    }
+
+    #[test]
+    fn popover_pointer_aims_at_the_anchor_it_is_centred_on() {
+        let (rect, side, tip) = hang(r(300.0, 100.0, 80.0, 30.0), dvec2(200.0, 60.0), Placement::BOTTOM_CENTER);
+        assert_eq!(side, Side::Bottom);
+        assert_eq!(rect.pos, dvec2(240.0, 141.0));
+        // Under the anchor's middle; the outline's outer edge round the point
+        // is `offset` from the anchor, so the point itself is a border's
+        // width further out.
+        assert_eq!(tip, dvec2(340.0, 130.0 + OFFSET + BORDER));
+    }
+
+    #[test]
+    fn popover_pointer_slides_along_the_edge_when_the_window_pushes_the_panel() {
+        // Too near the left edge to centre: the panel is pushed right and the
+        // pointer moves left along it, still under the anchor.
+        let anchor = r(20.0, 100.0, 80.0, 30.0);
+        let (rect, _, tip) = hang(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_CENTER);
+        assert_eq!(rect.pos.x, EDGE);
+        assert_eq!(tip.x, anchor.center().x);
+        // The right edge, above.
+        let anchor = r(720.0, 300.0, 60.0, 30.0);
+        let (rect, side, tip) = hang(anchor, dvec2(200.0, 60.0), Placement::TOP_CENTER);
+        assert_eq!(side, Side::Top);
+        assert_eq!(rect.pos.x, PASS.x - EDGE - 200.0);
+        assert_eq!(tip, dvec2(anchor.center().x, 300.0 - OFFSET - BORDER));
+        // A side placement pushed up off the bottom edge slides the same way.
+        let anchor = r(100.0, 560.0, 80.0, 30.0);
+        let (rect, side, tip) = hang(anchor, dvec2(160.0, 120.0), Placement::RIGHT_CENTER);
+        assert_eq!(side, Side::Right);
+        assert_eq!(rect.pos.y, PASS.y - EDGE - 120.0);
+        assert_eq!(tip, dvec2(180.0 + OFFSET + BORDER, anchor.center().y));
+    }
+
+    #[test]
+    fn popover_pointer_stops_where_the_corner_starts() {
+        // The anchor's middle lies off the panel's straight edge: the pointer
+        // stops with its whole base on the straight part, the corner's reach
+        // plus its own half base in from the panel's end.
+        let (rect, _, tip) = hang(r(0.0, 100.0, 10.0, 30.0), dvec2(200.0, 60.0), Placement::BOTTOM_CENTER);
+        assert_eq!(rect.pos.x, EDGE);
+        assert_eq!(tip.x, EDGE + BORDER + RADIUS * 2.0 + ARROW);
+        let (rect, _, tip) = hang(r(790.0, 100.0, 10.0, 30.0), dvec2(200.0, 60.0), Placement::BOTTOM_CENTER);
+        assert_eq!(rect.pos.x + rect.size.x, PASS.x - EDGE);
+        assert_eq!(tip.x, PASS.x - EDGE - BORDER - RADIUS * 2.0 - ARROW);
+    }
+
+    #[test]
+    fn popover_pointer_follows_a_flip_and_every_side() {
+        // No room above: the panel flips below and its pointer points up.
+        let anchor = r(300.0, 10.0, 80.0, 30.0);
+        let (rect, side, tip) = hang(anchor, dvec2(200.0, 60.0), Placement::TOP_CENTER);
+        assert_eq!(side, Side::Bottom);
+        assert!(tip.y < rect.pos.y);
+        assert_eq!(tip.x, anchor.center().x);
+        // Beside a control taller than the corners' reach, so its middle is
+        // on the straight part for both ends.
+        let anchor = r(300.0, 300.0, 80.0, 74.0);
+        let (_, side, tip) = hang(anchor, dvec2(160.0, 120.0), Placement::LEFT_START);
+        assert_eq!(side, Side::Left);
+        assert_eq!(tip, dvec2(300.0 - OFFSET - BORDER, anchor.center().y));
+        let (_, side, tip) = hang(anchor, dvec2(160.0, 120.0), Placement::RIGHT_END);
+        assert_eq!(side, Side::Right);
+        assert_eq!(tip, dvec2(380.0 + OFFSET + BORDER, anchor.center().y));
+    }
+
+    #[test]
+    fn popover_pointer_corner_never_reaches_past_half_the_panel() {
+        // A radius bigger than a squat panel can hold saturates the way the
+        // shader's box does, so the pointer still finds the straight part.
+        let size = dvec2(200.0, 24.0);
+        let corner = panel_corner(size, 1.0, 40.0);
+        let p = pointer_on_edge(Side::Right, size, dvec2(0.0, 0.0), 7.0, 1.0, corner);
+        assert_eq!(p.base, dvec2(1.0, 12.0));
+        let p = pointer_on_edge(Side::Bottom, size, dvec2(0.0, 0.0), 7.0, 1.0, corner);
+        assert_eq!(p.tip, dvec2(1.0 + 11.0 + 7.0, 1.0 - 7.0));
+    }
+
+    #[test]
+    fn popover_moves_off_a_small_control_so_its_pointer_reaches_the_middle() {
+        // Narrower than the pointer and a corner twice over: lined up with
+        // the control's start or end, the point would land past its middle,
+        // so the panel moves out past that end instead.
+        let anchor = r(300.0, 100.0, 20.0, 20.0);
+        let (rect, side, tip) = hang(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_START);
+        assert_eq!(side, Side::Bottom);
+        assert_eq!(tip.x, anchor.center().x);
+        assert!(rect.pos.x < anchor.pos.x);
+        let (rect, _, tip) = hang(anchor, dvec2(200.0, 60.0), Placement::TOP_END);
+        assert_eq!(tip.x, anchor.center().x);
+        assert!(rect.pos.x + rect.size.x > anchor.pos.x + anchor.size.x);
+        // Beside it: a panel tall enough for the pointer between its corners
+        // slides up, and one too short for that is centred on the control.
+        let (rect, side, tip) = hang(anchor, dvec2(160.0, 60.0), Placement::RIGHT_START);
+        assert_eq!(side, Side::Right);
+        assert_eq!(tip.y, anchor.center().y);
+        assert!(rect.pos.y < anchor.pos.y);
+        let (rect, _, tip) = hang(anchor, dvec2(90.0, 30.0), Placement::LEFT_END);
+        assert_eq!(tip.y, anchor.center().y);
+        assert_eq!(rect.center().y, anchor.center().y);
+    }
+
+    #[test]
+    fn popover_opened_at_a_press_points_at_the_press() {
+        // A secondary press anchors the panel to the one point pressed.
+        let press = r(400.0, 300.0, 1.0, 1.0);
+        let (_, side, tip) = hang(press, dvec2(200.0, 60.0), Placement::BOTTOM_START);
+        assert_eq!(side, Side::Bottom);
+        assert_eq!(tip.x, press.center().x);
+    }
+
+    #[test]
+    fn popover_without_a_pointer_lines_up_with_the_control() {
+        // No pointer, no slide: a small control still gets the placement it
+        // asked for, and the gap is the offset alone.
+        let anchor = r(300.0, 100.0, 20.0, 20.0);
+        let (placed, pointer) = hang_panel(anchor, dvec2(200.0, 60.0), PASS, Placement::BOTTOM_START, OFFSET, None);
+        assert!(pointer.is_none());
+        assert_eq!(placed.rect.pos, dvec2(300.0, 120.0 + OFFSET));
     }
 }
