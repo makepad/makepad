@@ -68,6 +68,24 @@ pub mod chip;
 pub mod wheel_picker;
 pub mod column_picker;
 pub mod svg_select;
+pub mod toolbar;
+pub mod window_chrome;
+pub mod drop_controls;
+pub mod tabs;
+pub mod nav_list;
+pub mod breadcrumb;
+pub mod pagination;
+pub mod stacknavigation;
+pub mod tip;
+pub mod popover;
+pub mod menu;
+pub mod pie_menu;
+pub mod command_palette;
+pub mod dialog;
+pub mod modal;
+pub mod drawer;
+pub mod floating_panel;
+pub mod tour;
 pub mod alert;
 pub mod toast;
 pub mod progress;
@@ -76,12 +94,6 @@ pub mod spinner;
 pub mod placeholder;
 pub mod empty_state;
 pub mod badge;
-pub mod menu;
-pub mod dialog;
-pub mod drawer;
-pub mod overlay;
-pub mod popover;
-pub mod tip;
 pub mod kbd;
 pub mod tree;
 pub mod filetree;
@@ -90,25 +102,11 @@ pub mod avatar;
 pub mod table;
 pub mod timeline;
 pub mod chat;
-pub mod command_palette;
-pub mod pie_menu;
 pub mod chart_more;
-pub mod toolbar;
 pub mod kanban;
-pub mod tour;
-pub mod breadcrumb;
 pub mod chart;
 pub mod lists;
-pub mod window_chrome;
-pub mod overlay_messages;
-pub mod drop_controls;
 pub mod data_grid;
-pub mod modal;
-pub mod floating_panel;
-pub mod nav_list;
-pub mod pagination;
-pub mod tabs;
-pub mod stacknavigation;
 pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
@@ -189,6 +187,26 @@ pub fn script_mod(vm: &mut ScriptVm) {
     wheel_picker::script_mod(vm);
     column_picker::script_mod(vm);
     svg_select::script_mod(vm);
+    // 9 Navigation
+    toolbar::script_mod(vm);
+    window_chrome::script_mod(vm);
+    drop_controls::script_mod(vm);
+    tabs::script_mod(vm);
+    nav_list::script_mod(vm);
+    breadcrumb::script_mod(vm);
+    pagination::script_mod(vm);
+    stacknavigation::script_mod(vm);
+    // 10 Overlay
+    tip::script_mod(vm);
+    popover::script_mod(vm);
+    menu::script_mod(vm);
+    pie_menu::script_mod(vm);
+    command_palette::script_mod(vm);
+    dialog::script_mod(vm);
+    modal::script_mod(vm);
+    drawer::script_mod(vm);
+    floating_panel::script_mod(vm);
+    tour::script_mod(vm);
     // 11 Feedback
     alert::script_mod(vm);
     toast::script_mod(vm);
@@ -197,12 +215,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     spinner::script_mod(vm);
     placeholder::script_mod(vm);
     empty_state::script_mod(vm);
-    tour::script_mod(vm);
     kanban::script_mod(vm);
-    toolbar::script_mod(vm);
     chart_more::script_mod(vm);
-    pie_menu::script_mod(vm);
-    command_palette::script_mod(vm);
     chat::script_mod(vm);
     timeline::script_mod(vm);
     table::script_mod(vm);
@@ -211,30 +225,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     tree::script_mod(vm);
     filetree::script_mod(vm);
     kbd::script_mod(vm);
-    breadcrumb::script_mod(vm);
     chart::script_mod(vm);
     lists::script_mod(vm);
-    window_chrome::script_mod(vm);
-    overlay_messages::script_mod(vm);
-    drop_controls::script_mod(vm);
     data_grid::script_mod(vm);
-    modal::script_mod(vm);
-    floating_panel::script_mod(vm);
-    nav_list::script_mod(vm);
-    pagination::script_mod(vm);
-    tabs::script_mod(vm);
-    stacknavigation::script_mod(vm);
     portallist::script_mod(vm);
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
     log_list::script_mod(vm);
     badge::script_mod(vm);
-    menu::script_mod(vm);
-    tip::script_mod(vm);
-    dialog::script_mod(vm);
-    drawer::script_mod(vm);
-    overlay::script_mod(vm);
-    popover::script_mod(vm);
 }
 
 /// Every story table, in navigator order: the categories run in the order
@@ -315,6 +313,26 @@ pub fn tables() -> &'static [&'static [Story]] {
         wheel_picker::STORIES,
         column_picker::STORIES,
         svg_select::STORIES,
+        // 9 Navigation
+        toolbar::STORIES,
+        window_chrome::STORIES,
+        drop_controls::STORIES,
+        tabs::STORIES,
+        nav_list::STORIES,
+        breadcrumb::STORIES,
+        pagination::STORIES,
+        stacknavigation::STORIES,
+        // 10 Overlay
+        tip::STORIES,
+        popover::STORIES,
+        menu::STORIES,
+        pie_menu::STORIES,
+        command_palette::STORIES,
+        dialog::STORIES,
+        modal::STORIES,
+        drawer::STORIES,
+        floating_panel::STORIES,
+        tour::STORIES,
         // 11 Feedback
         alert::STORIES,
         toast::STORIES,
@@ -323,12 +341,8 @@ pub fn tables() -> &'static [&'static [Story]] {
         spinner::STORIES,
         placeholder::STORIES,
         empty_state::STORIES,
-        tour::STORIES,
         kanban::STORIES,
-        toolbar::STORIES,
         chart_more::STORIES,
-        pie_menu::STORIES,
-        command_palette::STORIES,
         chat::STORIES,
         timeline::STORIES,
         table::STORIES,
@@ -337,30 +351,14 @@ pub fn tables() -> &'static [&'static [Story]] {
         tree::STORIES,
         filetree::STORIES,
         kbd::STORIES,
-        breadcrumb::STORIES,
         chart::STORIES,
         lists::STORIES,
-        window_chrome::STORIES,
-        overlay_messages::STORIES,
-        drop_controls::STORIES,
         data_grid::STORIES,
-        modal::STORIES,
-        floating_panel::STORIES,
-        nav_list::STORIES,
-        pagination::STORIES,
-        tabs::STORIES,
-        stacknavigation::STORIES,
         portallist::STORIES,
         tile_list::STORIES,
         item_grid::STORIES,
         log_list::STORIES,
         badge::STORIES,
-        menu::STORIES,
-        tip::STORIES,
-        dialog::STORIES,
-        drawer::STORIES,
-        overlay::STORIES,
-        popover::STORIES,
     ]
 }
 

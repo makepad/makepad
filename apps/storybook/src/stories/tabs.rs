@@ -1,5 +1,5 @@
-//! The tab stories: a strip that behaves like a browser's, and the shapes a
-//! row of choices can take when it is not one.
+//! The tab stories: a strip whose tabs share the width, shut, and carry the
+//! panel's colour, and a strip with more tabs than room.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 use std::sync::Mutex;
@@ -64,21 +64,7 @@ script_mod! {
         }
 
         StoryHeading{text: "Rows of choices that are not tabs"}
-        StoryNote{text: "Three neighbours worth telling apart. A segmented control glides a pill between peers and never grows or shrinks. A chip group is the same choice, lighter, and can hold more than one. A vertical segmented control is a rail. None of them shares its width, and that is exactly why none of them is a tab strip."}
-        StoryRow{
-            period := SegmentedControl{options: ["Day" "Week" "Month"]}
-        }
-        StoryRow{
-            filters := ChipGroup{
-                selection: Single
-                ChipFlat{text: "All" selectable: true appearance: Outline}
-                ChipFlat{text: "Open" selectable: true appearance: Outline}
-                ChipFlat{text: "Done" selectable: true appearance: Outline}
-            }
-        }
-        StoryRow{
-            SegmentedControlVertical{options: ["North" "East" "South"]}
-        }
+        StoryNote{text: "A row of choices that does not share its width is not a tab strip: the segmented controls are on Actions > ButtonGroup and the chip group on Selection > Chip."}
     }
 }
 
@@ -193,7 +179,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "TabsOverview",
     added: "2026-09-07",
     tags: &["new"],
-    doc: "# Tabs\n\nTabs are not a row of buttons, and the difference is one rule: **they share the width**. They are as wide as they can be up to a maximum, and they shrink together as more arrive rather than running off the edge. A segmented control never does that, which is why a segmented control never reads as tabs however it is painted.\n\nThree more things follow from taking that seriously.\n\n**A tab can be shut, and the mark for it appears when it earns its room.** On every tab at all times it is noise; on none of them the strip is a dead end. It shows on the tab under the pointer, on the tab in use, and on any tab wide enough that it costs nothing. The middle button shuts one without having to aim at the mark, which is the whole reason people use it.\n\n**The tab in use belongs to the panel below it.** It is drawn in the panel's own colour, so the two read as one surface. That is what says the strip chooses what is underneath, rather than that these are buttons which happen to sit above something.\n\n**The strip owns an order that changes.** Tabs are added and shut, so the list cannot live in the markup; the host holds it and hands it over. That is why this page keeps its own list rather than declaring three children.\n\nWhat it does not do yet: a strip narrower than its floor overruns rather than scrolling, and there is no overflow menu and no scroll-the-chosen-tab-into-view. The arithmetic for the overflow split is already in the library and still has no caller.\n\nThe behaviour was lifted from a working browser chrome in this repository rather than invented. Everything particular to that browser stayed behind.",
+    doc: "# Tabs\n\nTabs are not a row of buttons, and the difference is one rule: **they share the width**. They are as wide as they can be up to a maximum, and they shrink together as more arrive rather than running off the edge. A segmented control never does that, which is why a segmented control never reads as tabs however it is painted.\n\nThree more things follow from taking that seriously.\n\n**A tab can be shut, and the mark for it appears when it earns its room.** On every tab at all times it is noise; on none of them the strip is a dead end. It shows on the tab under the pointer, on the tab in use, and on any tab wide enough that it costs nothing. The middle button shuts one without having to aim at the mark, which is the whole reason people use it.\n\n**The tab in use belongs to the panel below it.** It is drawn in the panel's own colour, so the two read as one surface. That is what says the strip chooses what is underneath, rather than that these are buttons which happen to sit above something.\n\n**The strip owns an order that changes.** Tabs are added and shut, so the list cannot live in the markup; the host holds it and hands it over. That is why this page keeps its own list rather than declaring three children.\n\nWhat it does not do yet: a strip narrower than its floor overruns rather than scrolling, and there is no overflow menu and no scroll-the-chosen-tab-into-view. The arithmetic for the overflow split is already in the library and still has no caller.",
     subject: "strip",
     feature: None,
     controls: &[],

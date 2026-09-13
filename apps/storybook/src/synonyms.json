@@ -876,26 +876,6 @@
    ]
   },
   {
-   "component": "DropControls",
-   "aka": [
-    "popover slider",
-    "popup slider",
-    "toolbar chip",
-    "popover toggles"
-   ],
-   "does": [
-    "opens below",
-    "flips above",
-    "escape closes",
-    "click outside closes",
-    "drag the value",
-    "percentage readout",
-    "value suffix",
-    "switch list",
-    "active count"
-   ]
-  },
-  {
    "component": "DropDown",
    "aka": [],
    "does": [
@@ -1808,27 +1788,6 @@
    ]
   },
   {
-   "component": "Nesting",
-   "aka": [
-    "stacked popups",
-    "popup inside a popup",
-    "menu inside a popover",
-    "lock stack",
-    "depth of popups"
-   ],
-   "does": [
-    "escape closes one level",
-    "pointer grab",
-    "blocks clicks underneath",
-    "sweep lock",
-    "scroll block",
-    "stack of owners",
-    "release returns control",
-    "one press one level",
-    "multiple levels deep"
-   ]
-  },
-  {
    "component": "NumberField",
    "aka": [
     "quantity box",
@@ -1853,24 +1812,6 @@
     "unreadable text is refused",
     "the last good value comes back",
     "a suffix may be left in or typed out"
-   ]
-  },
-  {
-   "component": "OverlayMessages",
-   "aka": [
-    "notification popup"
-   ],
-   "does": [
-    "point at a control",
-    "arrow triangle",
-    "place at a position",
-    "corner popup",
-    "full width banner",
-    "intent colours",
-    "intent colors",
-    "title and detail",
-    "stays until closed",
-    "flips to stay on screen"
    ]
   },
   {
@@ -2029,7 +1970,12 @@
     "flyout",
     "hover card",
     "toggletip",
-    "anchored panel"
+    "anchored panel",
+    "stacked popups",
+    "popup inside a popup",
+    "menu inside a popover",
+    "lock stack",
+    "depth of popups"
    ],
    "does": [
     "anchor to a control",
@@ -2047,7 +1993,16 @@
     "tab cycles inside",
     "match anchor width",
     "confirm and cancel",
-    "danger styling"
+    "danger styling",
+    "escape closes one level",
+    "pointer grab",
+    "blocks clicks underneath",
+    "sweep lock",
+    "scroll block",
+    "stack of owners",
+    "release returns control",
+    "one press one level",
+    "multiple levels deep"
    ]
   },
   {
@@ -2952,7 +2907,11 @@
     "error colour",
     "error color",
     "instant follow",
-    "one overlay layer"
+    "one overlay layer",
+    "point at a control",
+    "arrow triangle",
+    "place at a position",
+    "flips to stay on screen"
    ]
   },
   {
@@ -2997,7 +2956,11 @@
     "action bar",
     "title strip",
     "button row",
-    "bottom bar"
+    "bottom bar",
+    "popover slider",
+    "popup slider",
+    "toolbar chip",
+    "popover toggles"
    ],
    "does": [
     "two fixed ends and a middle that takes what is left",
@@ -3012,7 +2975,16 @@
     "lift at one threshold and settle at a lower one",
     "the host reports its own scroll offset",
     "a slot takes a value and not a named child",
-    "it never collapses or folds what is in it"
+    "it never collapses or folds what is in it",
+    "opens below",
+    "flips above",
+    "escape closes",
+    "click outside closes",
+    "drag the value",
+    "percentage readout",
+    "value suffix",
+    "switch list",
+    "active count"
    ]
   },
   {
@@ -3306,7 +3278,7 @@
     "drops open under its title",
     "arrow keys walk the entries",
     "enable and disable an entry",
-    "cmd maps to ctrl off mac",
+    "cmd maps to ctrl on other platforms",
     "minimise maximise close glyphs",
     "fullscreen glyph",
     "xr mode glyph",

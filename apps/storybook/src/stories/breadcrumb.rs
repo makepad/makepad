@@ -15,7 +15,7 @@ script_mod! {
         View{
             width: Fill height: Fit
             subject := Breadcrumb{
-                trail: ["Home" "Projects" "makepad" "widgets" "src"]
+                trail: ["Home" "Projects" "garden" "widgets" "src"]
             }
         }
 
@@ -26,7 +26,7 @@ script_mod! {
             draw_bg +: {color: theme.color_surface_container_low}
             narrow := Breadcrumb{
                 width: Fill
-                trail: ["Home" "Projects" "makepad" "widgets" "src" "themes" "desktop"]
+                trail: ["Home" "Projects" "garden" "widgets" "src" "themes" "desktop"]
             }
         }
         View{
@@ -34,7 +34,7 @@ script_mod! {
             draw_bg +: {color: theme.color_surface_container_low}
             tiny := Breadcrumb{
                 width: Fill
-                trail: ["Home" "Projects" "makepad" "widgets" "src" "themes" "desktop"]
+                trail: ["Home" "Projects" "garden" "widgets" "src" "themes" "desktop"]
             }
         }
 
@@ -81,7 +81,7 @@ pub const STORIES: &[Story] = &[Story {
 
 Where you are, and every step back to the top.
 
-**One rule outranks the rest: the last crumb must never be the one that disappears.** A trail too long for its room has to drop something, and dropping the end tells the reader where they came from while hiding where they got to — which is the one thing the control exists to say. Both trails already in this repository broke that rule in different ways before this widget existed, so it is enforced by `breadcrumb_window`, a free function with its own tests, rather than left to each drawing.
+**One rule outranks the rest: the last crumb must never be the one that disappears.** A trail too long for its room has to drop something, and dropping the end tells the reader where they came from while hiding where they got to — which is the one thing the control exists to say. So the rule is enforced by `breadcrumb_window`, a free function with its own tests, rather than left to each drawing.
 
 What folds is the middle. The root stays while it can be afforded alongside the mark and the leaf, because the top of the tree is the other end people navigate to; squeezed harder than that the root goes as well, and only where you are is left.
 

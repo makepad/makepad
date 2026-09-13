@@ -57,6 +57,9 @@ script_mod! {
 
         StoryHeading{text: "They report what changed, not that something did"}
         StoryNote{text: "The slider reports its value, the toggles report which one moved and which way, and the drop-down reports the index it settled on. The label above follows all three."}
+
+        StoryHeading{text: "A list anywhere but a bar"}
+        StoryNote{text: "DropDown2 is sized for a bar. Choosing one value from a list on a page or in a form is Selection > Select."}
     }
 }
 
@@ -85,11 +88,11 @@ fn drop_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/dropcontrols/overview",
-    category: "Inputs",
-    component: "DropControls",
+    key: "navigation/toolbar/drop-controls",
+    category: "Navigation",
+    component: "Toolbar",
     also: &["DropSlider", "DropToggles", "DropDown2"],
-    name: "Overview",
+    name: "Drop controls",
     dsl: "DropControlsOverview",
     added: "2026-02-12",
     tags: &[],
@@ -102,6 +105,8 @@ Three controls shaped for a crowded toolbar. Each is a small chip that opens a p
 That is also why the chips are so small. `DropSlider` takes `min`, `max`, `default`, a `display_scale` for showing a fraction as a percentage, and a `suffix`; the number it shows is the value, and the popover is where you set it.
 
 They report what changed rather than that something did: `changed` on the slider gives the value, `toggled` on the switches gives which one moved and which way, `changed` on the drop-down gives the index it settled on.
+
+`DropDown2` is sized for a bar. Choosing one value from a list on a page or in a form is Selection > Select.
 
 Their colours are literals rather than theme tokens, in the same way the charts and the data grid are — a caller wanting them to match a light page has to restate them.",
     subject: "level",

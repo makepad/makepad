@@ -103,11 +103,11 @@ fn window_chrome_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "navigation/windowchrome/overview",
+    key: "navigation/toolbar/window-chrome",
     category: "Navigation",
-    component: "WindowChrome",
-    also: &["MenuBar", "DesktopButton"],
-    name: "Overview",
+    component: "Toolbar",
+    also: &["MenuBar", "DesktopButton", "WindowChrome"],
+    name: "Window chrome",
     dsl: "WindowChromeOverview",
     added: "2025-05-06",
     tags: &[],
@@ -121,7 +121,7 @@ Menus are **declared, not built**: `menus` takes a list of `{label, items}`, and
 
 `set_menus` replaces the lot at runtime and `set_enabled` greys one item, which is how a host keeps *Undo* dead until there is something to undo.
 
-**A shortcut string is not the same key press everywhere.** `Cmd` means the logo modifier on macOS and Ctrl on every other platform — the same chord, a different key, resolved by the bar rather than by the caller. And a focused text editor takes an editing shortcut *before* the menu bar does, so Cmd+Z in a text field undoes the typing rather than the document.
+**A shortcut string is not the same key press everywhere.** `Cmd` means the logo key on a platform whose shortcuts are built on it and Ctrl everywhere else — the same chord, a different key, resolved by the bar rather than by the caller. And a focused text editor takes an editing shortcut *before* the menu bar does, so Cmd+Z in a text field undoes the typing rather than the document.
 
 ## DesktopButton
 
