@@ -1556,6 +1556,21 @@ pub unsafe fn to_java_copy_to_clipboard(content: String) {
     );
 }
 
+/// Fire the system share sheet (`MakepadActivity.shareText`, an `ACTION_SEND`
+/// chooser) with `content`.
+pub unsafe fn to_java_share_text(content: String) {
+    let env = attach_jni_env();
+    let content = new_java_string(env, &content);
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "shareText",
+        "(Ljava/lang/String;)V",
+        content
+    );
+    (**env).DeleteLocalRef.unwrap()(env, content);
+}
+
 pub unsafe fn to_java_paste_from_clipboard() -> String {
     let env = attach_jni_env();
     let result = ndk_utils::call_object_method!(
