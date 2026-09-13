@@ -45,6 +45,7 @@ pub mod kbd;
 pub mod wheel_picker;
 pub mod typography;
 pub mod tree;
+pub mod filetree;
 pub mod list_item;
 pub mod avatar;
 pub mod card;
@@ -129,7 +130,6 @@ pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
 pub mod log_list;
-pub mod filetree;
 pub mod rotary;
 pub mod video;
 
@@ -172,6 +172,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     avatar::script_mod(vm);
     list_item::script_mod(vm);
     tree::script_mod(vm);
+    filetree::script_mod(vm);
     typography::script_mod(vm);
     wheel_picker::script_mod(vm);
     kbd::script_mod(vm);
@@ -237,7 +238,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
     log_list::script_mod(vm);
-    filetree::script_mod(vm);
     spinner::script_mod(vm);
     rotary::script_mod(vm);
     video::script_mod(vm);
@@ -303,6 +303,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         avatar::STORIES,
         list_item::STORIES,
         tree::STORIES,
+        filetree::STORIES,
         typography::STORIES,
         wheel_picker::STORIES,
         kbd::STORIES,
@@ -368,7 +369,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         tile_list::STORIES,
         item_grid::STORIES,
         log_list::STORIES,
-        filetree::STORIES,
         spinner::STORIES,
         rotary::STORIES,
         video::STORIES,

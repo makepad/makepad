@@ -1,6 +1,7 @@
-//! The tree story: rows that fold, an indent you can trace by eye, boxes
-//! that cascade, and the keyboard walk that makes a deep tree usable
-//! without the mouse.
+//! The tree component's overview: the general tree, with rows that fold,
+//! an indent you can trace by eye, boxes that cascade, and the keyboard
+//! walk that makes a deep tree usable without the mouse. The component's
+//! other page, the file browser, is `filetree.rs`.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -9,7 +10,7 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.TreeViewOverview = StoryPage{
+    mod.stories.TreeOverview = StoryPage{
         StoryNote{text: "A tree is three things a list is not: rows that hide other rows, rows that stand at a depth, and a tick on a branch that has to say something true about the leaves under it. All three are arithmetic, and all three are what every hand-rolled tree writes again for itself."}
 
         StoryHeading{text: "Depth you can see"}
@@ -201,17 +202,17 @@ fn tree_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/tree-view/overview",
+    key: "data-display/tree/overview",
     category: "Data display",
-    component: "TreeView",
-    also: &[],
+    component: "Tree",
+    also: &["TreeView"],
     name: "Overview",
-    dsl: "TreeViewOverview",
+    dsl: "TreeOverview",
     added: "2026-09-10",
     tags: &["new"],
     doc: "# TreeView
 
-Nested rows that fold: an indent guide, a fold mark, an optional glyph and a label.
+The general tree: nested rows that fold, with an indent guide, a fold mark, an optional glyph and a label. The Files page beside this one is the file browser, FileTree, which draws folders and files from a model the host walks; this one takes an outline as text and is for a hierarchy of anything.
 
 **The arithmetic is separate from the drawing.** `visible_rows`, `tick_of`, `cascade_tick` and `selection_for_click` are free functions with their own tests, and the widget is only their painting. Folding re-flattens an index; it never creates or destroys anything.
 
@@ -223,7 +224,7 @@ Nested rows that fold: an indent guide, a fold mark, an optional glyph and a lab
 
 **Marks are rectangles, boxes and circles.** The fold mark is a plus and a minus, the tick is a dot and a dash. Small marks drawn as shader paths do not paint reliably here, and a mark that is sometimes missing is worse than a plain one that is always there.
 
-What it deliberately does NOT do: no virtualisation and no scrolling of its own (every visible row draws every pass, which is honest up to a few hundred rows — past that, put your own list around it), no drag, no rename, no context menu, and no data source. The file tree next door is the browser; this is the general one.",
+What it deliberately does NOT do: no virtualisation and no scrolling of its own (every visible row draws every pass, which is honest up to a few hundred rows — past that, put your own list around it), no drag, no rename, no context menu, and no data source. The Files page beside this one is the browser; this is the general one.",
     subject: "subject",
     feature: None,
     controls: &[
@@ -236,3 +237,72 @@ What it deliberately does NOT do: no virtualisation and no scrolling of its own 
     ],
     on_actions: Some(tree_actions),
 }];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Cx` with this crate's theme, the shared page templates and this
+    /// file's own story registered, and nothing else: a failure here is
+    /// this page's, not some other story's.
+    fn shell() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            self::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+        });
+        cx
+    }
+
+    fn build(cx: &mut Cx, dsl: &str) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let stories = vm.module(id!(stories));
+            let value = vm.bx.heap.value(stories, LiveId::from_str(dsl).into(), NoTrap);
+            assert!(value.as_object().is_some(), "no template {dsl}");
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The page is built from the DSL, which the Rust compiler never reads:
+    /// the record's template name and the ids the controls panel and the
+    /// action handler address are strings, and a wrong one is a page that
+    /// opens empty or a label that never changes, with no error anywhere.
+    /// The page moved under a new component and its template was renamed
+    /// with it, so every one of those strings is asked for here.
+    #[test]
+    fn the_page_builds_and_every_addressed_id_is_on_it() {
+        let mut cx = shell();
+        for story in STORIES {
+            let page = build(&mut cx, story.dsl);
+            assert!(!page.is_empty(), "{} built no widget", story.key);
+            assert_eq!(
+                makepad_platform::shader_error::take(),
+                None,
+                "{}: a draw shader failed to compile",
+                story.key
+            );
+            let addressed = std::iter::once(story.subject)
+                .chain(story.controls.iter().map(|c| c.target))
+                .chain(["folds", "fold_state", "many", "picked", "boxes", "counted", "keyed"])
+                .filter(|t| !t.is_empty());
+            for target in addressed {
+                assert!(
+                    !page.widget(&cx, &[LiveId::from_str(target)]).is_empty(),
+                    "{}: no widget at {}",
+                    story.key,
+                    target
+                );
+            }
+            for tree in ["subject", "folds", "many", "boxes", "keyed"] {
+                assert!(
+                    page.widget(&cx, &[LiveId::from_str(tree)]).borrow::<TreeView>().is_some(),
+                    "{}: {} is not a TreeView",
+                    story.key,
+                    tree
+                );
+            }
+        }
+    }
+}

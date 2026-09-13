@@ -3054,7 +3054,7 @@
    ]
   },
   {
-   "component": "TreeView",
+   "component": "Tree",
    "aka": [
     "folder outline",
     "nested rows",
