@@ -95,6 +95,7 @@ pub use makepad_live_id::*;
 pub use makepad_script_derive::*;
 pub use object::*;
 pub use string::*;
+pub use string_heap::*;
 pub use thread::*;
 pub use traits::*;
 pub use trap::*;
