@@ -222,6 +222,24 @@ pub trait WidgetNode: ScriptApply {
     }
 }
 
+/// One target a widget draws for itself — a bar item, a panel row, a line in
+/// a stack — reported to the test tree as a row of its own, so a test can find
+/// and press it the way it presses a button. The tree only knows widget
+/// nodes; without this, anything drawn in Rust rather than built from child
+/// widgets is invisible to `/snap`.
+#[derive(Clone, Debug)]
+pub struct SnapshotPart {
+    pub id: LiveId,
+    /// The row's type in the tree, e.g. "PillNavItem".
+    pub widget_type: &'static str,
+    /// Window-local layout points, already clipped to what is on screen.
+    pub rect: Rect,
+    pub text: String,
+    /// The part is the current / chosen one.
+    pub selected: bool,
+    pub enabled: bool,
+}
+
 pub trait Widget: WidgetNode {
     fn handle_event_with(
         &mut self,
@@ -361,6 +379,12 @@ pub trait Widget: WidgetNode {
     /// selection also becomes the row's `text`, as a drop-down's does.
     fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
         None
+    }
+
+    /// The targets this widget draws for itself, each reported to the test
+    /// tree as a row after the widget's own. Default: none.
+    fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
+        Vec::new()
     }
 
     fn ref_cast_type_id(&self) -> TypeId
@@ -1284,6 +1308,13 @@ impl WidgetRef {
             return inner.widget.snapshot_selected(cx);
         }
         None
+    }
+
+    pub fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_parts(cx);
+        }
+        Vec::new()
     }
 
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {

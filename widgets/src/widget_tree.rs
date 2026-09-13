@@ -7,7 +7,7 @@ use {
     crate::makepad_platform::studio::WidgetSnapshot,
     crate::radio_button::RadioButton,
     crate::text_input::TextInput,
-    crate::widget::{WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
+    crate::widget::{SnapshotPart, WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
     crate::widget_async::update_global_ui_handle,
     crate::window::Window,
     std::any::TypeId,
@@ -67,6 +67,45 @@ pub(crate) fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
         widget_type_names.insert(*type_id, info.name);
     }
     widget_type_names
+}
+
+/// The rows a widget's drawn parts add to the snapshot, in the window of the
+/// widget that drew them. A part is only as visible as the widget it belongs
+/// to: a hidden bar's items must not look pressable to a test. Parts with no
+/// size are left out, as a dock header with no size is.
+fn snapshot_part_rows(
+    parts: Vec<SnapshotPart>,
+    node_visible: bool,
+    window_id: &str,
+    window_index: usize,
+    offset: (i64, i64),
+) -> Vec<WidgetSnapshot> {
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let width = part.rect.size.x.round() as i64;
+            let height = part.rect.size.y.round() as i64;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            Some(WidgetSnapshot {
+                id: live_id_token(part.id),
+                widget_type: part.widget_type.to_string(),
+                window_id: window_id.to_string(),
+                window_index,
+                visible: node_visible,
+                enabled: part.enabled,
+                x: part.rect.pos.x.round() as i64 + offset.0,
+                y: part.rect.pos.y.round() as i64 + offset.1,
+                width,
+                height,
+                selected: part.selected.then(|| part.text.clone()),
+                checked: Some(part.selected),
+                text: Some(part.text),
+                value: None,
+            })
+        })
+        .collect()
 }
 
 /// What a widget reported about itself through the `Widget` snapshot hooks.
@@ -2261,6 +2300,34 @@ impl WidgetTree {
                     }
                 }
                 dump_index += 1;
+
+                // The parts a widget draws for itself, in the shape of the
+                // dock's lines below, so a query can find an item no widget
+                // node holds. Only for a widget drawn this frame, as its own
+                // line is: parts cached from an earlier draw would give a
+                // test coordinates for something no longer on screen.
+                for part in widget.snapshot_parts(cx) {
+                    let x = part.rect.pos.x.round() as i64;
+                    let y = part.rect.pos.y.round() as i64;
+                    let w = part.rect.size.x.round() as i64;
+                    let h = part.rect.size.y.round() as i64;
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let id_token = live_id_token(part.id);
+                    if matches_query(mode, needle, &id_token, part.widget_type) {
+                        rects.push(format!(
+                            "PP {} {} {} {} {} {}",
+                            id_token, part.widget_type, x, y, w, h
+                        ));
+                        if rects.len() >= 256 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if rects.len() >= 256 {
+                break;
             }
 
             let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
@@ -2471,6 +2538,29 @@ impl WidgetTree {
                 checked: state.checked,
                 selected: state.selected,
             });
+
+            let window_offset = window_context
+                .as_ref()
+                .map(|context| {
+                    (
+                        context.position.x.round() as i64,
+                        context.position.y.round() as i64,
+                    )
+                })
+                .unwrap_or_default();
+            widgets.extend(snapshot_part_rows(
+                widget.snapshot_parts(cx),
+                node_visible,
+                &window_context
+                    .as_ref()
+                    .map(|context| context.id.clone())
+                    .unwrap_or_default(),
+                window_context
+                    .as_ref()
+                    .map(|context| context.index)
+                    .unwrap_or_default(),
+                window_offset,
+            ));
 
             let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
             if let Some(dock_dump) = dock_dump {
@@ -4814,6 +4904,133 @@ mod tests {
             new_label_uid,
             "WidgetRef::widget should refresh the same dynamic branch that child_by_path sees"
         );
+    }
+
+    /// A widget that draws its own targets, the way a bar of items drawn
+    /// in Rust does, and reports them through the parts hook.
+    struct PartsTestWidget {
+        uid: WidgetUid,
+        area: Area,
+        parts: Vec<SnapshotPart>,
+    }
+
+    impl ScriptApply for PartsTestWidget {
+        fn script_apply(
+            &mut self,
+            _vm: &mut ScriptVm,
+            _apply: &Apply,
+            _scope: &mut Scope,
+            _value: ScriptValue,
+        ) {
+        }
+    }
+
+    impl WidgetNode for PartsTestWidget {
+        fn widget_uid(&self) -> WidgetUid {
+            self.uid
+        }
+        fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+        fn walk(&mut self, _cx: &mut Cx) -> Walk {
+            Walk::default()
+        }
+        fn area(&self) -> Area {
+            self.area
+        }
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for PartsTestWidget {
+        fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+            DrawStep::done()
+        }
+        fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
+            self.parts.clone()
+        }
+    }
+
+    fn part(id: &str, rect: Rect, text: &str, selected: bool, enabled: bool) -> SnapshotPart {
+        SnapshotPart {
+            // Through the lookup table, so the tree can spell the id back.
+            id: LiveId::from_str_with_lut(id).unwrap(),
+            widget_type: "PillNavItem",
+            rect,
+            text: text.to_string(),
+            selected,
+            enabled,
+        }
+    }
+
+    /// Items a widget draws for itself show in the test tree as rows after
+    /// the widget's own, with their type, words and state, and a query
+    /// finds them by type or id; an item with no size is left out.
+    #[test]
+    fn snapshot_reports_the_parts_a_widget_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        drop(cx.components.get_or_create::<WidgetRegistry>());
+        let (_list, area) = snapshot_area(&mut cx);
+        let parts = vec![
+            part("home", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.4, 24.6) }, "Home", true, true),
+            part("docs", Rect { pos: dvec2(72.0, 20.0), size: dvec2(50.0, 24.0) }, "Docs", false, false),
+            part("gone", Rect { pos: dvec2(130.0, 20.0), size: dvec2(0.0, 24.0) }, "Gone", false, true),
+        ];
+        let uid = WidgetUid::new();
+        let bar = WidgetRef::new_with_inner(Box::new(PartsTestWidget { uid, area, parts }));
+        let tree = WidgetTree::default();
+        tree.observe_node(uid, LiveId::from_str_with_lut("bar").unwrap(), bar.clone(), None);
+
+        let rows = tree.snapshot(&cx);
+        assert_eq!(rows.len(), 3, "the widget and its two parts with a size");
+        assert_eq!(rows[0].id, "bar");
+        let home = &rows[1];
+        assert_eq!((home.id.as_str(), home.widget_type.as_str()), ("home", "PillNavItem"));
+        assert_eq!((home.x, home.y, home.width, home.height), (10, 20, 60, 25));
+        assert_eq!(home.text.as_deref(), Some("Home"));
+        assert_eq!(home.checked, Some(true));
+        assert_eq!(home.selected.as_deref(), Some("Home"));
+        assert_eq!(home.value, None);
+        assert!(home.visible && home.enabled);
+        let docs = &rows[2];
+        assert_eq!((docs.id.as_str(), docs.text.as_deref()), ("docs", Some("Docs")));
+        assert_eq!((docs.checked, docs.selected.as_deref()), (Some(false), None));
+        assert!(docs.visible && !docs.enabled);
+
+        assert_eq!(
+            tree.query_rects(&cx, "type:PillNavItem"),
+            vec!["PP home PillNavItem 10 20 60 25", "PP docs PillNavItem 72 20 50 24"]
+        );
+        assert_eq!(tree.query_rects(&cx, "id:docs"), vec!["PP docs PillNavItem 72 20 50 24"]);
+        drop(bar);
+    }
+
+    /// A widget not drawn this frame has no line in a query, and its parts
+    /// none either: rects cached from an earlier draw would send a test to
+    /// press something no longer on screen.
+    #[test]
+    fn a_widget_not_drawn_this_frame_reports_no_parts() {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        drop(cx.components.get_or_create::<WidgetRegistry>());
+        let parts = vec![part("stale", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.0, 24.0) }, "Stale", false, true)];
+        let uid = WidgetUid::new();
+        let bar = WidgetRef::new_with_inner(Box::new(PartsTestWidget { uid, area: Area::Empty, parts }));
+        let tree = WidgetTree::default();
+        tree.observe_node(uid, LiveId::from_str_with_lut("bar").unwrap(), bar.clone(), None);
+        assert!(tree.query_rects(&cx, "type:PillNavItem").is_empty());
+        assert!(tree.query_rects(&cx, "id:stale").is_empty());
+        drop(bar);
+    }
+
+    /// A part sits in its widget's window: the window's offset is added as
+    /// it is to the widget's own row, and a hidden widget's parts are hidden.
+    #[test]
+    fn snapshot_parts_take_their_window_and_visibility_from_the_widget() {
+        let parts = vec![part("home", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.0, 24.0) }, "Home", false, true)];
+        let rows = snapshot_part_rows(parts.clone(), true, "main_window", 2, (100, 50));
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].x, rows[0].y), (110, 70));
+        assert_eq!((rows[0].window_id.as_str(), rows[0].window_index), ("main_window", 2));
+        assert!(rows[0].visible);
+        let hidden = snapshot_part_rows(parts, false, "main_window", 2, (100, 50));
+        assert!(!hidden[0].visible, "a hidden widget's items are not pressable");
     }
 
     fn plain_fallback(text: &str) -> SnapshotFallback {
