@@ -2016,7 +2016,7 @@ mod imp {
              /d                whole widget tree as indented text (id, type, x y w h)\n\
              /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
              /handsoff?on=1|0  a red frame round the window: the bridge is driving, hands off. it lights by itself for 3s after any /m /k /t\n\
-             /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
+             /tweak/state      selection + its editable properties + diff log + annotations + asks waiting on the source (renames; converts: grid, flex, dock with its \"do\"), one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
              /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
