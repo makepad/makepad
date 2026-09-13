@@ -59,7 +59,17 @@ script_mod! {
             a: View{
                 width: Fill
                 height: Fill
+                flow: Down
                 navigator := mod.storybook.StoryNavigator{}
+                // What the switches keep out of the tree for the search
+                // in the box, so a search that finds nothing says why.
+                // Shown only while it has something to say.
+                hidden_note := Label{
+                    visible: false
+                    width: Fill
+                    padding: theme.mspace_2
+                    text: ""
+                }
             }
             b: Splitter{
                 axis: SplitterAxis.Horizontal
@@ -210,10 +220,16 @@ impl App {
 
     /// How many stories the search text picks out, and which one the
     /// arrows are on. Empty while the box is empty: a count of nothing
-    /// beside an empty box is noise.
+    /// beside an empty box is noise. The line under the tree moves with
+    /// it: what the switches keep out of the same search.
     fn refresh_match_count(&self, cx: &mut Cx) {
-        let report = self.ui.story_navigator(cx, ids!(navigator)).match_report();
+        let navigator = self.ui.story_navigator(cx, ids!(navigator));
+        let report = navigator.match_report();
         self.ui.label(cx, ids!(match_count)).set_text(cx, &report);
+        let hidden = navigator.hidden_line();
+        let note = self.ui.label(cx, ids!(hidden_note));
+        note.set_text(cx, &hidden);
+        note.set_visible(cx, !hidden.is_empty());
     }
 
     fn refresh_new_count(&self, cx: &mut Cx) {
@@ -424,6 +440,10 @@ impl AppMain for App {
                 self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
             }
             self.refresh_new_count(cx);
+            // The match count and the hidden-matches line under the
+            // tree were rebuilt blank too; without this a filtered tree
+            // says nothing about why after a theme switch.
+            self.refresh_match_count(cx);
         }
     }
 }
