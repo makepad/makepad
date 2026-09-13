@@ -31,6 +31,7 @@
 //! quantity of things wants it to stay at the top. Stopping is the default,
 //! since wrapping a count is how a form ends up ordering none of something.
 use crate::{
+    animator::{Animate, AnimatorImpl},
     badge::measure,
     widget_tree::CxWidgetExt,
     makepad_derive_widget::*,
@@ -60,7 +61,13 @@ script_mod! {
 
         draw_text +: {
             color: theme.color_text
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+            color_disabled: uniform(theme.color_text_disabled)
             text_style: theme.font_regular{font_size: 8., line_spacing: 1.0}
+            get_color: fn() {
+                return self.color.mix(self.color_disabled, self.disabled)
+            }
         }
 
         draw_bg +: {
@@ -80,7 +87,9 @@ script_mod! {
             color: uniform(theme.color_surface_container)
             color_hover: uniform(theme.color_surface_container_high)
             color_down: uniform(theme.color_surface_container_highest)
+            color_disabled: uniform(theme.color_inset_disabled)
             rule_color: uniform(theme.color_bevel)
+            rule_color_disabled: uniform(theme.color_bevel_disabled)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -89,19 +98,31 @@ script_mod! {
                 let mid = floor(h * 0.5)
 
                 // The two halves are lit separately, so the pointer says
-                // which way a press would go before it goes.
-                let upper_hot = max(0.0, self.hot)
-                let lower_hot = max(0.0, -self.hot)
-                let upper_down = max(0.0, self.down)
-                let lower_down = max(0.0, -self.down)
+                // which way a press would go before it goes. Disabled, neither
+                // lights: there is nowhere a press would go.
+                let live = 1.0 - self.disabled
+                let upper_hot = max(0.0, self.hot) * live
+                let lower_hot = max(0.0, -self.hot) * live
+                let upper_down = max(0.0, self.down) * live
+                let lower_down = max(0.0, -self.down) * live
 
                 sdf.rect(0.0, 0.0, w, mid)
-                sdf.fill(self.color.mix(self.color_hover, upper_hot).mix(self.color_down, upper_down))
+                sdf.fill(
+                    self.color
+                        .mix(self.color_hover, upper_hot)
+                        .mix(self.color_down, upper_down)
+                        .mix(self.color_disabled, self.disabled)
+                )
                 sdf.rect(0.0, mid, w, h - mid)
-                sdf.fill(self.color.mix(self.color_hover, lower_hot).mix(self.color_down, lower_down))
+                sdf.fill(
+                    self.color
+                        .mix(self.color_hover, lower_hot)
+                        .mix(self.color_down, lower_down)
+                        .mix(self.color_disabled, self.disabled)
+                )
 
                 sdf.rect(0.0, mid - self.rule * 0.5, w, self.rule)
-                sdf.fill(self.rule_color)
+                sdf.fill(self.rule_color.mix(self.rule_color_disabled, self.disabled))
 
                 return sdf.result
             }
@@ -147,6 +168,7 @@ script_mod! {
             color_disabled: uniform(theme.color_inset_disabled)
             border_color: uniform(theme.color_bevel)
             border_color_focus: uniform(theme.color_bevel_focus)
+            border_color_disabled: uniform(theme.color_bevel_disabled)
             /** corner rounding radius 0..16 step 0.5 */
             border_radius: uniform(theme.corner_radius)
 
@@ -165,7 +187,12 @@ script_mod! {
                         .mix(self.color_focus, self.focus)
                         .mix(self.color_disabled, self.disabled)
                 )
-                sdf.stroke(self.border_color.mix(self.border_color_focus, self.focus), 1.0)
+                sdf.stroke(
+                    self.border_color
+                        .mix(self.border_color_focus, self.focus)
+                        .mix(self.border_color_disabled, self.disabled)
+                    1.0
+                )
                 return sdf.result
             }
         }
@@ -263,6 +290,15 @@ impl Widget for NumberSpin {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.draw_bg.disabled = if disabled { 1.0 } else { 0.0 };
+        if disabled {
+            // A press held when the field went off never sees its release.
+            self.held = None;
+            self.drag = None;
+            cx.stop_timer(self.repeat);
+            self.repeat = Timer::empty();
+            self.draw_bg.hot = 0.0;
+            self.draw_bg.down = 0.0;
+        }
         self.draw_bg.redraw(cx);
     }
 
@@ -271,6 +307,8 @@ impl Widget for NumberSpin {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_text
+            .set_dyn_instance(cx.cx, id!(disabled), &[self.draw_bg.disabled]);
         self.draw_bg.begin(cx, walk, self.layout);
         let rect = cx.turtle().rect();
         let size = self.draw_text.text_style.font_size as f64;
@@ -445,25 +483,119 @@ pub struct NumberField {
 }
 
 impl ScriptHook for NumberField {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        self.value = self.value.clamp(self.min, self.max);
+    /// Any apply but an animation frame may have changed what the box should
+    /// say or whether the field takes input: `suffix`, `precision`,
+    /// `disabled`. The text is only written when the value changes and the
+    /// parts only hear about `disabled` when they are told, so without this
+    /// an edit to either reached the widget and never reached the screen.
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if apply.is_animate() {
+            return;
+        }
+        // A field that is new or reloaded is shown the way it is; one
+        // changed while on screen moves to its new look.
+        let animate = if apply.is_eval() { Animate::Yes } else { Animate::No };
         vm.with_cx_mut(|cx| {
-            self.write_text(cx);
-            if self.disabled {
-                self.input.set_disabled(cx, true);
-                self.spin.set_disabled(cx, true);
+            if apply.is_new() {
+                self.value = self.value.clamp(self.min, self.max);
             }
+            self.refresh_text(cx);
+            self.sync_disabled(cx, animate);
         });
     }
 }
 
+/// The text a field shows for a value: `precision` decimals, then the
+/// suffix exactly as it was given, leading space and all.
+fn readout(value: f64, precision: usize, suffix: &str) -> String {
+    format!("{:.*}{}", precision, value, suffix)
+}
+
+/// What an apply writes into the box, if anything: the readout, when that is
+/// not what the box last showed. Nothing while somebody is typing: the
+/// characters are theirs until they commit or abandon them, and either one
+/// writes the readout with whatever the suffix is by then.
+fn text_after_apply(shown: &str, readout: &str, editing: bool) -> Option<String> {
+    if editing || shown == readout {
+        None
+    } else {
+        Some(readout.to_string())
+    }
+}
+
+/// Whether an event goes on to the box and the step buttons. Disabled, only
+/// two do. The frame clock, because the box dims by animating and an
+/// animation that never sees a frame never gets there. And the box losing
+/// the keyboard, which disabling takes from it, so its caret and focus ring
+/// go too. No press, key or character gets through.
+fn reaches_parts(disabled: bool, event: &Event) -> bool {
+    !disabled || matches!(event, Event::NextFrame(_) | Event::KeyFocusLost(_))
+}
+
 impl NumberField {
     fn format(&self) -> String {
-        format!("{:.*}{}", self.precision, self.value, self.suffix)
+        readout(self.value, self.precision, &self.suffix)
     }
 
     fn input(&self) -> WidgetRef {
         self.input.clone()
+    }
+
+    /// Somebody is typing in the box. Both are asked: `focused` is only
+    /// news the box sent, and a new field's empty area would otherwise
+    /// count as holding the keyboard when nothing does.
+    fn editing(&self, cx: &Cx) -> bool {
+        self.focused && self.input.key_focus(cx)
+    }
+
+    /// Write the readout into the box after an apply, unless it is being
+    /// typed in.
+    fn refresh_text(&mut self, cx: &mut Cx) {
+        let readout = self.format();
+        if let Some(text) = text_after_apply(&self.shown, &readout, self.editing(cx)) {
+            self.input().as_text_input().set_text(cx, &text);
+            self.shown = text;
+        }
+    }
+
+    /// Bring the box and the step buttons in line with `disabled`, and take
+    /// the keyboard from a field that has just stopped taking input: what
+    /// was half typed is dropped and the readout put back, as Escape would.
+    fn sync_disabled(&mut self, cx: &mut Cx, animate: Animate) {
+        if self.spin.disabled(cx) != self.disabled {
+            self.spin.set_disabled(cx, self.disabled);
+        }
+        if self.input.disabled(cx) != self.disabled {
+            match animate {
+                Animate::Yes => self.input.set_disabled(cx, self.disabled),
+                Animate::No => {
+                    if let Some(mut input) = self.input.as_text_input().borrow_mut() {
+                        let state = if self.disabled {
+                            ids!(disabled.on)
+                        } else {
+                            ids!(disabled.off)
+                        };
+                        input.animator_cut(cx, state);
+                    }
+                }
+            }
+        }
+        if self.disabled {
+            if self.editing(cx) {
+                cx.set_key_focus(Area::Empty);
+                self.shown.clear();
+                self.write_text(cx);
+            }
+            self.focused = false;
+            self.body_drag = None;
+        }
+        self.draw_bg.redraw(cx);
     }
 
     fn write_text(&mut self, cx: &mut Cx) {
@@ -561,8 +693,7 @@ impl NumberField {
 impl Widget for NumberField {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
-        self.input.set_disabled(cx, disabled);
-        self.spin.set_disabled(cx, disabled);
+        self.sync_disabled(cx, Animate::Yes);
     }
 
     fn disabled(&self, _cx: &Cx) -> bool {
@@ -570,10 +701,15 @@ impl Widget for NumberField {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_bg.set_uniform(cx.cx, id!(hover), &[if self.hovered { 1.0 } else { 0.0 }]);
-        self.draw_bg.set_uniform(cx.cx, id!(focus), &[if self.focused { 1.0 } else { 0.0 }]);
-        self.draw_bg
-            .set_uniform(cx.cx, id!(disabled), &[if self.disabled { 1.0 } else { 0.0 }]);
+        // Per-instance values, not uniforms. The shader declares all three
+        // as plain numbers, which makes them instance fields, and
+        // `set_uniform` on a name with no uniform behind it writes nothing:
+        // the box never lit under the pointer, never showed focus and never
+        // dimmed.
+        let flag = |on: bool| [if on { 1.0 } else { 0.0 }];
+        self.draw_bg.set_dyn_instance(cx.cx, id!(hover), &flag(self.hovered));
+        self.draw_bg.set_dyn_instance(cx.cx, id!(focus), &flag(self.focused));
+        self.draw_bg.set_dyn_instance(cx.cx, id!(disabled), &flag(self.disabled));
 
         self.draw_bg.begin(cx, walk, self.layout);
         let rect = cx.turtle().rect();
@@ -601,13 +737,18 @@ impl Widget for NumberField {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.disabled {
+        if !reaches_parts(self.disabled, event) {
             return;
         }
         let actions = cx.capture_actions(|cx| {
             self.input.handle_event(cx, event, scope);
             self.spin.handle_event(cx, event, scope);
         });
+        // What got through to a disabled field's parts was only ever there to
+        // let them settle; the field itself does nothing with it.
+        if self.disabled {
+            return;
+        }
         for action in actions {
             match action.as_widget_action().cast() {
                 NumberSpinAction::Step(steps) => {
@@ -748,6 +889,7 @@ impl NumberFieldRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
 
     /// The bounding and rounding on their own, without a script heap.
     struct Bounds {
@@ -816,11 +958,204 @@ mod tests {
     }
 
     #[test]
+    fn the_readout_is_the_value_at_its_precision_then_the_suffix() {
+        assert_eq!(readout(12.0, 0, ""), "12");
+        assert_eq!(readout(0.3, 2, "%"), "0.30%");
+        assert_eq!(readout(72.5, 1, " kg"), "72.5 kg");
+    }
+
+    #[test]
+    fn an_apply_that_changes_nothing_writes_nothing() {
+        // Writing the same text again would put the caret back at the end.
+        assert_eq!(text_after_apply("1 pcs", "1 pcs", false), None);
+    }
+
+    #[test]
+    fn an_apply_leaves_an_edit_in_progress_alone() {
+        let text = readout(1.0, 0, " pcs");
+        assert_eq!(text_after_apply("17", &text, true), None);
+    }
+
+    fn press() -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: dvec2(10.0, 10.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(0, 0),
+            modifiers: Default::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    #[test]
+    fn a_disabled_field_passes_no_press_key_or_character_to_its_parts() {
+        let character = Event::TextInput(TextInputEvent {
+            input: "7".to_string(),
+            ..Default::default()
+        });
+        for event in [
+            press(),
+            Event::KeyDown(KeyEvent::default()),
+            Event::KeyUp(KeyEvent::default()),
+            character,
+        ] {
+            assert!(!reaches_parts(true, &event), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_field_still_gives_its_parts_the_frame_clock() {
+        // The box dims by animating, and an animation only moves on frames:
+        // withheld, the box never reached its disabled look.
+        assert!(reaches_parts(true, &Event::NextFrame(NextFrameEvent::default())));
+    }
+
+    #[test]
+    fn a_disabled_field_lets_its_box_hear_that_it_lost_the_keyboard() {
+        // Disabling takes the keyboard away; the box has to be told, or its
+        // caret and focus ring stay on.
+        let lost = Event::KeyFocusLost(KeyFocusEvent { prev: Area::Empty, focus: Area::Empty });
+        assert!(reaches_parts(true, &lost));
+    }
+
+    #[test]
+    fn an_enabled_field_passes_everything_on() {
+        assert!(reaches_parts(false, &press()));
+        assert!(reaches_parts(false, &Event::KeyDown(KeyEvent::default())));
+        assert!(reaches_parts(false, &Event::NextFrame(NextFrameEvent::default())));
+    }
+
+    #[test]
     fn the_stored_value_is_the_one_that_is_shown() {
         // Rounding to the shown precision, so a field displaying 0.30 does
         // not hold 0.30000000000000004 and hand it to its host.
         let b = Bounds { min: 0.0, max: 1.0, wrap: false, precision: 2 };
         assert_eq!(b.quantize(0.1 + 0.2), 0.3);
         assert_eq!(b.quantize(0.005), 0.01);
+    }
+
+    // The tests below build a whole field from the library's default, apply to
+    // it the way the catalogue's controls do, draw it and hand it frames. The
+    // ones above check the rules; these check that the rules reach the screen.
+
+    const FIELD: DVec2 = dvec2(140.0, 24.0);
+
+    fn new_field(cx: &mut Cx) -> NumberField {
+        cx.with_vm(crate::script_mod);
+        cx.with_vm(NumberField::script_new_with_default)
+    }
+
+    /// One draw of the field on its own, in the pass and draw list the test
+    /// keeps.
+    fn draw(cx: &mut Cx, field: &mut NumberField, pass: &DrawPass, list: &mut DrawList2d) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(FIELD, Layout::flow_down());
+        let _ = field.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(FIELD.x, FIELD.y));
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// An instance value as the last draw left it in the buffer behind
+    /// `area`, which is what the GPU is handed. A value written anywhere
+    /// else, such as a uniform the shader never declared, does not show here.
+    fn drawn(cx: &Cx, area: Area, name: LiveId) -> Option<f32> {
+        let inst = area.valid_instance(cx)?;
+        let item = &cx.draw_lists[inst.draw_list_id].draw_items[inst.draw_item_id];
+        let shader = &cx.draw_shaders[item.kind.draw_call()?.draw_shader_id.index];
+        let input = shader.mapping.instances.inputs.iter().find(|input| input.id == name)?;
+        item.instances.as_ref()?.get(inst.instance_offset + input.offset).copied()
+    }
+
+    /// Frames at the given times, each one for every animation that has asked
+    /// for a frame so far, handed to the field the way a window hands them.
+    fn run_frames(cx: &mut Cx, field: &mut NumberField, times: &[f64]) {
+        for (frame, time) in times.iter().enumerate() {
+            let last = cx.new_next_frame();
+            let event = Event::NextFrame(NextFrameEvent {
+                frame: frame as u64,
+                time: *time,
+                set: (1..=last.0).map(NextFrame).collect(),
+            });
+            field.handle_event(cx, &event, &mut Scope::empty());
+        }
+    }
+
+    /// The catalogue's Suffix control on a field already showing its number:
+    /// the suffix is in the box at once, and so is a new precision. The text
+    /// used to be written only when the value changed, so both were stored and
+    /// the box went on saying "0".
+    #[test]
+    fn a_suffix_or_precision_applied_to_a_field_on_screen_is_written_into_its_box() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut field = new_field(&mut cx);
+        let text = |field: &NumberField| field.input.as_text_input().text();
+        assert_eq!(text(&field), "0");
+
+        script_apply_eval!(cx, field, { suffix: " pcs" });
+        assert_eq!(text(&field), "0 pcs");
+        script_apply_eval!(cx, field, { precision: 2 });
+        assert_eq!(text(&field), "0.00 pcs");
+    }
+
+    /// The box draws the hover, focus and disabled it holds. Its shader
+    /// declares all three as plain numbers, which makes them instance values,
+    /// and they were written as uniforms: nothing reached the buffer, so the
+    /// box never lit, never showed focus and never dimmed.
+    #[test]
+    fn the_box_draws_its_hover_focus_and_disabled_look() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut field = new_field(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, FIELD);
+        let mut list = DrawList2d::new(&mut cx);
+        let look = |cx: &Cx, field: &NumberField| {
+            [id!(hover), id!(focus), id!(disabled)]
+                .map(|name| drawn(cx, field.draw_bg.area(), name))
+        };
+
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(look(&cx, &field), [Some(0.0), Some(0.0), Some(0.0)], "at rest");
+
+        field.hovered = true;
+        field.focused = true;
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(look(&cx, &field), [Some(1.0), Some(1.0), Some(0.0)], "hovered and focused");
+
+        // Disabling takes the keyboard, so focus goes with it.
+        script_apply_eval!(cx, field, { disabled: true });
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(look(&cx, &field), [Some(1.0), Some(0.0), Some(1.0)], "disabled");
+        assert_eq!(drawn(&cx, field.spin.area(), id!(disabled)), Some(1.0), "the step column");
+    }
+
+    /// The catalogue's Disabled control on a field on screen: the text box
+    /// fades to its disabled look over the frames that follow, and back when
+    /// the field is switched on again. The fade runs on frames, and a disabled
+    /// field used to pass its parts no event at all, so the box never got
+    /// there.
+    #[test]
+    fn a_field_switched_off_on_screen_fades_its_text_box_over_the_next_frames() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut field = new_field(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, FIELD);
+        let mut list = DrawList2d::new(&mut cx);
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(drawn(&cx, field.input.area(), id!(disabled)), Some(0.0), "at rest");
+
+        script_apply_eval!(cx, field, { disabled: true });
+        run_frames(&mut cx, &mut field, &[0.0, 0.1, 0.5, 1.0]);
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(drawn(&cx, field.input.area(), id!(disabled)), Some(1.0), "switched off");
+
+        script_apply_eval!(cx, field, { disabled: false });
+        run_frames(&mut cx, &mut field, &[2.0, 2.1, 2.5, 3.0]);
+        draw(&mut cx, &mut field, &pass, &mut list);
+        assert_eq!(drawn(&cx, field.input.area(), id!(disabled)), Some(0.0), "switched on again");
     }
 }
