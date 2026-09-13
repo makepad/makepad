@@ -1,4 +1,4 @@
-//! The icon set stories: a row of font icons, ported from the widget zoo.
+//! The icon set stories: font icons that wrap with the page, ported from the widget zoo.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -8,7 +8,8 @@ script_mod! {
     use mod.storybook.*
 
     mod.stories.IconSetOverview = StoryPage{
-        flow: Right
+        // The icons wrap with the page instead of running off its right edge.
+        flow: Right{wrap: true}
         spacing: 30.
         IconSet{text: "\u{f015}" draw_text +: {color: #0ff}}
         IconSet{text: "\u{f2bd}" draw_text +: {color: #0ff}}
