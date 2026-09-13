@@ -8,8 +8,10 @@
 //! navigator shows.
 use crate::makepad_widgets::*;
 
-/// The date the catalogue was started. Every story added on or after this
-/// date counts as new until the user moves the baseline in the settings.
+/// The date the catalogue was started: how far back "new" reaches until
+/// the person sets the reach in days themselves. What the settings keep is
+/// that number of days, and the date a story is measured against is today
+/// less that reach, so it moves with the calendar rather than staying put.
 pub const DEFAULT_BASELINE: &str = "2026-09-05";
 
 pub struct Story {

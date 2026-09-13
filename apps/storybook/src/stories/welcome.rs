@@ -18,7 +18,7 @@ script_mod! {
             H4{text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, on every major desktop and mobile platform."}
             P{text: "Its shader-based architecture draws every widget on the GPU, which is what makes it fast enough for dense tools, media applications and 3D or immersive work."}
             P{text: "Live styling reflects UI code changes without recompiling or restarting, so designers and developers work in the same loop."}
-            P{text: "This catalogue lists every component of the widget library. Pick a story on the left; the panels on the right document it, let you drive its properties and show what it raised. A green dot marks a story added on or after the baseline date in the settings."}
+            P{text: "This catalogue lists every component of the widget library. Pick a story on the left; the panels on the right document it, let you drive its properties and show what it raised. A green dot marks a story whose widget arrived within the number of days set beside New only."}
         }
     }
 }
