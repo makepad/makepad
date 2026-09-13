@@ -90,7 +90,7 @@ use crate::{
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     dock::DockWidgetRefExt,
     file_tree::{FileTree, FileTreeAction},
-    fold_header::FoldHeaderWidgetRefExt,
+    fold_header::{FoldHeader, FoldHeaderWidgetRefExt},
     page_flip::PageFlipWidgetRefExt,
     label::Label,
     makepad_derive_widget::*,
@@ -104,6 +104,7 @@ use crate::{
 use crate::makepad_script::script_eval;
 use crate::Animate;
 use crate::ButtonAction;
+use crate::button::ButtonWidgetRefExt;
 use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_draw::makepad_platform::DrawShaderId;
@@ -1845,19 +1846,17 @@ pub fn window_intercept(
     if kind == PointerKind::Scroll {
         // ISOLATED: the wheel magnifies instead of scrolling. There is one
         // thing on screen and the rest is covered, so scrolling the app under
-        // it is not what the wheel is for any more.
-        let isolated = tweaker
+        // it is not what the wheel is for any more. The gate is the panel's
+        // Zoom field's, `view_focus_rule`, so the two never disagree.
+        let zooms = tweaker
             .borrow::<Tweaker>()
-            .is_some_and(|tw| tw.tree_isolate && tw.isolate_uid != 0);
-        if isolated {
+            .is_some_and(|tw| tw.view_focus_rule().controls_enabled);
+        if zooms {
             if let Event::Scroll(e) = event {
                 let step = if e.scroll.y > 0.0 { -ZOOM_WHEEL_STEP } else { ZOOM_WHEEL_STEP };
                 if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
-                    tw.view_zoom = (tw.view_zoom.max(1.0) + step).clamp(1.0, 4.0);
-                }
-                let zoom = tweaker.borrow::<Tweaker>().map(|tw| tw.view_zoom).unwrap_or(1.0);
-                let _ = zoom;
-                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    let next = tw.view_state().zoom_stepped(step);
+                    tw.set_view_state(next);
                     tw.view_focus_pending = true;
                 }
                 redraw_tweaker(cx, &tweaker);
@@ -4695,6 +4694,215 @@ fn hex_of(c: u32) -> String {
 /// The theme rows' place in `rows_uid`: no widget, the theme itself.
 const THEME_ROWS: u64 = u64::MAX;
 
+/// What the Tree tab's view controls may do, given whether a branch is
+/// isolated. Center and Zoom act on the isolated branch — they hold it in
+/// the middle of the screen and bring it closer — so without one they are
+/// inert, and the view is back at rest: nothing centred, life size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewFocusRule {
+    /// Center and Zoom take input and read as live.
+    controls_enabled: bool,
+    /// Where Center stands under the rule.
+    center: bool,
+    /// Where Zoom stands under the rule, 1..4.
+    zoom: f32,
+}
+
+fn view_focus_rule(isolated: bool, center: bool, zoom: f32) -> ViewFocusRule {
+    if isolated {
+        ViewFocusRule { controls_enabled: true, center, zoom: zoom.clamp(1.0, 4.0) }
+    } else {
+        ViewFocusRule { controls_enabled: false, center: false, zoom: 1.0 }
+    }
+}
+
+/// The Tree tab's view state: the isolation lock, and Center / Zoom, which
+/// act on what is locked. Every change goes through one of the transitions
+/// here, so the gate — no lock, no Center, no Zoom — is in one place, and
+/// the head row, the button, the field and the wheel all read it the same.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewState {
+    tree_isolate: bool,
+    isolate_uid: u64,
+    center: bool,
+    zoom: f32,
+}
+
+impl ViewState {
+    /// Is the Tree tab locked onto one branch?
+    fn isolated(&self) -> bool {
+        self.tree_isolate && self.isolate_uid != 0
+    }
+
+    fn rule(&self) -> ViewFocusRule {
+        view_focus_rule(self.isolated(), self.center, self.zoom)
+    }
+
+    /// Nothing locked, and the view at rest with it: Center off, life size.
+    fn rested(self) -> Self {
+        let rule = view_focus_rule(false, self.center, self.zoom);
+        Self { tree_isolate: false, isolate_uid: 0, center: rule.center, zoom: rule.zoom }
+    }
+
+    /// The lock checked against its target: a target that is not on screen
+    /// any more (`target_presence`) is let go, and the view rests with it.
+    /// Nothing locked, nothing to check.
+    fn settled(self, presence: TargetPresence) -> Self {
+        if self.isolated() && presence != TargetPresence::Shown {
+            self.rested()
+        } else {
+            self
+        }
+    }
+
+    /// The Center button. Inert while nothing is locked.
+    fn center_toggled(self) -> Self {
+        if !self.rule().controls_enabled {
+            return self;
+        }
+        Self { center: !self.center, ..self }
+    }
+
+    /// The Zoom field, held to 1..4. Inert while nothing is locked.
+    fn zoom_set(self, zoom: f32) -> Self {
+        if !self.rule().controls_enabled {
+            return self;
+        }
+        Self { zoom: view_focus_rule(true, self.center, zoom).zoom, ..self }
+    }
+
+    /// The wheel over the isolated view: one step of the field.
+    fn zoom_stepped(self, step: f32) -> Self {
+        self.zoom_set(self.zoom.max(1.0) + step)
+    }
+}
+
+/// Where the lock's target stands in the frame its window last drew.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TargetPresence {
+    /// On screen, or nothing says otherwise.
+    Shown,
+    /// Dropped from the widget tree: a story switched, a list rebuilt.
+    Gone,
+    /// Alive, but not in what its window last drew: its draw list was
+    /// redrawn without it, or the list hangs off no pass (a Dock page that is
+    /// not the selected tab).
+    NotDrawn,
+    /// Drawn, and shut away by a closed fold above it.
+    FoldedShut,
+}
+
+impl TargetPresence {
+    /// The log's word for it.
+    fn reason(self) -> &'static str {
+        match self {
+            TargetPresence::Shown => "is shown",
+            TargetPresence::Gone => "is gone",
+            TargetPresence::NotDrawn => "is not drawn",
+            TargetPresence::FoldedShut => "is folded shut",
+        }
+    }
+}
+
+/// What was seen of the lock's target. Everything past `in_tree` is read
+/// off the draw lists, so only between frames (`Tweaker::settle_isolation`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TargetSighting {
+    /// Still in the widget tree.
+    in_tree: bool,
+    /// It has an area that was drawn at some point, so there is something
+    /// to judge by. No area of its own, or borrowed mid-event: nothing is.
+    drawn_once: bool,
+    /// Its draw list has not been redrawn since that area was recorded.
+    current: bool,
+    /// Its draw list hangs off a pass.
+    attached: bool,
+    /// Some of it lies inside its clip.
+    shows: bool,
+    /// A fold above it is closed, done closing, and itself on screen.
+    under_shut_fold: bool,
+}
+
+/// The rule `ViewState::settled` applies. What is off screen for good lets
+/// the lock go; what is only out of sight keeps it. A widget clipped or
+/// scrolled out of a scrolling view is still drawn and scrolls back, so it
+/// holds however little of it shows, and so does a fold's body while the
+/// fold is still moving. A closed fold is the exception that needs naming:
+/// it keeps DRAWING its body, clamped to no height and scrolled away, so
+/// the body reads as drawn and only the fold says it is shut. A fold's
+/// header still shows, which is what keeps it out of that.
+fn target_presence(seen: TargetSighting) -> TargetPresence {
+    if !seen.in_tree {
+        TargetPresence::Gone
+    } else if !seen.drawn_once {
+        TargetPresence::Shown
+    } else if !seen.current || !seen.attached {
+        TargetPresence::NotDrawn
+    } else if seen.under_shut_fold && !seen.shows {
+        TargetPresence::FoldedShut
+    } else {
+        TargetPresence::Shown
+    }
+}
+
+/// Look at the lock's target: the tree, and with `in_frame` the frame too.
+fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
+    let widget = cx.widget_tree().widget(WidgetUid(uid));
+    let mut seen = TargetSighting {
+        in_tree: !widget.is_empty(),
+        drawn_once: false,
+        current: true,
+        attached: true,
+        shows: true,
+        under_shut_fold: false,
+    };
+    // Borrowed means an ancestor of this panel, mid-event: there, and its
+    // area is not to be read.
+    if !in_frame || !seen.in_tree || widget.try_widget_uid().is_none() {
+        return seen;
+    }
+    let area = widget.area();
+    let (Some(list_id), Some(redraw_id)) = (area.draw_list_id(), area.redraw_id()) else {
+        return seen;
+    };
+    seen.drawn_once = true;
+    // Stale is a list redrawn AFTER the area was recorded. The other way
+    // round is a retained list whose widget recorded where it is again (see
+    // `Area::clipped_rect_union_attached`): on screen.
+    seen.current = !cx.draw_lists.is_id_freed(list_id)
+        && cx
+            .draw_lists
+            .checked_index(list_id)
+            .is_some_and(|list| list.redraw_id <= redraw_id);
+    if !seen.current {
+        return seen;
+    }
+    seen.attached = area.is_attached(cx, &attached_lists_of(cx, &widget));
+    let has_size = |rect: Rect| rect.size.x > 0.0 && rect.size.y > 0.0;
+    seen.shows = has_size(area.clipped_rect_union(cx));
+    let mut up = cx.widget_tree().parent_of(WidgetUid(uid));
+    for _ in 0..64 {
+        let Some(at) = up else { break };
+        let ancestor = cx.widget_tree().widget(at);
+        // Borrowed: the window this panel sits in, or above it. No folds.
+        if ancestor.is_empty() || ancestor.try_widget_uid().is_none() {
+            break;
+        }
+        if ancestor.widget_type_id() == Some(std::any::TypeId::of::<FoldHeader>()) {
+            let fold = ancestor.as_fold_header();
+            if !fold.is_open(cx)
+                && fold.opened() <= 0.0
+                && has_size(ancestor.area().clipped_rect_union(cx))
+            {
+                seen.under_shut_fold = true;
+                break;
+            }
+        }
+        up = cx.widget_tree().parent_of(at);
+    }
+    seen
+}
+
 /// Selected state by fill, never by brackets in the label.
 ///
 /// ALL FIVE fills, not just the resting one. A Button's face is
@@ -4735,6 +4943,17 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
             color_2_focus: #(flat)
         }
     });
+}
+
+/// A Button live or off, as one thing. Its `enabled` is what makes it
+/// inert and its disabled track is what makes it look so, and neither
+/// drives the other; this sets both. Guarded on the track, so a sidebar
+/// redraw does not restart the fade.
+fn set_button_live(cx: &mut Cx, btn: &WidgetRef, live: bool) {
+    btn.as_button().set_enabled(cx, live);
+    if btn.disabled(cx) == live {
+        btn.set_disabled(cx, !live);
+    }
 }
 
 /// Keep the leaf visible: `…` then the last `keep` chars.
@@ -7217,6 +7436,10 @@ pub struct Tweaker {
     /// Re-check the outline suppression window when it expires.
     #[rust]
     next_frame: NextFrame,
+    /// Asked for by every draw while a branch is isolated: the event it
+    /// brings reads that frame for the target (`settle_isolation`).
+    #[rust]
+    settle_frame: NextFrame,
     /// Long-tail expansion per section ("show all (N)" clicked).
     #[rust]
     expanded: [bool; 6],
@@ -9225,6 +9448,63 @@ impl Tweaker {
         self.redraw_sidebar(cx);
     }
 
+    /// The lock and the view on it, as `ViewState` reads them.
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            tree_isolate: self.tree_isolate,
+            isolate_uid: self.isolate_uid,
+            center: self.view_center,
+            zoom: self.view_zoom,
+        }
+    }
+
+    fn set_view_state(&mut self, state: ViewState) {
+        self.tree_isolate = state.tree_isolate;
+        self.isolate_uid = state.isolate_uid;
+        self.view_center = state.center;
+        self.view_zoom = state.zoom;
+    }
+
+    /// Is the Tree tab locked onto one branch?
+    fn isolated(&self) -> bool {
+        self.view_state().isolated()
+    }
+
+    /// The view controls under the current isolation: see `view_focus_rule`.
+    fn view_focus_rule(&self) -> ViewFocusRule {
+        self.view_state().rule()
+    }
+
+    /// The lock checked against its target, once per event and per draw: a
+    /// target that is off the screen — a story switched, a page flipped, its
+    /// fold closed (`target_presence`) — is let go, and the view rests with
+    /// it, so Center and Zoom dim instead of holding a zoom on nothing. Says
+    /// whether anything moved; the caller pushes the view.
+    ///
+    /// `in_frame` reads the draw lists as well as the tree, and that is only
+    /// sound between frames: mid-draw an open list has not drawn what comes
+    /// after this panel yet, and a list links into its parent only when it
+    /// ends. So the draw asks for `settle_frame`, and the event it brings,
+    /// right after the window drew, is where the frame is read. Every other
+    /// call reads the tree alone.
+    fn settle_isolation(&mut self, cx: &mut Cx, in_frame: bool) -> bool {
+        let state = self.view_state();
+        if !state.isolated() {
+            return false;
+        }
+        let presence = target_presence(sight_target(cx, state.isolate_uid, in_frame));
+        let next = state.settled(presence);
+        if next == state {
+            return false;
+        }
+        self.set_view_state(next);
+        log!("TWEAK tree isolate off: uid {} {}", state.isolate_uid, presence.reason());
+        self.tree_scrolled_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+        true
+    }
+
     /// Push Center / Zoom down onto the view transform.
     fn apply_view_focus(&mut self, cx: &mut Cx) {
         let zoom = self.view_zoom.max(1.0);
@@ -9238,10 +9518,8 @@ impl Tweaker {
     /// The layout point the view holds in the middle of the screen, or
     /// `None` when Centre is off (the window centres on itself).
     ///
-    /// Centre acts on WHAT IS SELECTED. Isolation, when it is locked onto a
-    /// widget, is the stronger statement of "this is the subject" and wins;
-    /// otherwise it is the pin, so Centre works on its own without having to
-    /// isolate first.
+    /// Centre acts on the ISOLATED branch: it is only ever on while one is
+    /// locked (`view_focus_rule`) and goes off with the isolation.
     ///
     /// "The middle of the screen" is the middle of what is left of it — the
     /// panel band covers the right edge — but that correction belongs in
@@ -9254,11 +9532,10 @@ impl Tweaker {
         if !self.view_center {
             return None;
         }
-        let uid = if self.tree_isolate && self.isolate_uid != 0 {
-            self.isolate_uid
-        } else {
-            session().lock().unwrap().pinned.as_ref()?.uid
-        };
+        if !self.isolated() {
+            return None;
+        }
+        let uid = self.isolate_uid;
         let widget = cx.widget_tree().widget(WidgetUid(uid));
         if widget.is_empty() {
             return None;
@@ -11057,7 +11334,12 @@ impl Tweaker {
                 let head = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree_head));
                 set_button_fill(cx, head.child(live_id!(isolate)), self.tree_isolate);
                 set_button_fill(cx, head.child(live_id!(center)), self.view_center);
+                // Center and Zoom follow Isolate: live while a branch is
+                // isolated, dimmed and inert otherwise.
+                let live = self.view_focus_rule().controls_enabled;
+                set_button_live(cx, &head.child(live_id!(center)), live);
                 let zoom_field = head.child(live_id!(zoom));
+                zoom_field.as_fab_value_input().set_enabled(cx, live);
                 if zoom_field.area() == Area::Empty || !cx.has_key_focus(zoom_field.area()) {
                     // A FabValueInput holds a number, not a string: set_text
                     // leaves its own value at zero and the field reads 0.00.
@@ -13653,11 +13935,17 @@ impl Tweaker {
                 }
                 continue;
             }
+            // Center and Zoom act on the isolated branch. Without one the
+            // controls are off; an action that still arrives (a remote edit
+            // by uid) is dropped the same way.
             if self.view_center_uid != 0 && action_uid == self.view_center_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    self.view_center = !self.view_center;
-                    self.apply_view_focus(cx);
-                    self.redraw_sidebar(cx);
+                    let next = self.view_state().center_toggled();
+                    if next != self.view_state() {
+                        self.set_view_state(next);
+                        self.apply_view_focus(cx);
+                        self.redraw_sidebar(cx);
+                    }
                 }
                 continue;
             }
@@ -13665,16 +13953,21 @@ impl Tweaker {
                 if let FabValueInputAction::Changed(v) =
                     widget_action.cast::<FabValueInputAction>()
                 {
-                    self.view_zoom = (v as f32).clamp(1.0, 4.0);
-                    self.apply_view_focus(cx);
+                    let next = self.view_state().zoom_set(v as f32);
+                    if next != self.view_state() {
+                        self.set_view_state(next);
+                        self.apply_view_focus(cx);
+                    }
                 }
                 continue;
             }
             if self.tree_isolate_uid != 0 && action_uid == self.tree_isolate_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     if self.tree_isolate {
-                        self.tree_isolate = false;
-                        self.isolate_uid = 0;
+                        // Off lets go, and the view rests with it: Center
+                        // off, life size — apply_view_focus below pushes it.
+                        let rested = self.view_state().rested();
+                        self.set_view_state(rested);
                         log!("TWEAK tree isolate off");
                     } else if self.rows_uid != 0 && self.rows_uid != THEME_ROWS {
                         // Lock onto what is selected NOW, and stay there.
@@ -14676,6 +14969,10 @@ impl Widget for Tweaker {
             return;
         }
         discard_unavailable_picks(cx);
+        let in_frame = self.settle_frame.is_event(event).is_some();
+        if self.settle_isolation(cx, in_frame) {
+            self.apply_view_focus(cx);
+        }
         // An eyedropper sample in flight: apply it the moment the frame
         // has been read back, else look again next frame.
         let probe = session().lock().unwrap().eyedrop_probe.clone();
@@ -15358,6 +15655,16 @@ impl Widget for Tweaker {
         let on = tweak_is_on();
         if on {
             discard_unavailable_picks(cx);
+            // The head row below reads the lock, so it settles first. The
+            // view itself is pushed at the next event, where it is set from.
+            if self.settle_isolation(cx, false) {
+                self.view_focus_pending = true;
+                self.next_frame = cx.new_next_frame();
+            }
+            // Whether the target is in THIS frame is read once it is drawn.
+            if self.isolated() {
+                self.settle_frame = cx.new_next_frame();
+            }
         }
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.
@@ -16221,5 +16528,93 @@ line two");
         assert_eq!(fmt_f64(12.0), "12");
         assert_eq!(fmt_f64(2.5), "2.5");
         assert_eq!(fmt_f64(0.33333333), "0.3333");
+    }
+
+    #[test]
+    fn center_and_zoom_follow_the_lock() {
+        let rest = ViewState { tree_isolate: false, isolate_uid: 0, center: false, zoom: 1.0 };
+        // Nothing locked: the head row is off, and neither the button, the
+        // field nor the wheel gets anywhere.
+        assert!(!rest.rule().controls_enabled);
+        assert_eq!(rest.center_toggled(), rest);
+        assert_eq!(rest.zoom_set(3.0), rest);
+        assert_eq!(rest.zoom_stepped(0.25), rest);
+        // The toggle lit with nothing locked is no lock either.
+        let unset = ViewState { tree_isolate: true, ..rest };
+        assert!(!unset.rule().controls_enabled);
+        assert_eq!(unset.center_toggled(), unset);
+        // Locked on 7: live, and each control moves its own thing, zoom held
+        // to 1..4 whichever way it arrives.
+        let locked = ViewState { tree_isolate: true, isolate_uid: 7, ..rest };
+        assert!(locked.rule().controls_enabled);
+        assert!(locked.center_toggled().center);
+        assert_eq!(locked.center_toggled().center_toggled(), locked);
+        assert_eq!(locked.zoom_set(2.5).zoom, 2.5);
+        assert_eq!(locked.zoom_set(9.0).zoom, 4.0);
+        assert_eq!(locked.zoom_set(0.2).zoom, 1.0);
+        assert_eq!(locked.zoom_stepped(0.25).zoom, 1.25);
+        assert_eq!(locked.zoom_set(4.0).zoom_stepped(0.25).zoom, 4.0);
+        assert_eq!(locked.zoom_stepped(-0.25).zoom, 1.0);
+        // Centred and zoomed in, the target leaves the screen: the lock lets
+        // go and the view rests — Center off, life size, head row off.
+        // While it is shown, nothing moves; the Isolate button off is the
+        // same rest; at rest already, nothing is asked.
+        let held = locked.center_toggled().zoom_set(3.0);
+        assert_eq!(held.settled(TargetPresence::Shown), held);
+        for off in [TargetPresence::Gone, TargetPresence::NotDrawn, TargetPresence::FoldedShut] {
+            assert_eq!(held.settled(off), rest);
+            assert_eq!(
+                held.settled(off).rule(),
+                ViewFocusRule { controls_enabled: false, center: false, zoom: 1.0 }
+            );
+            assert_eq!(rest.settled(off), rest);
+        }
+        assert_eq!(held.rested(), rest);
+
+        // Where the target stands. Drawn in its window's last frame and
+        // showing: held.
+        let shown = TargetSighting {
+            in_tree: true,
+            drawn_once: true,
+            current: true,
+            attached: true,
+            shows: true,
+            under_shut_fold: false,
+        };
+        assert_eq!(target_presence(shown), TargetPresence::Shown);
+        // Dropped from the tree.
+        let dropped = TargetSighting { in_tree: false, ..shown };
+        assert_eq!(target_presence(dropped), TargetPresence::Gone);
+        // Present but not drawn: its list was redrawn without it, or the
+        // list hangs off no pass. Either lets go of a held view.
+        let stale = TargetSighting { current: false, shows: false, ..shown };
+        assert_eq!(target_presence(stale), TargetPresence::NotDrawn);
+        assert_eq!(held.settled(target_presence(stale)), rest);
+        let detached = TargetSighting { attached: false, ..shown };
+        assert_eq!(target_presence(detached), TargetPresence::NotDrawn);
+        assert_eq!(held.settled(target_presence(detached)), rest);
+        // Present and drawn, but a closed fold has shut it away.
+        let folded = TargetSighting { shows: false, under_shut_fold: true, ..shown };
+        assert_eq!(target_presence(folded), TargetPresence::FoldedShut);
+        assert_eq!(held.settled(target_presence(folded)), rest);
+        // Drawn and clipped to nothing with no shut fold above: scrolled out
+        // of a scrolling view, or a fold still closing. Held.
+        let scrolled_out = TargetSighting { shows: false, ..shown };
+        assert_eq!(target_presence(scrolled_out), TargetPresence::Shown);
+        assert_eq!(held.settled(target_presence(scrolled_out)), held);
+        // Showing under a shut fold is the fold's header: held.
+        let header = TargetSighting { under_shut_fold: true, ..shown };
+        assert_eq!(target_presence(header), TargetPresence::Shown);
+        // Nothing drawn to judge by (read mid-draw, or no area of its own):
+        // there is only the tree to go on.
+        let unread = TargetSighting {
+            drawn_once: false,
+            current: false,
+            attached: false,
+            shows: false,
+            ..shown
+        };
+        assert_eq!(target_presence(unread), TargetPresence::Shown);
+        assert_eq!(target_presence(TargetSighting { in_tree: false, ..unread }), TargetPresence::Gone);
     }
 }

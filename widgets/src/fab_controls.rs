@@ -11,6 +11,7 @@
 //! * `mod.widgets.FabValueInput` — the drag-numeric field. Press arms, 3 px
 //!   engages a drag (one step per pixel, Shift fine, Ctrl snaps, clamping
 //!   shifts the anchor), a plain click opens text entry, the end zones step.
+//!   `enabled: false` dims it and makes it inert.
 //! * `mod.widgets.FabColorWheel` — hue ring around a saturation/value
 //!   square, pointer-captured drags, arrow-key nudges.
 //! * `mod.widgets.FabColorPick` — a swatch that opens a self-managed
@@ -136,19 +137,23 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 let h = self.rect_size.y
                 sdf.box(0.5, 0.5, w - 1.0, h - 1.0, fab.radius)
                 let reveal = mix(1.0, max(self.hover, max(self.down, self.focus)), self.flat)
+                // Off: the well sinks most of the way into the row, so a
+                // field that answers nothing does not look like one that will.
+                let dim = 1.0 - 0.6 * self.disabled
                 let mut base = fab.color_num.mix(fab.color_num_hover, self.hover).mix(fab.color_input_active, self.down)
-                base = vec4(base.xyz, base.w * reveal)
+                base = vec4(base.xyz, base.w * reveal * dim)
                 sdf.fill_keep(base)
                 let mut border = fab.color_border.mix(fab.color_focus_ring, self.focus)
-                border = vec4(border.xyz, border.w * reveal)
+                border = vec4(border.xyz, border.w * reveal * dim)
                 sdf.stroke(border, 1.0)
                 if self.fill >= 0.0 {
                     sdf.box(1.0, 1.0, max(2.0, (w - 2.0) * self.fill), h - 2.0, fab.radius)
                     sdf.fill(vec4(fab.color_num_fill.xyz, 0.85))
                 }
                 // Hover arrows in the end zones; they retire while the field
-                // is a text editor (focus carries the editing state).
-                if self.hover > 0.01 {
+                // is a text editor (focus carries the editing state) and
+                // while it is off.
+                if self.hover * (1.0 - self.disabled) > 0.01 {
                     if self.focus < 0.5 {
                         let cy = h * 0.5
                         let a = vec4(fab.color_num_arrow.xyz, self.hover)
@@ -963,6 +968,11 @@ pub struct FabValueInput {
     show_fill: bool,
     #[live]
     quantize: bool,
+    /// Off: the value shows dimmed and nothing answers — no press, scrub,
+    /// wheel step or click into text entry. A host switches a field off
+    /// when what it drives is not there to be driven.
+    #[live(true)]
+    enabled: bool,
 
     #[rust]
     drag: Option<DragState>,
@@ -1081,6 +1091,30 @@ impl FabValueInput {
         self.value
     }
 
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Switching off mid-gesture ends the gesture first: an open editor
+    /// closes without committing, an engaged scrub lets the pointer go.
+    pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            let uid = self.widget_uid();
+            if self.editing {
+                self.end_edit(cx);
+                cx.revert_key_focus();
+            }
+            self.cancel_drag(cx, uid);
+            self.hovered = false;
+            self.animator_play(cx, ids!(hover.off));
+        }
+        self.draw_bg.redraw(cx);
+    }
+
     /// Focus/IME state of the private text editor used while a scrub field is
     /// being typed. Canvas hosts cannot discover this child through the
     /// public widget tree because it is embedded directly, not a WidgetRef.
@@ -1184,6 +1218,16 @@ impl FabValueInput {
 }
 
 impl Widget for FabValueInput {
+    // The generic switch and the bridge's /snap `enabled` column both go
+    // through these, so what they say is what the field does.
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.set_enabled(cx, !disabled);
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        !self.enabled
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1195,6 +1239,7 @@ impl Widget for FabValueInput {
         } else {
             -1.0
         };
+        self.draw_bg.disabled = if self.enabled { 0.0 } else { 1.0 };
         self.draw_bg.begin(cx, walk, self.layout);
         if !self.label.is_empty() {
             // The label spans exactly the space the value does not need:
@@ -1216,11 +1261,21 @@ impl Widget for FabValueInput {
             }
         }
         let iw = self.text_input.walk(cx);
-        let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
+        if self.enabled {
+            let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
+        } else {
+            // Off: the value is still there to read, in the label's ink at
+            // half strength, where the editor would have put it.
+            let text = self.format();
+            let old = self.draw_text.color;
+            self.draw_text.color = vec4(old.x, old.y, old.z, old.w * 0.5);
+            self.draw_text.draw_walk(cx, iw, Align { x: 1.0, y: 0.5 }, &text);
+            self.draw_text.color = old;
+        }
         // The 3D-suite convention: stepper chevrons reveal on hover at the
         // field's edges — their zones (field_zone) exist regardless; the
         // glyphs only while the pointer is here and nothing is in flight.
-        if self.hovered && !self.editing && self.drag.is_none() {
+        if self.enabled && self.hovered && !self.editing && self.drag.is_none() {
             let rect = cx.turtle().rect();
             let fs = self.draw_text.text_style.font_size as f64;
             let y = rect.pos.y + (rect.size.y - fs * 1.5).max(0.0) * 0.5;
@@ -1242,6 +1297,11 @@ impl Widget for FabValueInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        // Off: nothing below answers. The animator still settles whatever
+        // was in flight when the field went off.
+        if !self.enabled {
+            return;
+        }
 
         // Double-click = RESET, detected on the raw press so it works in
         // every state (the second press of a double-click lands while the
@@ -1504,6 +1564,16 @@ impl FabValueInputRef {
 
     pub fn value(&self) -> f64 {
         self.borrow().map_or(0.0, |i| i.value())
+    }
+
+    pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_enabled(cx, enabled);
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.borrow().map_or(true, |i| i.enabled())
     }
 }
 
