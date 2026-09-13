@@ -2550,6 +2550,9 @@ impl Cx {
                 CxOsOp::ShowNotification { title, body } => unsafe {
                     android_jni::to_java_show_notification(&title, &body);
                 },
+                CxOsOp::DownloadFile { call_id, url, dest } => unsafe {
+                    android_jni::to_java_download_file(call_id, &url, &dest);
+                },
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => unsafe {
                     // Rust positions are in Makepad layout points; Android overlay APIs expect physical pixels.

@@ -365,6 +365,11 @@ pub enum CxOsOp {
         title: String,
         body: String,
     },
+    DownloadFile {
+        call_id: i64,
+        url: String,
+        dest: String,
+    },
     SetPrimarySelection(String),
     ShowSelectionHandles {
         start: Vec2d,
@@ -534,6 +539,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
             Self::ShareText(..) => write!(f, "ShareText"),
             Self::ShowNotification { .. } => write!(f, "ShowNotification"),
+            Self::DownloadFile { .. } => write!(f, "DownloadFile"),
             Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
             Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
             Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
@@ -1402,6 +1408,20 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::ShowNotification {
             title: title.to_owned(),
             body: body.to_owned(),
+        });
+    }
+
+    /// Stream `url` to the file at `dest` (an absolute path the app may write
+    /// to) on a native background thread, in constant memory. Progress arrives
+    /// as [`crate::event::AndroidDownloadProgress`] actions and the outcome as
+    /// one [`crate::event::AndroidDownloadComplete`], both carrying `call_id`
+    /// so the app can correlate concurrent downloads. No-op on platforms whose
+    /// backend doesn't handle `CxOsOp::DownloadFile`.
+    pub fn download_file(&mut self, call_id: i64, url: &str, dest: &str) {
+        self.platform_ops.push_back(CxOsOp::DownloadFile {
+            call_id,
+            url: url.to_owned(),
+            dest: dest.to_owned(),
         });
     }
 
