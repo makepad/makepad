@@ -841,11 +841,6 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_core(&mut self) -> ScriptValue {
-        // Cache opcodes pointer to avoid RefCell borrow on every iteration
-        let mut cached_body_index: usize = usize::MAX;
-        let mut opcodes_ptr: *const ScriptValue = std::ptr::null();
-        let mut opcodes_len: usize = 0;
-
         loop {
             // Heap growth paths cannot own the interpreter trap (many are
             // shared with parsers/native bindings), so they record one hard
@@ -928,28 +923,23 @@ impl<'a> ScriptVm<'a> {
             let body_index = thread.trap.ip.body as usize;
             let ip_index = thread.trap.ip.index as usize;
 
-            // Only re-borrow bodies when body changes
-            if body_index != cached_body_index {
+            // Copy the opcode while the body borrow is live. Native calls may
+            // re-enter the VM and replace a body's parser, so a cached pointer
+            // into its opcode buffer cannot outlive this iteration.
+            let opcode = {
                 let bodies = self.bx.code.bodies.borrow();
                 let body = &bodies[body_index];
-                opcodes_ptr = body.parser.opcodes.as_ptr();
-                opcodes_len = body.parser.opcodes.len();
-                cached_body_index = body_index;
-            }
+                body.parser.opcodes.get(ip_index).copied()
+            };
 
-            if ip_index >= opcodes_len {
+            let Some(opcode) = opcode else {
                 // If there's a value on the stack, return it (for expression-style scripts)
                 let stack_len = self.bx.threads.cur().stack.len();
                 if stack_len > 0 {
-                    log!("run_core: returning stack value, stack_len={}", stack_len);
                     return self.bx.threads.cur().pop_stack_value();
                 }
-                log!("run_core: stack empty, returning NIL");
                 return NIL;
-            }
-
-            // SAFETY: opcodes_ptr is valid as long as bodies isn't mutated during execution
-            let opcode = unsafe { *opcodes_ptr.add(ip_index) };
+            };
 
             if self.bx.debug_trace {
                 let stack_len = self.bx.threads.cur_ref().stack.len();
@@ -1736,5 +1726,33 @@ mod tests {
         assert!(!parse_reports_error("let {x} = {x: 1}"));
         // `me:` as an OBJECT KEY is data, not a binding.
         assert!(!parse_reports_error("let o = {me: 1}"));
+    }
+
+    #[test]
+    fn reentrant_reload_of_the_active_body_does_not_keep_an_opcode_pointer() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        let reentrant = vm.bx.heap.new_module(id!(reentrant));
+        vm.add_method(reentrant, id!(reload), &[], |vm, _| {
+            vm.eval(ScriptMod {
+                file: "reentrant-reload.octoscript".to_owned(),
+                code: "41\n;".to_owned(),
+                ..Default::default()
+            })
+        });
+
+        let _ = vm.eval(ScriptMod {
+            file: "reentrant-reload.octoscript".to_owned(),
+            code: "use mod.reentrant\nreentrant.reload()\n;".to_owned(),
+            ..Default::default()
+        });
+
+        // The replacement body intentionally makes the outer VM result
+        // unspecified. Under Miri or ASan this path used to dereference the
+        // old parser's freed opcode allocation before it could return.
     }
 }

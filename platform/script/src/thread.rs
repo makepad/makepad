@@ -352,28 +352,29 @@ impl ScriptThreads {
     /// Update the cached pointer after any operation that might invalidate it
     #[inline(always)]
     fn update_ptr(&mut self) {
-        if !self.threads.is_empty() {
-            self.cur_ptr = unsafe { self.threads.as_mut_ptr().add(self.current) };
-        } else {
-            self.cur_ptr = std::ptr::null_mut();
-        }
+        // Bounds-checked: an invalid `current` yields a null pointer that the
+        // accessors reject, never an out-of-bounds pointer.
+        self.cur_ptr = self
+            .threads
+            .get_mut(self.current)
+            .map_or(std::ptr::null_mut(), |thread| thread as *mut ScriptThread);
     }
 
     /// Get a mutable reference to the current thread using cached pointer
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
     #[inline(always)]
     pub fn cur(&mut self) -> &mut ScriptThread {
-        debug_assert!(
+        assert!(
             !self.cur_ptr.is_null(),
-            "cur() called on empty ScriptThreads"
+            "current ScriptThread index is invalid"
         );
         unsafe { &mut *self.cur_ptr }
     }
 
     pub fn trap<'a>(&'a self) -> ScriptTrap<'a> {
-        debug_assert!(
+        assert!(
             !self.cur_ptr.is_null(),
-            "trap() called on empty ScriptThreads"
+            "current ScriptThread index is invalid"
         );
         unsafe { (*self.cur_ptr).trap.pass() }
     }
@@ -382,15 +383,20 @@ impl ScriptThreads {
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
     #[inline(always)]
     pub fn cur_ref(&self) -> &ScriptThread {
-        debug_assert!(
+        assert!(
             !self.cur_ptr.is_null(),
-            "cur_ref() called on empty ScriptThreads"
+            "current ScriptThread index is invalid"
         );
         unsafe { &*self.cur_ptr }
     }
 
     /// Set which thread is current
     pub fn set_current(&mut self, id: usize) {
+        assert!(
+            id < self.threads.len(),
+            "current ScriptThread index {id} is out of bounds for {} threads",
+            self.threads.len()
+        );
         self.current = id;
         self.update_ptr();
     }
@@ -419,8 +425,7 @@ impl ScriptThreads {
 
     /// Set the current thread by ScriptThreadId
     pub fn set_current_thread_id(&mut self, thread_id: ScriptThreadId) {
-        self.current = thread_id.to_index();
-        self.update_ptr();
+        self.set_current(thread_id.to_index());
     }
 
     /// Get the number of threads
@@ -448,5 +453,24 @@ impl ScriptThreads {
     /// Get thread by index mutably
     pub fn get_mut(&mut self, index: usize) -> Option<&mut ScriptThread> {
         self.threads.get_mut(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn selecting_an_unknown_current_thread_panics_before_pointer_update() {
+        let mut threads = ScriptThreads::new();
+        threads.set_current(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "index is invalid")]
+    fn empty_threads_reject_current_access_in_release_builds() {
+        let threads = ScriptThreads::empty();
+        let _ = threads.cur_ref();
     }
 }
