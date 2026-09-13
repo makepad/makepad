@@ -40,7 +40,9 @@ script_mod! {
                 value := Slider{width: 200.}
             }
             RowChoice := ControlRow{
-                value := DropDown{width: 200.}
+                // The list as wide as the button, so an option that fits the
+                // button is not cut short in the list.
+                value := DropDown{width: 200. popup_menu +: {width: 200.}}
             }
             RowText := ControlRow{
                 value := TextInput{width: 200.}
@@ -94,6 +96,38 @@ pub fn chunk_for(control: &Control, value: &ControlValue) -> Option<String> {
         }
         (ControlKind::Color { prop, .. }, ControlValue::Color(c)) => Some(format!("{{{prop}: #x{c:08X}}}")),
         _ => None,
+    }
+}
+
+/// The words a choice shows for an option. An option is the DSL the choice
+/// writes, and neither a theme token path nor a qualified enum makes a good
+/// name. The eight easings all start `theme.motion_ease_`, and a narrow
+/// drop-down cuts each to that same prefix, so a theme token shows its own
+/// name in words, its family prefix left off:
+/// `theme.motion_ease_standard_decelerate` is "Standard decelerate". A
+/// qualified enum shows its variant, as an enum the DSL takes bare already
+/// shows: `ImageSliceEdge.Round` is "Round". The type is the same for every
+/// option of one choice, so it says nothing the row's own label does not.
+/// Any other option shows as written. What the choice writes is still the
+/// option itself.
+pub fn choice_label(option: &str) -> String {
+    if let Some((ty, variant)) = option.split_once('.') {
+        let name = |part: &str| {
+            part.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && part.chars().all(|c| c.is_ascii_alphanumeric())
+        };
+        if name(ty) && name(variant) {
+            return variant.to_string();
+        }
+    }
+    let Some(token) = option.strip_prefix("theme.") else {
+        return option.to_string();
+    };
+    let name = token.strip_prefix("motion_ease_").unwrap_or(token).replace('_', " ");
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => option.to_string(),
     }
 }
 
@@ -203,7 +237,7 @@ impl ControlsPanel {
             }
             (ControlKind::Choice { options, .. }, ControlValue::Choice(i)) => {
                 let dd = item.drop_down(cx, ids!(value));
-                dd.set_labels(cx, options.iter().map(|o| o.to_string()).collect());
+                dd.set_labels(cx, options.iter().map(|o| choice_label(o)).collect());
                 dd.set_selected_item(cx, *i);
             }
             (ControlKind::Text { .. }, ControlValue::Text(t)) => {
@@ -345,6 +379,65 @@ mod tests {
             kind: ControlKind::Choice { prop: "flow", options: &["Right", "Down"], default: 0 },
         };
         assert_eq!(chunk_for(&choice, &ControlValue::Choice(1)).unwrap(), "{flow: Down}");
+    }
+
+    /// The theme's easings read as words, each different from the rest, a
+    /// qualified enum reads as its variant, and every other option reads as
+    /// written.
+    #[test]
+    fn theme_tokens_read_as_words() {
+        let eases = [
+            ("theme.motion_ease_standard", "Standard"),
+            ("theme.motion_ease_standard_decelerate", "Standard decelerate"),
+            ("theme.motion_ease_standard_accelerate", "Standard accelerate"),
+            ("theme.motion_ease_emphasized_decelerate", "Emphasized decelerate"),
+            ("theme.motion_ease_emphasized_accelerate", "Emphasized accelerate"),
+            ("theme.motion_ease_linear", "Linear"),
+            ("theme.motion_ease_spring", "Spring"),
+            ("theme.motion_ease_bounce", "Bounce"),
+        ];
+        for (option, words) in eases {
+            assert_eq!(choice_label(option), words);
+        }
+        for (option, bare) in [
+            ("RadialLook.Frosted", "Frosted"),
+            ("ImageSliceEdge.Round", "Round"),
+            ("ImageSliceCenter.Tile", "Tile"),
+            ("ImageSliceUnits.DevicePixels", "DevicePixels"),
+            ("ImageFit.Slice", "Slice"),
+        ] {
+            assert_eq!(choice_label(option), bare);
+        }
+        for option in ["Right", "BottomCenter", "", "0.5", "Ease.OutElastic2x", "a.B", "Ab.c"] {
+            let shown = choice_label(option);
+            if option == "Ease.OutElastic2x" {
+                assert_eq!(shown, "OutElastic2x");
+            } else {
+                assert_eq!(shown, option);
+            }
+        }
+    }
+
+    /// Shown shorter than it is written, no option of any story's choice may
+    /// read the same as another option of that choice, or the drop-down
+    /// would offer two rows nobody can tell apart.
+    #[test]
+    fn every_choice_shows_its_options_apart() {
+        let mut choices = 0;
+        for story in crate::registry::all() {
+            for control in story.controls.iter() {
+                let ControlKind::Choice { options, .. } = &control.kind else {
+                    continue;
+                };
+                choices += 1;
+                let mut shown: Vec<String> = options.iter().map(|option| choice_label(option)).collect();
+                shown.sort();
+                let before = shown.len();
+                shown.dedup();
+                assert_eq!(shown.len(), before, "{} / {}: two options show as one: {options:?}", story.key, control.label);
+            }
+        }
+        assert!(choices > 20, "the registry lost its choices ({choices})");
     }
 
     #[test]
