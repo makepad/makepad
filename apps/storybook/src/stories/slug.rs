@@ -1,4 +1,6 @@
-//! The large-text stories: the same text widgets below and above the large-glyph cutoff, with a diagnostic matrix, ported from the widget zoo.
+//! The large-text page: the same text widgets on both sides of the size at
+//! which glyphs stop coming from the atlas and are drawn from their
+//! outlines, and a set of probes above that size that each vary one thing.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -7,7 +9,7 @@ script_mod! {
     use mod.widgets.*
     use mod.storybook.*
 
-    let SlugDemoCard = RoundedView{
+    let LargeTextCard = RoundedView{
         width: Fill
         height: Fit
         flow: Down
@@ -23,31 +25,31 @@ script_mod! {
         }
     }
 
-    let SlugDemoTitle = Pbold{
+    let LargeTextTitle = Pbold{
         width: Fill
         margin: 0.
     }
 
-    let SlugDemoNote = P{
+    let LargeTextNote = P{
         width: Fill
         margin: 0.
     }
 
-    let SlugProbeGrid = View{
+    let LargeTextProbeGrid = View{
         width: Fill
         height: Fit
         flow: Flow.Right{wrap: true}
         spacing: theme.space_2
     }
 
-    let SlugProbeCard = RoundedView{
+    let LargeTextProbeCard = RoundedView{
         width: 200.
         height: Fit
         flow: Down
         spacing: theme.space_2
         padding: theme.mspace_2
         show_bg: true
-        // Plain values, as on SlugDemoCard: the uniform(..) colours never drew.
+        // Plain values, as on LargeTextCard: the uniform(..) colours never drew.
         draw_bg +: {
             color: theme.color_inset_1
             border_radius: theme.corner_radius
@@ -56,7 +58,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeDefaultLabel = Label{
+    let LargeDefaultLabel = Label{
         draw_text +: {
             text_style +: {
                 font_size: 160.
@@ -64,7 +66,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeLiteralLabel = Label{
+    let LargeLiteralLabel = Label{
         draw_text +: {
             color: #fff
             text_style +: {
@@ -73,7 +75,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeThemeLabel = Label{
+    let LargeThemeLabel = Label{
         draw_text +: {
             color: theme.color_text
             text_style +: {
@@ -82,7 +84,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeAccentLabel = Label{
+    let LargeAccentLabel = Label{
         draw_text +: {
             color: theme.color_makepad
             text_style +: {
@@ -91,7 +93,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeGradientLabel = Label{
+    let LargeGradientLabel = Label{
         draw_text +: {
             color: #x6CF
             color_2: #xFD6
@@ -102,7 +104,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeCustomLiteralLabel = Label{
+    let LargeCustomLiteralLabel = Label{
         draw_text +: {
             color: #xF75
             text_style +: {
@@ -114,7 +116,7 @@ script_mod! {
         }
     }
 
-    let SlugLargeCustomThemeLabel = Label{
+    let LargeCustomThemeLabel = Label{
         draw_text +: {
             color: theme.color_makepad
             text_style +: {
@@ -127,13 +129,15 @@ script_mod! {
     }
 
     mod.stories.SlugOverview = StoryPage{
-        H4{text: "Plain Label"}
-        P{text: "Same Label widget, same text, different font sizes."}
+        StoryNote{text: "Text is drawn one of two ways. Up to the largest size the glyph atlas holds, each glyph is a small picture taken from the atlas. Past that size the glyph is drawn from its outline, so large type stays sharp instead of turning soft. Some systems draw every size from outlines."}
+        StoryNote{text: "Each pair below is one widget with only its font size changed, the left one under that size and the right one over it. Any difference between the two is a difference between the two ways of drawing."}
+
+        StoryHeading{text: "A plain label"}
         StoryRow{
             align: Align{x: 0. y: 0.}
-            SlugDemoCard{
-                SlugDemoTitle{text: "Below Linux cutoff"}
-                SlugDemoNote{text: "32 px Label text. Expected to stay on the normal text path on Linux."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 32"}
+                LargeTextNote{text: "Under the size: drawn from the atlas."}
                 Label{
                     draw_text +: {
                         text_style +: {
@@ -143,9 +147,9 @@ script_mod! {
                     text: "Ag"
                 }
             }
-            SlugDemoCard{
-                SlugDemoTitle{text: "Above Linux cutoff"}
-                SlugDemoNote{text: "192 px Label text. Expected to use SLUG on Linux."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 192"}
+                LargeTextNote{text: "Over the size: drawn from the outline."}
                 Label{
                     draw_text +: {
                         text_style +: {
@@ -157,14 +161,13 @@ script_mod! {
             }
         }
 
-        Hr{}
-        H4{text: "Gradient Label"}
-        P{text: "Same gradient Label widget, so this is useful for checking that text styling still matches across both render paths."}
+        StoryHeading{text: "A gradient label"}
+        StoryNote{text: "The same two-colour label at both sizes, so the gradient can be checked against both ways of drawing."}
         StoryRow{
             align: Align{x: 0. y: 0.}
-            SlugDemoCard{
-                SlugDemoTitle{text: "Gradient below cutoff"}
-                SlugDemoNote{text: "32 px LabelGradientX text."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 32"}
+                LargeTextNote{text: "LabelGradientX under the size."}
                 LabelGradientX{
                     draw_text +: {
                         color: #x6CF
@@ -173,12 +176,12 @@ script_mod! {
                             font_size: 32.
                         }
                     }
-                    text: "SLUG"
+                    text: "Type"
                 }
             }
-            SlugDemoCard{
-                SlugDemoTitle{text: "Gradient above cutoff"}
-                SlugDemoNote{text: "192 px LabelGradientX text."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 192"}
+                LargeTextNote{text: "LabelGradientX over the size."}
                 LabelGradientX{
                     draw_text +: {
                         color: #x6CF
@@ -187,19 +190,18 @@ script_mod! {
                             font_size: 192.
                         }
                     }
-                    text: "SL"
+                    text: "Ty"
                 }
             }
         }
 
-        Hr{}
-        H4{text: "Custom Text Shader"}
-        P{text: "Both sides use the same Label shader override. This makes it easy to compare custom get_color logic across non-SLUG and SLUG rendering on Linux."}
+        StoryHeading{text: "A text shader of its own"}
+        StoryNote{text: "Both labels replace get_color with the same fade, so a custom colour function can be checked on both sides."}
         StoryRow{
             align: Align{x: 0. y: 0.}
-            SlugDemoCard{
-                SlugDemoTitle{text: "Custom shader below cutoff"}
-                SlugDemoNote{text: "32 px Label with a custom get_color function."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 32"}
+                LargeTextNote{text: "A custom get_color under the size."}
                 Label{
                     draw_text +: {
                         color: theme.color_makepad
@@ -213,9 +215,9 @@ script_mod! {
                     text: "WAVE"
                 }
             }
-            SlugDemoCard{
-                SlugDemoTitle{text: "Custom shader above cutoff"}
-                SlugDemoNote{text: "192 px Label with the same custom get_color function."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 192"}
+                LargeTextNote{text: "The same get_color over the size."}
                 Label{
                     draw_text +: {
                         color: theme.color_makepad
@@ -231,14 +233,13 @@ script_mod! {
             }
         }
 
-        Hr{}
-        H4{text: "LinkLabel"}
-        P{text: "This row uses the same interactive text widget at two sizes so you can compare the path switch on Linux with built-in link styling."}
+        StoryHeading{text: "A link"}
+        StoryNote{text: "The same interactive text widget at two sizes, with the link's own styling."}
         StoryRow{
             align: Align{x: 0. y: 0.}
-            SlugDemoCard{
-                SlugDemoTitle{text: "LinkLabel below cutoff"}
-                SlugDemoNote{text: "28 px LinkLabel text."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 28"}
+                LargeTextNote{text: "LinkLabel under the size."}
                 LinkLabel{
                     draw_text +: {
                         gradient_fill_horizontal: 1.0
@@ -251,9 +252,9 @@ script_mod! {
                     text: "Open docs"
                 }
             }
-            SlugDemoCard{
-                SlugDemoTitle{text: "LinkLabel above cutoff"}
-                SlugDemoNote{text: "144 px LinkLabel text."}
+            LargeTextCard{
+                LargeTextTitle{text: "Font size 144"}
+                LargeTextNote{text: "LinkLabel over the size."}
                 LinkLabel{
                     draw_text +: {
                         gradient_fill_horizontal: 1.0
@@ -268,124 +269,121 @@ script_mod! {
             }
         }
 
-        Hr{}
-        H4{text: "Diagnostic Matrix"}
-        P{text: "These extra probes all stay above the Linux SLUG cutoff. They are meant to help isolate whether the disappearing text is tied to plain single-color Labels, inherited theme colors, custom get_color logic, or specific glyph shapes."}
+        StoryHeading{text: "Probes"}
+        StoryNote{text: "Everything from here on is over the size, and each set varies one thing: where the colour comes from, the shape of the glyph, or a text shader of its own. When large text goes missing, the cards that go missing with it say which of those it depends on."}
 
-        H4{text: "Color Source Probes"}
-        P{text: "Same large Label widget, same text, different color sources. If only some of these disappear after SLUG promotion, that narrows the bug quickly."}
-        SlugProbeGrid{
-            SlugProbeCard{
-                SlugDemoTitle{text: "Default Label"}
-                SlugDemoNote{text: "No explicit color override."}
-                SlugLargeDefaultLabel{text: "Ag"}
+        StoryHeading{text: "Where the colour comes from"}
+        StoryNote{text: "One large label and one text, with the colour taken from five different places."}
+        LargeTextProbeGrid{
+            LargeTextProbeCard{
+                LargeTextTitle{text: "No colour set"}
+                LargeTextNote{text: "The label's own default."}
+                LargeDefaultLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Literal White"}
-                SlugDemoNote{text: "Plain Label with color: #fff."}
-                SlugLargeLiteralLabel{text: "Ag"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "A literal white"}
+                LargeTextNote{text: "color: #fff"}
+                LargeLiteralLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Theme Text"}
-                SlugDemoNote{text: "Plain Label with theme.color_text."}
-                SlugLargeThemeLabel{text: "Ag"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "The text colour"}
+                LargeTextNote{text: "theme.color_text"}
+                LargeThemeLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Theme Accent"}
-                SlugDemoNote{text: "Plain Label with theme.color_makepad."}
-                SlugLargeAccentLabel{text: "Ag"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "The accent"}
+                LargeTextNote{text: "theme.color_makepad"}
+                LargeAccentLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Plain Gradient"}
-                SlugDemoNote{text: "Plain Label using color and color_2."}
-                SlugLargeGradientLabel{text: "Ag"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "Two colours"}
+                LargeTextNote{text: "color and color_2 as a gradient."}
+                LargeGradientLabel{text: "Ag"}
             }
         }
 
-        Hr{}
-        H4{text: "Glyph Shape Probes"}
-        P{text: "All of these use the same large plain Label with a literal white color. This helps separate geometry-specific failures from color/state-specific failures."}
-        SlugProbeGrid{
-            SlugProbeCard{
-                SlugDemoTitle{text: "A"}
-                SlugDemoNote{text: "Uppercase with counters."}
-                SlugLargeLiteralLabel{text: "A"}
+        StoryHeading{text: "The shape of the glyph"}
+        StoryNote{text: "The same white label with one glyph each, so a glyph that fails can be told from a colour that fails."}
+        LargeTextProbeGrid{
+            LargeTextProbeCard{
+                LargeTextTitle{text: "A"}
+                LargeTextNote{text: "A capital with a counter."}
+                LargeLiteralLabel{text: "A"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "g"}
-                SlugDemoNote{text: "Lowercase descender."}
-                SlugLargeLiteralLabel{text: "g"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "g"}
+                LargeTextNote{text: "A descender."}
+                LargeLiteralLabel{text: "g"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "W"}
-                SlugDemoNote{text: "Wide uppercase."}
-                SlugLargeLiteralLabel{text: "W"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "W"}
+                LargeTextNote{text: "A wide capital."}
+                LargeLiteralLabel{text: "W"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "S"}
-                SlugDemoNote{text: "Curved single glyph."}
-                SlugLargeLiteralLabel{text: "S"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "S"}
+                LargeTextNote{text: "One curve."}
+                LargeLiteralLabel{text: "S"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "L"}
-                SlugDemoNote{text: "Simple cornered glyph."}
-                SlugLargeLiteralLabel{text: "L"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "L"}
+                LargeTextNote{text: "Straight strokes and a corner."}
+                LargeLiteralLabel{text: "L"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "O"}
-                SlugDemoNote{text: "Closed loop counter."}
-                SlugLargeLiteralLabel{text: "O"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "O"}
+                LargeTextNote{text: "A closed loop."}
+                LargeLiteralLabel{text: "O"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "8"}
-                SlugDemoNote{text: "Double counter."}
-                SlugLargeLiteralLabel{text: "8"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "8"}
+                LargeTextNote{text: "Two counters."}
+                LargeLiteralLabel{text: "8"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "y"}
-                SlugDemoNote{text: "Descender with simpler shape."}
-                SlugLargeLiteralLabel{text: "y"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "y"}
+                LargeTextNote{text: "A simpler descender."}
+                LargeLiteralLabel{text: "y"}
             }
         }
 
-        Hr{}
-        H4{text: "Custom Shader Probes"}
-        P{text: "These all use the same basic fade-out get_color idea, but vary whether the base color is literal or theme-driven and whether the text is Ag or W."}
-        SlugProbeGrid{
-            SlugProbeCard{
-                SlugDemoTitle{text: "Custom Literal Ag"}
-                SlugDemoNote{text: "Literal base color, Ag text."}
-                SlugLargeCustomLiteralLabel{text: "Ag"}
+        StoryHeading{text: "A fade in get_color"}
+        StoryNote{text: "The same fade in get_color, with the base colour literal or from the theme, on a short word and on a wide glyph."}
+        LargeTextProbeGrid{
+            LargeTextProbeCard{
+                LargeTextTitle{text: "Literal, Ag"}
+                LargeTextNote{text: "A literal base colour."}
+                LargeCustomLiteralLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Custom Theme Ag"}
-                SlugDemoNote{text: "Theme base color, Ag text."}
-                SlugLargeCustomThemeLabel{text: "Ag"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "Theme, Ag"}
+                LargeTextNote{text: "The base colour from the theme."}
+                LargeCustomThemeLabel{text: "Ag"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Custom Literal W"}
-                SlugDemoNote{text: "Literal base color, W text."}
-                SlugLargeCustomLiteralLabel{text: "W"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "Literal, W"}
+                LargeTextNote{text: "A literal base colour."}
+                LargeCustomLiteralLabel{text: "W"}
             }
-            SlugProbeCard{
-                SlugDemoTitle{text: "Custom Theme W"}
-                SlugDemoNote{text: "Theme base color, W text."}
-                SlugLargeCustomThemeLabel{text: "W"}
+            LargeTextProbeCard{
+                LargeTextTitle{text: "Theme, W"}
+                LargeTextNote{text: "The base colour from the theme."}
+                LargeCustomThemeLabel{text: "W"}
             }
         }
     }
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "text/slug/overview",
-    category: "Text",
-    component: "Slug",
+    key: "overview/large-text/overview",
+    category: "Overview",
+    component: "Large text",
     also: &[],
     name: "Overview",
     dsl: "SlugOverview",
     added: "2026-04-16",
     tags: &["ported"],
-    doc: "# SLUG\n\nThese demos compare the same text widget below and above the current Linux SLUG cutoff.\n\nOnly the text size changes between the left and right columns. On Linux, the left column should stay on the raster/MSDF text path while the right column should switch to SLUG. On other platforms, both columns may already use SLUG.\n\nThe lower diagnostic section intentionally adds redundant large-text probes so we can tell whether Linux SLUG failures are tied to glyph shape, color source, or custom `get_color()` logic.",
+    doc: "# Large text\n\nText is drawn from the glyph atlas up to the largest size the atlas holds, 128 device pixels to the em, and from each glyph's outline above that size, so large type stays sharp. Some systems draw every size from outlines.\n\nThe page sets the same widget on both sides of that size with nothing else changed: a plain label, a gradient label, a label with its own `get_color`, and a `LinkLabel`. Below them are probes, all of them over the size, that each vary one thing: where the colour comes from, the shape of the glyph, or a custom `get_color`.\n\nIt documents no widget. It is the check that the two ways of drawing text agree.",
     subject: "",
     feature: None,
     controls: &[],

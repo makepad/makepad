@@ -6,8 +6,10 @@ use crate::registry::Story;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-pub mod badge;
+pub mod welcome;
+pub mod slug;
 pub mod foundations;
+pub mod badge;
 pub mod placeholder;
 pub mod button_more;
 pub mod checkbox_more;
@@ -28,7 +30,6 @@ pub mod popover;
 pub mod toast;
 pub mod select;
 pub mod tip;
-pub mod welcome;
 pub mod button;
 pub mod checkbox;
 pub mod combobox;
@@ -119,7 +120,6 @@ pub mod glasspanel;
 pub mod linklabel;
 pub mod markdown;
 pub mod html;
-pub mod slug;
 pub mod pageflip;
 pub mod tabs;
 pub mod stacknavigation;
@@ -133,9 +133,14 @@ pub mod log_list;
 pub mod rotary;
 pub mod video;
 
+/// Registered in the order the navigator reads, the same order as
+/// [`tables`], though no story template leans on another file's.
 pub fn script_mod(vm: &mut ScriptVm) {
+    // 0 Overview
     welcome::script_mod(vm);
     crate::coverage::script_mod(vm);
+    slug::script_mod(vm);
+    // 1 Foundations
     foundations::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
@@ -227,7 +232,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     linklabel::script_mod(vm);
     markdown::script_mod(vm);
     html::script_mod(vm);
-    slug::script_mod(vm);
     pageflip::script_mod(vm);
     tabs::script_mod(vm);
     stacknavigation::script_mod(vm);
@@ -263,10 +267,17 @@ pub fn script_mod(vm: &mut ScriptVm) {
     level_meter::script_mod(vm);
 }
 
+/// Every story table, in navigator order: the categories run in the order
+/// they are listed here, and so do the components inside each and the pages
+/// inside each component. A host page's file comes before the file of its
+/// second page, so Overview heads its folder.
 pub fn tables() -> &'static [&'static [Story]] {
     &[
+        // 0 Overview
         welcome::STORIES,
         crate::coverage::STORIES,
+        slug::STORIES,
+        // 1 Foundations
         foundations::STORIES,
         button::STORIES,
         checkbox::STORIES,
@@ -358,7 +369,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         linklabel::STORIES,
         markdown::STORIES,
         html::STORIES,
-        slug::STORIES,
         pageflip::STORIES,
         tabs::STORIES,
         stacknavigation::STORIES,
