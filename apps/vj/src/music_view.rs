@@ -3598,8 +3598,11 @@ script_mod! {
                                     flow: Flow.Right{wrap: false}
                                     empty_text: "search music…"
                                 }
+                                // Fit, not Fill: a Fill here is handed what is left of
+                                // the row, and when that is less than the category cell
+                                // and its two chips, Search ran on under FILTER.
                                 music_catalog := View{
-                                    width: Fill
+                                    width: Fit
                                     height: Fit
                                     flow: Right
                                     spacing: 6
