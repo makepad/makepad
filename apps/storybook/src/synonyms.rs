@@ -241,6 +241,7 @@ mod tests {
             ("stretchable frame", "Image"),
             ("hollow frame", "Image"),
             ("corners keep their size", "Image"),
+            ("speed dial", "FloatingAction"),
         ] {
             let found: Vec<&str> = registry::all()
                 .filter(|s| registry::matches(s, query))

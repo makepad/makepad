@@ -1014,6 +1014,21 @@
    ]
   },
   {
+   "component": "FloatingAction",
+   "aka": [
+    "fab",
+    "floating action button",
+    "floating action",
+    "speed dial",
+    "action dial"
+   ],
+   "does": [
+    "pinned to a corner",
+    "a set of actions from one button",
+    "fan out along an arc"
+   ]
+  },
+  {
    "component": "FloatingPanel",
    "aka": [
     "inspector",

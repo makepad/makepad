@@ -46,6 +46,7 @@ pub mod playback_bar;
 pub mod waveform;
 pub mod button;
 pub mod button_group;
+pub mod floating_action;
 pub mod textinput;
 pub mod field;
 pub mod number_field;
@@ -164,6 +165,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // 6 Actions
     button::script_mod(vm);
     button_group::script_mod(vm);
+    floating_action::script_mod(vm);
     // 7 Inputs
     textinput::script_mod(vm);
     field::script_mod(vm);
@@ -293,6 +295,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         // 6 Actions
         button::STORIES,
         button_group::STORIES,
+        floating_action::STORIES,
         // 7 Inputs
         textinput::STORIES,
         field::STORIES,

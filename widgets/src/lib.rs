@@ -149,6 +149,7 @@ pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
 pub mod radial_menu;
+pub mod floating_action;
 pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
@@ -323,6 +324,7 @@ pub use crate::{
     command_palette::*,
     pie_menu::*,
     radial_menu::*,
+    floating_action::*,
     drag_number::*,
     chart_more::*,
     toolbar::*,
@@ -622,6 +624,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tour::script_mod(vm);
     crate::chart_more::script_mod(vm);
     crate::toolbar::script_mod(vm);
+    crate::floating_action::script_mod(vm);
     crate::masonry::script_mod(vm);
     crate::tile_list::script_mod(vm);
     crate::item_grid::script_mod(vm);
@@ -1124,6 +1127,28 @@ mod radial_menu_registration_tests {
         );
         assert!(radial.contains("mod.widgets.RadialMenuBase = #(RadialMenu::register_widget(vm))"));
         assert_eq!(radial.matches("set_type_default() do mod.widgets.RadialMenuBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod floating_action_registration_tests {
+    /// The floating action registers directly after the toolbar whose
+    /// floating slot can host it, after the button its faces are, with one
+    /// type default for the action and one for an item.
+    #[test]
+    fn test_floating_action_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let floating = include_str!("floating_action.rs");
+        assert!(lib.contains("\npub mod floating_action;"));
+        assert!(lib.contains("\n    floating_action::*,"));
+        crate::assert_registered_after(
+            "crate::floating_action::script_mod(vm);",
+            &["crate::toolbar::script_mod(vm);", "crate::button::script_mod(vm);"],
+        );
+        assert!(floating.contains("mod.widgets.FloatingActionBase = #(FloatingAction::register_widget(vm))"));
+        assert!(floating.contains("mod.widgets.FloatingActionItemBase = #(FloatingActionItem::register_widget(vm))"));
+        assert_eq!(floating.matches("set_type_default() do mod.widgets.FloatingActionBase").count(), 1);
+        assert_eq!(floating.matches("set_type_default() do mod.widgets.FloatingActionItemBase").count(), 1);
     }
 }
 
