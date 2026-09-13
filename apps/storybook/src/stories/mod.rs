@@ -93,24 +93,23 @@ pub mod level_meter;
 pub mod spinner;
 pub mod placeholder;
 pub mod empty_state;
-pub mod badge;
-pub mod kbd;
+pub mod lists;
+pub mod list_item;
+pub mod table;
 pub mod tree;
 pub mod filetree;
-pub mod list_item;
-pub mod avatar;
-pub mod table;
-pub mod timeline;
-pub mod chat;
-pub mod chart_more;
-pub mod kanban;
-pub mod chart;
-pub mod lists;
 pub mod data_grid;
-pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
+pub mod kanban;
 pub mod log_list;
+pub mod badge;
+pub mod avatar;
+pub mod kbd;
+pub mod chart;
+pub mod chart_more;
+pub mod timeline;
+pub mod chat;
 
 /// Registered in the order the navigator reads, the same order as
 /// [`tables`], though no story template leans on another file's.
@@ -215,24 +214,25 @@ pub fn script_mod(vm: &mut ScriptVm) {
     spinner::script_mod(vm);
     placeholder::script_mod(vm);
     empty_state::script_mod(vm);
-    kanban::script_mod(vm);
-    chart_more::script_mod(vm);
-    chat::script_mod(vm);
-    timeline::script_mod(vm);
-    table::script_mod(vm);
-    avatar::script_mod(vm);
+    // 12 Collections
+    lists::script_mod(vm);
     list_item::script_mod(vm);
+    table::script_mod(vm);
     tree::script_mod(vm);
     filetree::script_mod(vm);
-    kbd::script_mod(vm);
-    chart::script_mod(vm);
-    lists::script_mod(vm);
     data_grid::script_mod(vm);
-    portallist::script_mod(vm);
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
+    kanban::script_mod(vm);
     log_list::script_mod(vm);
+    // 13 Data display
     badge::script_mod(vm);
+    avatar::script_mod(vm);
+    kbd::script_mod(vm);
+    chart::script_mod(vm);
+    chart_more::script_mod(vm);
+    timeline::script_mod(vm);
+    chat::script_mod(vm);
 }
 
 /// Every story table, in navigator order: the categories run in the order
@@ -341,24 +341,25 @@ pub fn tables() -> &'static [&'static [Story]] {
         spinner::STORIES,
         placeholder::STORIES,
         empty_state::STORIES,
-        kanban::STORIES,
-        chart_more::STORIES,
-        chat::STORIES,
-        timeline::STORIES,
-        table::STORIES,
-        avatar::STORIES,
+        // 12 Collections
+        lists::STORIES,
         list_item::STORIES,
+        table::STORIES,
         tree::STORIES,
         filetree::STORIES,
-        kbd::STORIES,
-        chart::STORIES,
-        lists::STORIES,
         data_grid::STORIES,
-        portallist::STORIES,
         tile_list::STORIES,
         item_grid::STORIES,
+        kanban::STORIES,
         log_list::STORIES,
+        // 13 Data display
         badge::STORIES,
+        avatar::STORIES,
+        kbd::STORIES,
+        chart::STORIES,
+        chart_more::STORIES,
+        timeline::STORIES,
+        chat::STORIES,
     ]
 }
 

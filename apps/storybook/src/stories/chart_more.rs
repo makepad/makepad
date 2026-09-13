@@ -155,7 +155,7 @@ script_mod! {
         }
 
         StoryHeading{text: "A chart with nothing in it"}
-        StoryNote{text: "These four were declared empty. A pie with no parts is an empty box, a radial bar draws its tracks and no arcs, a radar draws its web, and a bubble plot draws its grid. None of them invents a plausible series to fill itself with — which the plots on the Overview page do, and which is why a chart there whose data never arrived looks exactly like one that is working."}
+        StoryNote{text: "These four were declared empty. A pie with no parts is an empty box, a radial bar draws its tracks and no arcs, a radar draws its web, and a bubble plot draws its grid. None of them invents a plausible series to fill itself with — which the six full plots on the Overview page do, and which is why a chart there whose data never arrived looks exactly like one that is working."}
         StoryRow{
             Plot{
                 height: 150.
@@ -260,7 +260,7 @@ The donut's hole is not decoration. It removes the middle of every wedge, where 
 
 ## Nothing to draw
 
-**A chart with no data draws its empty frame and stops.** No fabricated series, no invented curve. The plots on the Overview page do invent one — a fixed-seed sine wave or a walked price — which makes a chart whose data never arrived look exactly like a chart that is working. That is worth not repeating: an empty circle is a true picture of an empty list.
+**A chart with no data draws its empty frame and stops.** No fabricated series, no invented curve. The six full plots on the Overview page do invent one — a fixed-seed sine wave or a walked price — which makes a chart whose data never arrived look exactly like a chart that is working. That is worth not repeating: an empty circle is a true picture of an empty list.
 
 ## Reading the parts
 

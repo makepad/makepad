@@ -128,8 +128,8 @@ fn kanban_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/kanbanboard/overview",
-    category: "Containers",
+    key: "collections/kanbanboard/overview",
+    category: "Collections",
     component: "KanbanBoard",
     also: &["KanbanColumn", "KanbanCard"],
     name: "Overview",

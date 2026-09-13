@@ -1,7 +1,8 @@
-//! The lists story: the two list widgets that are not the portal list, what
-//! each one is for, and what neither of them keeps. The reorder demo owns the
-//! order and applies the move itself, because that is the whole of the
-//! widget's contract: it reports where a row was dropped and moves nothing.
+//! The lists story: the three list widgets, what each one is for, and what
+//! none of them keeps. The feed asks for a thousand rows and holds a
+//! screenful. The reorder demo owns the order and applies the move itself,
+//! because that is the whole of the widget's contract: it reports where a row
+//! was dropped and moves nothing.
 use crate::makepad_widgets::flat_list::FlatList;
 use crate::makepad_widgets::reorder_list::ReorderList;
 use crate::makepad_widgets::*;
@@ -47,6 +48,27 @@ script_mod! {
         }
     }
 
+    mod.storybook.StoryFeedBase = #(StoryFeed::register_widget(vm))
+
+    mod.storybook.StoryFeed = set_type_default() do mod.storybook.StoryFeedBase{
+        width: Fill
+        height: Fill
+
+        list := PortalList{
+            width: Fill height: Fill
+            scroll_bar: ScrollBar{}
+            // One template, rows of different heights: each post is as tall
+            // as its text, which is what the list has to measure as it goes.
+            Post := View{
+                width: Fill height: Fit
+                flow: Down
+                padding: Inset{left: theme.space_2, right: theme.space_2, top: theme.space_2}
+                text := P{text: ""}
+                Divider{}
+            }
+        }
+    }
+
     mod.storybook.StoryReorderRowsBase = #(StoryReorderRows::register_widget(vm))
 
     mod.storybook.StoryReorderRows = set_type_default() do mod.storybook.StoryReorderRowsBase{
@@ -86,12 +108,20 @@ script_mod! {
     }
 
     mod.stories.ListsOverview = StoryPage{
-        StoryNote{text: "Four widgets show many rows. Two of them are here; the portal list and the data grid have pages of their own. What separates them is how much each one holds on your behalf, and the answer is never your rows."}
+        StoryNote{text: "Six widgets show many items. Three of them are here: a list that draws every row, a list that draws only the rows on screen, and a list you can reorder. The table, the data grid and the tile list have pages of their own. What separates them is how much each one holds on your behalf, and the answer is never your rows."}
 
         StoryHeading{text: "A list that draws every row"}
         StoryNote{text: "`FlatList` is asked for each row by an id you choose, and it draws all of them: no visible range to work out, nothing recycled, no scroll arithmetic. Reach for it when the count is bounded by the design rather than by the data — a settings group, a legend, the ten rows below. Hand it a thousand expensive rows and it will draw a thousand expensive rows, on every frame."}
         flat_demo := mod.storybook.StoryFlatRows{}
         StoryNote{text: "The id is the row's identity. The widget built for it is kept and handed back, so what a row holds — a cursor in a text field, a half-typed number — survives the next draw, and nothing evicts it either. Ids that come and go with the data leave their widgets behind, so number rows by position unless per-row state has to follow the row rather than the place."}
+
+        StoryHeading{text: "Many rows"}
+        StoryNote{text: "`PortalList` is asked only for the rows on screen. It is given a range of ids, works out which of them fall inside its height at the current scroll, and hands those out one at a time to be filled and drawn. The feed below is a thousand posts long and holds a screenful."}
+        ListBox{
+            height: 320.
+            feed_demo := mod.storybook.StoryFeed{}
+        }
+        StoryNote{text: "Rows need not be the same height. The list measures a row the first time it draws it and guesses the rest from the rows it has seen, so the scroll bar is an estimate that settles as the list is read. A row that scrolls out of view is let go and built again from its template when it comes back, so set everything a row shows on every draw, from its id."}
 
         StoryHeading{text: "A list you can reorder"}
         StoryNote{text: "`ReorderList` is a portal list with one addition, and it is driven exactly like one: same templates, same item range, same virtualisation, same item actions. What it adds is `drag_handle`, which names one child of the row template — the gripper here. A press on that child is taken before the inner list ever sees it, so a drag on the gripper reorders and a drag anywhere else on the row still scrolls. Four pixels of travel decide which: under that, a press on the gripper is still a click."}
@@ -108,11 +138,13 @@ script_mod! {
             EmptyStateNothingYet{}
         }
 
-        StoryHeading{text: "Which of the four"}
+        StoryHeading{text: "Which one"}
         StoryNote{text: "`FlatList` when the rows are few and the count is bounded by the design: it draws them all and costs what they cost."}
-        StoryNote{text: "`PortalList` when the rows are many or unbounded: it works out which of them are on screen, asks for those, and recycles the widgets behind them, so a thousand posts cost a screenful."}
+        StoryNote{text: "`PortalList` when the rows are many or unbounded: it works out which of them are on screen, asks for those, and lets go of the rest, so a thousand posts cost a screenful."}
         StoryNote{text: "`ReorderList` when the order is itself the data — a playlist, a queue, a set of steps to run in turn. It is a portal list, so that choice is already made; what it adds is the gesture and the report."}
-        StoryNote{text: "`DataGrid` when a row is columns that line up and can be selected, resized and moved about: a spreadsheet rather than a list. Both axes are virtualised and it asks for one cell at a time."}
+        StoryNote{text: "`Table` when the rows are a fixed set of records whose whole job is to line up and be read. It holds every row, so it suits tens of rows rather than millions, and a table with markup in it draws the markup."}
+        StoryNote{text: "`DataGrid` when a row is columns that line up and can be selected, resized, moved about and edited: a spreadsheet rather than a list. Both axes are virtualised and it asks for one cell at a time."}
+        StoryNote{text: "`TileList` when the items sit several across, as in a picker of thousands. Its rows are a portal list and each row is as many tiles as the width allows."}
     }
 }
 
@@ -176,6 +208,47 @@ impl Widget for StoryFlatRows {
                     continue;
                 };
                 row.label(cx, ids!(label)).set_text(cx, name);
+                row.draw_all(cx, &mut Scope::empty());
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+/// What the feed's posts say, picked by id. Four lengths, so the rows are four
+/// heights and the list has something to measure.
+const POSTS: &[&str] = &[
+    "Only the rows inside the box exist at any moment, whichever of the thousand they are.",
+    "A short one.",
+    "A row as tall as its text. The list measures each row the first time it draws it, and until then it guesses from the rows it has already seen, so the scroll bar is an estimate that settles as you read. Scroll back up and this one is the height it was.",
+    "Rows that leave the screen are let go, and built again from the template when they come back.",
+];
+
+/// The feed: a portal list of a thousand posts, each filled from its id as it
+/// comes into view.
+#[derive(Script, ScriptHook, Widget)]
+pub struct StoryFeed {
+    #[deref]
+    view: View,
+}
+
+impl Widget for StoryFeed {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            let Some(mut list) = item.borrow_mut::<PortalList>() else {
+                continue;
+            };
+            // The range is the whole feed; what the loop hands out is the
+            // part of it that is on screen.
+            list.set_item_range(cx, 0, 1000);
+            while let Some(id) = list.next_visible_item(cx) {
+                let row = list.item(cx, id, live_id!(Post));
+                let text = format!("{}. {}", id + 1, POSTS[id % POSTS.len()]);
+                row.label(cx, ids!(text)).set_text(cx, &text);
                 row.draw_all(cx, &mut Scope::empty());
             }
         }
@@ -259,17 +332,17 @@ fn lists_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/lists/overview",
-    category: "Data display",
+    key: "collections/lists/overview",
+    category: "Collections",
     component: "Lists",
-    also: &["FlatList", "ReorderList"],
+    also: &["FlatList", "PortalList", "ReorderList"],
     name: "Overview",
     dsl: "ListsOverview",
     added: "2025-05-06",
-    tags: &["list", "rows", "reorder", "drag", "gripper", "virtualisation", "empty"],
-    doc: "# FlatList and ReorderList
+    tags: &["list", "rows", "reorder", "drag", "gripper", "virtualisation", "empty", "ported"],
+    doc: "# Lists
 
-Four widgets show many rows. Two of them are on this page; `PortalList` and `DataGrid` have pages of their own. What separates them is **how much each one holds on your behalf**, and the answer is never your rows.
+Six widgets show many items. Three of them are on this page: `FlatList`, `PortalList` and `ReorderList`. `Table`, `DataGrid` and `TileList` have pages of their own. What separates them is **how much each one holds on your behalf**, and the answer is never your rows.
 
 ## FlatList
 
@@ -278,6 +351,14 @@ Asked for each row by an id you choose, and it draws all of them. There is no vi
 Reach for it when the count is bounded by the design rather than by the data — a settings group, a legend, a menu of twenty things. Hand it a thousand expensive rows and it draws a thousand expensive rows on every frame, which is not slow once, it is slow always.
 
 **The id is the row's identity.** `item(cx, id, template)` builds the widget the first time and hands the same one back afterwards, so what a row holds — a cursor in a text field, a half-typed number — survives the next draw. Nothing evicts it, either: an id you stop asking for keeps its widget for the life of the list. Numbering rows by position keeps that map bounded, at the price of per-row state following the place rather than the row.
+
+## PortalList
+
+Asked only for the rows on screen. It is given a range of ids with `set_item_range(cx, 0, count)`, works out which of them fall inside its height at the current scroll, and hands those out one at a time: `while let Some(id) = list.next_visible_item(cx)`. For each, `item(cx, id, template)` gives the row's widget, which the host fills and draws. A thousand rows cost a screenful.
+
+Rows need not be the same height. The list measures a row the first time it draws it and guesses the others from the average of the rows it has seen, so the scroll bar is an estimate that settles as the list is read.
+
+**What it keeps is the window.** A row that scrolls out of view is let go and built again from its template when it comes back, so anything that row's widget held goes with it. `reuse_items: true` pools those widgets by template instead, and resets each one to its template before another row gets it. `keep_invisible: true` keeps every row it ever built. Either way, set everything a row shows on every draw, from its id.
 
 ## ReorderList
 
@@ -304,16 +385,18 @@ The widget's own source records why no `Area` is cached anywhere inside it: a fi
 
 ## With no rows
 
-Both lists paint their background and stop. No message, no placeholder: the list cannot know *why* it is empty and the reader has to. Nothing yet, nothing matched, not allowed to see them, the fetch failed, the device is offline — five answers, and a blank rectangle is none of them. Put an `EmptyState` in the space the list would have filled.
+All three draw no rows and stop. No message, no placeholder: the list cannot know *why* it is empty and the reader has to. Nothing yet, nothing matched, not allowed to see them, the fetch failed, the device is offline — five answers, and a blank rectangle is none of them. Put an `EmptyState` in the space the list would have filled.
 
-## Which of the four
+## Which one
 
 | Widget | Reach for it when | What it holds |
 |---|---|---|
 | `FlatList` | the rows are few and bounded by the design | every row widget, by your id, for the life of the list |
-| `PortalList` | the rows are many or unbounded | a visible window, recycled |
-| `ReorderList` | the order is itself the data | that window, plus one live gesture |
-| `DataGrid` | a row is columns that line up, select and resize | a sparse size table for both axes |",
+| `PortalList` | the rows are many or unbounded | the rows in view |
+| `ReorderList` | the order is itself the data | the rows in view, plus one live gesture |
+| `Table` | a fixed set of records to line up and read | every row, and one widget per widget cell |
+| `DataGrid` | a row is columns that line up, select, resize and edit | a sparse size table for both axes |
+| `TileList` | the items sit several across, as in a picker of thousands | the rows in view, each as many tiles as the width allows |",
     subject: "reorder_demo.reorder",
     feature: None,
     controls: &[],

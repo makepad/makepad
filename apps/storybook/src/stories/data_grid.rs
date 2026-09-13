@@ -1,6 +1,6 @@
 //! The data grid story: a grid that draws cells the host hands it, one at a
-//! time, and holds none of them — and, now that the editor lives on the
-//! grid, a host that says what may be written into them.
+//! time, and holds none of them, and a host that says what may be written
+//! into them.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -41,7 +41,7 @@ script_mod! {
                 // block is what the section about it is pointing at.
                 color_bg: theme.color_surface_container_low
                 color_cell: theme.color_surface
-                color_cell_alt: theme.color_surface_container_lowest
+                color_cell_alt: theme.color_surface_container
                 color_text: theme.color_text
                 color_header: theme.color_surface_container
                 color_header_active: theme.color_surface_container_high
@@ -67,19 +67,16 @@ script_mod! {
         StoryHeading{text: "Three columns of people"}
         StoryNote{text: "Click a cell, shift-click another for a rectangle, click a row number for the row, a column header for the column. Arrow keys move and shift extends. Drag a column edge to resize it, and a column header to move it somewhere else."}
         StoryNote{text: "Press a heading to sort by it: once for up, again for down, a third time back to the order the rows arrived in. The grid does not do this — it reports the press and this page reorders its own rows, which is the whole arrangement."}
-        StoryNote{text: "Every cell can be edited: type over it, or press F2, Return or double-click to amend it. The Editing page is about that."}
         demo := mod.storybook.StoryDataGrid{}
-    }
 
-    mod.stories.DataGridEditing = StoryPage{
+        StoryHeading{text: "Editing"}
         StoryNote{text: "The grid seats its own editor. Type over a selected cell to replace what it says, or press F2, Return or double-click to amend it. Return keeps the value and steps down a row, shift-Return steps up, Tab steps sideways, Escape puts the cell back as it was, and a click anywhere else keeps the value where it stands."}
 
         StoryHeading{text: "The host says what may be written"}
         StoryNote{text: "The grid holds no data, so it cannot know what a cell says or whether a value is any good. It asks this page for the text to start from and hands the finished text back. This page keeps a name that is not blank and a year of four digits, and refuses the rest: a refused value is simply not written down, the cell redraws with what it had, and the line under the grid says why."}
 
         StoryHeading{text: "An edit survives a scroll"}
-        StoryNote{text: "Start an edit, wheel the row off the bottom and back, and the text is still there. The grid keeps the live editor out of the pool its other cells are recycled through; a host that drew its own editor into a cell lost the text the moment the wheel moved."}
-        demo := mod.storybook.StoryDataGrid{}
+        StoryNote{text: "Start an edit, wheel the row off the bottom and back, and the text is still there. The grid keeps the live editor out of the pool its other cells are recycled through; a host that draws its own editor into a cell loses the text the moment the wheel moves."}
     }
 }
 
@@ -323,9 +320,8 @@ fn data_grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     }
 }
 
-/// Both pages show the same grid, so both get the same knobs. The defaults
-/// are what the story's own declaration says, and each sits on a step of
-/// its slider.
+/// The grid's knobs. The defaults are what the story's own declaration
+/// says, and each sits on a step of its slider.
 const CONTROLS: &[Control] = &[
     Control { label: "Row height", target: "demo.grid", kind: ControlKind::Number { prop: "default_row_height", min: 18., max: 40., step: 2., default: 24. } },
     Control { label: "Column width", target: "demo.grid", kind: ControlKind::Number { prop: "default_col_width", min: 90., max: 250., step: 10., default: 150. } },
@@ -337,14 +333,14 @@ const CONTROLS: &[Control] = &[
 
 pub const STORIES: &[Story] = &[
     Story {
-        key: "data-display/datagrid/overview",
-        category: "Data display",
+        key: "collections/datagrid/overview",
+        category: "Collections",
         component: "DataGrid",
         also: &[],
         name: "Overview",
         dsl: "DataGridOverview",
         added: "2025-05-06",
-        tags: &[],
+        tags: &["editing"],
         doc: "# DataGrid
 
 A spreadsheet-shaped table over a very large number of rows. Eleven places in this repository use one.
@@ -357,7 +353,29 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 
 Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
 
-Yours, despite the name: **it does not sort the rows** — with `sortable: true` a heading press cycles unsorted, up, down and back, draws the mark and raises `SortChanged { col, ascending }`; the rows themselves are yours to reorder, because the grid never held them. This page keeps a list of indices and draws through it, which is all it takes. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **Editing is shared** — the grid seats the editor and reads its keys, you answer `EditCell` with the text to start from and `CellEdited` with a yes or a no; the Editing page is about that. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
+Yours, despite the name: **it does not sort the rows** — with `sortable: true` a heading press cycles unsorted, up, down and back, draws the mark and raises `SortChanged { col, ascending }`; the rows themselves are yours to reorder, because the grid never held them. This page keeps a list of indices and draws through it, which is all it takes. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **Editing is shared** — the grid seats the editor and reads its keys, you answer `EditCell` with the text to start from and `CellEdited` with a yes or a no; the next section is about that. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
+
+## Editing
+
+The grid seats its own editor. **Type over** a selected cell and the editor opens holding what you typed; **F2**, **Return** or a **double-click** opens it holding what the cell says, with the caret after the last character. **Return** keeps the value and steps down a row, **shift-Return** up, **Tab** sideways and shift-Tab back; **Escape** puts the cell back as it was; a click anywhere else keeps the value where it stands, and asking to edit another cell keeps this one first.
+
+### The host still owns the data
+
+The grid holds no data, so it cannot start an edit by itself. It raises `EditCell { row, col, replace }` — `replace` carries what was typed, or nothing for an amendment — and the host answers with `edit_cell(cx, row, col, text)`, passing the typed text or the cell's own. An unanswered request is a read-only grid, which is what an unanswered request ought to be.
+
+When the editor closes the grid raises `CellEdited { row, col, text }`, with the editor already put away and, for a key, the selection already moved on. Whether the text is written down is the host's call, and **refusing is not writing it down**: the cell redraws with what the host still has. This page keeps a name that is not blank and a year of four digits, and says under the grid what it refused and why. A host that wants the person to try again reopens the editor with `edit_cell` and the refused text. Escape raises `EditCancelled` and nothing else; there is nothing to write.
+
+This page answers with a handful of lines, which is the whole of hosting an editor.
+
+### Why it lives on the grid
+
+A host that draws its own text input into the edited cell loses the text the moment the wheel moves. The grid recycles the widgets of cells that leave the screen, and a host-side editor is one of them: it goes into the pool with the text still in it, and the next cell to reuse it writes the template back over the top. Only the grid can keep the live editor out of that sweep — it does, whether or not the cell is on screen — and only the grid can turn the editor losing the keyboard into a commit.
+
+Two details come with it that a host would otherwise have to find for itself. The seed is written exactly once, when the editor is seated, and never during a draw, so a redraw cannot write over what has been typed since. And the keyboard is handed to the editor after the first draw that gives it an area; focus set before then lands nowhere.
+
+### The editor
+
+The stock editor fills the cell in the grid's type size from `theme.font_regular`. A grid that wants another look declares `Editor := TextInput{...}` inside its own declaration and that one takes its place. Whatever it looks like it has to be a `TextInput`: Return, Escape and the loss of the keyboard are read from it.
 
 ## Two things that will bite
 
@@ -368,41 +386,6 @@ Yours, despite the name: **it does not sort the rows** — with `sortable: true`
 ## It ignores the theme
 
 Every surface it paints is a literal light-mode colour — `color_bg: #fafafa`, `color_cell: #ffffff`, `color_text: #202020`, the gridline, and both scrollbar handles in translucent *black*. All six application callers restate the lot; one of them says in a comment that the register turns up white otherwise. This page restates them from theme tokens, which is the shortest honest demonstration of what the widget actually costs to use.",
-        subject: "demo",
-        feature: None,
-        controls: CONTROLS,
-        on_actions: Some(data_grid_actions),
-    },
-    Story {
-        key: "data-display/datagrid/editing",
-        category: "Data display",
-        component: "DataGrid",
-        also: &[],
-        name: "Editing",
-        dsl: "DataGridEditing",
-        added: "2026-09-11",
-        tags: &["editing"],
-        doc: "# DataGrid editing
-
-The grid seats its own editor. **Type over** a selected cell and the editor opens holding what you typed; **F2**, **Return** or a **double-click** opens it holding what the cell says, with the caret after the last character. **Return** keeps the value and steps down a row, **shift-Return** up, **Tab** sideways and shift-Tab back; **Escape** puts the cell back as it was; a click anywhere else keeps the value where it stands, and asking to edit another cell keeps this one first.
-
-## The host still owns the data
-
-The grid holds no data, so it cannot start an edit by itself. It raises `EditCell { row, col, replace }` — `replace` carries what was typed, or nothing for an amendment — and the host answers with `edit_cell(cx, row, col, text)`, passing the typed text or the cell's own. An unanswered request is a read-only grid, which is what an unanswered request ought to be.
-
-When the editor closes the grid raises `CellEdited { row, col, text }`, with the editor already put away and, for a key, the selection already moved on. Whether the text is written down is the host's call, and **refusing is not writing it down**: the cell redraws with what the host still has. This page keeps a name that is not blank and a year of four digits, and says under the grid what it refused and why. A host that wants the person to try again reopens the editor with `edit_cell` and the refused text. Escape raises `EditCancelled` and nothing else; there is nothing to write.
-
-Both pages here answer with the same handful of lines, which is the whole of hosting an editor now.
-
-## Why it lives on the grid
-
-Three hosts in this repository, two applications and an example, each drew their own text input into the edited cell, and each lost the text the moment the wheel moved. The grid recycles the widgets of cells that leave the screen, and a host-side editor is one of them: it went into the pool with the text still in it, and the next cell to reuse it wrote the template back over the top. Only the grid can keep the live editor out of that sweep — it does, whether or not the cell is on screen — and only the grid can turn the editor losing the keyboard into a commit.
-
-Two details every copy had to find for itself come with it. The seed is written exactly once, when the editor is seated, and never during a draw, so a redraw cannot write over what has been typed since. And the keyboard is handed to the editor after the first draw that gives it an area; focus set before then lands nowhere.
-
-## The editor
-
-The stock editor fills the cell in the grid's type size from `theme.font_regular`. A grid that wants another look declares `Editor := TextInput{...}` inside its own declaration and that one takes its place. Whatever it looks like it has to be a `TextInput`: Return, Escape and the loss of the keyboard are read from it.",
         subject: "demo",
         feature: None,
         controls: CONTROLS,

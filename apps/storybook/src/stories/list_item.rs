@@ -201,11 +201,11 @@ fn list_item_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 
 pub const STORIES: &[Story] = &[
     Story {
-        key: "data-display/list-item/overview",
-        category: "Data display",
-        component: "ListItem",
-        also: &["ListItemOne", "ListItemTwo", "ListItemThree", "ListItemRuled"],
-        name: "Overview",
+        key: "collections/lists/list-item",
+        category: "Collections",
+        component: "Lists",
+        also: &["ListItem", "ListItemOne", "ListItemTwo", "ListItemThree", "ListItemRuled"],
+        name: "List item",
         dsl: "ListItemOverview",
         added: "2026-09-10",
         tags: &["new", "list"],

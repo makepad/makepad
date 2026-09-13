@@ -233,8 +233,8 @@ fn table_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/table/overview",
-    category: "Data display",
+    key: "collections/table/overview",
+    category: "Collections",
     component: "Table",
     also: &["TableStriped", "TableBordered", "TableCompact"],
     name: "Overview",
@@ -245,7 +245,7 @@ pub const STORIES: &[Story] = &[Story {
 
 The plain table: columns with headings, and rows that are all present.
 
-**Which of the two to reach for.** `DataGrid` is a spreadsheet — it virtualises both axes, holds none of your data, asks for cells one at a time inside a draw loop, and carries resizing, reordering, rectangle selection and cell editing. Reach for it when drawing every row is out of the question, or when the thing really is a sheet. `Table` is for the other case, which is far more common: a fixed list of records where the whole job is to line them up and be readable. A grid with no host loop behind it draws lettered columns over an empty field; a table with markup in it draws the markup.
+It is for a fixed list of records where the whole job is to line them up and be readable, which is far more common than a sheet, and a table with markup in it draws the markup. Which of the widgets that show many rows to reach for is set out once, on Lists > Overview.
 
 ## Columns
 
