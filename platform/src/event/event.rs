@@ -13,6 +13,7 @@ use {
         },
         //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
+        makepad_math::Vec2Index,
         makepad_script::*,
         midi::MidiPortsEvent,
         permission::PermissionResult,
@@ -473,6 +474,37 @@ impl Event {
             }
         }
         false
+    }
+
+    /// Whether a scroll view already moved by this [`Scroll`](Self::Scroll)
+    /// event's delta along `axis`. Always `false` for any other event.
+    ///
+    /// A scroll event reaches the widgets nearest the pointer first and the
+    /// scroll views around them after, so a scroll view that checks this
+    /// before applying a delta leaves alone a wheel an inner one has used.
+    pub fn scroll_handled(&self, axis: Vec2Index) -> bool {
+        match self {
+            Self::Scroll(e) => match axis {
+                Vec2Index::X => e.handled_x.get(),
+                Vec2Index::Y => e.handled_y.get(),
+            },
+            _ => false,
+        }
+    }
+
+    /// Marks this [`Scroll`](Self::Scroll) event's delta along `axis` as used,
+    /// so the scroll views around the caller leave it alone.
+    ///
+    /// Call it only after moving by the delta. A scroll view pinned at the edge
+    /// the delta points past leaves the delta for the views around it, the way
+    /// a `ScrollBar` at its limit does. Does nothing for any other event.
+    pub fn set_scroll_handled(&self, axis: Vec2Index) {
+        if let Self::Scroll(e) = self {
+            match axis {
+                Vec2Index::X => e.handled_x.set(true),
+                Vec2Index::Y => e.handled_y.set(true),
+            }
+        }
     }
 }
 
